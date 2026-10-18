@@ -778,7 +778,7 @@ SHOW COLUMNS IN SEMANTIC VIEW a b
 ----
 
 statement error
-DROP SEMANTIC VIEW foo bar
+DROP SEMANTIC VIEW a bar
 ----
 
 # S-101: rewrite.rs::test_name_only_forms_reject_trailing_garbage — the rejected DROPs dropped nothing
