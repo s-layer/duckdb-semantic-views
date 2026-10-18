@@ -3757,14 +3757,16 @@ static void sv_wire_node(string &out, ParseResult &pr) {
 // to the trivia the tokenizer drops. Each gap must also hold a line break
 // exactly when the tokenizer says this query's gap did (preceded_by_newline),
 // so a record never lends its line structure to an error's caret or to the
-// stored body. A transform gets only the tokens, so
-// this is how it learns the source text. With the override on, the override
-// saw this query and declined it just before the grammar ran. With it off
-// nothing was recorded, and an earlier query on this thread is left over:
-// matching tokens alone would take its text where the offsets line up, so a
-// body with spaces where the earlier one had `+o.b` would store the earlier
-// body. What still passes is a gap of the same length with the same line
-// breaks, such as a tab for a space (TECH-DEBT #100).
+// stored body. A transform gets only the tokens, so the record is how it
+// learns the source text: sv_grammar_span_has_source below checks the
+// statement's own span the same way, and this whole-query check guards the
+// caret, which quotes the query around the statement. With the override on,
+// the override saw this query and declined it just before the grammar ran.
+// With it off nothing was recorded, and an earlier query on this thread is
+// left over: matching tokens alone would take its text where the offsets line
+// up, so a body with spaces where the earlier one had `+o.b` would store the
+// earlier body. What still passes is a gap of the same length with the same
+// line breaks, such as a tab for a space (TECH-DEBT #100).
 static bool sv_grammar_has_source(TokenIterator &tokens) {
     const std::string &query = sv_override_query;
     if (query.empty()) {
@@ -3792,29 +3794,113 @@ static bool sv_grammar_has_source(TokenIterator &tokens) {
     return sv_skip_trivia(query, pos) && pos == query.size();
 }
 
-static string sv_grammar_serialise(PEGTransformer &transformer, ParseResult &pr, bool has_source) {
+// The matched statement's own part of the query: its byte span [start, end)
+// and the tokens wholly inside it, [first, last). The iterator holds the whole
+// query's tokens, so a transform that got all of them, and the record with
+// them, would cost every statement of a K-statement string the length of the
+// whole string (TECH-DEBT #85). Without a span the statement is the query.
+struct SvGrammarSpan {
+    idx_t start = 0;
+    idx_t end = 0;
+    idx_t first = 0;
+    idx_t last = 0;
+};
+
+static SvGrammarSpan sv_grammar_span(TokenIterator &tokens, ParseResult &pr) {
+    SvGrammarSpan span;
+    span.last = tokens.Size();
+    if (!pr.offset.IsValid() || !pr.length.IsValid()) {
+        span.end = tokens.Size() == 0 ? 0 : tokens.GetToken(tokens.Size() - 1).offset +
+                                                tokens.GetToken(tokens.Size() - 1).text.size();
+        return span;
+    }
+    span.start = pr.offset.GetIndex();
+    span.end = span.start + pr.length.GetIndex();
+    // The tokens are in query order: binary-search the first one at or after
+    // `start`, then take them while they end inside the span.
+    idx_t lo = 0, hi = tokens.Size();
+    while (lo < hi) {
+        idx_t mid = lo + (hi - lo) / 2;
+        if (tokens.GetToken(mid).offset < span.start) {
+            lo = mid + 1;
+        } else {
+            hi = mid;
+        }
+    }
+    span.first = lo;
+    span.last = lo;
+    while (span.last < tokens.Size()) {
+        auto &tok = tokens.GetToken(span.last);
+        if (tok.offset + tok.text.size() > span.end) {
+            break;
+        }
+        span.last++;
+    }
+    return span;
+}
+
+// Whether the record holds this statement: what sv_grammar_has_source checks
+// for the whole query, for the statement's span alone. Each token is the
+// record's text at its offset, the gaps between them are whitespace or
+// comments holding a line break exactly where this query's do, and so is
+// whatever lies between the last token and the end of the span. The gap
+// before the first token is outside the span and is not checked.
+static bool sv_grammar_span_has_source(TokenIterator &tokens, const SvGrammarSpan &span) {
+    const std::string &query = sv_override_query;
+    if (query.empty() || span.end > query.size() || span.start > span.end) {
+        return false;
+    }
+    idx_t pos = span.start;
+    bool first = true;
+    for (idx_t i = span.first; i < span.last; i++) {
+        auto &tok = tokens.GetToken(i);
+        if (tok.text.empty()) {
+            continue;
+        }
+        bool newline = false;
+        if (!sv_skip_trivia(query, pos, &newline) || pos != tok.offset ||
+            query.compare(tok.offset, tok.text.size(), tok.text) != 0) {
+            return false;
+        }
+        if (!first && newline != tok.preceded_by_newline) {
+            return false;
+        }
+        first = false;
+        pos = tok.offset + tok.text.size();
+    }
+    return pos >= span.end || (sv_skip_trivia(query, pos) && pos >= span.end);
+}
+
+// The statement's tree, its own tokens, and its part of the record when the
+// record holds it.
+static string sv_grammar_serialise(PEGTransformer &transformer, ParseResult &pr, const SvGrammarSpan &span,
+                                   bool has_source) {
     string out;
     sv_wire_node(out, pr);
     auto &tokens = transformer.token_iterator;
-    sv_wire_u32(out, static_cast<uint32_t>(tokens.Size()));
-    for (idx_t i = 0; i < tokens.Size(); i++) {
+    sv_wire_u32(out, static_cast<uint32_t>(span.last - span.first));
+    for (idx_t i = span.first; i < span.last; i++) {
         auto &tok = tokens.GetToken(i);
         sv_wire_u32(out, static_cast<uint32_t>(tok.offset));
         sv_wire_u32(out, static_cast<uint32_t>(tok.length));
         out.push_back(tok.preceded_by_newline ? 1 : 0);
         sv_wire_str(out, tok.text);
     }
-    sv_wire_str(out, has_source ? sv_override_query : string());
+    sv_wire_u32(out, static_cast<uint32_t>(span.start));
+    sv_wire_str(out, has_source ? sv_override_query.substr(span.start, span.end - span.start) : string());
     return out;
 }
 
 // Have Rust lower a matched statement rule to SQL, and parse the SQL. With the
 // source text, an error's caret is rendered into its message, as the parse stub
 // renders it, since 2.0 shows a parser error's location only on the
-// ClientContext path (TECH-DEBT #99).
+// ClientContext path (TECH-DEBT #99). The caret quotes the whole query, so it
+// needs the record to be the whole query, which is checked only then: an error
+// ends the parse, so the check runs at most once per query.
 static vector<unique_ptr<SQLStatement>> sv_grammar_lower(PEGTransformer &transformer, ParseResult &pr) {
-    bool has_source = sv_grammar_has_source(transformer.token_iterator);
-    auto wire = sv_grammar_serialise(transformer, pr, has_source);
+    auto span = sv_grammar_span(transformer.token_iterator, pr);
+    bool has_source = sv_grammar_span_has_source(transformer.token_iterator, span);
+    auto wire = sv_grammar_serialise(transformer, pr, span, has_source);
     SvOwnedBuffer sql_buf;
     char error_buf[1024];
     memset(error_buf, 0, sizeof(error_buf));
@@ -3822,7 +3908,7 @@ static vector<unique_ptr<SQLStatement>> sv_grammar_lower(PEGTransformer &transfo
     uint8_t rc = sv_grammar_transform_rust(reinterpret_cast<const uint8_t *>(wire.data()), wire.size(),
                                            &sql_buf.ptr, &sql_buf.len, error_buf, sizeof(error_buf), &position);
     if (rc == 1) {
-        if (position != UINT32_MAX && has_source) {
+        if (position != UINT32_MAX && has_source && sv_grammar_has_source(transformer.token_iterator)) {
             throw ParserException("%s", QueryErrorContext::Format(sv_override_query, string(error_buf), position));
         }
         if (position != UINT32_MAX) {

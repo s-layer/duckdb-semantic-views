@@ -42,7 +42,7 @@ mod show_clauses;
 pub(crate) use show_clauses::{build_filter_suffix, parse_show_filter_clauses};
 // The grammar productions use these; they compile with the extension or for tests.
 #[cfg(any(feature = "extension", test))]
-pub(crate) use show_clauses::{ScopeName, ShowClauses};
+pub(crate) use show_clauses::{show_unexpected_tokens, ScopeName, ShowClauses};
 
 mod rewrite;
 pub(crate) use rewrite::extract_quoted_string;

@@ -122,17 +122,71 @@ pub(crate) fn transform(tree: &Tree) -> Result<RewriteAction, ParseError> {
 
 // --- helpers the statement modules share ---
 
-/// A string literal's decoded contents.
-fn string_value(node: &Node) -> String {
-    node.first_leaf(Kind::String)
-        .map(|n| n.value.clone())
-        .unwrap_or_default()
+/// The decoded contents of the string literal under `node`, which must be
+/// written `'...'`, as the parser override requires: `DuckDB`'s
+/// `StringLiteral` also matches `$$...$$`, `$tag$...$tag$` and `E'...'`, which
+/// get `message`, at the literal.
+fn plain_string(tree: &Tree, node: &Node, message: &str) -> Result<String, ParseError> {
+    let leaf = node
+        .first_leaf(Kind::String)
+        .ok_or_else(|| internal(node, "missing string literal"))?;
+    let quoted = tree
+        .tokens_in(leaf)
+        .next()
+        .is_some_and(|t| t.text.starts_with('\''));
+    if !quoted {
+        return Err(ParseError {
+            message: message.to_string(),
+            position: leaf.offset(),
+        });
+    }
+    Ok(leaf.value.clone())
 }
 
-/// A name exactly as written, quotes and qualifiers included, with no
-/// whitespace: the read table functions fold and resolve it themselves (FF-4).
-fn name_text(tree: &Tree, node: &Node) -> String {
-    tree.tokens_in(node).map(|t| t.text.as_str()).collect()
+/// A name exactly as written, quotes and qualifiers included: the read table
+/// functions fold and resolve it themselves (FF-4).
+///
+/// The grammar's tokens skip whitespace and comments, so `s . v` matches a
+/// dotted name. The parser override ends a name at the first whitespace, as
+/// `DuckDB` does, and reports what follows. So a name is one run of text: the
+/// error is the offset of the first token that whitespace or a comment
+/// separates from the one before it, for the caller to report with
+/// [`rest_from`].
+fn name_text(tree: &Tree, node: &Node) -> Result<String, usize> {
+    let mut out = String::new();
+    let mut end = None;
+    for t in tree.tokens_in(node) {
+        if end.is_some_and(|e| e != t.offset) {
+            return Err(t.offset);
+        }
+        out.push_str(&t.text);
+        end = Some(t.offset + t.len);
+    }
+    Ok(out)
+}
+
+/// The statement's text from query offset `offset` to its end, comments
+/// blanked and trimmed: what the parser override reports as the unexpected
+/// rest of a statement.
+fn rest_from(tree: &Tree, offset: usize) -> String {
+    let start = tree.root.offset().unwrap_or(0);
+    let text = tree.text(&tree.root);
+    let rest = text.get(offset.saturating_sub(start)..).unwrap_or_default();
+    let rest = crate::util::blank_sql_comments(rest);
+    rest.trim().trim_end_matches(';').trim_end().to_string()
+}
+
+/// [`name_text`], with the rest of the statement reported by `message` when
+/// the name is not one run of text.
+fn name_or(
+    tree: &Tree,
+    node: &Node,
+    message: impl FnOnce(&str) -> String,
+) -> Result<String, ParseError> {
+    name_text(tree, node).map_err(|at| ParseError {
+        message: message(&rest_from(tree, at)),
+        position: Some(at),
+    })
 }
 
 fn internal(node: &Node, what: &str) -> ParseError {

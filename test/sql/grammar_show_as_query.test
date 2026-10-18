@@ -242,6 +242,97 @@ SELECT * FROM (DESCRIBE SEMANTIC VIEW gq_nope);
 ----
 semantic view 'gq_nope' does not exist
 
+# A pattern is a plain '...' literal, as for the parser override: DuckDB's
+# string literal also takes $$...$$ and E'...', which the grammar refuses.
+statement error
+SELECT * FROM (SHOW SEMANTIC VIEWS LIKE $$gq%$$);
+----
+Expected single-quoted string
+
+statement error
+SELECT * FROM (SHOW SEMANTIC VIEWS STARTS WITH E'gq');
+----
+Expected single-quoted string
+
+statement error
+SELECT * FROM (SHOW SEMANTIC VIEWS IN SCHEMA STARTS WITH $$gq$$);
+----
+Expected single-quoted string
+
+statement error
+SELECT * FROM (SHOW SEMANTIC VIEWS IN DATABASE STARTS WITH $t$gq$t$);
+----
+Expected single-quoted string
+
+statement error
+SELECT * FROM (SHOW SEMANTIC DIMENSIONS LIKE $$r%$$ IN gq_m);
+----
+Expected single-quoted string
+
+statement error
+SHOW SEMANTIC VIEWS LIKE $$gq%$$;
+----
+Expected single-quoted string
+
+statement error
+SHOW SEMANTIC VIEWS IN SCHEMA main STARTS WITH E'gq';
+----
+Expected single-quoted string
+
+# A name is one run of text, as for the parser override: whitespace or a
+# comment inside a dotted name ends it, and the rest is reported. The rest
+# stops at the end of the SHOW, not of the query around it.
+statement error
+SELECT * FROM (DESCRIBE SEMANTIC VIEW main . gq_m);
+----
+Unexpected tokens after view name: '. gq_m'
+
+statement error
+DESCRIBE SEMANTIC VIEW main . gq_m;
+----
+Unexpected tokens after view name: '. gq_m'
+
+statement error
+SELECT * FROM (SHOW COLUMNS IN SEMANTIC VIEW main .gq_m);
+----
+Unexpected tokens after view name: '.gq_m'
+
+statement error
+SELECT * FROM (SHOW SEMANTIC DIMENSIONS IN main . gq_m);
+----
+Unexpected tokens: '. gq_m'. Usage: SHOW SEMANTIC DIMENSIONS [LIKE '<pattern>']
+
+statement error
+SELECT * FROM (SHOW SEMANTIC METRICS IN memory . main.gq_m LIMIT 1);
+----
+Unexpected tokens: '. main.gq_m LIMIT 1'. Usage: SHOW SEMANTIC METRICS [LIKE '<pattern>']
+
+statement error
+SELECT * FROM (SHOW SEMANTIC DIMENSIONS IN gq_m FOR METRIC o . revenue);
+----
+Unexpected tokens: '. revenue'. Usage: SHOW SEMANTIC DIMENSIONS [LIKE '<pattern>']
+
+statement error
+SELECT * FROM (SHOW SEMANTIC VIEWS IN SCHEMA memory . main);
+----
+Unexpected tokens: '. main'. Usage: SHOW SEMANTIC VIEWS [LIKE '<pattern>']
+
+statement error
+SHOW SEMANTIC VIEWS IN DATABASE memory/**/.main;
+----
+Unexpected tokens: '.main'. Usage: SHOW SEMANTIC VIEWS [LIKE '<pattern>']
+
+# Controls: the same names and patterns, written plainly.
+query T
+SELECT name FROM (SHOW SEMANTIC VIEWS LIKE 'gq_m' IN SCHEMA memory.main STARTS WITH 'gq');
+----
+gq_m
+
+query I
+SELECT count(*) FROM (SHOW SEMANTIC DIMENSIONS IN memory.main.gq_m FOR METRIC revenue);
+----
+2
+
 # --- the top-level statement is unchanged ----------------------------------------
 
 query I

@@ -335,6 +335,28 @@ fn parse_for_metric(rest: &str, base: usize) -> Result<(&str, &str), ParseError>
     Ok((remaining, metric_name))
 }
 
+/// The error for text left over after a SHOW statement's clauses, with the
+/// statement's usage. The grammar productions report a name with whitespace
+/// inside it the same way.
+pub(crate) fn show_unexpected_tokens(kind: DdlKind, rest: &str) -> String {
+    let entity = match kind {
+        DdlKind::Show | DdlKind::ShowTerse => "VIEWS",
+        DdlKind::ShowDimensions => "DIMENSIONS",
+        DdlKind::ShowMetrics => "METRICS",
+        DdlKind::ShowMaterializations => "MATERIALIZATIONS",
+        _ => "FACTS",
+    };
+    let for_metric = if kind == DdlKind::ShowDimensions {
+        " [FOR METRIC metric_name]"
+    } else {
+        ""
+    };
+    format!(
+        "Unexpected tokens: '{rest}'. \
+         Usage: SHOW SEMANTIC {entity} [LIKE '<pattern>'] [IN {{view_name | ACCOUNT | DATABASE [db] | SCHEMA [[db.]schema]}}]{for_metric} [STARTS WITH '<prefix>'] [LIMIT <n>]"
+    )
+}
+
 /// Parse optional SHOW SEMANTIC filter clauses from text after the prefix.
 ///
 /// Clause order (Snowflake): LIKE, IN, FOR METRIC, STARTS WITH, LIMIT.
@@ -482,19 +504,8 @@ pub(crate) fn parse_show_filter_clauses<'a>(
 
     // 6. If any text remains, error with usage hint
     if !rest.is_empty() {
-        let usage = if kind == DdlKind::ShowDimensions {
-            format!(
-                "Unexpected tokens: '{rest}'. \
-                 Usage: SHOW SEMANTIC DIMENSIONS [LIKE '<pattern>'] [IN {{view_name | ACCOUNT | DATABASE [db] | SCHEMA [[db.]schema]}}] [FOR METRIC metric_name] [STARTS WITH '<prefix>'] [LIMIT <n>]"
-            )
-        } else {
-            format!(
-                "Unexpected tokens: '{rest}'. \
-                 Usage: SHOW SEMANTIC {entity} [LIKE '<pattern>'] [IN {{view_name | ACCOUNT | DATABASE [db] | SCHEMA [[db.]schema]}}] [STARTS WITH '<prefix>'] [LIMIT <n>]"
-            )
-        };
         return Err(ParseError {
-            message: usage,
+            message: show_unexpected_tokens(kind, rest),
             position: Some(abs(rest)),
         });
     }

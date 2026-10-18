@@ -2,12 +2,12 @@
 //!
 //! The rule matches the statement's prefix and then takes every token up to
 //! the end of the statement without interpreting it (`SvCreateToken`, `DuckDB`'s
-//! passthrough matcher). The transform takes the statement's text, with
-//! everything before it in the query blanked ([`Tree::text_at_offsets`]), and
-//! plans it with the parser override's own [`plan_rewrite`]. So every CREATE
-//! form (`AS` body, `FROM YAML`, `FROM YAML FILE`, `IF NOT EXISTS`, `COMMENT =`)
-//! is accepted and refused exactly as the override does, with the same
-//! messages, and an error position in the text is one in the query.
+//! passthrough matcher). The transform takes the statement's text
+//! ([`Tree::text`]) and plans it with the parser override's own
+//! [`plan_rewrite`]. So every CREATE form (`AS` body, `FROM YAML`, `FROM YAML
+//! FILE`, `IF NOT EXISTS`, `COMMENT =`) is accepted and refused exactly as the
+//! override does, with the same messages. An error position in the text is
+//! moved by the statement's offset, so it is one in the query.
 //!
 //! With the parser override off, the bridge has no source text and the text is
 //! rebuilt from the tokens, so a tab inside an expression becomes a space and a
@@ -33,8 +33,14 @@ pub(super) const STATEMENTS: &[&str] = &["SvCreate"];
 pub(super) const ANY_TOKEN: &[&str] = &["SvCreateToken"];
 
 pub(super) fn transform(tree: &Tree) -> Result<RewriteAction, ParseError> {
-    let text = tree.text_at_offsets(&tree.root);
-    plan_rewrite(&text)?.ok_or_else(|| internal(&tree.root, "statement is not a CREATE"))
+    let base = tree.root.offset().unwrap_or(0);
+    let text = tree.text(&tree.root);
+    plan_rewrite(&text)
+        .map_err(|e| ParseError {
+            position: e.position.map(|p| p + base),
+            ..e
+        })?
+        .ok_or_else(|| internal(&tree.root, "statement is not a CREATE"))
 }
 
 #[cfg(test)]
@@ -60,7 +66,10 @@ mod tests {
         let sql = "SELECT 1; CREATE SEMANTIC VIEW v AS TABLES (o AS orders PRIMARY KEY (id)) DIMENSIONS (o.r AS upper(\to.region ||\n\n  'x'))";
         let stmt = &sql[10..];
         let mut t = tree(sql, n(sql, "SvCreate", stmt, Kind::List, "", vec![]));
-        t.source = Some(sql.to_string());
+        t.source = Some(crate::grammar::tree::Source {
+            offset: 10,
+            text: stmt.to_string(),
+        });
         let got = transform(&t).unwrap();
         let want = crate::parse::plan_rewrite(stmt).unwrap().unwrap();
         assert_eq!(got, want);

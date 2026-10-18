@@ -11,7 +11,7 @@
 //! which removes the stub, has to move those messages into the grammar.
 
 use super::tree::{Node, Tree};
-use super::{internal, name_text, string_value};
+use super::{internal, name_or, plain_string};
 use crate::errors::ParseError;
 use crate::ident::{parse_view_ref, ViewRef};
 use crate::parse::RewriteAction;
@@ -34,8 +34,17 @@ pub(super) const STATEMENTS: &[&str] = &["SvDrop", "SvAlter"];
 pub(super) fn transform(rule: &str, tree: &Tree) -> Result<RewriteAction, ParseError> {
     let root = &tree.root;
     let if_exists = root.find("SvIfExists").is_some();
-    let name = view_ref(tree, root, "SvViewName", "Invalid view name")?;
-    if rule.eq_ignore_ascii_case("SvDrop") {
+    let is_drop = rule.eq_ignore_ascii_case("SvDrop");
+    // The override reads ALTER's operation from where the source name ends,
+    // so a name with a gap reads as an unknown operation.
+    let name = view_ref(tree, root, "SvViewName", "Invalid view name", |rest| {
+        if is_drop {
+            format!("Unexpected tokens after view name: '{rest}'")
+        } else {
+            UNSUPPORTED_ALTER.to_string()
+        }
+    })?;
+    if is_drop {
         return Ok(RewriteAction::Drop { name, if_exists });
     }
     let action = root
@@ -47,6 +56,7 @@ pub(super) fn transform(rule: &str, tree: &Tree) -> Result<RewriteAction, ParseE
             action,
             "SvNewName",
             "Invalid new view name in RENAME TO",
+            |rest| format!("Unexpected tokens after new view name in RENAME TO: '{rest}'"),
         )?;
         return Ok(RewriteAction::AlterRename {
             name,
@@ -57,7 +67,11 @@ pub(super) fn transform(rule: &str, tree: &Tree) -> Result<RewriteAction, ParseE
     if let Some(set) = action.find("SvAlterSetComment") {
         return Ok(RewriteAction::AlterSetComment {
             name,
-            comment: string_value(set),
+            comment: plain_string(
+                tree,
+                set,
+                "Expected single-quoted string after SET COMMENT =",
+            )?,
             if_exists,
         });
     }
@@ -67,13 +81,24 @@ pub(super) fn transform(rule: &str, tree: &Tree) -> Result<RewriteAction, ParseE
     Err(internal(action, "unknown ALTER operation"))
 }
 
+/// The parser override's message for an ALTER whose operation it cannot read.
+const UNSUPPORTED_ALTER: &str =
+    "Unsupported ALTER operation. Supported: RENAME TO, SET COMMENT, UNSET COMMENT.";
+
 /// The view named by the `rule` node under `parent`, folded as the parser
-/// override folds it (`parse_view_ref`).
-fn view_ref(tree: &Tree, parent: &Node, rule: &str, what: &str) -> Result<ViewRef, ParseError> {
+/// override folds it (`parse_view_ref`). `gap` words the error for a name
+/// with whitespace inside it, given the rest of the statement.
+fn view_ref(
+    tree: &Tree,
+    parent: &Node,
+    rule: &str,
+    what: &str,
+    gap: impl FnOnce(&str) -> String,
+) -> Result<ViewRef, ParseError> {
     let node = parent
         .find(rule)
         .ok_or_else(|| internal(parent, &format!("missing {rule}")))?;
-    parse_view_ref(&name_text(tree, node)).map_err(|e| ParseError {
+    parse_view_ref(&name_or(tree, node, gap)?).map_err(|e| ParseError {
         message: format!("{what}: {e}"),
         position: node.offset(),
     })
@@ -226,6 +251,40 @@ mod tests {
                 if_exists: false,
             }
         );
+    }
+
+    /// The parser override ends a name at whitespace and reports the rest;
+    /// the grammar's tokens skip it, so the transform checks for the gap.
+    #[test]
+    fn a_name_with_whitespace_inside_is_reported_with_the_rest() {
+        let sql = "DROP SEMANTIC VIEW s . v";
+        let r = root(sql, "SvDrop", vec![name(sql, "SvViewName", "s . v")]);
+        let err = transform("SvDrop", &tree(sql, r)).unwrap_err();
+        assert_eq!(err.message, "Unexpected tokens after view name: '. v'");
+        assert_eq!(err.position, Some(sql.find(" .").unwrap() + 1));
+    }
+
+    #[test]
+    fn a_comment_that_is_not_a_plain_literal_is_refused() {
+        for literal in ["$$x$$", "E'x'", "$t$x$t$"] {
+            let sql = format!("ALTER SEMANTIC VIEW v SET COMMENT = {literal}");
+            let sql = sql.as_str();
+            let set = format!("SET COMMENT = {literal}");
+            let lit = n(sql, "StringLiteral", literal, Kind::String, "x", vec![]);
+            let set_node = n(sql, "SvAlterSetComment", &set, L, "", vec![lit]);
+            let action = n(sql, "SvAlterAction", &set, L, "", vec![set_node]);
+            let r = root(
+                sql,
+                "SvAlter",
+                vec![n(sql, "SvViewName", " v ", L, "", vec![]), action],
+            );
+            let err = transform("SvAlter", &tree(sql, r)).unwrap_err();
+            assert_eq!(
+                err.message, "Expected single-quoted string after SET COMMENT =",
+                "{literal}"
+            );
+            assert_eq!(err.position, Some(sql.find(literal).unwrap()), "{literal}");
+        }
     }
 
     #[test]

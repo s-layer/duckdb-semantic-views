@@ -7,9 +7,11 @@
 //! grammar accepts one: a subquery, a CTE, a view body (TECH-DEBT #77).
 
 use super::tree::{Kind, Node, Tree};
-use super::{internal, name_text, string_value};
+use super::{internal, name_or, plain_string};
 use crate::errors::ParseError;
-use crate::parse::{lower_name_only_read, lower_show, DdlKind, ScopeName, ShowClauses};
+use crate::parse::{
+    lower_name_only_read, lower_show, show_unexpected_tokens, DdlKind, ScopeName, ShowClauses,
+};
 
 /// The grammar rules for the read statements, in `DuckDB`'s PEG syntax.
 ///
@@ -86,15 +88,12 @@ fn transform_show(tree: &Tree) -> Result<String, ParseError> {
         _ => "FACTS",
     };
 
-    let like_pattern = root.find("SvShowLike").map(string_value);
-    let starts_with_clauses = root.find_all("SvShowStartsWith");
-    if let Some(second) = starts_with_clauses.get(1) {
-        return Err(ParseError {
-            message: "STARTS WITH given twice".to_string(),
-            position: second.offset(),
-        });
-    }
-    let starts_with = starts_with_clauses.first().map(|n| string_value(n));
+    // The clauses are read in the order the parser override reads them, so a
+    // statement with two faults gets the override's message for the first.
+    let like_pattern = root
+        .find("SvShowLike")
+        .map(|like| plain_string(tree, like, QUOTED))
+        .transpose()?;
 
     let (in_view, in_schema, in_database) = match root.find("SvShowScope") {
         Some(scope) => show_scope(tree, scope, kind)?,
@@ -112,14 +111,26 @@ fn transform_show(tree: &Tree) -> Result<String, ParseError> {
             });
         }
         let name = metric.find("SvMemberName").unwrap_or(metric);
-        for_metric = Some(name_text(tree, name));
+        for_metric = Some(show_name(tree, name, kind)?);
     }
+
+    let starts_with_clauses = root.find_all("SvShowStartsWith");
+    if let Some(second) = starts_with_clauses.get(1) {
+        return Err(ParseError {
+            message: "STARTS WITH given twice".to_string(),
+            position: second.offset(),
+        });
+    }
+    let starts_with = starts_with_clauses
+        .first()
+        .map(|clause| plain_string(tree, clause, QUOTED))
+        .transpose()?;
 
     let mut limit = None;
     if let Some(node) = root.find("SvShowLimit") {
-        let token = node
+        let token: String = node
             .find("SvShowLimitValue")
-            .map(|v| name_text(tree, v))
+            .map(|v| tree.tokens_in(v).map(|t| t.text.as_str()).collect())
             .unwrap_or_default();
         let n: u64 = token.parse().map_err(|_| ParseError {
             message: format!("LIMIT must be a non-negative integer, got: '{token}'"),
@@ -140,6 +151,16 @@ fn transform_show(tree: &Tree) -> Result<String, ParseError> {
     lower_show(kind, &clauses, root.offset().unwrap_or(0))
 }
 
+/// The parser override's message for a pattern that is not a `'...'` literal.
+const QUOTED: &str = "Expected single-quoted string";
+
+/// A name in a SHOW clause, which must be one run of text: the override ends
+/// it at whitespace and reports the rest of the statement with its usage
+/// message.
+fn show_name(tree: &Tree, node: &Node, kind: DdlKind) -> Result<String, ParseError> {
+    name_or(tree, node, |rest| show_unexpected_tokens(kind, rest))
+}
+
 /// What an `IN` clause names: a view, or a schema and / or database scope.
 /// `IN ACCOUNT` names nothing: it is an unfiltered listing.
 type Scope = (Option<String>, Option<ScopeName>, Option<ScopeName>);
@@ -157,12 +178,13 @@ fn show_scope(tree: &Tree, scope: &Node, kind: DdlKind) -> Result<Scope, ParseEr
                 position: view.offset(),
             });
         }
-        return Ok((Some(name_text(tree, view)), None, None));
+        return Ok((Some(show_name(tree, view, kind)?), None, None));
     }
     if let Some(schema) = scope.find("SvShowInSchema") {
         let Some(name) = schema.find("SvScopeName") else {
             return Ok((None, Some(ScopeName::Current), None));
         };
+        let text = show_name(tree, name, kind)?;
         let mut parts = name_parts(name);
         return match parts.len() {
             1 => Ok((None, parts.pop().map(ScopeName::Named), None)),
@@ -173,8 +195,7 @@ fn show_scope(tree: &Tree, scope: &Node, kind: DdlKind) -> Result<Scope, ParseEr
             }
             _ => Err(ParseError {
                 message: format!(
-                    "Invalid schema name '{}': expected <schema> or <database>.<schema>",
-                    name_text(tree, name)
+                    "Invalid schema name '{text}': expected <schema> or <database>.<schema>"
                 ),
                 position: name.offset(),
             }),
@@ -184,13 +205,11 @@ fn show_scope(tree: &Tree, scope: &Node, kind: DdlKind) -> Result<Scope, ParseEr
         let Some(name) = database.find("SvScopeName") else {
             return Ok((None, None, Some(ScopeName::Current)));
         };
+        let text = show_name(tree, name, kind)?;
         let mut parts = name_parts(name);
         if parts.len() != 1 {
             return Err(ParseError {
-                message: format!(
-                    "Invalid database name '{}': expected a single <database>",
-                    name_text(tree, name)
-                ),
+                message: format!("Invalid database name '{text}': expected a single <database>"),
                 position: name.offset(),
             });
         }
@@ -228,10 +247,15 @@ fn name_parts(node: &Node) -> Vec<String> {
         .collect()
 }
 
+/// The view name of `DESCRIBE` / `SHOW COLUMNS`, reported as the override
+/// reports a name with whitespace inside it.
 fn required(tree: &Tree, root: &Node, rule: &str) -> Result<String, ParseError> {
-    root.find(rule)
-        .map(|n| name_text(tree, n))
-        .ok_or_else(|| internal(root, &format!("missing {rule}")))
+    let node = root
+        .find(rule)
+        .ok_or_else(|| internal(root, &format!("missing {rule}")))?;
+    name_or(tree, node, |rest| {
+        format!("Unexpected tokens after view name: '{rest}'")
+    })
 }
 
 #[cfg(test)]
@@ -373,6 +397,71 @@ mod tests {
         );
         let err = transform("SvShowStatement", &tree(sql, r)).unwrap_err();
         assert_eq!(err.message, "FOR METRIC requires IN view_name");
+    }
+
+    #[test]
+    fn a_metric_name_with_whitespace_inside_gets_the_usage_message() {
+        let sql = "SHOW SEMANTIC DIMENSIONS IN v FOR METRIC o . m LIMIT 2";
+        let r = root(
+            sql,
+            "SvShowStatement",
+            vec![
+                n(
+                    sql,
+                    "SvShowDimensions",
+                    "SEMANTIC DIMENSIONS",
+                    L,
+                    "",
+                    vec![],
+                ),
+                n(
+                    sql,
+                    "SvShowScope",
+                    " v ",
+                    L,
+                    "",
+                    vec![n(sql, "SvShowInView", " v ", L, "", vec![])],
+                ),
+                n(
+                    sql,
+                    "SvShowForMetric",
+                    "FOR METRIC o . m",
+                    L,
+                    "",
+                    vec![n(sql, "SvMemberName", "o . m", L, "", vec![])],
+                ),
+            ],
+        );
+        let err = transform("SvShowStatement", &tree(sql, r)).unwrap_err();
+        assert_eq!(
+            err.message,
+            crate::parse::show_unexpected_tokens(
+                crate::parse::DdlKind::ShowDimensions,
+                ". m LIMIT 2"
+            )
+        );
+        assert_eq!(err.position, Some(sql.find(" . ").unwrap() + 1));
+    }
+
+    #[test]
+    fn a_pattern_that_is_not_a_plain_literal_is_refused() {
+        for literal in ["$$v%$$", "E'v%'"] {
+            let sql = format!("SHOW SEMANTIC VIEWS LIKE {literal}");
+            let sql = sql.as_str();
+            let lit = n(sql, "StringLiteral", literal, Kind::String, "v%", vec![]);
+            let like = format!("LIKE {literal}");
+            let r = root(
+                sql,
+                "SvShowStatement",
+                vec![
+                    n(sql, "SvShowViews", "SEMANTIC VIEWS", L, "", vec![]),
+                    n(sql, "SvShowLike", &like, L, "", vec![lit]),
+                ],
+            );
+            let err = transform("SvShowStatement", &tree(sql, r)).unwrap_err();
+            assert_eq!(err.message, "Expected single-quoted string", "{literal}");
+            assert_eq!(err.position, Some(sql.find(literal).unwrap()), "{literal}");
+        }
     }
 
     #[test]

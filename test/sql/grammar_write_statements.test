@@ -113,6 +113,66 @@ ALTER SEMANTIC VIEW gw_a2 RENAME TO;
 ----
 Missing new name after RENAME TO
 
+# A comment is a plain '...' literal, as for the parser override: DuckDB's
+# string literal also takes $$...$$ and E'...', which the grammar refuses.
+statement error
+ALTER SEMANTIC VIEW gw_a2 SET COMMENT = $$x$$;
+----
+Expected single-quoted string after SET COMMENT =
+
+statement error
+ALTER SEMANTIC VIEW gw_a2 SET COMMENT = E'x';
+----
+Expected single-quoted string after SET COMMENT =
+
+statement error
+ALTER SEMANTIC VIEW gw_a2 SET COMMENT = $t$x$t$;
+----
+Expected single-quoted string after SET COMMENT =
+
+# A view name is one run of text, as for the parser override: whitespace or a
+# comment inside a dotted name ends it, and the rest is reported.
+statement ok
+CREATE SEMANTIC VIEW gw_s.gw_c AS TABLES (t AS gw_t PRIMARY KEY (id)) DIMENSIONS (t.region AS region);
+
+statement error
+DROP SEMANTIC VIEW gw_s . gw_c;
+----
+Unexpected tokens after view name: '. gw_c'
+
+statement error
+DROP SEMANTIC VIEW IF EXISTS gw_s .gw_c;
+----
+Unexpected tokens after view name: '.gw_c'
+
+statement error
+DROP SEMANTIC VIEW gw_s. gw_c;
+----
+Unexpected tokens after view name: 'gw_c'
+
+statement error
+DROP SEMANTIC VIEW gw_s/**/.gw_c;
+----
+Unexpected tokens after view name: '.gw_c'
+
+statement error
+ALTER SEMANTIC VIEW gw_s . gw_c RENAME TO gw_d;
+----
+Unsupported ALTER operation. Supported: RENAME TO, SET COMMENT, UNSET COMMENT.
+
+statement error
+ALTER SEMANTIC VIEW gw_s.gw_c RENAME TO gw_s . gw_d;
+----
+Unexpected tokens after new view name in RENAME TO: '. gw_d'
+
+query T
+SELECT name FROM (SHOW SEMANTIC VIEWS) WHERE name IN ('gw_c', 'gw_d');
+----
+gw_c
+
+statement ok
+DROP SEMANTIC VIEW gw_s.gw_c;
+
 # --- inside a multi-statement string (TECH-DEBT #85) ---------------------------
 
 # Back to the override as the extension loads it. It declines a string holding
@@ -139,6 +199,36 @@ query I
 SELECT count(*) FROM (SHOW SEMANTIC VIEWS) WHERE name LIKE 'gw_m%';
 ----
 0
+
+# Each statement is checked on its own text: the reported rest of a spaced
+# name stops at the end of its statement.
+statement ok
+CREATE SEMANTIC VIEW gw_s.gw_e AS TABLES (t AS gw_t PRIMARY KEY (id)) DIMENSIONS (t.region AS region);
+
+statement error
+DROP SEMANTIC VIEW gw_s . gw_e; SELECT 3;
+----
+Unexpected tokens after view name: '. gw_e'
+
+# Alone, with the override on, the statement gets the same message: the
+# override refuses it and declines, and the grammar takes it.
+statement error
+DROP SEMANTIC VIEW gw_s . gw_e;
+----
+Unexpected tokens after view name: '. gw_e'
+
+statement error
+ALTER SEMANTIC VIEW gw_s.gw_e SET COMMENT = E'x';
+----
+Expected single-quoted string after SET COMMENT =
+
+statement error
+SELECT 1; ALTER SEMANTIC VIEW gw_s.gw_e SET COMMENT = $$x$$; SELECT 2;
+----
+Expected single-quoted string after SET COMMENT =
+
+statement ok
+DROP SEMANTIC VIEW gw_s.gw_e;
 
 # --- wrapped in EXPLAIN or PREPARE ------------------------------------------------
 # A write statement lowers to several statements, which neither EXPLAIN nor

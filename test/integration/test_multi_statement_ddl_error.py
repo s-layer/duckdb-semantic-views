@@ -67,12 +67,18 @@ Each scenario runs on a fresh in-memory database and reports independently:
                                `;` that succeeds.
   control_stale_after_typo     the same after a string that fails to parse
                                before its DDL.
+  statement_costs_its_own_length  100 DROPs after a 40000-element SELECT, parsed
+                               with the override on and off: each DROP is
+                               handed only its own tokens, so the string parses
+                               in about the time of its parts. It used to hand
+                               each DROP every token of the string.
 
 Run: uv run test/integration/test_multi_statement_ddl_error.py (or
 `just test-multi-statement-error`).
 """
 
 import sys
+import time
 from pathlib import Path
 
 import duckdb
@@ -349,6 +355,35 @@ def scenario_control_stale_after_typo():
     check_not_blamed_after("SELEC 1; " + RW_DDL, lambda first: first is not None)
 
 
+def parse_seconds(con, sql):
+    """The best of three parses of `sql` (no execution)."""
+    best = None
+    for _ in range(3):
+        start = time.perf_counter()
+        con.extract_statements(sql)
+        took = time.perf_counter() - start
+        best = took if best is None else min(best, took)
+    return best
+
+
+def scenario_statement_costs_its_own_length():
+    # Handing every statement the whole string's tokens made a string of K
+    # statements cost K times its length: here about ten times its parts.
+    drops = "; ".join(f"DROP SEMANTIC VIEW IF EXISTS v{i}" for i in range(100))
+    filler = "SELECT [" + ", ".join(["1"] * 40000) + "]"
+    con = connect()
+    try:
+        for mode in ("FALLBACK", "DEFAULT"):
+            con.execute(f"SET allow_parser_override_extension = '{mode}'")
+            parts = parse_seconds(con, drops) + parse_seconds(con, filler)
+            both = parse_seconds(con, filler + "; " + drops)
+            assert both < 2.5 * parts, (
+                f"{mode}: the string took {both:.2f}s, its parts {parts:.2f}s"
+            )
+    finally:
+        con.close()
+
+
 SCENARIOS = [
     scenario_ddl_after_other_statements,
     scenario_ddl_before_other_statement,
@@ -368,6 +403,7 @@ SCENARIOS = [
     scenario_control_stale_other_database,
     scenario_control_stale_after_success,
     scenario_control_stale_after_typo,
+    scenario_statement_costs_its_own_length,
 ]
 
 
