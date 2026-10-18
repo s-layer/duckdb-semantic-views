@@ -713,6 +713,64 @@ mod tests {
         assert_eq!(r.sql, "(c.region) IN ( -- r\n SELECT region FROM t)");
     }
 
+    /// A `(` in a comment opens nothing: the names after the comment are the
+    /// predicate's, so they are still members.
+    #[test]
+    fn a_bracket_in_a_comment_before_the_predicate_opens_no_subquery() {
+        let r = resolve_where_clause("v", &def(), "/* (select EU only */ region = 'EU'").unwrap();
+        assert_eq!(r.sql, "/* (select EU only */ (c.region) = 'EU'");
+        assert_eq!(r.source_tables, vec!["c"]);
+    }
+
+    #[test]
+    fn a_bracket_in_a_line_comment_before_the_predicate_opens_no_subquery() {
+        let r = resolve_where_clause("v", &def(), "-- (select EU only\nregion = 'EU'").unwrap();
+        assert_eq!(r.sql, "-- (select EU only\n(c.region) = 'EU'");
+    }
+
+    /// A `)` in a comment inside a subquery does not end it: the name after the
+    /// comment is still the subquery's own.
+    #[test]
+    fn a_bracket_in_a_comment_inside_a_subquery_does_not_end_it() {
+        let r = resolve_where_clause(
+            "v",
+            &def(),
+            "region IN (SELECT r /* ) */ FROM t WHERE region = 1)",
+        )
+        .unwrap();
+        assert_eq!(
+            r.sql,
+            "(c.region) IN (SELECT r /* ) */ FROM t WHERE region = 1)"
+        );
+    }
+
+    #[test]
+    fn a_bracket_in_a_line_comment_inside_a_subquery_does_not_end_it() {
+        let r = resolve_where_clause(
+            "v",
+            &def(),
+            "region IN (SELECT r -- )\n FROM t WHERE region = 1)",
+        )
+        .unwrap();
+        assert_eq!(
+            r.sql,
+            "(c.region) IN (SELECT r -- )\n FROM t WHERE region = 1)"
+        );
+    }
+
+    /// Brackets nested deeper than any stack would hold are scanned without
+    /// recursing on each one.
+    #[test]
+    fn deeply_nested_brackets_do_not_exhaust_the_stack() {
+        let depth = 200_000;
+        let predicate = format!("{}region = 'EU'{}", "(".repeat(depth), ")".repeat(depth));
+        let r = resolve_where_clause("v", &def(), &predicate).unwrap();
+        assert!(
+            r.sql.contains("(c.region) = 'EU'"),
+            "the member is still inlined"
+        );
+    }
+
     /// A set operation whose first query is bracketed is one subquery: the
     /// names after `UNION` are its own too.
     #[test]

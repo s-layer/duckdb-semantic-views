@@ -399,13 +399,18 @@ fn skip_type(bytes: &[u8], start: usize) -> usize {
 }
 
 /// Offset just past the bracket that closes the `open` at `bytes[i]`, skipping
-/// literal and quoted-identifier content and nested pairs. Saturates at `len`.
+/// literal, quoted-identifier and comment content and nested pairs. Saturates
+/// at `len`.
 fn skip_balanced(bytes: &[u8], i: usize, open: u8, close: u8) -> usize {
     let len = bytes.len();
     let mut nesting = 0usize;
     let mut j = i;
     while j < len {
         let b = bytes[j];
+        if starts_comment(bytes, j) {
+            j = skip_whitespace_and_comments(bytes, j);
+            continue;
+        }
         if b == b'\'' {
             j = skip_single_quoted(bytes, j);
             continue;
@@ -718,49 +723,92 @@ const QUERY_OPENERS: &[&str] = &["select", "with", "from", "values", "table"];
 /// The byte spans `(start, end)` of the subqueries in `expr`, in order: each `(`
 /// that opens a query ([`opens_query`]), through its matching `)`. A subquery
 /// nested in another lies inside the outer span and is not listed separately.
-/// Literal and quoted-identifier content is skipped, as in [`scan_references`].
+/// Literal, quoted-identifier and comment content is skipped: `semantic_view()`'s
+/// `where_clause` arrives with its comments (only the construct strips them
+/// first), and a bracket in one opens or closes nothing.
 pub(crate) fn subquery_spans(expr: &str) -> Vec<(usize, usize)> {
     let bytes = expr.as_bytes();
     let mut out = Vec::new();
     let mut i = 0;
     while i < bytes.len() {
+        if starts_comment(bytes, i) {
+            i = skip_whitespace_and_comments(bytes, i);
+            continue;
+        }
         match bytes[i] {
             b'\'' => i = skip_single_quoted(bytes, i),
             b'"' => i = skip_quoted_part(bytes, i),
             b'$' => i = try_skip_dollar_quoted(bytes, i).unwrap_or(i + 1),
-            b'(' if opens_query(bytes, i) => {
-                let end = skip_balanced(bytes, i, b'(', b')');
-                out.push((i, end));
-                i = end;
-            }
+            b'(' => match opens_query(bytes, i) {
+                Opens::Query => {
+                    let end = skip_balanced(bytes, i, b'(', b')');
+                    out.push((i, end));
+                    i = end;
+                }
+                Opens::NoQueryBefore(next) => i = next,
+            },
             _ => i += 1,
         }
     }
     out
 }
 
+/// Whether a `(` opens a query, from [`opens_query`].
+enum Opens {
+    Query,
+    /// No `(` from this one up to the offset opens a query, so the scan
+    /// resumes there rather than asking again of each bracket in a chain.
+    NoQueryBefore(usize),
+}
+
+/// `DuckDB` refuses an expression nested deeper than this
+/// (`max_expression_depth`), so a longer chain of directly nested brackets is
+/// no query that runs; the scan stops following it there.
+const MAX_BRACKET_CHAIN: usize = 1000;
+
 /// Whether the `(` at `open` starts a query: its first word is one of
 /// [`QUERY_OPENERS`], or it starts with a bracketed query that a set operation
-/// continues (`((SELECT …) UNION SELECT …)`). Comments are skipped, since
-/// `semantic_view()`'s `where_clause` arrives with them; only the construct
-/// strips them first.
-fn opens_query(bytes: &[u8], open: usize) -> bool {
-    let first = skip_whitespace_and_comments(bytes, open + 1);
-    if bytes.get(first) == Some(&b'(') {
-        if !opens_query(bytes, first) {
-            return false;
+/// continues (`((SELECT …) UNION SELECT …)`). Comments are skipped.
+///
+/// The brackets that open directly inside one another (`((( …`) are walked
+/// in a loop, not by recursion, since their number comes from the caller's
+/// text.
+fn opens_query(bytes: &[u8], open: usize) -> Opens {
+    let mut chain = vec![open];
+    let mut first = skip_whitespace_and_comments(bytes, open + 1);
+    while bytes.get(first) == Some(&b'(') {
+        if chain.len() == MAX_BRACKET_CHAIN {
+            return Opens::NoQueryBefore(first);
         }
-        let after = skip_whitespace_and_comments(bytes, skip_balanced(bytes, first, b'(', b')'));
-        return SET_OPERATIONS
-            .iter()
-            .any(|w| match_words(bytes, after, &[w]).is_some());
+        chain.push(first);
+        first = skip_whitespace_and_comments(bytes, first + 1);
     }
     let mut word_end = first;
     while word_end < bytes.len() && crate::util::is_ident_byte(bytes[word_end]) {
         word_end += 1;
     }
     let word = String::from_utf8_lossy(&bytes[first..word_end]);
-    QUERY_OPENERS.iter().any(|w| w.eq_ignore_ascii_case(&word))
+    if !QUERY_OPENERS.iter().any(|w| w.eq_ignore_ascii_case(&word)) {
+        // The innermost bracket holds no query, so none around it does.
+        return Opens::NoQueryBefore(first);
+    }
+    // The innermost bracket holds a query. Each one around it does too only if
+    // a set operation continues the bracketed query just inside it.
+    for &inner in &chain[1..] {
+        let after = skip_whitespace_and_comments(bytes, skip_balanced(bytes, inner, b'(', b')'));
+        if !SET_OPERATIONS
+            .iter()
+            .any(|w| match_words(bytes, after, &[w]).is_some())
+        {
+            return Opens::NoQueryBefore(inner);
+        }
+    }
+    Opens::Query
+}
+
+/// Whether a `/* … */` or `-- …` comment starts at `pos`.
+fn starts_comment(bytes: &[u8], pos: usize) -> bool {
+    bytes[pos..].starts_with(b"/*") || bytes[pos..].starts_with(b"--")
 }
 
 /// The words that continue a query after a bracketed one.

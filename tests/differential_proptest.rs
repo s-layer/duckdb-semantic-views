@@ -55,7 +55,7 @@ use semantic_views::expand::{expand, DimensionName, MetricName, QueryRequest};
 use semantic_views::model::{
     AccessModifier, Dimension, Fact, Metric, SemanticViewDefinition, TableRef,
 };
-use semantic_views::query::items::{Group, OutputColumns};
+use semantic_views::query::items::{aliases_for, Group, OutputColumns, RequestItems};
 use semantic_views::query::wire::build_projected_execution_sql;
 
 /// Comparison operators used by generated predicates.
@@ -106,7 +106,13 @@ enum Pred {
     /// as its own column. A subquery is its own scope: the name inside it is
     /// the subquery's, and substituting the member there turned it into a
     /// correlated subquery (or a syntax error, in its alias position).
-    InSubquery(usize, i64),
+    ///
+    /// The flag picks the body. `false` filters on `fa{i}` inside the
+    /// subquery, where a substituted `(d{i} + 1)` fails to bind. `true`
+    /// selects `fa{i}` from a derived table that also has a `d{i}` column, so
+    /// a substituted `(d{i} + 1)` binds and silently shifts every value by
+    /// one: the wrong-number shape, which only an oracle catches.
+    InSubquery(usize, i64, bool),
     And(Box<Pred>, Box<Pred>),
     Or(Box<Pred>, Box<Pred>),
     Not(Box<Pred>),
@@ -142,9 +148,13 @@ impl Pred {
             Pred::IsNotNull(i) => format!("d{i} IS NOT NULL"),
             Pred::Filter(i) => format!("f{i}"),
             Pred::ChainedFact(i) => format!("fb{i} > 0"),
-            Pred::InSubquery(i, k) => format!(
+            Pred::InSubquery(i, k, false) => format!(
                 "d{i} IN (SELECT x FROM (SELECT d{i} AS x, d{i} + 1 AS fa{i} FROM t) AS s \
                  WHERE fa{i} > {k})"
+            ),
+            Pred::InSubquery(i, k, true) => format!(
+                "d{i} IN (SELECT fa{i} FROM (SELECT d{i} AS fa{i}, d{i} FROM t \
+                 WHERE d{i} + 1 > {k}) AS s)"
             ),
             Pred::And(a, b) => format!("({} AND {})", a.to_member_sql(), b.to_member_sql()),
             Pred::Or(a, b) => format!("({} OR {})", a.to_member_sql(), b.to_member_sql()),
@@ -165,7 +175,7 @@ impl Pred {
             // chained — so the comparison stays differential rather than
             // re-using the expander's own inlining.
             Pred::ChainedFact(i) => format!("((({}) * 2) > 0)", leaf_fact_expr(*i)),
-            Pred::InSubquery(i, k) => {
+            Pred::InSubquery(i, k, _) => {
                 format!("(d{i} IN (SELECT d{i} FROM t WHERE (d{i} + 1) > {k}))")
             }
             Pred::And(a, b) => format!("({} AND {})", a.to_raw_sql(), b.to_raw_sql()),
@@ -245,7 +255,8 @@ fn arb_pred(n_dims: usize) -> impl Strategy<Value = Pred> {
         1 => (0..n_dims).prop_map(Pred::IsNotNull),
         3 => (0..n_dims).prop_map(Pred::Filter),
         3 => (0..n_dims).prop_map(Pred::ChainedFact),
-        2 => (0..n_dims, -1i64..=3).prop_map(|(i, k)| Pred::InSubquery(i, k)),
+        2 => (0..n_dims, -1i64..=3, any::<bool>())
+            .prop_map(|(i, k, silent)| Pred::InSubquery(i, k, silent)),
     ];
     // depth 3, up to 8 nodes, branching 2 — deep enough for a filter member to
     // land inside a surrounding AND/OR/NOT, which is where precedence bites.
@@ -559,18 +570,45 @@ proptest! {
     fn expansion_matches_handwritten_group_by(case in arb_case()) {
         let def = build_def(&case.schema);
 
+        // The request as `semantic_view()` receives it: item text (`d0 AS
+        // x_d0`) and `column_order` entries, parsed by the code it uses.
+        let outputs = case.output_names();
+        let n_dims = case.sel_dims.len();
+        let item_text = |k: usize, member: String| {
+            if case.aliased[k] { format!("{member} AS {}", outputs[k]) } else { member }
+        };
+        let dim_text: Vec<String> = case
+            .sel_dims
+            .iter()
+            .enumerate()
+            .map(|(k, i)| item_text(k, format!("d{i}")))
+            .collect();
+        let met_text: Vec<String> = case
+            .sel_metrics
+            .iter()
+            .enumerate()
+            .map(|(k, i)| item_text(n_dims + k, format!("m{i}")))
+            .collect();
+        let order_text: Vec<String> = case
+            .order
+            .iter()
+            .map(|g| match g {
+                Group::Dimensions => "dimensions",
+                Group::Metrics => "METRICS",
+                Group::Facts => "Facts",
+            })
+            .map(String::from)
+            .collect();
+        let items = RequestItems::parse(&dim_text, &met_text, &[], &order_text)
+            .expect("generated items parse");
+        prop_assert_eq!(items.order, case.order);
+        let dim_members = RequestItems::members(&items.dimensions);
+        let met_members = RequestItems::members(&items.metrics);
+
         let req = QueryRequest {
             where_clause: case.where_pred.as_ref().map(Pred::to_member_sql),
-            dimensions: case
-                .sel_dims
-                .iter()
-                .map(|i| DimensionName::new(format!("d{i}")))
-                .collect(),
-            metrics: case
-                .sel_metrics
-                .iter()
-                .map(|i| MetricName::new(format!("m{i}")))
-                .collect(),
+            dimensions: dim_members.iter().map(DimensionName::new).collect(),
+            metrics: met_members.iter().map(MetricName::new).collect(),
             // PIN: the row-level FACTS path is oracled by child_grain_proptest (below-base grain) and metamorphic_proptest; this harness oracles single-table aggregation. TECH-DEBT #66
             facts: vec![],
         };
@@ -588,12 +626,11 @@ proptest! {
             .expect("probe must prepare");
         probe.execute([]).expect("probe must run");
         let names: Vec<String> = probe.column_names();
-        let outputs = case.output_names();
-        let n_dims = case.sel_dims.len();
-        let alias_of = |k: usize| case.aliased[k].then(|| outputs[k].clone());
-        let dim_aliases: Vec<Option<String>> = (0..n_dims).map(alias_of).collect();
-        let met_aliases: Vec<Option<String>> = (n_dims..outputs.len()).map(alias_of).collect();
-        let layout = OutputColumns::new(&names, [&dim_aliases, &met_aliases, &[]], case.order)
+        let dim_aliases =
+            aliases_for(&items.dimensions, &dim_members).expect("each alias finds its member");
+        let met_aliases =
+            aliases_for(&items.metrics, &met_members).expect("each alias finds its member");
+        let layout = OutputColumns::new(&names, [&dim_aliases, &met_aliases, &[]], items.order)
             .expect("generated output names are distinct");
         let (_, _, expanded) =
             build_projected_execution_sql(&expanded, &names, &vec![u32::MAX; names.len()], &layout);
@@ -715,6 +752,7 @@ fn generator_varies_the_predicate_and_exercises_filter_members() {
     let mut with_filter = 0usize;
     let mut with_chained_fact = 0usize;
     let mut with_subquery = 0usize;
+    let mut with_silent_subquery = 0usize;
     let mut compound = 0usize;
     let mut distinct: HashSet<String> = HashSet::new();
     let mut default_layout = 0usize;
@@ -755,6 +793,9 @@ fn generator_varies_the_predicate_and_exercises_filter_members() {
                     with_subquery += 1;
                 }
                 let sql = p.to_member_sql();
+                if sql.contains("SELECT fa") {
+                    with_silent_subquery += 1;
+                }
                 if sql.contains(" AND ") || sql.contains(" OR ") || sql.contains("NOT ") {
                     compound += 1;
                 }
@@ -785,6 +826,11 @@ fn generator_varies_the_predicate_and_exercises_filter_members() {
     assert!(
         with_subquery > 0,
         "generator never produced a subquery -- a subquery's own scope is untested"
+    );
+    assert!(
+        with_silent_subquery > 0,
+        "generator never selected a member name from a subquery -- the shape where \
+         a substituted name binds and shifts the result is untested"
     );
     assert!(
         compound > 0,
