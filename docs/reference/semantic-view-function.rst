@@ -390,10 +390,10 @@ Wildcard patterns (``alias.*``) are expanded before name resolution. The expansi
 
 If a name does not match any defined dimension, metric, or fact, the error message lists available names and suggests the closest match (if one exists within 3 edits).
 
-**Tables in the definition.** A table the semantic view names without a schema, in ``TABLES`` or in a subquery inside a dimension, fact or metric expression, is the table of that name in the database and schema the view was created in. A CTE of the same name in your query, or a table of that name in your current schema, is not read in its place. A table named in a ``where_clause`` subquery is part of your query and resolves there, so it can read your CTEs.
+**Tables in the definition.** A table the semantic view names without a schema, in ``TABLES`` or in a subquery inside a dimension, fact or metric expression, is the table of that name in the database and schema the view was created in. A CTE of the same name in your query, or a table of that name in your current schema, is not read in its place. Where the view's schema has no table of that name, your session's temporary table of that name is read, so a semantic view over a temporary table can be queried in the session that has the table; a table in a member expression's subquery that is in neither resolves as your session resolves it. A table the view names with its schema is that table only. A table named in a ``where_clause`` subquery is part of your query and resolves there, so it can read your CTEs.
 
 .. versionchanged:: 0.16.0
-   A table named in a member expression's subquery no longer resolves to your query's CTE of that name.
+   A table named in a member expression's subquery no longer resolves to your query's CTE of that name, and a semantic view over a temporary table can be queried.
 
 
 .. _ref-sv-examples:

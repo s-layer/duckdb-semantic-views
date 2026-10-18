@@ -265,6 +265,7 @@ unsafe fn semantic_view_bind_body(
     Ok(frame_bind_payload(
         database,
         schema,
+        &crate::expand::stamped_tables(&def),
         &build_projected_sql(&expanded_sql, &column_names, &output),
     ))
 }

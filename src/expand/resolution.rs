@@ -132,6 +132,32 @@ pub fn body_qualifier(def: &SemanticViewDefinition) -> (Option<&str>, Option<&st
     (def.database_name.as_deref(), schema)
 }
 
+/// The table names the expansion qualifies with [`body_qualifier`]: each
+/// `TABLES` entry and materialization table written without a schema, as the
+/// name `DuckDB`'s parser reads back from the quoted, qualified reference.
+///
+/// The shim pins each of these to the stamped table and, where the stamped
+/// schema has none, to the session's temporary table of that name, so a semantic view over a temporary table can be queried in
+/// the session that has it. A table the definition names with its schema is
+/// not in this list, and stays that table only.
+#[must_use]
+pub fn stamped_tables(def: &SemanticViewDefinition) -> Vec<String> {
+    let mut names: Vec<String> = Vec::new();
+    let tables = def.tables.iter().map(|t| t.table.as_str());
+    let materialized = def.materializations.iter().map(|m| m.table.as_str());
+    for table in tables.chain(materialized) {
+        let name = match crate::ident::parse_qualified_identifier(table) {
+            Ok(parts) if parts.len() == 1 => parts[0].clone(),
+            Ok(_) => continue,
+            Err(_) => table.to_string(),
+        };
+        if !names.iter().any(|n| n.eq_ignore_ascii_case(&name)) {
+            names.push(name);
+        }
+    }
+    names
+}
+
 /// Qualify a table name with the definition's catalog/schema, then quote it.
 ///
 /// If the table name is already dot-qualified (more than one structural part),
@@ -831,6 +857,42 @@ mod tests {
                 result.starts_with("\"db\".\"schema\"."),
                 "expected db/schema prefix on malformed input, got: {result}",
             );
+        }
+    }
+
+    mod stamped_tables_tests {
+        use super::*;
+        use crate::expand::resolution::stamped_tables;
+        use crate::model::{Materialization, TableRef};
+
+        fn table(table: &str) -> TableRef {
+            TableRef {
+                alias: "a".to_string(),
+                table: table.to_string(),
+                ..TableRef::default()
+            }
+        }
+
+        #[test]
+        fn names_written_without_a_schema_are_stamped() {
+            let mut def = def_with_db_schema(Some("db"), Some("main"));
+            def.tables = vec![table("orders"), table("\"Line Items\""), table("ORDERS")];
+            def.materializations = vec![Materialization {
+                table: "daily".to_string(),
+                ..Materialization::default()
+            }];
+            assert_eq!(stamped_tables(&def), ["orders", "Line Items", "daily"]);
+        }
+
+        #[test]
+        fn names_written_with_a_schema_are_not_stamped() {
+            let mut def = def_with_db_schema(Some("db"), Some("main"));
+            def.tables = vec![table("main.orders"), table("db.main.customers")];
+            def.materializations = vec![Materialization {
+                table: "agg.daily".to_string(),
+                ..Materialization::default()
+            }];
+            assert!(stamped_tables(&def).is_empty());
         }
     }
 }

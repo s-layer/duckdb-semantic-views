@@ -56,27 +56,82 @@ SELECT * FROM semantic_view('cq_sv', dimensions := ['region'], metrics := ['reve
 EU	150
 US	70
 
-# A semantic view over a temporary table is not reachable yet, although the
-# query now runs in the caller's session: the expansion qualifies a bare table
-# name with the database and schema stamped at CREATE (`memory.main`), and a
-# temporary table lives in `temp.main` (TECH-DEBT #106). Pinned so that the
-# fix shows up here.
+# A semantic view over a temporary table can be queried in the session that
+# has the table: a table the definition names without a schema is the one in
+# the database and schema stamped at CREATE (`memory.main`) and, where there is
+# none, the session's temporary table of that name. (A table the stamped schema
+# lacks for another reason, such as a CREATE under a search path, still fails:
+# TECH-DEBT #97, `ddl_corpus_frontdoor_c.test` F-095.)
 
 statement ok
 CREATE TEMP TABLE cq_scratch (id INTEGER, amount INTEGER);
+
+statement ok
+INSERT INTO cq_scratch VALUES (1, 5), (2, 6);
 
 statement ok
 CREATE SEMANTIC VIEW cq_tmp AS
   TABLES (s AS cq_scratch PRIMARY KEY (id))
   METRICS (s.total AS sum(s.amount));
 
-statement error
+query I
+SELECT * FROM semantic_view('cq_tmp', metrics := ['total']);
+----
+11
+
+# Another session has no such table, so the query fails there.
+
+statement error con2
 SELECT * FROM semantic_view('cq_tmp', metrics := ['total']);
 ----
 Table with name cq_scratch does not exist
 
+# A table of the same name in the stamped schema is read ahead of the
+# temporary one.
+
+statement ok
+CREATE TABLE memory.main.cq_scratch (id INTEGER, amount INTEGER);
+
+statement ok
+INSERT INTO memory.main.cq_scratch VALUES (1, 100);
+
+query I
+SELECT * FROM semantic_view('cq_tmp', metrics := ['total']);
+----
+100
+
+statement ok
+DROP TABLE memory.main.cq_scratch;
+
 statement ok
 DROP SEMANTIC VIEW cq_tmp;
+
+# A table the definition names with its schema is that table only.
+
+statement ok
+CREATE TABLE memory.main.cq_spelled (id INTEGER, amount INTEGER);
+
+statement ok
+CREATE SEMANTIC VIEW cq_tmp_spelled AS
+  TABLES (s AS memory.main.cq_spelled PRIMARY KEY (id))
+  METRICS (s.total AS sum(s.amount));
+
+statement ok
+DROP TABLE memory.main.cq_spelled;
+
+statement ok
+CREATE TEMP TABLE cq_spelled AS SELECT 1 AS id, 7 AS amount;
+
+statement error
+SELECT * FROM semantic_view('cq_tmp_spelled', metrics := ['total']);
+----
+does not exist
+
+statement ok
+DROP SEMANTIC VIEW cq_tmp_spelled;
+
+statement ok
+DROP TABLE cq_spelled;
 
 statement ok
 DROP TABLE cq_scratch;

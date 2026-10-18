@@ -3168,6 +3168,12 @@ static void sv_relocate(QueryNode &node, QueryLocation location) {
 // covers the tables a member expression's subquery names, which the Rust side
 // sees only as text. A bare name is looked up in that database and schema
 // first, as a `TABLES` entry is, then as DuckDB's binder would look it up.
+// A `TABLES` entry the Rust side qualified with the stamp (`stamped`, from
+// `expand::stamped_tables`) that the stamped schema lacks is read from the
+// session's temporary table of that name, if it has one, so a semantic view
+// over a temporary table is read in the session that has it. Otherwise it
+// stays as stamped and fails as before; one the definition spelled with its
+// schema is that table only.
 //
 // Left as written: a CTE name the expansion has in scope, anything inside a
 // hoisted where_clause subquery (`__sv_sqN`, the caller's own text, which
@@ -3179,6 +3185,7 @@ struct SvTablePinner {
     optional_ptr<Binder> caller;
     Identifier database;
     Identifier schema;
+    std::vector<Identifier> stamped;
     std::vector<Identifier> scope;
 
     static bool IsHoisted(const Identifier &name) {
@@ -3190,8 +3197,44 @@ struct SvTablePinner {
         return Catalog::GetEntry(context, lookup, OnEntryNotFound::RETURN_NULL);
     }
 
+    // Whether `name` is a stamped `TABLES` entry: the stamp's path, then one
+    // of the names the Rust side qualified with it.
+    bool IsStamped(const QualifiedName &name) const {
+        vector<Identifier> path;
+        if (!database.empty()) {
+            path.push_back(database);
+        }
+        if (!schema.empty()) {
+            path.push_back(schema);
+        }
+        path.push_back(name.Name());
+        if (path.size() == 1 || name.Path() != path) {
+            return false;
+        }
+        for (auto &table : stamped) {
+            if (table == name.Name()) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    void PinStamped(BaseTableRef &ref) {
+        auto table = ref.GetQualifiedName().Name();
+        if (Lookup(ref.GetQualifiedName())) {
+            return;
+        }
+        if (Lookup(QualifiedName(TEMP_CATALOG, DEFAULT_SCHEMA, table))) {
+            ref.SetQualifiedName(TEMP_CATALOG, DEFAULT_SCHEMA, table);
+        }
+    }
+
     void Pin(BaseTableRef &ref) {
         auto &name = ref.GetQualifiedName();
+        if (IsStamped(name)) {
+            PinStamped(ref);
+            return;
+        }
         if (name.Path().size() != 1) {
             return;
         }
@@ -3418,6 +3461,11 @@ static unique_ptr<TableRef> sv_semantic_view_bind_replace(
         size_t offset = 0;
         std::string database = sv_read_string(framed, payload.len, offset, "semantic_view");
         std::string schema = sv_read_string(framed, payload.len, offset, "semantic_view");
+        std::vector<Identifier> stamped;
+        uint32_t stamped_count = sv_read_u32_le(framed, payload.len, offset, "semantic_view");
+        for (uint32_t i = 0; i < stamped_count; i++) {
+            stamped.emplace_back(sv_read_string(framed, payload.len, offset, "semantic_view"));
+        }
         std::string sql(framed + offset, payload.len - offset);
         Parser parser = sv_compat::builtin_parser();
         try {
@@ -3439,7 +3487,8 @@ static unique_ptr<TableRef> sv_semantic_view_bind_replace(
         auto select = unique_ptr_cast<SQLStatement, SelectStatement>(
             std::move(parser.statements[0]));
         sv_relocate(*select->node, input.ref.query_location);
-        SvTablePinner pinner {context, input.binder, Identifier(database), Identifier(schema), {}};
+        SvTablePinner pinner {context, input.binder, Identifier(database), Identifier(schema),
+                              std::move(stamped), {}};
         pinner.Node(*select->node);
         return select;
     };

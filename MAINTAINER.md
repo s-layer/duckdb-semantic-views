@@ -189,7 +189,8 @@ semantic_view('shop', dimensions := [...], metrics := [...])
        expand/ generates SQL, and DuckDB plans it as a subquery of the caller's query.
        The shim (SvTablePinner) first pins each bare table name to its catalog entry,
        looking in the database and schema stamped at CREATE first, so a caller's CTE
-       can't stand in for it.
+       can't stand in for it. A TABLES entry the expansion stamped (expand::stamped_tables)
+       that the stamped schema lacks is pinned to the session's temporary table of that name.
 ```
 
 `expand/` is pure Rust that converts a `SemanticViewDefinition` plus a `QueryRequest` into a SQL string. DuckDB handles all actual data processing. The generated SQL looks like:

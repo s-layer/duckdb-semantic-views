@@ -119,6 +119,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   inside a transaction are now counted by a semantic-view query in that transaction.
   Before, the query ran on a connection of its own and saw only committed data. A
   semantic view you create inside a transaction still can't be queried until you commit.
+- **A semantic view over a temporary table can be queried** in the session that has the
+  table. A table the view names without a schema is the one in the database and schema the
+  view was created in and, where that schema has none, your session's temporary table of
+  that name. Before, the query could not see temporary tables at all.
 - **A prepared `semantic_view()` query follows a later `SET search_path`.** `EXECUTE`
   now looks the view up on the search path in effect when it runs, as DuckDB does for
   its own tables. Before, it kept the view found when the statement was prepared.
@@ -130,10 +134,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `WHERE` clause takes uncorrelated subqueries.
 
 ### Known limitations
-
-- **A semantic view over a temporary table can't be queried.** The query fails with
-  `Table with name ... does not exist`, because a table named without a schema is looked
-  up in the database and schema the semantic view was created in.
 
 - **ADBC needs `import duckdb` first.** With the DuckDB 2.0 Python wheel, a connection from
   `adbc_driver_duckdb` cannot `INSTALL` or `LOAD` any extension, this one included, unless
