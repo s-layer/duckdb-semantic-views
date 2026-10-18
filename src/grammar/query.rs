@@ -279,14 +279,15 @@ fn extend<'a>(
             alias: Some((node, !is_alias)),
         }),
         Some(_) => {
-            let what = if word == "WHERE" {
-                "after the WHERE predicate".to_string()
+            // A comma can't follow the predicate either: WHERE takes one.
+            let expected = if word == "WHERE" {
+                "a clause or ')' after the WHERE predicate".to_string()
             } else {
-                format!("between the items of {word}")
+                format!("',' between the items of {word}")
             };
             Err(error_at(
                 Some(node),
-                format!("expected ',' {what}, got: {}", clean(&tree.text(node))),
+                format!("expected {expected}, got: {}", clean(&tree.text(node))),
             ))
         }
     }
@@ -698,7 +699,10 @@ mod tests {
                 (E, "b"),
             ],
         );
-        assert_eq!(message, "expected ',' after the WHERE predicate, got: b");
+        assert_eq!(
+            message,
+            "expected a clause or ')' after the WHERE predicate, got: b"
+        );
 
         let sql = "SEMANTIC_VIEW(v METRICS m WHERE)";
         let (message, _) = error(sql, &[(W, "METRICS"), (E, "m"), (W, "WHERE")]);

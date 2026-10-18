@@ -221,6 +221,40 @@ US	70.00
 statement ok
 DROP TABLE wc_targets;
 
+# A name inside the subquery that its own tables lack is not a member either:
+# DuckDB looks it up in the semantic view's tables, where it is the raw column.
+# Here `region` is lower(c.region), but the subquery compares c.region as
+# stored ('EU'), so nothing matches (TECH-DEBT #109). Pinned so a change shows
+# up here.
+
+statement ok
+CREATE TABLE wc_codes (code VARCHAR);
+
+statement ok
+INSERT INTO wc_codes VALUES ('eu');
+
+statement ok
+CREATE SEMANTIC VIEW wc_lower AS
+  TABLES (o AS wc_orders PRIMARY KEY (id), c AS wc_customers PRIMARY KEY (id))
+  RELATIONSHIPS (order_customer AS o(customer_id) REFERENCES c)
+  DIMENSIONS (c.region AS lower(c.region))
+  METRICS (o.revenue AS sum(o.amount));
+
+query TT rowsort
+SELECT * FROM semantic_view('wc_lower', metrics := ['revenue'], dimensions := ['region'], where_clause := 'EXISTS (SELECT 1 FROM wc_codes k WHERE k.code = region)');
+----
+
+query TT rowsort
+SELECT * FROM semantic_view('wc_lower', metrics := ['revenue'], dimensions := ['region'], where_clause := 'region IN (SELECT code FROM wc_codes)');
+----
+eu	150.00
+
+statement ok
+DROP SEMANTIC VIEW wc_lower;
+
+statement ok
+DROP TABLE wc_codes;
+
 # ============================================================
 # Cleanup
 # ============================================================
