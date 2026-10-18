@@ -22,7 +22,9 @@
 
 use std::collections::{HashMap, HashSet};
 
-use crate::expr_tokens::{inline_references, scan_references};
+use crate::expr_tokens::{
+    inline_references_outside_subqueries, scan_references_outside_subqueries,
+};
 use crate::ident::normalize_ident_part;
 use crate::model::SemanticViewDefinition;
 
@@ -243,7 +245,7 @@ pub(super) fn resolve_where_clause(
     let mut source_tables: Vec<String> = Vec::new();
     let mut members: Vec<WhereMember> = Vec::new();
     let mut seen_members: HashSet<String> = HashSet::new();
-    for r in scan_references(raw) {
+    for r in scan_references_outside_subqueries(raw) {
         let key = r.key();
         if let Some(table) = member_tables.get(&key) {
             if let Some(t) = table {
@@ -303,7 +305,7 @@ pub(super) fn resolve_where_clause(
         .map(|(k, v)| (k.clone(), v.as_str()))
         .collect();
     Ok(ResolvedWhere {
-        sql: inline_references(raw, &borrowed),
+        sql: inline_references_outside_subqueries(raw, &borrowed),
         source_tables,
         members,
     })
@@ -639,5 +641,56 @@ mod tests {
                 "blank predicate {blank:?} must emit no WHERE: {sql}"
             );
         }
+    }
+
+    // A subquery in the predicate is its own scope: Snowflake's `WHERE` takes
+    // uncorrelated subqueries, and a name inside one is that subquery's column,
+    // not a member. Substituting it turned `region IN (SELECT region FROM
+    // regions)` into `(c.region) IN (SELECT (c.region) FROM regions)`, a
+    // correlated subquery that compares each row with itself.
+
+    #[test]
+    fn a_member_name_inside_a_subquery_is_left_to_the_subquery() {
+        let r =
+            resolve_where_clause("v", &def(), "region IN (SELECT region FROM regions)").unwrap();
+        assert_eq!(r.sql, "(c.region) IN (SELECT region FROM regions)");
+        assert_eq!(r.source_tables, vec!["c"]);
+        assert_eq!(r.members.len(), 1, "{:?}", r.members);
+    }
+
+    #[test]
+    fn a_from_first_subquery_is_a_subquery_too() {
+        let r =
+            resolve_where_clause("v", &def(), "region IN (FROM regions SELECT region)").unwrap();
+        assert_eq!(r.sql, "(c.region) IN (FROM regions SELECT region)");
+    }
+
+    #[test]
+    fn a_subquery_with_a_cte_is_a_subquery_too() {
+        let r = resolve_where_clause(
+            "v",
+            &def(),
+            "order_date > ( WITH d AS (SELECT order_date FROM t) SELECT max(order_date) FROM d)",
+        )
+        .unwrap();
+        assert_eq!(
+            r.sql,
+            "(o.ordered_at) > ( WITH d AS (SELECT order_date FROM t) SELECT max(order_date) FROM d)"
+        );
+        assert_eq!(r.source_tables, vec!["o"]);
+    }
+
+    #[test]
+    fn a_metric_name_inside_a_subquery_is_not_a_metric_reference() {
+        let r = resolve_where_clause("v", &def(), "region IN (SELECT revenue FROM t)").unwrap();
+        assert_eq!(r.sql, "(c.region) IN (SELECT revenue FROM t)");
+    }
+
+    /// Control: parentheses that hold an expression, not a query, are part of
+    /// the predicate.
+    #[test]
+    fn parentheses_around_an_expression_are_not_a_subquery() {
+        let r = resolve_where_clause("v", &def(), "(region = 'x') AND (order_date > 1)").unwrap();
+        assert_eq!(r.sql, "((c.region) = 'x') AND ((o.ordered_at) > 1)");
     }
 }

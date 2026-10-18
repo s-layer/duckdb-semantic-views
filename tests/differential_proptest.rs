@@ -100,6 +100,11 @@ enum Pred {
     /// expression in VERBATIM, with no inlining pass, so the inner fact's name
     /// survived into the emitted SQL as a bare column.
     ChainedFact(usize),
+    /// `d{i} IN (<uncorrelated subquery>)`, whose body names leaf fact `fa{i}`
+    /// as its own column. A subquery is its own scope: the name inside it is
+    /// the subquery's, and substituting the member there turned it into a
+    /// correlated subquery (or a syntax error, in its alias position).
+    InSubquery(usize, i64),
     And(Box<Pred>, Box<Pred>),
     Or(Box<Pred>, Box<Pred>),
     Not(Box<Pred>),
@@ -135,6 +140,10 @@ impl Pred {
             Pred::IsNotNull(i) => format!("d{i} IS NOT NULL"),
             Pred::Filter(i) => format!("f{i}"),
             Pred::ChainedFact(i) => format!("fb{i} > 0"),
+            Pred::InSubquery(i, k) => format!(
+                "d{i} IN (SELECT x FROM (SELECT d{i} AS x, d{i} + 1 AS fa{i} FROM t) AS s \
+                 WHERE fa{i} > {k})"
+            ),
             Pred::And(a, b) => format!("({} AND {})", a.to_member_sql(), b.to_member_sql()),
             Pred::Or(a, b) => format!("({} OR {})", a.to_member_sql(), b.to_member_sql()),
             Pred::Not(a) => format!("(NOT {})", a.to_member_sql()),
@@ -154,6 +163,9 @@ impl Pred {
             // chained — so the comparison stays differential rather than
             // re-using the expander's own inlining.
             Pred::ChainedFact(i) => format!("((({}) * 2) > 0)", leaf_fact_expr(*i)),
+            Pred::InSubquery(i, k) => {
+                format!("(d{i} IN (SELECT d{i} FROM t WHERE (d{i} + 1) > {k}))")
+            }
             Pred::And(a, b) => format!("({} AND {})", a.to_raw_sql(), b.to_raw_sql()),
             Pred::Or(a, b) => format!("({} OR {})", a.to_raw_sql(), b.to_raw_sql()),
             Pred::Not(a) => format!("(NOT {})", a.to_raw_sql()),
@@ -166,7 +178,11 @@ impl Pred {
     fn references_filter(&self) -> bool {
         match self {
             Pred::Filter(_) => true,
-            Pred::Cmp(..) | Pred::IsNull(_) | Pred::IsNotNull(_) | Pred::ChainedFact(_) => false,
+            Pred::Cmp(..)
+            | Pred::IsNull(_)
+            | Pred::IsNotNull(_)
+            | Pred::ChainedFact(_)
+            | Pred::InSubquery(..) => false,
             Pred::And(a, b) | Pred::Or(a, b) => a.references_filter() || b.references_filter(),
             Pred::Not(a) => a.references_filter(),
         }
@@ -178,11 +194,29 @@ impl Pred {
     fn references_chained_fact(&self) -> bool {
         match self {
             Pred::ChainedFact(_) => true,
-            Pred::Cmp(..) | Pred::IsNull(_) | Pred::IsNotNull(_) | Pred::Filter(_) => false,
+            Pred::Cmp(..)
+            | Pred::IsNull(_)
+            | Pred::IsNotNull(_)
+            | Pred::Filter(_)
+            | Pred::InSubquery(..) => false,
             Pred::And(a, b) | Pred::Or(a, b) => {
                 a.references_chained_fact() || b.references_chained_fact()
             }
             Pred::Not(a) => a.references_chained_fact(),
+        }
+    }
+
+    /// Whether this predicate holds a subquery. Same anti-vacuity role.
+    fn has_subquery(&self) -> bool {
+        match self {
+            Pred::InSubquery(..) => true,
+            Pred::Cmp(..)
+            | Pred::IsNull(_)
+            | Pred::IsNotNull(_)
+            | Pred::Filter(_)
+            | Pred::ChainedFact(_) => false,
+            Pred::And(a, b) | Pred::Or(a, b) => a.has_subquery() || b.has_subquery(),
+            Pred::Not(a) => a.has_subquery(),
         }
     }
 }
@@ -209,6 +243,7 @@ fn arb_pred(n_dims: usize) -> impl Strategy<Value = Pred> {
         1 => (0..n_dims).prop_map(Pred::IsNotNull),
         3 => (0..n_dims).prop_map(Pred::Filter),
         3 => (0..n_dims).prop_map(Pred::ChainedFact),
+        2 => (0..n_dims, -1i64..=3).prop_map(|(i, k)| Pred::InSubquery(i, k)),
     ];
     // depth 3, up to 8 nodes, branching 2 — deep enough for a filter member to
     // land inside a surrounding AND/OR/NOT, which is where precedence bites.
@@ -588,6 +623,7 @@ fn generator_varies_the_predicate_and_exercises_filter_members() {
     let mut without_pred = 0usize;
     let mut with_filter = 0usize;
     let mut with_chained_fact = 0usize;
+    let mut with_subquery = 0usize;
     let mut compound = 0usize;
     let mut distinct: HashSet<String> = HashSet::new();
 
@@ -605,6 +641,9 @@ fn generator_varies_the_predicate_and_exercises_filter_members() {
                 }
                 if p.references_chained_fact() {
                     with_chained_fact += 1;
+                }
+                if p.has_subquery() {
+                    with_subquery += 1;
                 }
                 let sql = p.to_member_sql();
                 if sql.contains(" AND ") || sql.contains(" OR ") || sql.contains("NOT ") {
@@ -633,6 +672,10 @@ fn generator_varies_the_predicate_and_exercises_filter_members() {
         with_chained_fact > 0,
         "generator never referenced a chained fact -- EXP-23's surface (a fact \
          whose expression names another fact) is untested"
+    );
+    assert!(
+        with_subquery > 0,
+        "generator never produced a subquery -- a subquery's own scope is untested"
     );
     assert!(
         compound > 0,

@@ -199,6 +199,29 @@ statement ok
 DROP TABLE wc_items;
 
 # ============================================================
+# A subquery is its own scope: Snowflake's WHERE takes uncorrelated
+# subqueries, and a name inside one is the subquery's column, not a member.
+# `amt` is both a fact (o.amount) and a column of wc_targets. Substituting the
+# member inside the subquery made it `SELECT (o.amount) FROM wc_targets`, which
+# matches every order: EU came out 150.00 instead of 100.00.
+# ============================================================
+
+statement ok
+CREATE TABLE wc_targets (amt DECIMAL(10,2));
+
+statement ok
+INSERT INTO wc_targets VALUES (100.00), (70.00);
+
+query TT rowsort
+SELECT * FROM semantic_view('wc_sv', metrics := ['revenue'], dimensions := ['region'], where_clause := 'amt IN (SELECT amt FROM wc_targets)');
+----
+EU	100.00
+US	70.00
+
+statement ok
+DROP TABLE wc_targets;
+
+# ============================================================
 # Cleanup
 # ============================================================
 

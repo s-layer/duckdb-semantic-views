@@ -67,6 +67,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   YAML export of a view stored in the legacy format, which lists no tables, can no longer be
   imported either; re-create that view with `CREATE OR REPLACE SEMANTIC VIEW`.
 
+### Fixed
+
+- **A subquery in `where_clause` keeps its own names.** A name inside a subquery, such as
+  `amt` in `amt IN (SELECT amt FROM targets)`, was replaced with the member of that name, so
+  the subquery compared each row with itself and filtered nothing, or failed to parse. Names
+  inside a subquery now refer to the subquery's own tables, as in Snowflake, where the
+  `WHERE` clause takes uncorrelated subqueries.
+
 ### Known limitations
 
 - **ADBC needs `import duckdb` first.** With the DuckDB 2.0 Python wheel, a connection from

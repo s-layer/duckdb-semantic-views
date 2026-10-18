@@ -675,12 +675,30 @@ pub(crate) fn references_ref(expr: &str, name: &str, source_table: Option<&str>)
 /// [`crate::ident::normalize_ident_part`]): a bare `revenue` or a qualified
 /// `o.net_price`.
 pub(crate) fn inline_references(expr: &str, replacements: &HashMap<String, &str>) -> String {
+    splice_references(expr, scan_references(expr), replacements)
+}
+
+/// [`inline_references`] for a predicate that may hold subqueries: a reference
+/// inside one ([`subquery_spans`]) is the subquery's own name and is left as
+/// written.
+pub(crate) fn inline_references_outside_subqueries(
+    expr: &str,
+    replacements: &HashMap<String, &str>,
+) -> String {
+    splice_references(expr, scan_references_outside_subqueries(expr), replacements)
+}
+
+fn splice_references(
+    expr: &str,
+    refs: Vec<IdentRef<'_>>,
+    replacements: &HashMap<String, &str>,
+) -> String {
     if replacements.is_empty() {
         return expr.to_string();
     }
     let mut out = String::with_capacity(expr.len());
     let mut copied = 0;
-    for r in scan_references(expr) {
+    for r in refs {
         if let Some(repl) = replacements.get(&r.key()) {
             out.push_str(&expr[copied..r.start]);
             out.push_str(repl);
@@ -689,6 +707,57 @@ pub(crate) fn inline_references(expr: &str, replacements: &HashMap<String, &str>
     }
     out.push_str(&expr[copied..]);
     out
+}
+
+/// The reserved words that open a query, so that a `(` whose first word is one
+/// of them starts a subquery. `DuckDB` also starts a query with unreserved words
+/// (`PIVOT`, `SUMMARIZE`, `SHOW`, …), which could equally be a member's name
+/// inside ordinary parentheses, so those are not counted.
+const QUERY_OPENERS: &[&str] = &["select", "with", "from", "values", "table"];
+
+/// The byte spans `(start, end)` of the subqueries in `expr`, in order: each `(`
+/// whose first word opens a query ([`QUERY_OPENERS`]), through its matching
+/// `)`. A subquery nested in another lies inside the outer span and is not
+/// listed separately. Literal and quoted-identifier content is skipped, as in
+/// [`scan_references`].
+pub(crate) fn subquery_spans(expr: &str) -> Vec<(usize, usize)> {
+    let bytes = expr.as_bytes();
+    let mut out = Vec::new();
+    let mut i = 0;
+    while i < bytes.len() {
+        match bytes[i] {
+            b'\'' => i = skip_single_quoted(bytes, i),
+            b'"' => i = skip_quoted_part(bytes, i),
+            b'$' => i = try_skip_dollar_quoted(bytes, i).unwrap_or(i + 1),
+            b'(' => {
+                let word_start = skip_whitespace(bytes, i + 1);
+                let mut word_end = word_start;
+                while word_end < bytes.len() && crate::util::is_ident_byte(bytes[word_end]) {
+                    word_end += 1;
+                }
+                let word = &expr[word_start..word_end];
+                if QUERY_OPENERS.iter().any(|w| w.eq_ignore_ascii_case(word)) {
+                    let end = skip_balanced(bytes, i, b'(', b')');
+                    out.push((i, end));
+                    i = end;
+                } else {
+                    i += 1;
+                }
+            }
+            _ => i += 1,
+        }
+    }
+    out
+}
+
+/// [`scan_references`] without the references inside a subquery
+/// ([`subquery_spans`]), which name the subquery's own columns and tables.
+pub(crate) fn scan_references_outside_subqueries(expr: &str) -> Vec<IdentRef<'_>> {
+    let spans = subquery_spans(expr);
+    scan_references(expr)
+        .into_iter()
+        .filter(|r| !spans.iter().any(|&(s, e)| r.start >= s && r.end <= e))
+        .collect()
 }
 
 /// Rewrite the leading **qualifier** (first part) of every reference chain in
