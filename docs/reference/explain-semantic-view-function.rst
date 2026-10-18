@@ -19,10 +19,11 @@ Syntax
 
    SELECT * FROM explain_semantic_view(
        '<view_name>',
-       [ dimensions := [ '<dim_name>' [, ...] ] , ]
-       [ metrics := [ '<metric_name>' [, ...] ] , ]
-       [ facts := [ '<fact_name>' [, ...] ] , ]
-       [ where_clause := '<predicate>' ]
+       [ dimensions := [ '<dim_name> [ AS <alias> ]' [, ...] ] , ]
+       [ metrics := [ '<metric_name> [ AS <alias> ]' [, ...] ] , ]
+       [ facts := [ '<fact_name> [ AS <alias> ]' [, ...] ] , ]
+       [ where_clause := '<predicate>' , ]
+       [ column_order := [ '<list_name>' [, ...] ] ]
    )
 
 
@@ -45,21 +46,28 @@ Parameters
      - The name of the semantic view to explain. Matched case-insensitively (folded to lowercase per DuckDB identifier semantics), quoted or not. May carry a ``<schema>.`` (or ``<database>.<schema>.``) qualifier; an unqualified name resolves through the session's ``search_path``, exactly as in :ref:`semantic_view() <ref-semantic-view-function>`.
    * - ``dimensions``
      - VARCHAR[] (named)
-     - Optional list of dimension names. Supports ``alias.*`` wildcard patterns.
+     - Optional list of dimension names. Supports ``alias.*`` wildcard patterns. An item may name its column (``'region AS r'``), as in :ref:`semantic_view() <ref-semantic-view-function>`.
    * - ``metrics``
      - VARCHAR[] (named)
-     - Optional list of metric names. Supports ``alias.*`` wildcard patterns.
+     - Optional list of metric names. Supports ``alias.*`` wildcard patterns and ``AS`` aliases.
    * - ``facts``
      - VARCHAR[] (named)
-     - Optional list of fact names. Supports ``alias.*`` wildcard patterns. The expanded SQL shows each fact expression inlined, which makes this the quickest way to check how a chained fact resolved.
+     - Optional list of fact names. Supports ``alias.*`` wildcard patterns and ``AS`` aliases. The expanded SQL shows each fact expression inlined, which makes this the quickest way to check how a chained fact resolved.
    * - ``where_clause``
      - VARCHAR (named)
      - Optional predicate applied **before** metrics are aggregated -- the equivalent of Snowflake's ``SEMANTIC_VIEW( ... WHERE <predicate> )``. See :ref:`ref-sv-pre-agg-filtering`. An omitted, empty, or whitespace-only value is treated as absent.
+   * - ``column_order``
+     - VARCHAR[] (named)
+     - Optional order of the lists' columns, for example ``['metrics', 'dimensions']``. It is checked as in :ref:`semantic_view() <ref-semantic-view-function>`.
    * - ``search_path``
      - VARCHAR[] (named)
      - **Reserved. Do not pass it.** The function reads the session's ``search_path`` itself, so an unqualified ``<view_name>`` resolves the way it does for :ref:`semantic_view() <ref-semantic-view-function>` (see :ref:`ref-functions-search-path`).
 
 At least one of ``dimensions``, ``metrics``, or ``facts`` must be specified. ``where_clause`` alone is not a query.
+
+.. versionadded:: 0.16.0
+
+   Aliases in items and the ``column_order`` parameter.
 
 .. warning::
 

@@ -196,6 +196,11 @@ pub(super) fn resolve_where_clause(
     def: &SemanticViewDefinition,
     raw: &str,
 ) -> Result<ResolvedWhere, ExpandError> {
+    // Comments are blanked first, as at every parse entry point (PA-7): the
+    // scanners below then see no comment, so none can hide a bracket or a
+    // name from them. Offsets are kept, so carets still point into `raw`.
+    let blanked = crate::util::blank_sql_comments(raw);
+    let raw = blanked.as_ref();
     // Member lookup tables, keyed the same way `inline_references` keys its
     // replacements so FIND and SPLICE agree.
     //
@@ -697,35 +702,35 @@ mod tests {
         assert!(r.source_tables.is_empty(), "{:?}", r.source_tables);
     }
 
-    /// `semantic_view()`'s `where_clause` reaches here with its comments: only
-    /// the construct strips them first.
+    /// `semantic_view()`'s `where_clause` reaches here with its comments, which
+    /// are blanked before the scan.
     #[test]
     fn a_subquery_with_a_comment_before_its_select_is_a_subquery() {
         let r =
             resolve_where_clause("v", &def(), "region IN (/* r */ SELECT region FROM t)").unwrap();
-        assert_eq!(r.sql, "(c.region) IN (/* r */ SELECT region FROM t)");
+        assert_eq!(r.sql, "(c.region) IN (        SELECT region FROM t)");
     }
 
     #[test]
     fn a_subquery_with_a_line_comment_before_its_select_is_a_subquery() {
         let r =
             resolve_where_clause("v", &def(), "region IN ( -- r\n SELECT region FROM t)").unwrap();
-        assert_eq!(r.sql, "(c.region) IN ( -- r\n SELECT region FROM t)");
+        assert_eq!(r.sql, "(c.region) IN (     \n SELECT region FROM t)");
     }
 
     /// A `(` in a comment opens nothing: the names after the comment are the
-    /// predicate's, so they are still members.
+    /// predicate's, so they are still members. Comments come out blanked.
     #[test]
     fn a_bracket_in_a_comment_before_the_predicate_opens_no_subquery() {
         let r = resolve_where_clause("v", &def(), "/* (select EU only */ region = 'EU'").unwrap();
-        assert_eq!(r.sql, "/* (select EU only */ (c.region) = 'EU'");
+        assert_eq!(r.sql, "                      (c.region) = 'EU'");
         assert_eq!(r.source_tables, vec!["c"]);
     }
 
     #[test]
     fn a_bracket_in_a_line_comment_before_the_predicate_opens_no_subquery() {
         let r = resolve_where_clause("v", &def(), "-- (select EU only\nregion = 'EU'").unwrap();
-        assert_eq!(r.sql, "-- (select EU only\n(c.region) = 'EU'");
+        assert_eq!(r.sql, "                  \n(c.region) = 'EU'");
     }
 
     /// A `)` in a comment inside a subquery does not end it: the name after the
@@ -740,7 +745,7 @@ mod tests {
         .unwrap();
         assert_eq!(
             r.sql,
-            "(c.region) IN (SELECT r /* ) */ FROM t WHERE region = 1)"
+            "(c.region) IN (SELECT r         FROM t WHERE region = 1)"
         );
     }
 
@@ -754,8 +759,26 @@ mod tests {
         .unwrap();
         assert_eq!(
             r.sql,
-            "(c.region) IN (SELECT r -- )\n FROM t WHERE region = 1)"
+            "(c.region) IN (SELECT r     \n FROM t WHERE region = 1)"
         );
+    }
+
+    /// A bare `\r` ends a line comment, as in `DuckDB`: the `)` after it closes
+    /// the subquery, so the name after that is the predicate's.
+    #[test]
+    fn a_carriage_return_ends_a_line_comment_inside_a_subquery() {
+        let r = resolve_where_clause(
+            "v",
+            &def(),
+            "region IN (SELECT r FROM t -- note\r) AND order_date > DATE '2024-01-01'",
+        )
+        .unwrap();
+        assert!(
+            r.sql.ends_with(") AND (o.ordered_at) > DATE '2024-01-01'"),
+            "{}",
+            r.sql
+        );
+        assert_eq!(r.source_tables, vec!["c", "o"]);
     }
 
     /// Brackets nested deeper than any stack would hold are scanned without
@@ -785,6 +808,21 @@ mod tests {
             r.sql,
             "(c.region) IN ((SELECT region FROM a) UNION SELECT region FROM b)"
         );
+    }
+
+    /// A bracketed query that `ORDER BY`, `LIMIT` or `OFFSET` continues is one
+    /// subquery too.
+    #[test]
+    fn a_bracketed_query_with_order_by_or_limit_is_a_subquery() {
+        let wrong: Vec<String> = ["ORDER BY region", "LIMIT region", "OFFSET region"]
+            .iter()
+            .filter_map(|tail| {
+                let predicate = format!("region IN ((SELECT region FROM t) {tail})");
+                let sql = resolve_where_clause("v", &def(), &predicate).unwrap().sql;
+                (sql != format!("(c.region) IN ((SELECT region FROM t) {tail})")).then_some(sql)
+            })
+            .collect();
+        assert!(wrong.is_empty(), "{wrong:#?}");
     }
 
     /// Control: brackets around arithmetic on a scalar subquery hold an

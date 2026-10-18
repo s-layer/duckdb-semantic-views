@@ -62,8 +62,13 @@ struct Clause<'a> {
 
 /// Lower a matched `SEMANTIC_VIEW(...)` to a query over `semantic_view()`.
 pub(super) fn transform(tree: &Tree) -> Result<String, ParseError> {
-    let root = &tree.root;
     reject_parameters(tree)?;
+    Ok(format!("SELECT * FROM {}", lower(tree, &tree.root)?))
+}
+
+/// The `semantic_view()` call, with its table alias, that the construct at
+/// `root` lowers to.
+fn lower(tree: &Tree, root: &Node) -> Result<String, ParseError> {
     let name_node = root
         .find("SvViewName")
         .ok_or_else(|| internal(root, "missing view name"))?;
@@ -104,34 +109,55 @@ pub(super) fn transform(tree: &Tree) -> Result<String, ParseError> {
         args.push(format!("column_order := [{names}]"));
     }
 
-    let alias = root
-        .find("SvQueryTableAlias")
+    let alias = table_alias(root)
         .map(|a| format!(" {}", clean(&tree.text(a))))
         .unwrap_or_default();
-    Ok(format!(
-        "SELECT * FROM semantic_view({}){alias}",
-        args.join(", ")
-    ))
+    Ok(format!("semantic_view({}){alias}", args.join(", ")))
 }
 
+/// What `part` is: the first of the part rules under it, in pre-order. An
+/// expression can hold a construct of its own in a subquery, with words,
+/// commas and aliases that are not this construct's, so only the outermost
+/// rule counts.
 fn classify<'a>(tree: &Tree, part: &'a Node) -> Result<Part<'a>, ParseError> {
-    if let Some(word) = part.find("SvQueryWord") {
+    let node = first_of(
+        part,
+        &["SvQueryWord", "SvQueryComma", "SvQueryAlias", "SvQueryExpr"],
+    )
+    .ok_or_else(|| internal(part, "unknown part"))?;
+    if node.rule.eq_ignore_ascii_case("SvQueryWord") {
         let text = tree
-            .tokens_in(word)
+            .tokens_in(node)
             .next()
             .map(|t| t.text.to_ascii_uppercase())
-            .ok_or_else(|| internal(word, "missing clause word"))?;
-        return Ok(Part::Word(text, word));
+            .ok_or_else(|| internal(node, "missing clause word"))?;
+        Ok(Part::Word(text, node))
+    } else if node.rule.eq_ignore_ascii_case("SvQueryComma") {
+        Ok(Part::Comma(node))
+    } else if node.rule.eq_ignore_ascii_case("SvQueryAlias") {
+        Ok(Part::Alias(node))
+    } else {
+        Ok(Part::Expr(node))
     }
-    if let Some(comma) = part.find("SvQueryComma") {
-        return Ok(Part::Comma(comma));
+}
+
+/// The construct's table alias: not one of a construct inside a part.
+fn table_alias(node: &Node) -> Option<&Node> {
+    if node.rule.eq_ignore_ascii_case("SvQueryTableAlias") {
+        return Some(node);
     }
-    if let Some(alias) = part.find("SvQueryAlias") {
-        return Ok(Part::Alias(alias));
+    if node.rule.eq_ignore_ascii_case("SvQueryPart") {
+        return None;
     }
-    part.find("SvQueryExpr")
-        .map(Part::Expr)
-        .ok_or_else(|| internal(part, "unknown part"))
+    node.children.iter().find_map(table_alias)
+}
+
+/// The first node under `node` named one of `rules`, in pre-order.
+fn first_of<'a>(node: &'a Node, rules: &[&str]) -> Option<&'a Node> {
+    if rules.iter().any(|r| node.rule.eq_ignore_ascii_case(r)) {
+        return Some(node);
+    }
+    node.children.iter().find_map(|c| first_of(c, rules))
 }
 
 /// One item as written: its expression and its alias, if any (`true` for a
@@ -269,12 +295,14 @@ fn extend<'a>(
 /// An item's text for its `semantic_view()` list: the member, then `AS` and
 /// the alias as written. A list item names its column only with `AS`
 /// (`crate::query::items::parse_item`), so a bare alias gets one. The predicate
-/// of `WHERE` goes as written.
+/// of `WHERE` goes as written, but for a construct in a subquery of it, which
+/// is lowered too: `semantic_view()` parses `where_clause` with `DuckDB`'s own
+/// parser, which does not know the construct.
 fn item_text(tree: &Tree, word: &str, item: ItemParts<'_>) -> Result<String, ParseError> {
-    let expr = clean(&tree.text(item.expr));
     if word == "WHERE" {
-        return Ok(expr);
+        return Ok(clean(&lower_inside(tree, item.expr)?));
     }
+    let expr = clean(&tree.text(item.expr));
     let is_member = expr.ends_with('*') || {
         let refs = crate::expr_tokens::scan_references(&expr);
         matches!(refs.as_slice(), [r] if r.start == 0 && r.end == expr.len())
@@ -293,6 +321,22 @@ fn item_text(tree: &Tree, word: &str, item: ItemParts<'_>) -> Result<String, Par
         Some((alias, true)) => format!("{expr} AS {}", clean(&tree.text(alias))),
         Some((alias, false)) => format!("{expr} {}", clean(&tree.text(alias))),
     })
+}
+
+/// `node`'s text with each construct inside it lowered. A construct's own
+/// constructs are lowered with it.
+fn lower_inside(tree: &Tree, node: &Node) -> Result<String, ParseError> {
+    let mut text = tree.text(node);
+    let start = node.offset().unwrap_or_default();
+    for inner in node.find_all("SvSemanticView").into_iter().rev() {
+        let range = inner
+            .span
+            .and_then(|(o, l)| o.checked_sub(start).map(|at| at..at + l))
+            .filter(|r| text.get(r.clone()).is_some())
+            .ok_or_else(|| internal(inner, "construct outside its expression"))?;
+        text.replace_range(range, &lower(tree, inner)?);
+    }
+    Ok(text)
 }
 
 fn clean(text: &str) -> String {
@@ -588,6 +632,14 @@ mod tests {
         assert_eq!(at, Some(27));
     }
 
+    /// An item ending in `*` is a wildcard only as `<table>.*`.
+    #[test]
+    fn a_call_ending_in_a_star_is_an_expression() {
+        let sql = "SEMANTIC_VIEW(v METRICS count(*))";
+        let (message, _) = error(sql, &[(W, "METRICS"), (E, "count(*)")]);
+        assert!(message.contains("TECH-DEBT #76"), "{message}");
+    }
+
     #[test]
     fn a_wildcard_is_a_member_item() {
         let sql = "SEMANTIC_VIEW(v DIMENSIONS o.*)";
@@ -651,6 +703,90 @@ mod tests {
         let sql = "SEMANTIC_VIEW(v METRICS m WHERE)";
         let (message, _) = error(sql, &[(W, "METRICS"), (E, "m"), (W, "WHERE")]);
         assert_eq!(message, "WHERE needs a predicate");
+    }
+
+    /// The tree of `sql`, an outer construct over `parts` (with the table alias
+    /// `alias`) whose part holding `inner` has the inner construct's tree, over
+    /// `inner_parts` and `inner_alias`, under it, as a subquery in an
+    /// expression has.
+    fn nested(
+        sql: &str,
+        parts: &[(&str, &str)],
+        alias: Option<&str>,
+        inner: &str,
+        inner_parts: &[(&str, &str)],
+        inner_alias: Option<&str>,
+    ) -> Tree {
+        fn shift(node: &mut Node, by: usize) {
+            node.span = node.span.map(|(o, l)| (o + by, l));
+            node.children.iter_mut().for_each(|c| shift(c, by));
+        }
+        let mut tree = construct(sql, "v", parts, alias);
+        let at = sql.find(inner).unwrap();
+        let mut inner_root = construct(inner, "v", inner_parts, inner_alias).root;
+        shift(&mut inner_root, at);
+        let holder = tree
+            .root
+            .children
+            .iter_mut()
+            .find(|c| {
+                c.span
+                    .is_some_and(|(o, l)| o <= at && at + inner.len() <= o + l)
+            })
+            .unwrap();
+        holder.children[0].children.push(inner_root);
+        tree
+    }
+
+    const NESTED: &str = "SEMANTIC_VIEW(v METRICS m WHERE d IN (SELECT r FROM \
+                          SEMANTIC_VIEW(v DIMENSIONS d AS r METRICS m) AS z WHERE m < 100)) AS s";
+    const INNER: &str = "SEMANTIC_VIEW(v DIMENSIONS d AS r METRICS m) AS z";
+
+    fn nested_tree() -> Tree {
+        nested(
+            NESTED,
+            &[
+                (W, "METRICS"),
+                (E, "m"),
+                (W, "WHERE"),
+                (E, "d IN (SELECT r FROM SEMANTIC_VIEW(v DIMENSIONS d AS r METRICS m) AS z WHERE m < 100)"),
+            ],
+            Some("AS s"),
+            INNER,
+            &[(W, "DIMENSIONS"), (E, "d"), (A, "AS r"), (W, "METRICS"), (E, "m")],
+            Some("AS z"),
+        )
+    }
+
+    /// A construct in a subquery of `WHERE` leaves the predicate a predicate:
+    /// its clause words are its own.
+    #[test]
+    fn a_construct_inside_where_is_part_of_the_predicate() {
+        let t = nested_tree();
+        assert!(
+            transform(&t).is_ok(),
+            "{:?}",
+            transform(&t).err().map(|e| e.message)
+        );
+    }
+
+    /// The table alias is the outer construct's, not one inside it.
+    #[test]
+    fn the_table_alias_is_not_taken_from_a_construct_inside() {
+        let lowered = transform(&nested_tree()).unwrap_or_else(|e| e.message);
+        assert!(lowered.ends_with(") AS s"), "{lowered}");
+    }
+
+    /// A construct inside the predicate is lowered too: `where_clause` is
+    /// expanded with `DuckDB`'s own parser, which does not know the construct.
+    #[test]
+    fn a_construct_inside_where_is_lowered() {
+        assert_eq!(
+            transform(&nested_tree()).unwrap(),
+            "SELECT * FROM semantic_view('v', metrics := ['m'], where_clause := \
+             'd IN (SELECT r FROM semantic_view(''v'', dimensions := [''d AS r''], \
+             metrics := [''m'']) AS z WHERE m < 100)') AS s"
+        );
     }
 
     #[test]
