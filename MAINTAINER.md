@@ -492,7 +492,8 @@ Replace `X.Y.Z` below with the target DuckDB version (e.g., `1.5.1`). The duckdb
    ```
    Then run `cargo deny check advisories`. If the new `libduckdb-sys` no longer pulls
    in `zip 6`, it fails on the three zip ignores in `deny.toml`
-   (`unused-ignored-advisory = "deny"`): delete them and close TECH-DEBT #104.
+   (`unused-ignored-advisory = "deny"`): delete them and the `zip` entry in
+   `[bans] deny`, and close TECH-DEBT #104.
 
 3. Update `MINIMUM_DUCKDB_VERSION` in `src/lib.rs` (the version handed to
    `duckdb_rs_extension_api_init` at load time):
