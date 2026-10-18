@@ -11,6 +11,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **The `SEMANTIC_VIEW(...)` query construct.** You can query a semantic view the way
+  Snowflake does, in `FROM`:
+  `SELECT * FROM SEMANTIC_VIEW(sales DIMENSIONS c.region AS r METRICS o.revenue WHERE o.year = 2024)`.
+  It stands wherever a table can: in joins, CTEs, subqueries, `PIVOT` and view bodies, with
+  a table alias and column aliases. Clauses can come in any order, and the order you write
+  them in is the order of the columns. `WHERE` filters the rows the metrics aggregate, as
+  `where_clause` does. A view over the construct expands against the semantic view's
+  current definition each time it is queried. Items are member names or `<table>.*`
+  wildcards for now; expressions are not supported yet. A prepared statement's `?`
+  parameter inside the construct is refused with an error.
+
+- **Output names and column order for `semantic_view()`.** A `dimensions`, `metrics` or
+  `facts` item can name its output column with `AS`, as in `'o.region AS r'`, and the new
+  `column_order` parameter (for example `['metrics', 'dimensions']`) sets which list's
+  columns come first. Two columns with the same name are an error. A member whose name
+  contains the word `as` on its own (`Sales as of`) now has to be quoted in a list item
+  (`'"Sales as of"'`); names with spaces otherwise work unquoted as before.
+
 - **`SHOW` and `DESCRIBE` statements work as subqueries.** `DESCRIBE SEMANTIC VIEW`,
   `SHOW [TERSE] SEMANTIC VIEWS`, `SHOW SEMANTIC DIMENSIONS / METRICS / FACTS /
   MATERIALIZATIONS` (with `FOR METRIC` too) and `SHOW COLUMNS IN SEMANTIC VIEW` can now be

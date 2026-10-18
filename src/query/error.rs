@@ -19,6 +19,9 @@ pub enum QueryError {
     /// rendering the diagnostic inside quotes followed by irrelevant
     /// "specify at least dimensions" advice).
     WildcardExpansion { view_name: String, detail: String },
+    /// A query item or `column_order` entry is malformed, or the items ask
+    /// for a column layout that cannot be built (two columns with one name).
+    InvalidRequest { view_name: String, detail: String },
     /// The expansion engine returned an error.
     ExpandFailed { source: ExpandError },
     /// The expanded SQL failed to execute against `DuckDB`.
@@ -64,7 +67,8 @@ impl fmt::Display for QueryError {
                     view_name: view_name.clone(),
                 }
             ),
-            Self::WildcardExpansion { view_name, detail } => {
+            Self::WildcardExpansion { view_name, detail }
+            | Self::InvalidRequest { view_name, detail } => {
                 write!(f, "semantic view '{view_name}': {detail}")
             }
             Self::ExpandFailed { source } => {

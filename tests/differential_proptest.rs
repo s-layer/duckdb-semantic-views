@@ -55,6 +55,8 @@ use semantic_views::expand::{expand, DimensionName, MetricName, QueryRequest};
 use semantic_views::model::{
     AccessModifier, Dimension, Fact, Metric, SemanticViewDefinition, TableRef,
 };
+use semantic_views::query::items::{Group, OutputColumns};
+use semantic_views::query::wire::build_projected_execution_sql;
 
 /// Comparison operators used by generated predicates.
 #[derive(Debug, Clone, Copy)]
@@ -304,6 +306,41 @@ struct Case {
     sel_dims: Vec<usize>,
     sel_metrics: Vec<usize>,
     where_pred: Option<Pred>,
+    /// The column layout `SEMANTIC_VIEW(...)` asks for: the clause order, and
+    /// which selected members (dimensions, then metrics, in request order)
+    /// are renamed with an alias.
+    order: [Group; 3],
+    aliased: Vec<bool>,
+}
+
+impl Case {
+    /// Each selected member's output name: `x_<member>` when aliased.
+    fn output_names(&self) -> Vec<String> {
+        self.sel_dims
+            .iter()
+            .map(|i| format!("d{i}"))
+            .chain(self.sel_metrics.iter().map(|i| format!("m{i}")))
+            .zip(&self.aliased)
+            .map(|(name, aliased)| if *aliased { format!("x_{name}") } else { name })
+            .collect()
+    }
+
+    fn is_default_layout(&self) -> bool {
+        self.order == Group::DEFAULT_ORDER && !self.aliased.contains(&true)
+    }
+}
+
+/// Every order of the three clauses.
+fn arb_order() -> impl Strategy<Value = [Group; 3]> {
+    use Group::{Dimensions as D, Facts as F, Metrics as M};
+    prop::sample::select(vec![
+        [D, M, F],
+        [D, F, M],
+        [M, D, F],
+        [M, F, D],
+        [F, D, M],
+        [F, M, D],
+    ])
 }
 
 fn arb_schema() -> impl Strategy<Value = Schema> {
@@ -372,17 +409,32 @@ fn arb_case() -> impl Strategy<Value = Case> {
             1 => Just(None),
             3 => arb_pred(nd).prop_map(Some),
         ];
-        (Just(schema), dim_sel, met_sel, where_pred)
+        // The layout `SEMANTIC_VIEW(...)` lowers to: half the cases keep the
+        // default, so the plain execution SQL stays covered.
+        let layout = prop_oneof![
+            1 => Just(([Group::Dimensions, Group::Metrics, Group::Facts], 0u8)),
+            1 => (arb_order(), any::<u8>()),
+        ];
+        (Just(schema), dim_sel, met_sel, where_pred, layout)
             .prop_filter(
                 "at least one of dimensions/metrics must be selected",
-                |(_, sel_dims, sel_metrics, _)| !sel_dims.is_empty() || !sel_metrics.is_empty(),
+                |(_, sel_dims, sel_metrics, _, _)| !sel_dims.is_empty() || !sel_metrics.is_empty(),
             )
-            .prop_map(|(schema, sel_dims, sel_metrics, where_pred)| Case {
-                schema,
-                sel_dims,
-                sel_metrics,
-                where_pred,
-            })
+            .prop_map(
+                |(schema, sel_dims, sel_metrics, where_pred, (order, mask))| {
+                    let aliased = (0..sel_dims.len() + sel_metrics.len())
+                        .map(|k| mask & (1 << k) != 0)
+                        .collect();
+                    Case {
+                        schema,
+                        sel_dims,
+                        sel_metrics,
+                        where_pred,
+                        order,
+                        aliased,
+                    }
+                },
+            )
     })
 }
 
@@ -526,13 +578,39 @@ proptest! {
         let expanded = expand("t_diff", &def, &req)
             .expect("expand must succeed for a core base-table definition");
 
-        // Independent oracle: a plain GROUP BY over the same table, aliasing
-        // each output column by the same name the expansion uses.
-        let dim_items: Vec<String> = case.sel_dims.iter().map(|i| format!("d{i} AS d{i}")).collect();
+        let conn = make_db(&case.schema);
+
+        // The column layout `SEMANTIC_VIEW(...)` asks for (clause order and
+        // aliases), applied as `semantic_view()` applies it: by position over
+        // the expansion's columns, whose names come from a LIMIT 0 probe.
+        let mut probe = conn
+            .prepare(&format!("SELECT * FROM ({expanded}) q LIMIT 0"))
+            .expect("probe must prepare");
+        probe.execute([]).expect("probe must run");
+        let names: Vec<String> = probe.column_names();
+        let outputs = case.output_names();
+        let n_dims = case.sel_dims.len();
+        let alias_of = |k: usize| case.aliased[k].then(|| outputs[k].clone());
+        let dim_aliases: Vec<Option<String>> = (0..n_dims).map(alias_of).collect();
+        let met_aliases: Vec<Option<String>> = (n_dims..outputs.len()).map(alias_of).collect();
+        let layout = OutputColumns::new(&names, [&dim_aliases, &met_aliases, &[]], case.order)
+            .expect("generated output names are distinct");
+        let (_, _, expanded) =
+            build_projected_execution_sql(&expanded, &names, &vec![u32::MAX; names.len()], &layout);
+
+        // Independent oracle: a plain GROUP BY over the same table, naming
+        // each output column by the name the request gives it.
+        let dim_items: Vec<String> = case
+            .sel_dims
+            .iter()
+            .zip(&outputs)
+            .map(|(i, out)| format!("d{i} AS {out}"))
+            .collect();
         let met_items: Vec<String> = case
             .sel_metrics
             .iter()
-            .map(|i| format!("{} AS m{i}", case.schema.metric_aggs[*i].to_sql()))
+            .zip(&outputs[n_dims..])
+            .map(|(i, out)| format!("{} AS {out}", case.schema.metric_aggs[*i].to_sql()))
             .collect();
         let select_items = dim_items
             .iter()
@@ -565,12 +643,7 @@ proptest! {
 
         // Canonical projection (columns sorted by output name) so a column
         // ORDER difference between the two formulations is not a false diff.
-        let mut proj_cols: Vec<String> = case
-            .sel_dims
-            .iter()
-            .map(|i| format!("d{i}"))
-            .chain(case.sel_metrics.iter().map(|i| format!("m{i}")))
-            .collect();
+        let mut proj_cols = outputs.clone();
         proj_cols.sort();
         let proj = proj_cols.join(", ");
 
@@ -586,7 +659,6 @@ proptest! {
                                       SELECT {proj} FROM ({expanded}) qd) e2) AS diff"
         );
 
-        let conn = make_db(&case.schema);
         let diff: i64 = conn.query_row(&cmp, [], |r| r.get(0)).unwrap_or_else(|e| {
             panic!("differential comparison query failed: {e}\n--- expanded:\n{expanded}\n--- oracle:\n{oracle}")
         });
@@ -626,12 +698,30 @@ fn generator_varies_the_predicate_and_exercises_filter_members() {
     let mut with_subquery = 0usize;
     let mut compound = 0usize;
     let mut distinct: HashSet<String> = HashSet::new();
+    let mut default_layout = 0usize;
+    let mut reordered = 0usize;
+    let mut aliased = 0usize;
 
     for _ in 0..300 {
         let case = arb_case()
             .new_tree(&mut runner)
             .expect("strategy must produce a value")
             .current();
+        if case.is_default_layout() {
+            default_layout += 1;
+        }
+        // A reorder moves columns only when both dimensions and metrics are
+        // selected and metrics come before dimensions.
+        let pos = |g| case.order.iter().position(|o| *o == g);
+        if !case.sel_dims.is_empty()
+            && !case.sel_metrics.is_empty()
+            && pos(Group::Metrics) < pos(Group::Dimensions)
+        {
+            reordered += 1;
+        }
+        if case.aliased.contains(&true) {
+            aliased += 1;
+        }
         match &case.where_pred {
             None => without_pred += 1,
             Some(p) => {
@@ -681,6 +771,12 @@ fn generator_varies_the_predicate_and_exercises_filter_members() {
         compound > 0,
         "generator never produced a compound predicate -- precedence around a \
          spliced member expression is untested"
+    );
+    assert!(
+        default_layout > 0 && reordered > 0 && aliased > 0,
+        "generator never varied the column layout (default {default_layout}, \
+         reordered {reordered}, aliased {aliased}) -- SEMANTIC_VIEW(...)'s clause \
+         order and aliases are untested"
     );
     assert!(
         distinct.len() > 50,
