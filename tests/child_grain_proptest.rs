@@ -1004,39 +1004,95 @@ proptest! {
 
     #[test]
     fn child_grain_queries_match_the_oracle(case in arb_case()) {
-        let def = build_def();
-        let req = build_request(&case);
-
-        let expanded = match expand("child", &def, &req) {
-            Ok(sql) => sql,
-            Err(e) => {
-                prop_assert!(false, "child-grain query unexpectedly rejected: {e}");
-                unreachable!()
-            }
-        };
-        let oracle = oracle_sql(&case);
-        let proj = projection(&case);
-
-        let cmp = format!(
-            "SELECT \
-               (SELECT count(*) FROM (SELECT {proj} FROM ({expanded}) qa \
-                                      EXCEPT ALL \
-                                      SELECT {proj} FROM ({oracle}) qb) e1) \
-             + (SELECT count(*) FROM (SELECT {proj} FROM ({oracle}) qc \
-                                      EXCEPT ALL \
-                                      SELECT {proj} FROM ({expanded}) qd) e2) AS diff"
-        );
-
-        let conn = make_db(&case.inst);
-        let diff: i64 = conn
-            .query_row(&cmp, [], |r| r.get(0))
-            .unwrap_or_else(|e| panic!("comparison failed: {e}\nEXPANDED:\n{expanded}\nORACLE:\n{oracle}"));
-        prop_assert_eq!(
-            diff, 0,
-            "expansion disagrees with the oracle\nEXPANDED:\n{}\nORACLE:\n{}",
-            expanded, oracle
-        );
+        check_case(&case)?;
     }
+}
+
+/// The property, for one case: the expansion matches the oracle. Shared by the
+/// proptest and the pinned cases below so a pinned case runs exactly the
+/// property's checks.
+fn check_case(case: &Case) -> Result<(), TestCaseError> {
+    let def = build_def();
+    let req = build_request(case);
+
+    let expanded = match expand("child", &def, &req) {
+        Ok(sql) => sql,
+        Err(e) => {
+            prop_assert!(false, "child-grain query unexpectedly rejected: {e}");
+            unreachable!()
+        }
+    };
+    let oracle = oracle_sql(case);
+    let proj = projection(case);
+
+    let cmp = format!(
+        "SELECT \
+           (SELECT count(*) FROM (SELECT {proj} FROM ({expanded}) qa \
+                                  EXCEPT ALL \
+                                  SELECT {proj} FROM ({oracle}) qb) e1) \
+         + (SELECT count(*) FROM (SELECT {proj} FROM ({oracle}) qc \
+                                  EXCEPT ALL \
+                                  SELECT {proj} FROM ({expanded}) qd) e2) AS diff"
+    );
+
+    let conn = make_db(&case.inst);
+    let diff: i64 = match conn.query_row(&cmp, [], |r| r.get(0)) {
+        Ok(diff) => diff,
+        // TECH-DEBT #84: DuckDB 1.4/1.5 raise this internal error while
+        // optimizing a GROUP BY over the joined chain under some filters, for
+        // the expansion and the oracle alike. It is an engine bug, not an
+        // answer, so the comparison is re-run with the optimizer pass that
+        // trips it switched off, as `multi_hop_join_proptest` does. That pass
+        // only compresses intermediate columns, so the numbers must still
+        // agree; any other error still fails the case.
+        Err(e)
+            if e.to_string()
+                .contains("INTERNAL Error: Failed to bind column reference") =>
+        {
+            conn.execute_batch("SET disabled_optimizers = 'compressed_materialization'")
+                .expect("disable compressed_materialization");
+            conn.query_row(&cmp, [], |r| r.get(0)).unwrap_or_else(|e| {
+                panic!("comparison failed with compressed_materialization off: {e}\nEXPANDED:\n{expanded}\nORACLE:\n{oracle}")
+            })
+        }
+        Err(e) => panic!("comparison failed: {e}\nEXPANDED:\n{expanded}\nORACLE:\n{oracle}"),
+    };
+    prop_assert_eq!(
+        diff,
+        0,
+        "expansion disagrees with the oracle\nEXPANDED:\n{}\nORACLE:\n{}",
+        expanded,
+        oracle
+    );
+    Ok(())
+}
+
+/// CI's shrunk input (PR #274, 2026-10-18): a contradictory filter over the
+/// base and child dimensions, on nearly all-NULL data. DuckDB raises
+/// `INTERNAL Error: Failed to bind column reference "region"` for the
+/// expansion's GROUP BY over the joined chain (TECH-DEBT #84).
+#[test]
+fn pinned_ci_contradiction_over_two_grains() {
+    let both = || {
+        Pred::And(
+            Box::new(Pred::Cmp(WMember::Region, "<", 0)),
+            Box::new(Pred::Filter(WMember::Camt)),
+        )
+    };
+    let case = Case {
+        inst: Instance {
+            o_rows: vec![(None, None), (None, None)],
+            li_rows: vec![(None, None), (None, None)],
+            lid_rows: vec![(Some(0), None)],
+        },
+        sel_dims: vec![0, 1],
+        ask: Ask::Metrics(vec![16]),
+        where_pred: Some(Pred::And(
+            Box::new(Pred::Not(Box::new(both()))),
+            Box::new(both()),
+        )),
+    };
+    check_case(&case).unwrap();
 }
 
 /// Draw a deterministic sample of generated cases for the anti-vacuity guards
