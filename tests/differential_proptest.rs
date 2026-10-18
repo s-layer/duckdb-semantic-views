@@ -109,6 +109,11 @@ enum Pred {
     /// the subquery's, and substituting the member there turned it into a
     /// correlated subquery (or a syntax error, in its alias position).
     InSubquery(usize, i64),
+    /// `d{i} <op> sv_outer.k…`: a comparison against a column of an enclosing
+    /// query, which the expansion reaches as a `LATERAL` subquery does
+    /// (`semantic_view()` is planned inside the caller's query). The oracle
+    /// compares against the column's value as a literal.
+    OuterCmp(usize, CmpOp, i64),
     And(Box<Pred>, Box<Pred>),
     Or(Box<Pred>, Box<Pred>),
     Not(Box<Pred>),
@@ -148,6 +153,9 @@ impl Pred {
                 "d{i} IN (SELECT x FROM (SELECT d{i} AS x, d{i} + 1 AS fa{i} FROM t) AS s \
                  WHERE fa{i} > {k})"
             ),
+            Pred::OuterCmp(i, op, k) => {
+                format!("d{i} {} sv_outer.{}", op.to_sql(), outer_column(*k))
+            }
             Pred::And(a, b) => format!("({} AND {})", a.to_member_sql(), b.to_member_sql()),
             Pred::Or(a, b) => format!("({} OR {})", a.to_member_sql(), b.to_member_sql()),
             Pred::Not(a) => format!("(NOT {})", a.to_member_sql()),
@@ -170,6 +178,7 @@ impl Pred {
             Pred::InSubquery(i, k) => {
                 format!("(d{i} IN (SELECT d{i} FROM t WHERE (d{i} + 1) > {k}))")
             }
+            Pred::OuterCmp(i, op, k) => format!("(d{i} {} {k})", op.to_sql()),
             Pred::And(a, b) => format!("({} AND {})", a.to_raw_sql(), b.to_raw_sql()),
             Pred::Or(a, b) => format!("({} OR {})", a.to_raw_sql(), b.to_raw_sql()),
             Pred::Not(a) => format!("(NOT {})", a.to_raw_sql()),
@@ -186,7 +195,8 @@ impl Pred {
             | Pred::IsNull(_)
             | Pred::IsNotNull(_)
             | Pred::ChainedFact(_)
-            | Pred::InSubquery(..) => false,
+            | Pred::InSubquery(..)
+            | Pred::OuterCmp(..) => false,
             Pred::And(a, b) | Pred::Or(a, b) => a.references_filter() || b.references_filter(),
             Pred::Not(a) => a.references_filter(),
         }
@@ -202,7 +212,8 @@ impl Pred {
             | Pred::IsNull(_)
             | Pred::IsNotNull(_)
             | Pred::Filter(_)
-            | Pred::InSubquery(..) => false,
+            | Pred::InSubquery(..)
+            | Pred::OuterCmp(..) => false,
             Pred::And(a, b) | Pred::Or(a, b) => {
                 a.references_chained_fact() || b.references_chained_fact()
             }
@@ -218,11 +229,48 @@ impl Pred {
             | Pred::IsNull(_)
             | Pred::IsNotNull(_)
             | Pred::Filter(_)
-            | Pred::ChainedFact(_) => false,
+            | Pred::ChainedFact(_)
+            | Pred::OuterCmp(..) => false,
             Pred::And(a, b) | Pred::Or(a, b) => a.has_subquery() || b.has_subquery(),
             Pred::Not(a) => a.has_subquery(),
         }
     }
+
+    /// Whether this predicate names a column of the enclosing query. Same
+    /// anti-vacuity role.
+    fn references_outer(&self) -> bool {
+        match self {
+            Pred::OuterCmp(..) => true,
+            Pred::Cmp(..)
+            | Pred::IsNull(_)
+            | Pred::IsNotNull(_)
+            | Pred::Filter(_)
+            | Pred::ChainedFact(_)
+            | Pred::InSubquery(..) => false,
+            Pred::And(a, b) | Pred::Or(a, b) => a.references_outer() || b.references_outer(),
+            Pred::Not(a) => a.references_outer(),
+        }
+    }
+}
+
+/// The literals a predicate compares against, and the enclosing query's row
+/// that holds each as a column, for [`Pred::OuterCmp`].
+const OUTER_LITERALS: [i64; 5] = [-1, 0, 1, 2, 3];
+
+fn outer_column(k: i64) -> String {
+    if k < 0 {
+        format!("km{}", -k)
+    } else {
+        format!("k{k}")
+    }
+}
+
+/// `sql` as the right side of a `LATERAL` join to the one-row enclosing query
+/// [`Pred::OuterCmp`] refers to, keeping `sql`'s columns and their names.
+fn under_outer_row(sql: &str) -> String {
+    let values = OUTER_LITERALS.map(|k| k.to_string()).join(", ");
+    let names = OUTER_LITERALS.map(outer_column).join(", ");
+    format!("SELECT sv_q.* FROM (VALUES ({values})) sv_outer({names}), LATERAL ({sql}) sv_q")
 }
 
 fn arb_cmp_op() -> impl Strategy<Value = CmpOp> {
@@ -248,6 +296,8 @@ fn arb_pred(n_dims: usize) -> impl Strategy<Value = Pred> {
         3 => (0..n_dims).prop_map(Pred::Filter),
         3 => (0..n_dims).prop_map(Pred::ChainedFact),
         2 => (0..n_dims, -1i64..=3).prop_map(|(i, k)| Pred::InSubquery(i, k)),
+        2 => (0..n_dims, arb_cmp_op(), -1i64..=3)
+            .prop_map(|(i, op, k)| Pred::OuterCmp(i, op, k)),
     ];
     // depth 3, up to 8 nodes, branching 2 — deep enough for a filter member to
     // land inside a surrounding AND/OR/NOT, which is where precedence bites.
@@ -579,6 +629,13 @@ proptest! {
 
         let expanded = expand("t_diff", &def, &req)
             .expect("expand must succeed for a core base-table definition");
+        // A predicate that names an enclosing query's column runs as DuckDB
+        // runs `semantic_view()` inside such a query: as a LATERAL subquery.
+        let expanded = if case.where_pred.as_ref().is_some_and(Pred::references_outer) {
+            under_outer_row(&expanded)
+        } else {
+            expanded
+        };
 
         let conn = make_db(&case.schema);
 
@@ -719,6 +776,7 @@ fn generator_varies_the_predicate_and_exercises_filter_members() {
     let mut with_filter = 0usize;
     let mut with_chained_fact = 0usize;
     let mut with_subquery = 0usize;
+    let mut with_outer = 0usize;
     let mut compound = 0usize;
     let mut distinct: HashSet<String> = HashSet::new();
     let mut default_layout = 0usize;
@@ -758,6 +816,9 @@ fn generator_varies_the_predicate_and_exercises_filter_members() {
                 if p.has_subquery() {
                     with_subquery += 1;
                 }
+                if p.references_outer() {
+                    with_outer += 1;
+                }
                 let sql = p.to_member_sql();
                 if sql.contains(" AND ") || sql.contains(" OR ") || sql.contains("NOT ") {
                     compound += 1;
@@ -789,6 +850,11 @@ fn generator_varies_the_predicate_and_exercises_filter_members() {
     assert!(
         with_subquery > 0,
         "generator never produced a subquery -- a subquery's own scope is untested"
+    );
+    assert!(
+        with_outer > 0,
+        "generator never named an enclosing query's column -- a LATERAL \
+         where_clause is untested"
     );
     assert!(
         compound > 0,

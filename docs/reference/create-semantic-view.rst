@@ -487,7 +487,7 @@ See :ref:`howto-window-metrics` for details on both modes.
 
 **Reported data type:**
 
-As with dimensions, ``CREATE`` does not record an output type for a metric. The ``data_type`` column reported by :ref:`SHOW SEMANTIC METRICS <ref-show-semantic-metrics>` and :ref:`DESCRIBE SEMANTIC VIEW <ref-describe-semantic-view>` is worked out when that command runs and is the type of the aggregate, not of its input: ``COUNT`` is ``BIGINT``, ``AVG`` is ``DOUBLE``, and ``SUM`` of an integer column is ``BIGINT`` -- the type :ref:`semantic_view() <ref-semantic-view-function>` returns it as. See :ref:`Reported Data Types <explanation-sf-data-types>`.
+As with dimensions, ``CREATE`` does not record an output type for a metric. The ``data_type`` column reported by :ref:`SHOW SEMANTIC METRICS <ref-show-semantic-metrics>` and :ref:`DESCRIBE SEMANTIC VIEW <ref-describe-semantic-view>` is worked out when that command runs and is the type of the aggregate, not of its input: ``COUNT`` is ``BIGINT``, ``AVG`` is ``DOUBLE``, and ``SUM`` of an integer column is ``HUGEINT``, as DuckDB types the aggregate and :ref:`semantic_view() <ref-semantic-view-function>` returns it. See :ref:`Reported Data Types <explanation-sf-data-types>`.
 
 
 .. _ref-create-materializations:

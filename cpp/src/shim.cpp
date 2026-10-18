@@ -3203,40 +3203,83 @@ static unique_ptr<TableRef> sv_semantic_view_bind_replace(
     SvBindCancellationScope cancellation(context, probe);
     duckdb_connection borrowed = reinterpret_cast<duckdb_connection>(&probe);
 
-    SvOwnedBuffer payload;
-    char error_buf[1024];
-    std::memset(error_buf, 0, sizeof(error_buf));
-    uint8_t rc = sv_semantic_view_bind_rust(
-        borrowed,
-        reinterpret_cast<const uint8_t *>(view_name.data()), view_name.size(),
-        sp_buf.empty()      ? nullptr : sp_buf.data(),      sp_buf.size(),
-        dims_buf.empty()    ? nullptr : dims_buf.data(),    dims_buf.size(),
-        metrics_buf.empty() ? nullptr : metrics_buf.data(), metrics_buf.size(),
-        facts_buf.empty()   ? nullptr : facts_buf.data(),   facts_buf.size(),
-        where_clause.empty() ? nullptr : reinterpret_cast<const uint8_t *>(where_clause.data()),
-        where_clause.size(),
-        order_buf.empty()   ? nullptr : order_buf.data(),   order_buf.size(),
-        &payload.ptr, &payload.len,
-        error_buf, sizeof(error_buf));
-    cancellation.ThrowIfCancelled();
-    if (rc != 0) {
-        throw BinderException(std::string("semantic_view: ") + error_buf);
+    // Expand the request with `where` as its predicate, into one SELECT whose
+    // parse positions are the call's.
+    auto expand = [&](const std::string &where) {
+        SvOwnedBuffer payload;
+        char error_buf[1024];
+        std::memset(error_buf, 0, sizeof(error_buf));
+        uint8_t rc = sv_semantic_view_bind_rust(
+            borrowed,
+            reinterpret_cast<const uint8_t *>(view_name.data()), view_name.size(),
+            sp_buf.empty()      ? nullptr : sp_buf.data(),      sp_buf.size(),
+            dims_buf.empty()    ? nullptr : dims_buf.data(),    dims_buf.size(),
+            metrics_buf.empty() ? nullptr : metrics_buf.data(), metrics_buf.size(),
+            facts_buf.empty()   ? nullptr : facts_buf.data(),   facts_buf.size(),
+            where.empty() ? nullptr : reinterpret_cast<const uint8_t *>(where.data()),
+            where.size(),
+            order_buf.empty()   ? nullptr : order_buf.data(),   order_buf.size(),
+            &payload.ptr, &payload.len,
+            error_buf, sizeof(error_buf));
+        cancellation.ThrowIfCancelled();
+        if (rc != 0) {
+            throw BinderException(std::string("semantic_view: ") + error_buf);
+        }
+
+        // The payload is the SQL to plan: one SELECT. It is parsed with the
+        // built-in grammar, as DuckDB's `query()` parses its argument; it is
+        // generated SQL and uses none of this extension's syntax.
+        //
+        // The expansion carries `where_clause` as written, so a malformed
+        // predicate fails here. Its parse error is reported at the call, like
+        // the binder's (see `sv_relocate`): the position the parser gives is an
+        // offset into SQL the caller never wrote.
+        std::string sql(reinterpret_cast<const char *>(payload.ptr), payload.len);
+        Parser parser = sv_compat::builtin_parser();
+        try {
+            parser.ParseQuery(sql);
+        } catch (ParserException &e) {
+            ErrorData error(e);
+            throw ParserException(Exception::InitializeExtraInfo(input.ref.query_location),
+                                  "semantic_view: the query does not parse, so check "
+                                  "where_clause: " + error.RawMessage());
+        }
+        // The Rust side refuses a `;` in where_clause, so the expansion is one
+        // statement; this guards the shape all the same, as an input error,
+        // since the expansion's text comes from the caller's arguments.
+        if (parser.statements.size() != 1 ||
+            parser.statements[0]->type != StatementType::SELECT_STATEMENT) {
+            throw InvalidInputException(
+                "semantic_view: the expansion is not one SELECT statement: %s", sql);
+        }
+        auto select = unique_ptr_cast<SQLStatement, SelectStatement>(
+            std::move(parser.statements[0]));
+        sv_relocate(*select->node, input.ref.query_location);
+        return select;
+    };
+    auto select = expand(where_clause);
+
+    // DuckDB binds the returned subquery in the caller's scope, so a name the
+    // expansion's own tables lack would bind to a column of an enclosing query
+    // (a comma join's right side is bound as LATERAL) instead of failing: a
+    // member expression's bare `amount` would read the outer row's `amount`.
+    // Only `where_clause` may refer outward (TECH-DEBT #107). So the expansion
+    // without it is bound first on a binder of its own, with no enclosing
+    // scope, where such a name fails as it would in a query of its own; its
+    // error carries the call's position, like the real bind's.
+    //
+    // DuckDB resolves a name outward only through the binder's enclosing
+    // scopes, so with none (a top-level FROM, a join's left side, a CTE or a
+    // subquery in FROM) the real bind is already isolated, and the second bind,
+    // which costs as much as the first, is skipped.
+    if (input.binder && input.binder->HasEnclosingScope()) {
+        auto isolated = where_clause.empty()
+                            ? unique_ptr_cast<SQLStatement, SelectStatement>(select->Copy())
+                            : expand(std::string());
+        auto isolated_binder = Binder::CreateBinder(context);
+        isolated_binder->Bind(static_cast<SQLStatement &>(*isolated));
     }
 
-    // The payload is the SQL to plan: one SELECT. It is parsed with the
-    // built-in grammar, as DuckDB's `query()` parses its argument; it is
-    // generated SQL and uses none of this extension's syntax.
-    std::string sql(reinterpret_cast<const char *>(payload.ptr), payload.len);
-    Parser parser = sv_compat::builtin_parser();
-    parser.ParseQuery(sql);
-    if (parser.statements.size() != 1 ||
-        parser.statements[0]->type != StatementType::SELECT_STATEMENT) {
-        throw InternalException(
-            "semantic_view: the expansion is not one SELECT statement: %s", sql);
-    }
-    auto select = unique_ptr_cast<SQLStatement, SelectStatement>(
-        std::move(parser.statements[0]));
-    sv_relocate(*select->node, input.ref.query_location);
     unique_ptr<TableRef> ref = make_uniq<SubqueryRef>(std::move(select));
     return ref;
 }

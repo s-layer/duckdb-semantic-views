@@ -3,10 +3,10 @@
 # DESCRIBE SEMANTIC VIEW report each member's `data_type`.
 #
 # The type is probed on the READ side, at SHOW / DESCRIBE bind time, by
-# expanding a request for the member and binding it with a LIMIT 0 probe —
-# the same mechanism `semantic_view()` uses to declare its output columns. So
-# the reported type is exactly what `typeof()` of that member's column returns
-# from `semantic_view()`, in DuckDB's spelling. `semantic_view()` returns the
+# expanding a request for the member and asking DuckDB to DESCRIBE it, which
+# binds the same SQL `semantic_view()` hands DuckDB to plan. So the reported
+# type is exactly what `typeof()` of that member's column returns from
+# `semantic_view()`, in DuckDB's spelling. `semantic_view()` returns the
 # expanded SQL's own types, so that is also the type plain DuckDB gives the
 # member's expression: `SUM` over an integer column is a HUGEINT.
 #

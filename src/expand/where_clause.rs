@@ -196,6 +196,11 @@ pub(super) fn resolve_where_clause(
     def: &SemanticViewDefinition,
     raw: &str,
 ) -> Result<ResolvedWhere, ExpandError> {
+    if crate::expr_tokens::has_statement_separator(raw) {
+        return Err(ExpandError::WhereClauseNotOnePredicate {
+            view_name: view_name.to_string(),
+        });
+    }
     // Member lookup tables, keyed the same way `inline_references` keys its
     // replacements so FIND and SPLICE agree.
     //
@@ -684,6 +689,35 @@ mod tests {
     fn a_metric_name_inside_a_subquery_is_not_a_metric_reference() {
         let r = resolve_where_clause("v", &def(), "region IN (SELECT revenue FROM t)").unwrap();
         assert_eq!(r.sql, "(c.region) IN (SELECT revenue FROM t)");
+    }
+
+    /// The predicate is spliced into the expansion as written, so a `;` would
+    /// end the expansion's statement and start another.
+    #[test]
+    fn a_semicolon_in_the_predicate_is_refused() {
+        for raw in [
+            "true; SELECT 1",
+            "region IN (SELECT 1; SELECT 2)",
+            "region = 'x';",
+        ] {
+            let err = resolve_where_clause("v", &def(), raw)
+                .unwrap_err()
+                .to_string();
+            assert!(err.contains("cannot contain ';'"), "{raw}: {err}");
+        }
+    }
+
+    #[test]
+    fn a_semicolon_in_a_literal_or_comment_is_kept() {
+        for raw in [
+            "region = ';'",
+            "region = $$;$$",
+            "\"a;b\" = 1",
+            "region = 'x' /* ; */",
+            "region = 'x' -- ;",
+        ] {
+            assert!(resolve_where_clause("v", &def(), raw).is_ok(), "{raw}");
+        }
     }
 
     /// A member name can't correlate a subquery with the outer query: inside

@@ -36,6 +36,10 @@ caller's setting, so the probe connections never had it, and `semantic_view()`
 and the metadata binds below ran to completion past it. Every check here runs
 once per cancellation (CANCELLATIONS), and a deadline must surface as the
 engine's own "Query exceeded maximum execution time", bare, the same way.
+DuckDB checks the deadline only once execution starts, so where the slow part
+is DuckDB's own bind of the source (a `semantic_view()` call over a source that
+is slow to bind), the deadline run is held to a plain query of that source
+instead: it must stop no later than DuckDB stops the plain query.
 
 A plain-SQL control runs first through the identical harness. It aborts early on
 *every* build (DuckDB's own executor polls the flag correctly), so if the control
@@ -342,9 +346,13 @@ def _run_metadata_probe_tests(con, csv_dir) -> bool:
     for label, sql in single:
         ok &= check_interrupted_statement(con, label, sql)
 
-    # semantic_view()'s own bind runs on a probe connection too: the Rust bind
-    # types the requested members, and a DECIMAL or LIST output adds a LIMIT 0
-    # probe of the expanded query. Both read the slow source.
+    # semantic_view() has no probe of its own: its bind hands DuckDB the
+    # expanded query, and DuckDB binds the slow source as part of the caller's
+    # statement. An interrupt stops that bind early, as it stops DuckDB's own
+    # bind of the source. A deadline does not: DuckDB checks
+    # max_execution_time only once execution starts, so a slow bind runs past
+    # it. So under a deadline semantic_view() is held to its plain twin, the
+    # same source queried directly: it must stop no later than the twin does.
     con.execute("DROP SEMANTIC VIEW IF EXISTS mp_dec")
     con.execute(
         """
@@ -358,20 +366,24 @@ def _run_metadata_probe_tests(con, csv_dir) -> bool:
         (
             "semantic_view(<view>) bind",
             "SELECT * FROM semantic_view('mp_one', metrics := ['total'])",
+            "SELECT sum(s.x) AS total FROM mp_src s",
         ),
         (
             "semantic_view(<view>) bind with a DECIMAL output",
             "SELECT * FROM semantic_view('mp_dec', metrics := ['dtotal'])",
+            "SELECT sum(s.x::DECIMAL(18, 2)) AS dtotal FROM mp_src s",
         ),
         # explain_semantic_view() runs EXPLAIN of the expanded query on its
-        # probe, which binds the slow source the same way.
+        # probe, which binds the slow source the same way, and the probe
+        # carries the deadline.
         (
             "explain_semantic_view(<view>) bind",
             "SELECT * FROM explain_semantic_view('mp_one', metrics := ['total'])",
+            None,
         ),
     ]
-    for label, sql in binds:
-        ok &= check_interrupted_statement(con, label, sql)
+    for label, sql, twin in binds:
+        ok &= check_interrupted_statement(con, label, sql, deadline_twin=twin)
     con.execute("DROP SEMANTIC VIEW mp_dec")
 
     # Cross-view: many views, each probe a fraction of the whole. The fix must
@@ -396,8 +408,15 @@ def _run_metadata_probe_tests(con, csv_dir) -> bool:
     return ok
 
 
-def check_interrupted_statement(con, label, sql) -> bool:
-    """Time `sql` uncancelled, then assert each cancellation stops it early and bare."""
+def check_interrupted_statement(con, label, sql, deadline_twin=None) -> bool:
+    """
+    Time `sql` uncancelled, then assert each cancellation stops it early and bare.
+
+    With `deadline_twin`, a plain query of the same source, the deadline run is
+    held to the twin's instead: it must stop no later than the twin does under
+    the same deadline (PARITY_FACTOR of it, plus PARITY_SLACK_S), and early if
+    the twin stops early.
+    """
     baseline = time_query(con, sql)
     limit = max(FIRE_AT_S + MIN_ABORT_SLACK_S, ABORT_FRACTION * baseline)
     print(f"\n{label}: cancellation must stop the member-type probes")
@@ -407,6 +426,9 @@ def check_interrupted_statement(con, label, sql) -> bool:
         f"limit {limit:.2f}s <= {VACUITY_MARGIN:.0%} of baseline {baseline:.2f}s",
     )
     for kind, run, expected in CANCELLATIONS:
+        if kind == "deadline" and deadline_twin is not None:
+            ok &= check_deadline_parity(con, sql, deadline_twin, baseline, limit)
+            continue
         elapsed, err = run(con, sql)
         message = "" if err is None else str(err)
         ok &= check(
@@ -428,6 +450,45 @@ def check_interrupted_statement(con, label, sql) -> bool:
             message.startswith(f"INTERRUPT Error: {expected}") and "failed:" not in message,
             f"message={message!r}",
         )
+    return ok
+
+
+# A statement held to its plain twin may take this much longer than the twin
+# under the same deadline: semantic_view()'s own work on top of DuckDB's bind of
+# the source (reading the definition, expanding it) is small next to the slow
+# bind, and a second bind of the source, which is what this guards against
+# for a top-level call, would land at ~2x.
+PARITY_FACTOR = 1.3
+PARITY_SLACK_S = 0.5
+
+
+def check_deadline_parity(con, sql, twin, baseline, limit) -> bool:
+    """Under a deadline, `sql` must stop no later than its plain twin does."""
+    twin_elapsed, twin_err = run_deadlined(con, twin)
+    elapsed, err = run_deadlined(con, sql)
+    message = "" if err is None else str(err)
+    parity_limit = max(limit, PARITY_FACTOR * twin_elapsed + PARITY_SLACK_S)
+    ok = check(
+        "deadline: the plain twin is cancelled by the deadline too",
+        twin_err is not None and DEADLINE_MESSAGE in str(twin_err),
+        f"twin error={twin_err!r} after {twin_elapsed:.2f}s",
+    )
+    ok &= check(
+        "deadline: the statement raises rather than completing",
+        err is not None,
+        f"error={type(err).__name__ if err else 'None'} after {elapsed:.2f}s",
+    )
+    ok &= check(
+        "deadline: the statement stops no later than DuckDB's plain query of the source",
+        err is not None and elapsed < parity_limit,
+        f"stopped after {elapsed:.2f}s (twin {twin_elapsed:.2f}s, baseline {baseline:.2f}s, "
+        f"limit {parity_limit:.2f}s)",
+    )
+    ok &= check(
+        "deadline: the error is a bare interrupt",
+        message.startswith(f"INTERRUPT Error: {DEADLINE_MESSAGE}") and "failed:" not in message,
+        f"message={message!r}",
+    )
     return ok
 
 

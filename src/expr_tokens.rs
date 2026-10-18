@@ -715,6 +715,27 @@ fn splice_references(
 /// inside ordinary parentheses, so those are not counted.
 const QUERY_OPENERS: &[&str] = &["select", "with", "from", "values", "table"];
 
+/// Whether `expr` holds a `;` outside its literals, quoted identifiers and
+/// comments: a statement separator, which no single expression contains.
+pub(crate) fn has_statement_separator(expr: &str) -> bool {
+    let bytes = expr.as_bytes();
+    let mut i = 0;
+    while i < bytes.len() {
+        match bytes[i] {
+            b'\'' => i = skip_single_quoted(bytes, i),
+            b'"' => i = skip_quoted_part(bytes, i),
+            b'$' => i = try_skip_dollar_quoted(bytes, i).unwrap_or(i + 1),
+            b'/' | b'-' => {
+                let next = skip_whitespace_and_comments(bytes, i);
+                i = if next == i { i + 1 } else { next };
+            }
+            b';' => return true,
+            _ => i += 1,
+        }
+    }
+    false
+}
+
 /// The byte spans `(start, end)` of the subqueries in `expr`, in order: each `(`
 /// that opens a query ([`opens_query`]), through its matching `)`. A subquery
 /// nested in another lies inside the outer span and is not listed separately.

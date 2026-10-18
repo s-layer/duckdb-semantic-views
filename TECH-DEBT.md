@@ -21,8 +21,8 @@ These are intentional trade-offs made during v0.1.0 development. Each was the be
 ### 3. ✅ All output columns are VARCHAR — RESOLVED
 
 - **Origin:** Phase 4, decision [04-03] varchar-output-columns
-- **Decision:** Originally declared all columns as VARCHAR to avoid type mismatch panics. Resolved in v0.2.0 with typed output, then further simplified post-v0.2.0 with zero-copy vector references (`duckdb_vector_reference_vector`). Type mismatches are now handled at SQL generation time via `build_execution_sql` casts.
-- **Action:** None needed. Output is fully typed with zero-copy transfer.
+- **Decision:** Originally declared all columns as VARCHAR to avoid type mismatch panics. Resolved in v0.2.0 with typed output, then further simplified post-v0.2.0 with zero-copy vector references (`duckdb_vector_reference_vector`). Since TECH-DEBT #42's `bind_replace` change, DuckDB plans the expanded SQL inside the caller's query, so each column has DuckDB's own type and nothing is cast.
+- **Action:** None needed.
 
 ### 4. ✅ Manual FFI entrypoint instead of macro
 
@@ -581,6 +581,9 @@ Areas where test coverage is reduced compared to ideal, with justification.
 - **What we do today:** nothing refuses it early; DuckDB's binder error on the expansion's connection is the error. No test pins it, because the fix is the next change on the stack.
 - **What would finish it:** have `semantic_view()` hand DuckDB its expansion to plan inside the caller's query (`bind_replace`, as DuckDB's `query()` does), so outer columns bind as in any subquery. Then add a `LATERAL` test and close this entry.
 - **Resolved 2026-10-18 (#42, `bind_replace`):** `semantic_view()` now hands DuckDB its expansion to plan inside the caller's query, so an outer column binds as in any subquery, through the construct too. Pinned by the `LATERAL` case in `test/sql/semantic_view_in_caller_query.test`.
+- **Fence added with it:** only `where_clause` may refer outward. A member expression's bare name that none of the expansion's tables has would otherwise bind to the outer row, silently. So when the call has an enclosing scope (a join's right side, `LATERAL`, a scalar subquery), `sv_semantic_view_bind_replace` first binds the expansion without `where_clause` on a binder of its own, where such a name fails as in a query of its own. That second bind costs as much as the first, which matters for a source that is slow to bind (a long glob list, remote files); a call with nothing enclosing it is bound once. The second bind would go away if DuckDB let a table function bind its subquery on a scope that only `where_clause`'s expressions can see past.
+- **Not fenced:** a table name the expansion does not qualify, inside a subquery in a member expression or in `where_clause`, resolves as it would in the caller's query: to the caller's CTE of that name first, then through the caller's search path. Only the `TABLES` entries are qualified with the database and schema stamped at CREATE. Finishing it means qualifying those names at CREATE too, as the `TABLES` entries are.
+- **Deadlines:** DuckDB checks `max_execution_time` only once execution starts, so a deadline no longer stops a `semantic_view()` call while DuckDB binds a slow source, as it does not stop DuckDB's own bind of that source. An interrupt still does. `test/integration/test_query_interrupt.py` holds the deadline case to a plain query of the same source.
 
 ### 106. ❌ A semantic view over a temporary table cannot be queried — OPEN
 

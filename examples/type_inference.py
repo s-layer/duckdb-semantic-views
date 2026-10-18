@@ -9,8 +9,8 @@ uv run examples/type_inference.py
 Demonstrates member data types in SHOW / DESCRIBE (TECH-DEBT #51):
   - DATA_TYPE in DESCRIBE, SHOW SEMANTIC DIMENSIONS/METRICS, SHOW COLUMNS
   - an aggregate reports its own type (COUNT -> BIGINT, AVG -> DOUBLE,
-    SUM of DECIMAL(10,2) -> DECIMAL(38,2), SUM of INTEGER -> BIGINT as
-    semantic_view() returns it)
+    SUM of DECIMAL(10,2) -> DECIMAL(38,2), SUM of INTEGER -> HUGEINT, as
+    DuckDB types it and semantic_view() returns it)
   - the type is worked out when SHOW runs, so it follows a source column
     whose type changes after CREATE, and an unbindable member reports ''
 

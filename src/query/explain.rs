@@ -7,7 +7,7 @@ use crate::model::SemanticViewDefinition;
 use crate::util::suggest_closest;
 
 use super::error::QueryError;
-use super::items::{aliases_for, RequestItems};
+use super::items::{aliases_for, OutputColumns, RequestItems};
 use crate::expand::wildcard::{expand_wildcards, WildcardItemType};
 
 use super::table_function::{execute_sql_raw, read_varchar_from_vector};
@@ -200,12 +200,10 @@ unsafe fn explain_semantic_view_bind_body(
 
     let def = SemanticViewDefinition::from_json(&view_name, &json_str)?;
 
-    // The items are parsed as semantic_view() parses them, and a member
-    // requested twice with different aliases is refused as there. The aliases
-    // and the column order rename and reorder only the output, which the
-    // explained SQL does not show, so the check that two output columns don't
-    // share a name, which needs the expansion's column names, is left to
-    // semantic_view().
+    // The items are parsed and checked as semantic_view() checks them: a member
+    // requested twice with different aliases, or two output columns with one
+    // name, is refused here too. The aliases and the column order rename and
+    // reorder only the output, which the explained SQL does not show.
     let invalid = |detail: String| {
         QueryError::InvalidRequest {
             view_name: view_name.clone(),
@@ -229,9 +227,9 @@ unsafe fn explain_semantic_view_bind_body(
     let dimensions = expand_list(&items.dimensions, &WildcardItemType::Dimension)?;
     let metrics = expand_list(&items.metrics, &WildcardItemType::Metric)?;
     let facts = expand_list(&items.facts, &WildcardItemType::Fact)?;
-    aliases_for(&items.dimensions, &dimensions).map_err(invalid)?;
-    aliases_for(&items.metrics, &metrics).map_err(invalid)?;
-    aliases_for(&items.facts, &facts).map_err(invalid)?;
+    let dimension_aliases = aliases_for(&items.dimensions, &dimensions).map_err(invalid)?;
+    let metric_aliases = aliases_for(&items.metrics, &metrics).map_err(invalid)?;
+    let fact_aliases = aliases_for(&items.facts, &facts).map_err(invalid)?;
 
     let mat_name = {
         // Resolve the requested names to their stored items with the SAME
@@ -282,6 +280,14 @@ unsafe fn explain_semantic_view_bind_body(
     };
     let expanded_sql =
         expand(&view_name, &def, &req).map_err(|e| QueryError::from(e).to_string())?;
+    let column_names = crate::expand::output_column_names(&view_name, &def, &req)
+        .map_err(|e| QueryError::from(e).to_string())?;
+    OutputColumns::new(
+        &column_names,
+        [&dimension_aliases, &metric_aliases, &fact_aliases],
+        items.order,
+    )
+    .map_err(invalid)?;
 
     // Build the three-part output, identical to the legacy VTab so
     // phase28_e2e / phase46_* / phase57_introspection / phase64

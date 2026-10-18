@@ -58,6 +58,20 @@ SELECT * FROM SEMANTIC_VIEW(sve_view METRICS gone);
 ----
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 
+# Fails to parse: where_clause is spliced into the expansion, so a predicate
+# that does not parse makes the expansion not parse. The error names
+# where_clause, and the caret goes on the call (here cut, with the line, where
+# DuckDB cuts a long one), not on an offset into the expansion.
+statement error
+SELECT * FROM semantic_view('sve_view', metrics := ['bad'], where_clause := 'id =');
+----
+the query does not parse, so check where_clause: syntax error
+
+statement error
+SELECT * FROM semantic_view('sve_view', metrics := ['bad'], where_clause := 'id =');
+----
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
 statement ok
 DROP SEMANTIC VIEW sve_view;
 

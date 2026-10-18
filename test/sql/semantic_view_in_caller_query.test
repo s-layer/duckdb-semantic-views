@@ -98,6 +98,58 @@ FROM (VALUES ('EU'), ('US')) t(r),
 EU	EU	150
 US	US	70
 
+# Only where_clause may refer to an enclosing query. A member expression's bare
+# column that the semantic view's tables lack still fails, as it does in a
+# query of its own, rather than reading the outer row's column of that name:
+# DuckDB binds a comma join's right side as LATERAL.
+
+statement ok
+CREATE TABLE cq_outer (price INTEGER);
+
+statement ok
+INSERT INTO cq_outer VALUES (7), (9);
+
+statement ok
+CREATE SEMANTIC VIEW cq_bare AS
+  TABLES (o AS cq_orders PRIMARY KEY (id))
+  METRICS (o.bad AS sum(price));
+
+statement error
+SELECT * FROM cq_outer, semantic_view('cq_bare', metrics := ['bad']);
+----
+Referenced column "price" not found
+
+statement error
+SELECT * FROM cq_outer JOIN semantic_view('cq_bare', metrics := ['bad']) ON true;
+----
+Referenced column "price" not found
+
+statement error
+SELECT (SELECT bad FROM semantic_view('cq_bare', metrics := ['bad'])) FROM cq_outer;
+----
+Referenced column "price" not found
+
+# With nothing enclosing the call, the name fails all the same.
+
+statement error
+SELECT * FROM semantic_view('cq_bare', metrics := ['bad']), cq_outer;
+----
+Referenced column "price" not found
+
+statement ok
+DROP SEMANTIC VIEW cq_bare;
+
+statement ok
+DROP TABLE cq_outer;
+
+# The predicate is spliced into the expansion, so a ';' in it is refused rather
+# than ending the expansion's statement.
+
+statement error
+SELECT * FROM semantic_view('cq_sv', metrics := ['revenue'], where_clause := 'true; SELECT 1');
+----
+where_clause is one predicate, so it cannot contain ';'
+
 # Cleanup
 
 statement ok

@@ -68,6 +68,7 @@
 // `DatabaseWrapper` (what a C-API `duckdb_database` points at), which v1.5's
 // amalgamation header exposed directly.
 #include "duckdb.hpp"
+#include "duckdb/common/error_data.hpp"
 #include "duckdb/catalog/catalog.hpp"
 #include "duckdb/catalog/catalog_search_path.hpp"
 #include "duckdb/main/capi/capi_internal.hpp"
@@ -91,6 +92,7 @@
 #include "duckdb/parser/statement/select_statement.hpp"
 #include "duckdb/parser/tableref/subqueryref.hpp"
 #include "duckdb/parser/tableref/table_function_ref.hpp"
+#include "duckdb/planner/binder.hpp"
 #include "duckdb/planner/extension_callback.hpp"
 
 #else // v1.5 amalgamation
