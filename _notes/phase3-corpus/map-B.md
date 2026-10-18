@@ -7,7 +7,8 @@ at B-103). Rows marked `[syntax]` are `statement error` with an empty `----` blo
 (no message pinned); rows marked `[text]` pin text the grammar might plausibly change;
 `PRE-EXISTING` comments mark today's behaviour that looks wrong.
 
-Totals: 104 accept rows, 3 semantic rejects, 77 syntax rejects.
+Totals: 102 accept rows, 27 rejects that pin their message (`[text]`), 55 syntax rejects
+(empty `----` block).
 
 | source::test_fn | corpus row id(s) | note |
 |---|---|---|

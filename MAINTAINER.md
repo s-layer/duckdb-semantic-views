@@ -595,7 +595,10 @@ v1.5.0 tip across three bumps without anything going red.)
 **A C API bump** is a separate decision (it changes which DuckDB releases accept the
 binary at all): update `.duckdb-capi-version`, `MINIMUM_DUCKDB_VERSION` in `src/lib.rs`,
 and the `duckdb` / `libduckdb-sys` pins in `Cargo.toml` (the crate version encodes the
-DuckDB version as `1.1XY0Z.0`, e.g. DuckDB 1.5.6 = crate 1.10506.0), then build and test.
+DuckDB version as `1.1XY0Z.0`, e.g. DuckDB 1.5.6 = crate 1.10506.0), then build and test. Then run
+`cargo deny check advisories`. If the new `libduckdb-sys` no longer pulls in `zip 6`, it
+fails on the three zip ignores in `deny.toml` (`unused-ignored-advisory = "deny"`): delete
+them and close TECH-DEBT #104.
 
 The `DuckDBVersionMonitor` workflow automates the engine bump: it checks weekly for a DuckDB release newer than `.duckdb-version`, updates the engine pins and their derived locations (steps 1–3, minus a new release line's extension-ci-tools move), then opens a PR. If the build passes, the PR bumps the version. If it fails, the PR tags `@copilot` to attempt an automated fix.
 

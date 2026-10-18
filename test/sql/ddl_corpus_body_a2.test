@@ -1171,20 +1171,23 @@ SELECT rtrim(replace(regexp_extract(read_yaml_from_semantic_view('dcb_rel_defaul
 ----
 - table: c   from_alias: o   fk_columns:   - fk   ref_columns:   - id   name: rel
 
-# B-179: body_parser/mod.rs::old_cardinality_keywords_rejected — a trailing `MANY TO ONE` cardinality keyword is rejected (near miss of B-178) [syntax]
+# B-179: body_parser/mod.rs::old_cardinality_keywords_rejected — a trailing `MANY TO ONE` cardinality keyword is rejected (near miss of B-178) [text]
 statement error
 CREATE SEMANTIC VIEW dcb_rel_card_many_to_one AS TABLES (o AS dcb_orders PRIMARY KEY (id), c AS dcb_customers PRIMARY KEY (id)) RELATIONSHIPS (rel AS o(fk) REFERENCES c MANY TO ONE) DIMENSIONS (o.region AS o.region);
 ----
+'MANY TO ONE'. Cardinality is now inferred from PK/UNIQUE constraints; explicit keywords are no longer supported
 
-# B-180: body_parser/mod.rs::old_cardinality_keywords_rejected — a trailing `ONE TO ONE` cardinality keyword is rejected (near miss of B-178) [syntax]
+# B-180: body_parser/mod.rs::old_cardinality_keywords_rejected — a trailing `ONE TO ONE` cardinality keyword is rejected (near miss of B-178) [text]
 statement error
 CREATE SEMANTIC VIEW dcb_rel_card_one_to_one AS TABLES (o AS dcb_orders PRIMARY KEY (id), c AS dcb_customers PRIMARY KEY (id)) RELATIONSHIPS (rel AS o(fk) REFERENCES c ONE TO ONE) DIMENSIONS (o.region AS o.region);
 ----
+'ONE TO ONE'. Cardinality is now inferred from PK/UNIQUE constraints; explicit keywords are no longer supported
 
-# B-181: body_parser/mod.rs::old_cardinality_keywords_rejected — a trailing `ONE TO MANY` cardinality keyword is rejected (near miss of B-178) [syntax]
+# B-181: body_parser/mod.rs::old_cardinality_keywords_rejected — a trailing `ONE TO MANY` cardinality keyword is rejected (near miss of B-178) [text]
 statement error
 CREATE SEMANTIC VIEW dcb_rel_card_one_to_many AS TABLES (o AS dcb_orders PRIMARY KEY (id), c AS dcb_customers PRIMARY KEY (id)) RELATIONSHIPS (rel AS o(fk) REFERENCES c ONE TO MANY) DIMENSIONS (o.region AS o.region);
 ----
+'ONE TO MANY'. Cardinality is now inferred from PK/UNIQUE constraints; explicit keywords are no longer supported
 
 # B-182: body_parser/mod.rs::trailing_text_after_references_rejected — trailing junk after REFERENCES c is rejected (near miss of B-178) [syntax]
 statement error
