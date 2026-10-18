@@ -19,11 +19,31 @@ confidence-threshold = 0.8
 db-path = "~/.cargo/advisory-db"
 db-urls = ["https://github.com/rustsec/advisory-db"]
 version = 2
-ignore = []
+# An ignore that matches no crate in the lock fails the check, so the zip
+# ignores below cannot outlive the zip 6 pin unnoticed.
+unused-ignored-advisory = "deny"
+# zip 6.0.0 is a build dependency of libduckdb-sys =1.10506.0, which requires
+# zip "6", so the advisories' fix (zip >= 9) cannot be taken until a
+# libduckdb-sys release moves. All three are in archive extraction, which
+# libduckdb-sys's build script runs only with DUCKDB_DOWNLOAD_LIB=1, to unpack
+# DuckDB's own release zip. This repo never sets it: the `bundled` build
+# unpacks the crate's duckdb.tar.gz with tar instead. Drop these when the
+# libduckdb-sys pin moves past zip 6 (TECH-DEBT #104).
+ignore = [
+    { id = "RUSTSEC-2026-0367", reason = "zip 6 via libduckdb-sys build script; extraction path unused (DUCKDB_DOWNLOAD_LIB unset)" },
+    { id = "RUSTSEC-2026-0368", reason = "zip 6 via libduckdb-sys build script; extraction path unused (DUCKDB_DOWNLOAD_LIB unset)" },
+    { id = "RUSTSEC-2026-0369", reason = "zip 6 via libduckdb-sys build script; extraction path unused (DUCKDB_DOWNLOAD_LIB unset)" },
+]
 
 [bans]
 multiple-versions = "warn"
 wildcards = "allow"
+# The zip ignores above match by advisory ID anywhere in the graph. This keeps
+# zip itself to the one place they were reviewed for: a crate that pulls zip
+# in other than libduckdb-sys fails the check (TECH-DEBT #104).
+deny = [
+    { crate = "zip", wrappers = ["libduckdb-sys"], reason = "zip 6 advisories are ignored only for libduckdb-sys's build script" },
+]
 
 [sources]
 unknown-registry = "warn"
