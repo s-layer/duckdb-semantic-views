@@ -9,6 +9,8 @@ semantic_view()
 
 Table function that queries a semantic view with a specified combination of dimensions, metrics, or facts. The extension generates the SQL (SELECT, FROM, JOIN, GROUP BY) and returns the result set.
 
+You can also write the same query as Snowflake does, with the :ref:`SEMANTIC_VIEW(...) construct <ref-sv-construct>`, which the extension turns into a ``semantic_view()`` call.
+
 
 .. _ref-sv-syntax:
 
@@ -22,8 +24,11 @@ Syntax
        [ dimensions := [ '<dim_name>' [, ...] ] , ]
        [ metrics := [ '<metric_name>' [, ...] ] , ]
        [ facts := [ '<fact_name>' [, ...] ] , ]
-       [ where_clause := '<predicate>' ]
+       [ where_clause := '<predicate>' , ]
+       [ column_order := [ '<list_name>' [, ...] ] ]
    )
+
+Each item in ``dimensions``, ``metrics`` or ``facts`` is ``'<member_name>'``, ``'<member_name> AS <alias>'`` or ``'<table_alias>.*'``.
 
 
 .. _ref-sv-params:
@@ -53,6 +58,9 @@ Parameters
    * - ``where_clause``
      - VARCHAR (named)
      - Optional predicate applied **before** metrics are aggregated -- the equivalent of Snowflake's ``SEMANTIC_VIEW( ... WHERE <predicate> )``. See :ref:`ref-sv-pre-agg-filtering`. An omitted, empty, or whitespace-only value is treated as absent.
+   * - ``column_order``
+     - VARCHAR[] (named)
+     - Optional order of the lists' columns in the result, as list names: ``'dimensions'``, ``'metrics'`` and ``'facts'``, matched case-insensitively. A list you leave out follows in the default order, dimensions, then metrics, then facts. Naming a list twice, or something that is not a list, is an error. See :ref:`ref-sv-output`.
    * - ``search_path``
      - VARCHAR[] (named)
      - **Reserved. Do not pass it.** The function reads the session's ``search_path`` itself, so an unqualified ``<view_name>`` resolves the way an unqualified table name does. Every table function the extension registers has this parameter (see :ref:`ref-functions-search-path`).
@@ -176,7 +184,23 @@ When an item appears both explicitly and via wildcard expansion, it appears only
 Output
 ======
 
-Returns a result set with one column per requested dimension, metric, or fact, in the order: dimensions first (in the order requested), then metrics or facts (in the order requested).
+Returns a result set with one column per requested dimension, metric, or fact, in the order: dimensions first (in the order requested), then metrics or facts (in the order requested). ``column_order`` changes which list's columns come first, as in ``column_order := ['metrics', 'dimensions']``; within a list the columns stay in the order requested.
+
+A column is named after its member, or after the alias the item gives it with ``AS``:
+
+.. code-block:: sql
+
+   SELECT * FROM semantic_view('shop',
+       dimensions := ['region AS r'],
+       metrics := ['revenue AS "Total revenue"'],
+       column_order := ['metrics', 'dimensions']
+   );
+
+The alias is one identifier, quoted or not, or a string (``AS 'r'``). Two columns with the same name are an error, and so is an alias on a wildcard. Since the text before ``AS`` is the member, a member whose name contains the word ``as`` on its own (``Sales as of``) has to be quoted in an item: ``'"Sales as of"'``.
+
+.. versionadded:: 0.16.0
+
+   Aliases in items and the ``column_order`` parameter.
 
 DuckDB plans the generated SQL as part of the query that calls ``semantic_view()``, so the column types are the ones DuckDB gives the generated SQL: ``SUM`` over an integer column is a ``HUGEINT``, and an ``ENUM`` or ``STRUCT`` column keeps its type. Nothing is cached at ``CREATE``.
 
@@ -204,6 +228,41 @@ If the generated SQL does not bind, for example because a metric names a column 
    column was named ``"order date"`` -- quote characters included. A consumer
    selecting the old quote-laden column name must update. Queries over unquoted
    names are unaffected.
+
+
+.. _ref-sv-construct:
+
+The ``SEMANTIC_VIEW(...)`` Construct
+====================================
+
+Snowflake queries a semantic view with ``SEMANTIC_VIEW(...)`` in ``FROM``, and so can you:
+
+.. code-block:: sqlgrammar
+
+   SELECT * FROM SEMANTIC_VIEW(
+       <view_name>
+       [ DIMENSIONS <item> [, ...] ]
+       [ METRICS <item> [, ...] ]
+       [ FACTS <item> [, ...] ]
+       [ WHERE <predicate> ]
+   )
+
+where each ``<item>`` is ``<member_name> [ [AS] <alias> ]`` or ``<table_alias>.*``. The view name and the items are identifiers, not strings, and no comma follows the view name. The clauses can come in any order, each at most once, and the order you write them in is the order of the columns. ``WHERE`` takes one predicate and filters the rows the metrics aggregate, as ``where_clause`` does.
+
+.. code-block:: sql
+
+   SELECT * FROM SEMANTIC_VIEW(shop METRICS revenue AS total DIMENSIONS region);
+
+   -- is the same query as
+   SELECT * FROM semantic_view('shop',
+       dimensions := ['region'],
+       metrics := ['revenue AS total'],
+       column_order := ['metrics', 'dimensions']
+   );
+
+The construct parses wherever a table can: in a join, a CTE, a subquery or a view body, with a table alias and column aliases. A view over it stores the ``semantic_view()`` call, so it expands against the semantic view's current definition each time it is queried. Items are member names for now: an expression is refused, and so is a prepared statement's ``?`` inside the construct. To bind a parameter, call ``semantic_view()`` and pass it as a whole argument.
+
+.. versionadded:: 0.16.0
 
 
 .. _ref-sv-filtering:
