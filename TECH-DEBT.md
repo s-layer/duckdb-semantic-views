@@ -580,6 +580,7 @@ Areas where test coverage is reduced compared to ideal, with justification.
 - **Why ignoring is safe today:** all three advisories are in archive extraction. `libduckdb-sys`'s build script extracts with `zip` only when `DUCKDB_DOWNLOAD_LIB=1`, to unpack DuckDB's release zip. Nothing in this repo sets it (Makefile, Justfile, workflows, build scripts): the `bundled` build unpacks the crate's `duckdb.tar.gz` with tar.
 - **What ships:** the three IDs are in `[advisories] ignore` in `deny.toml`, with the reason on each. `unused-ignored-advisory = "deny"` makes `cargo deny check` fail once an ignore no longer matches anything in the lock, so a bump that drops zip 6 forces the ignores out in the same PR.
 - **What would finish it:** a `libduckdb-sys` release that takes `zip >= 9` (or drops it). On that bump, delete the three ignores and this entry. MAINTAINER.md says the same where it covers moving the `libduckdb-sys` pin. Re-check this entry sooner if a build ever sets `DUCKDB_DOWNLOAD_LIB`: the ignores would then hide a reachable path.
+
 ### 98. ❌ Four oddities at the parser hook's front door — OPEN
 
 - **Origin:** 2026-10-16, the Phase 3 DDL corpus (rows F-013, S-014, S-391). Each row pins today's behaviour.
