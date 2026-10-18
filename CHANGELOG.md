@@ -77,6 +77,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   extension sees the statement. The errors read `unterminated quoted identifier` and
   `zero-length delimited identifier` instead of the extension's own wording.
 
+- **`semantic_view()` runs as part of your query.** DuckDB now plans the semantic view's
+  expanded SQL inside the query that calls it, instead of the extension running it
+  separately and copying the rows across. The rows stream instead of being collected
+  first, scans run in parallel, and DuckDB can push the query's filters and column
+  choices down into it. Three things you can see change:
+  - **Column types are DuckDB's own.** `SUM` over an integer column is a `HUGEINT` (it was
+    narrowed to `BIGINT`), and `ENUM`, `STRUCT`, `MAP` and `UHUGEINT` columns keep their
+    types (they were turned into `VARCHAR` and `UBIGINT`). The `data_type` that `SHOW` and
+    `DESCRIBE` report follows. Cast in your query if you relied on the old types.
+  - **Errors in the expanded SQL are DuckDB's.** A metric over a dropped column, or a cast
+    that fails on the data, now fails with DuckDB's own error, with its caret on the
+    `semantic_view(...)` call. The `semantic_view: SQL execution failed: ... (expanded SQL:
+    ...)` and `type inference failed for query` wrappers are gone; `explain_semantic_view`
+    still shows the SQL.
+  - **`where_clause` can use a column of an enclosing query**, as in
+    `FROM t, LATERAL (SELECT * FROM semantic_view('v', metrics := ['revenue'], where_clause := 'region = t.r'))`.
+
 - **CREATE rejects an empty view.** A view with no tables (`TABLES ()`, or a YAML
   definition with `tables: []` or no `tables`), or whose `DIMENSIONS` and `METRICS`
   clauses are all empty (`DIMENSIONS () METRICS ()`, a lone `METRICS ()`), is now refused at
@@ -87,6 +104,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **`semantic_view()` sees your open transaction.** Rows you insert, update or delete
+  inside a transaction are now counted by a semantic-view query in that transaction.
+  Before, the query ran on a connection of its own and saw only committed data. A
+  semantic view you create inside a transaction still can't be queried until you commit.
+
 - **A subquery in `where_clause` keeps its own names.** A name inside a subquery, such as
   `amt` in `amt IN (SELECT amt FROM targets)`, was replaced with the member of that name, so
   the subquery compared each row with itself and filtered nothing, or failed to parse. Names
@@ -94,6 +116,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `WHERE` clause takes uncorrelated subqueries.
 
 ### Known limitations
+
+- **A semantic view over a temporary table can't be queried.** The query fails with
+  `Table with name ... does not exist`, because a table named without a schema is looked
+  up in the database and schema the semantic view was created in.
 
 - **ADBC needs `import duckdb` first.** With the DuckDB 2.0 Python wheel, a connection from
   `adbc_driver_duckdb` cannot `INSTALL` or `LOAD` any extension, this one included, unless

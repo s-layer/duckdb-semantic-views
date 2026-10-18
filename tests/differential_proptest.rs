@@ -51,12 +51,14 @@
 //! — including predicates that filter every row away.
 
 use proptest::prelude::*;
-use semantic_views::expand::{expand, DimensionName, MetricName, QueryRequest};
+use semantic_views::expand::{
+    expand, output_column_names, DimensionName, MetricName, QueryRequest,
+};
 use semantic_views::model::{
     AccessModifier, Dimension, Fact, Metric, SemanticViewDefinition, TableRef,
 };
 use semantic_views::query::items::{Group, OutputColumns};
-use semantic_views::query::wire::build_projected_execution_sql;
+use semantic_views::query::wire::build_projected_sql;
 
 /// Comparison operators used by generated predicates.
 #[derive(Debug, Clone, Copy)]
@@ -581,13 +583,16 @@ proptest! {
         let conn = make_db(&case.schema);
 
         // The column layout `SEMANTIC_VIEW(...)` asks for (clause order and
-        // aliases), applied as `semantic_view()` applies it: by position over
-        // the expansion's columns, whose names come from a LIMIT 0 probe.
+        // aliases), applied as `semantic_view()` applies it: by name over the
+        // expansion's columns. The names `semantic_view()` works them out from
+        // must be the ones the expansion's columns really have, which a LIMIT 0
+        // probe reads.
+        let names = output_column_names("t_diff", &def, &req).expect("request resolves");
         let mut probe = conn
             .prepare(&format!("SELECT * FROM ({expanded}) q LIMIT 0"))
             .expect("probe must prepare");
         probe.execute([]).expect("probe must run");
-        let names: Vec<String> = probe.column_names();
+        prop_assert_eq!(&names, &probe.column_names());
         let outputs = case.output_names();
         let n_dims = case.sel_dims.len();
         let alias_of = |k: usize| case.aliased[k].then(|| outputs[k].clone());
@@ -595,8 +600,7 @@ proptest! {
         let met_aliases: Vec<Option<String>> = (n_dims..outputs.len()).map(alias_of).collect();
         let layout = OutputColumns::new(&names, [&dim_aliases, &met_aliases, &[]], case.order)
             .expect("generated output names are distinct");
-        let (_, _, expanded) =
-            build_projected_execution_sql(&expanded, &names, &vec![u32::MAX; names.len()], &layout);
+        let expanded = build_projected_sql(&expanded, &names, &layout);
 
         // Independent oracle: a plain GROUP BY over the same table, naming
         // each output column by the name the request gives it.

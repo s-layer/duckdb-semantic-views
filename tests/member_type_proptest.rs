@@ -10,9 +10,9 @@
 //!    type is `typeof(<expr>)` evaluated directly against its table; an
 //!    aggregate metric's is `typeof(<agg>(<col>))` over its table; a derived
 //!    metric's is `typeof` of its operator applied to columns typed as each
-//!    operand's raw (pre-declaration) type. The result is then mapped through the declaration rule
-//!    `semantic_view()` applies to its output schema, written out here
-//!    independently: HUGEINT / UHUGEINT are returned as BIGINT / UBIGINT.
+//!    operand's type. `semantic_view()` returns the expanded SQL's own types,
+//!    so no declaration rule maps the result (`SUM` over an integer stays a
+//!    HUGEINT).
 //! 2. **The type the member has when queried with others.** A random request
 //!    mixing the member with other members is expanded and probed the way
 //!    `semantic_view()` binds it; every member it returns must carry the same
@@ -347,16 +347,6 @@ fn try_scalar(db: &RawDb, sql: &str) -> Result<String, String> {
     }
 }
 
-/// The type `semantic_view()` declares for a column of raw type `raw` — the
-/// output-schema rule, stated independently of `query::wire`.
-fn declared(raw: &str) -> String {
-    match raw {
-        "HUGEINT" => "BIGINT".to_string(),
-        "UHUGEINT" => "UBIGINT".to_string(),
-        other => other.to_string(),
-    }
-}
-
 /// Oracle: (dimension types, fact types, metric types incl. derived), raw.
 /// A derived metric whose operator does not apply to its operands' types
 /// (`DATE + DATE`) is ill-typed: its oracle type is empty, and so must be the
@@ -488,7 +478,7 @@ fn check(case: &Case) -> Result<usize, TestCaseError> {
         let want = if broken.contains(&name) || raw.is_empty() {
             String::new()
         } else {
-            declared(raw)
+            raw.clone()
         };
         prop_assert_eq!(
             reported(&types, &name),
@@ -560,7 +550,7 @@ proptest! {
 }
 
 /// Anti-vacuity: the generator reaches the cells the properties are about —
-/// type-changing aggregates, HUGEINT normalisation, derived metrics, facts on
+/// type-changing aggregates, a SUM over an integer (HUGEINT), derived metrics, facts on
 /// both tables, and the drop axis breaking some members but not all.
 #[test]
 fn generator_reaches_the_interesting_cells() {

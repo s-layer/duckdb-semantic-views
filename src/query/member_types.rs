@@ -5,18 +5,16 @@
 //! `data_type` per member. Snowflake reports the member's actual type there.
 //! Nothing at CREATE records one (v0.10.0 removed CREATE-time inference, and
 //! no DDL clause can declare a type — see TECH-DEBT #68), so the type is
-//! computed here, at the SHOW / DESCRIBE bind, by the same mechanism
-//! `semantic_view()` uses to declare its output columns: expand a request for
-//! the member, run the expanded SQL with `LIMIT 0` on the per-call connection,
-//! and read the column type back.
+//! computed here, at the SHOW / DESCRIBE bind: expand a request for the
+//! member, `DESCRIBE` the expanded SQL on the per-call connection, and read the
+//! column type back.
 //!
 //! # What is reported
 //!
 //! The type `semantic_view()` *returns* for that member — what `typeof()` of
-//! its column says — in `DuckDB`'s spelling ([`crate::query::wire::declared_type_name`]).
-//! That includes the query path's own normalisation, so `SUM` over an integer
-//! column, which plain `DuckDB` types as HUGEINT, is reported BIGINT because
-//! that is what a query hands back.
+//! its column says. `semantic_view()` plans the expanded SQL inside the
+//! caller's query (TECH-DEBT #42), so that is the expanded SQL's own type in
+//! `DuckDB`'s spelling: `SUM` over an integer column is a HUGEINT.
 //!
 //! Probing on the read side means the type never goes stale: a source column
 //! whose type changes after CREATE is reported with its new type.
@@ -33,8 +31,7 @@
 //! always probed on its own, together with the dimensions its `PARTITION BY` /
 //! `ORDER BY` requires, because it has no shape it can be queried in alone.
 //!
-//! So the common case is at most three binds per view (plus a `DESCRIBE` when a
-//! DECIMAL or LIST column needs its parameters spelled out), and the worst case
+//! So the common case is at most three binds per view, and the worst case
 //! is one per member. `SHOW SEMANTIC … ` without `IN` probes every view, so it
 //! is linear in the total member count.
 //!
@@ -427,11 +424,8 @@ impl Prober<'_, '_> {
     }
 }
 
-/// Probe the output columns of `expanded_sql` on `conn` exactly as
-/// `semantic_view()`'s bind declares them: a `LIMIT 0` run for names and type
-/// ids, mapped through [`crate::query::wire::declared_type_name`], plus a
-/// `DESCRIBE` for any DECIMAL / LIST column, whose declared type is the full
-/// probed logical type.
+/// Probe the output columns of `expanded_sql` on `conn`: their names and
+/// types, as `semantic_view()` returns them, via `DESCRIBE`.
 ///
 /// # Safety
 ///
@@ -440,44 +434,16 @@ pub unsafe fn probe_output_types(
     conn: ffi::duckdb_connection,
     expanded_sql: &str,
 ) -> Result<Vec<ProbedColumn>, ProbeError> {
-    let classify = |e: crate::query::raw_sql::RawSqlError| {
+    let described = crate::query::raw_sql::describe_columns(conn, expanded_sql).map_err(|e| {
         if e.interrupted {
             ProbeError::Interrupted
         } else {
             ProbeError::Failed(e.message)
         }
-    };
-    let (names, ids) =
-        crate::query::raw_sql::infer_schema_raw(conn, expanded_sql).map_err(classify)?;
-    let mut types: Vec<Option<String>> = ids
-        .iter()
-        .map(|&id| crate::query::wire::declared_type_name(id).map(str::to_string))
-        .collect();
-    if types.iter().any(Option::is_none) {
-        // DECIMAL / LIST: `semantic_view()` declares the probed logical type
-        // itself, so read its full spelling.
-        let described =
-            crate::query::raw_sql::describe_column_types(conn, expanded_sql).map_err(classify)?;
-        if described.len() != types.len() {
-            return Err(ProbeError::Failed(format!(
-                "DESCRIBE returned {} columns, the probe {}",
-                described.len(),
-                types.len()
-            )));
-        }
-        for (t, d) in types.iter_mut().zip(described) {
-            if t.is_none() {
-                *t = Some(d);
-            }
-        }
-    }
-    Ok(names
+    })?;
+    Ok(described
         .into_iter()
-        .zip(types)
-        .map(|(name, t)| ProbedColumn {
-            name,
-            data_type: t.unwrap_or_default(),
-        })
+        .map(|(name, data_type)| ProbedColumn { name, data_type })
         .collect())
 }
 
@@ -584,55 +550,36 @@ mod tests {
             o.closing_amount NON ADDITIVE BY (placed) AS SUM(o.amount)
         )";
 
-    /// The declared-type map agrees with what `semantic_view()`'s C++ bind
-    /// declares (`sv_logical_type_from_c_type_id`), spelled as `typeof()`
-    /// prints it. Normalised ids are hand-written; pass-through ids are also
-    /// cross-checked against `DuckDB`'s own `typeof()`.
+    /// A member's reported type is what `typeof()` says of its column, in
+    /// `DuckDB`'s own spelling, for every type: `semantic_view()` returns the
+    /// expanded SQL's own types (TECH-DEBT #42), so nothing is narrowed.
     #[test]
-    fn declared_type_names_match_typeof() {
+    fn reported_types_are_typeof() {
         let db = db(&[]);
-        // (expression, declared type, declared type is the expression's own)
-        let cases: &[(&str, &str, bool)] = &[
-            ("TRUE", "BOOLEAN", true),
-            ("1::TINYINT", "TINYINT", true),
-            ("1::SMALLINT", "SMALLINT", true),
-            ("1::INTEGER", "INTEGER", true),
-            ("1::BIGINT", "BIGINT", true),
-            ("1::UTINYINT", "UTINYINT", true),
-            ("1::USMALLINT", "USMALLINT", true),
-            ("1::UINTEGER", "UINTEGER", true),
-            ("1::UBIGINT", "UBIGINT", true),
-            ("1::FLOAT", "FLOAT", true),
-            ("1::DOUBLE", "DOUBLE", true),
-            ("TIMESTAMP '2024-01-01'", "TIMESTAMP", true),
-            ("DATE '2024-01-01'", "DATE", true),
-            ("TIME '01:02:03'", "TIME", true),
-            ("INTERVAL 1 DAY", "INTERVAL", true),
-            ("'a'", "VARCHAR", true),
-            ("'a'::BLOB", "BLOB", true),
-            ("'2024-01-01'::TIMESTAMP_S", "TIMESTAMP_S", true),
-            ("'2024-01-01'::TIMESTAMP_MS", "TIMESTAMP_MS", true),
-            ("'2024-01-01'::TIMESTAMP_NS", "TIMESTAMP_NS", true),
-            (
-                "'2024-01-01'::TIMESTAMPTZ",
-                "TIMESTAMP WITH TIME ZONE",
-                true,
-            ),
-            ("'01:02:03+00'::TIMETZ", "TIME WITH TIME ZONE", true),
-            ("gen_random_uuid()", "UUID", true),
-            ("'101'::BIT", "BIT", true),
-            ("1.5::DECIMAL(10,3)", "DECIMAL(10,3)", true),
-            ("[1, 2]", "INTEGER[]", true),
-            ("[1::HUGEINT]", "HUGEINT[]", true),
-            // Normalised by the query path's declaration.
-            ("1::HUGEINT", "BIGINT", false),
-            ("1::UHUGEINT", "UBIGINT", false),
-            ("'x'::ENUM('x', 'y')", "VARCHAR", false),
-            ("{'a': 1}", "VARCHAR", false),
-            ("MAP {'a': 1}", "VARCHAR", false),
-            ("[1, 2]::INTEGER[2]", "VARCHAR", false),
+        // (expression, its type as DuckDB spells it)
+        let cases: &[(&str, &str)] = &[
+            ("TRUE", "BOOLEAN"),
+            ("1::TINYINT", "TINYINT"),
+            ("1::INTEGER", "INTEGER"),
+            ("1::BIGINT", "BIGINT"),
+            ("1::HUGEINT", "HUGEINT"),
+            ("1::UHUGEINT", "UHUGEINT"),
+            ("1::UBIGINT", "UBIGINT"),
+            ("1::DOUBLE", "DOUBLE"),
+            ("TIMESTAMP '2024-01-01'", "TIMESTAMP"),
+            ("DATE '2024-01-01'", "DATE"),
+            ("INTERVAL 1 DAY", "INTERVAL"),
+            ("'a'", "VARCHAR"),
+            ("'2024-01-01'::TIMESTAMPTZ", "TIMESTAMP WITH TIME ZONE"),
+            ("gen_random_uuid()", "UUID"),
+            ("1.5::DECIMAL(10,3)", "DECIMAL(10,3)"),
+            ("[1, 2]", "INTEGER[]"),
+            ("[1, 2]::INTEGER[2]", "INTEGER[2]"),
+            ("'x'::ENUM('x', 'y')", "ENUM('x', 'y')"),
+            ("{'a': 1}", "STRUCT(a INTEGER)"),
+            ("MAP {'a': 1}", "MAP(VARCHAR, INTEGER)"),
         ];
-        for (expr, want, own) in cases {
+        for (expr, want) in cases {
             let got = unsafe { probe_output_types(db.conn, &format!("SELECT {expr} AS c")) }
                 .unwrap_or_else(|e| panic!("probe of {expr} failed: {e:?}"));
             assert_eq!(
@@ -641,13 +588,10 @@ mod tests {
                     name: "c".to_string(),
                     data_type: (*want).to_string()
                 }],
-                "declared type of {expr}"
+                "reported type of {expr}"
             );
-            if *own {
-                let typeof_sql = format!("SELECT typeof({expr}) AS t");
-                let t = unsafe { probe_typeof(&db, &typeof_sql) };
-                assert_eq!(&t, want, "typeof({expr})");
-            }
+            let t = unsafe { probe_typeof(&db, &format!("SELECT typeof({expr}) AS t")) };
+            assert_eq!(&t, want, "typeof({expr})");
         }
     }
 
@@ -685,8 +629,8 @@ mod tests {
         let t = types_on(&db, &def_from(ORDERS_VIEW), Wanted::METRICS);
         assert_eq!(t.metric("order_count", None), "BIGINT");
         assert_eq!(t.metric("avg_qty", None), "DOUBLE");
-        // HUGEINT in plain DuckDB; semantic_view() declares BIGINT.
-        assert_eq!(t.metric("total_qty", None), "BIGINT");
+        // SUM over an integer column is a HUGEINT, and is reported as one.
+        assert_eq!(t.metric("total_qty", None), "HUGEINT");
         assert_eq!(t.metric("total_amount", None), "DECIMAL(38,2)");
     }
 
@@ -701,7 +645,7 @@ mod tests {
     fn window_metric_is_typed_with_its_required_dimensions() {
         let db = db(ORDERS);
         let t = types_on(&db, &def_from(ORDERS_VIEW), Wanted::METRICS);
-        assert_eq!(t.metric("qty_lag", None), "BIGINT");
+        assert_eq!(t.metric("qty_lag", None), "HUGEINT");
     }
 
     /// The semi-additive metric cannot share a query with the derived one
@@ -747,7 +691,7 @@ mod tests {
         let t = types_on(&db, &def, Wanted::ALL);
         assert_eq!(t.dimension("k", None), "VARCHAR");
         assert_eq!(t.dimension("g_dim", None), "");
-        assert_eq!(t.metric("n_total", None), "BIGINT");
+        assert_eq!(t.metric("n_total", None), "HUGEINT");
         assert_eq!(t.metric("g_total", None), "");
     }
 

@@ -1,0 +1,110 @@
+# semantic_view() plans its expanded SQL inside the caller's query
+# (`bind_replace`), rather than running it on a connection of its own. So the
+# query reads the caller's transaction, its columns keep DuckDB's own types,
+# and it may refer to a lateral column.
+
+require semantic_views
+
+statement ok
+CREATE TABLE cq_customers (id INTEGER, region VARCHAR);
+
+statement ok
+CREATE TABLE cq_orders (id INTEGER, customer_id INTEGER, amount INTEGER);
+
+statement ok
+INSERT INTO cq_customers VALUES (1, 'EU'), (2, 'US');
+
+statement ok
+INSERT INTO cq_orders VALUES (10, 1, 100), (11, 1, 50), (12, 2, 70);
+
+statement ok
+CREATE SEMANTIC VIEW cq_sv AS
+  TABLES (
+    o AS cq_orders PRIMARY KEY (id),
+    c AS cq_customers PRIMARY KEY (id)
+  )
+  RELATIONSHIPS (
+    order_customer AS o(customer_id) REFERENCES c
+  )
+  DIMENSIONS (
+    c.region AS c.region
+  )
+  METRICS (
+    o.revenue AS sum(o.amount)
+  );
+
+# A row the caller's open transaction inserted is counted.
+
+statement ok
+BEGIN;
+
+statement ok
+INSERT INTO cq_orders VALUES (13, 2, 30);
+
+query TI rowsort
+SELECT * FROM semantic_view('cq_sv', dimensions := ['region'], metrics := ['revenue']);
+----
+EU	150
+US	100
+
+statement ok
+ROLLBACK;
+
+query TI rowsort
+SELECT * FROM semantic_view('cq_sv', dimensions := ['region'], metrics := ['revenue']);
+----
+EU	150
+US	70
+
+# A semantic view over a temporary table is not reachable yet, although the
+# query now runs in the caller's session: the expansion qualifies a bare table
+# name with the database and schema stamped at CREATE (`memory.main`), and a
+# temporary table lives in `temp.main` (TECH-DEBT #106). Pinned so that the
+# fix shows up here.
+
+statement ok
+CREATE TEMP TABLE cq_scratch (id INTEGER, amount INTEGER);
+
+statement ok
+CREATE SEMANTIC VIEW cq_tmp AS
+  TABLES (s AS cq_scratch PRIMARY KEY (id))
+  METRICS (s.total AS sum(s.amount));
+
+statement error
+SELECT * FROM semantic_view('cq_tmp', metrics := ['total']);
+----
+Table with name cq_scratch does not exist
+
+statement ok
+DROP SEMANTIC VIEW cq_tmp;
+
+statement ok
+DROP TABLE cq_scratch;
+
+# The result types are DuckDB's own: sum() over INTEGER is a HUGEINT.
+
+query T
+SELECT typeof(revenue) FROM semantic_view('cq_sv', metrics := ['revenue']);
+----
+HUGEINT
+
+# A lateral column can be used in the predicate.
+
+query TTI rowsort
+SELECT t.r, s.region, s.revenue
+FROM (VALUES ('EU'), ('US')) t(r),
+     LATERAL (SELECT * FROM semantic_view('cq_sv', dimensions := ['region'], metrics := ['revenue'], where_clause := 'region = t.r')) s;
+----
+EU	EU	150
+US	US	70
+
+# Cleanup
+
+statement ok
+DROP SEMANTIC VIEW cq_sv;
+
+statement ok
+DROP TABLE cq_orders;
+
+statement ok
+DROP TABLE cq_customers;

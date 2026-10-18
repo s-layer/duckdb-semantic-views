@@ -178,9 +178,23 @@ Output
 
 Returns a result set with one column per requested dimension, metric, or fact, in the order: dimensions first (in the order requested), then metrics or facts (in the order requested).
 
-Column types are inferred when the query is bound, by running the generated SQL as a ``LIMIT 0`` probe and reading back the result schema. Every query infers this way -- there is no ``CREATE``-time type cache to fall back on, and views stored by older releases that still carry one are ignored in favor of the probe.
+DuckDB plans the generated SQL as part of the query that calls ``semantic_view()``, so the column types are the ones DuckDB gives the generated SQL: ``SUM`` over an integer column is a ``HUGEINT``, and an ``ENUM`` or ``STRUCT`` column keeps its type. Nothing is cached at ``CREATE``.
 
-If the probe fails, the query raises ``semantic_view: type inference failed for query ...`` with the underlying error. It does not fall back to VARCHAR: a placeholder type would mask a broken ``FACTS`` expression until something downstream tripped over it.
+Because it is part of your query, ``semantic_view()`` reads your open transaction, including rows you have not committed yet, and DuckDB can push your query's filters and column choices down into it. ``where_clause`` can refer to a column of an enclosing query, as in a ``LATERAL`` join:
+
+.. code-block:: sql
+
+   SELECT t.r, s.revenue
+   FROM targets t,
+        LATERAL (SELECT * FROM semantic_view('shop',
+                    metrics := ['revenue'],
+                    where_clause := 'region = t.r')) s;
+
+If the generated SQL does not bind, for example because a metric names a column that has since been dropped, the query fails with DuckDB's own error, and the caret points at the ``semantic_view(...)`` call. Use :ref:`explain_semantic_view() <ref-explain-semantic-view>` to see the generated SQL.
+
+.. versionchanged:: 0.16.0
+
+   Column types are DuckDB's own. Earlier releases returned a ``HUGEINT`` as ``BIGINT``, a ``UHUGEINT`` as ``UBIGINT``, and ``ENUM``, ``STRUCT`` and ``MAP`` columns as ``VARCHAR``. Errors in the generated SQL used to be wrapped as ``semantic_view: SQL execution failed: ...`` or ``semantic_view: type inference failed for query ...``.
 
 .. versionchanged:: 0.11.0
 

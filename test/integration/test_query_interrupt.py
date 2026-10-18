@@ -6,18 +6,18 @@
 """
 Regression test: `duckdb_interrupt()` must actually stop a `semantic_view()` query.
 
-`semantic_view()` runs its expanded SQL eagerly inside `init_global`
+`semantic_view()` used to run its expanded SQL eagerly inside `init_global`
 (`cpp/src/shim.cpp`), on a *fresh* `Connection(*context.db)` — and DuckDB's
 interrupt flag is per-`ClientContext`. `con.interrupt()` (and therefore ADBC's
 `adbc_cancel()`, the CLI's Ctrl-C, and any framework timeout built on them) sets
-the flag on the *caller's* context; pre-fix the inner query polled its own,
-which nothing ever set. The inner query therefore ran to full completion and the
+the flag on the *caller's* context; the inner query polled its own, which
+nothing ever set. The inner query therefore ran to full completion and the
 interrupt only surfaced afterwards, when the outer pipeline resumed.
 
-Post-fix `init_global` drives the inner query through `PendingQuery` +
-`ExecuteTask()` and polls the OUTER context's `interrupted` flag between tasks,
-forwarding the cancel to the inner connection and raising a bare
-`InterruptException`.
+Since TECH-DEBT #42's `bind_replace` change there is no inner query:
+`semantic_view()`'s bind hands DuckDB the expanded SQL as a subquery, and DuckDB
+runs it as part of the caller's query, so a cancel stops it as it stops any
+query. This file keeps guarding that it does.
 
 Two properties are asserted, because the pre-fix build satisfies one of them:
 
