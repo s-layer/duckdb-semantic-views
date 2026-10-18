@@ -27,6 +27,11 @@ Usage:
         published pinned to a later `main`). With <branch> (`just release` passes
         `origin/main`), also exit 1 unless <branch> contains that commit, so a tag
         made on a feature branch or an unpushed commit is never published.
+    registry_target.py unpushed <version> <branch>
+        Exit 1 when HEAD has commits <branch> does not, listing them, since the
+        release pushes HEAD to <branch> and would publish them with it. The one
+        exception is a re-run after that push failed: a single commit with the
+        release's own subject that changes only description.yml.
 """
 
 from __future__ import annotations
@@ -123,6 +128,38 @@ def release_sha(version: str, branch: str | None = None) -> str:
     return sha
 
 
+def release_commit_subject(version: str) -> str:
+    return f"chore: update description.yml for v{version} release"
+
+
+def check_unpushed(version: str, branch: str) -> None:
+    out = subprocess.run(
+        ["git", "log", "--format=%H %s", f"{branch}..HEAD"], capture_output=True, text=True
+    )
+    if out.returncode != 0:
+        raise SystemExit(
+            f"could not list commits not on {branch!r} (is it a ref in this checkout?): "
+            f"{out.stderr.strip()}"
+        )
+    commits = [line.split(" ", 1) for line in out.stdout.splitlines()]
+    if not commits:
+        return
+    if len(commits) == 1 and commits[0][1] == release_commit_subject(version):
+        files = subprocess.run(
+            ["git", "diff-tree", "--no-commit-id", "--name-only", "-r", commits[0][0]],
+            capture_output=True,
+            text=True,
+            check=True,
+        ).stdout.split()
+        if files == ["description.yml"]:
+            return
+    listed = "\n".join(f"  {sha[:12]} {subject}" for sha, subject in commits)
+    raise SystemExit(
+        f"local HEAD has commits that are not on {branch}, and the release would push "
+        f"them:\n{listed}\nPush them through review, or drop them, then re-run."
+    )
+
+
 def main(argv: list[str]) -> None:
     if len(argv) == 5 and argv[1] == "key":
         pin = argv[2].strip()
@@ -139,6 +176,8 @@ def main(argv: list[str]) -> None:
             f.write(set_key(text, key, sha))
     elif len(argv) in (3, 4) and argv[1] == "release-sha":
         print(release_sha(argv[2].strip(), argv[3].strip() if len(argv) == 4 else None))
+    elif len(argv) == 4 and argv[1] == "unpushed":
+        check_unpushed(argv[2].strip(), argv[3].strip())
     else:
         raise SystemExit(__doc__)
 

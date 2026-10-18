@@ -488,6 +488,10 @@ release:
       echo "ERROR: could not extract version from Cargo.toml" >&2
       exit 1
     fi
+    # --ff-only also passes when local main is ahead, and the push below would
+    # publish those commits with the release. Only a re-run's own unpushed
+    # description.yml commit may be there.
+    python3 scripts/registry_target.py unpushed "$VERSION" origin/main
     # Take the release tag from origin when it is there (it may still be local
     # only). Just this tag: fetching all of them would stop on any unrelated
     # local tag that differs from origin's.
@@ -516,6 +520,7 @@ release:
     if git diff --cached --quiet; then
       echo "description.yml already pins v$VERSION; nothing to commit"
     else
+      # registry_target.py unpushed recognises a re-run by this subject.
       git commit -m "chore: update description.yml for v$VERSION release"
     fi
     # Outside the if: a re-run after a failed push still has that commit to push.
