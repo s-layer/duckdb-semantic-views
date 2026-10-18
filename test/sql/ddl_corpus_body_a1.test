@@ -395,12 +395,13 @@ DIMENSIONS (
     o.a AS $$x)y$$
 )
 
-# B-018: body_parser/mod.rs::unterminated_dollar_in_clause_reports_precise_error — an unterminated $$ in a clause is rejected (near miss of B-017) [syntax]
+# B-018: body_parser/mod.rs::unterminated_dollar_in_clause_reports_precise_error — an unterminated $$ in a clause is rejected (near miss of B-017) [text]
 statement error
 CREATE SEMANTIC VIEW dcb_dq_unterminated AS
 TABLES (o AS dcb_orders)
 DIMENSIONS (o.a AS $$unterminated);
 ----
+Unterminated dollar-quoted string in clause 'DIMENSIONS'
 
 # --- pre-AS metric clauses written after AS (TECH-DEBT #38) ---
 
@@ -425,13 +426,14 @@ METRICS (
     o.m NON ADDITIVE BY (d NULLS LAST) AS sum(o.v)
 )
 
-# B-020: body_parser/mod.rs::non_additive_by_after_as_is_rejected — NON ADDITIVE BY (...) after AS is rejected, not swallowed into the expression (near miss of B-019) [syntax]
+# B-020: body_parser/mod.rs::non_additive_by_after_as_is_rejected — NON ADDITIVE BY (...) after AS is rejected, not swallowed into the expression (near miss of B-019) [text]
 statement error
 CREATE SEMANTIC VIEW dcb_nab_after AS
 TABLES (o AS dcb_orders PRIMARY KEY (id))
 DIMENSIONS (o.d AS o.d)
 METRICS (o.m AS sum(o.v) NON ADDITIVE BY (d));
 ----
+'NON ADDITIVE BY (...)' must come BEFORE 'AS' in a metric entry
 
 # B-021: body_parser/mod.rs::using_after_as_is_rejected — control: USING (...) in its place, before AS
 statement ok
@@ -459,7 +461,7 @@ METRICS (
     o.m USING (r) AS sum(o.v)
 )
 
-# B-022: body_parser/mod.rs::using_after_as_is_rejected — USING (...) after AS is rejected (near miss of B-021) [syntax]
+# B-022: body_parser/mod.rs::using_after_as_is_rejected — USING (...) after AS is rejected (near miss of B-021) [text]
 statement error
 CREATE SEMANTIC VIEW dcb_using_after AS
 TABLES (o AS dcb_orders PRIMARY KEY (id), c AS dcb_customers PRIMARY KEY (id))
@@ -467,6 +469,7 @@ RELATIONSHIPS (r AS o(cid) REFERENCES c(id))
 DIMENSIONS (o.d AS o.d)
 METRICS (o.m AS sum(o.v) USING (r));
 ----
+'USING (...)' must come BEFORE 'AS' in a metric entry
 
 # B-023: body_parser/mod.rs::a_parenthesised_expression_does_not_hide_a_misplaced_clause — redundant outer parens do not hide a misplaced clause: `o.m AS (sum(o.v) USING (r))` (near miss of B-021) [text]
 statement error
@@ -678,12 +681,13 @@ METRICS (o.revenue AS sum(o.amount));
 ----
 LABELS is not valid on a table
 
-# B-039: body_parser/mod.rs::labels_is_rejected_at_the_view_level — LABELS after the view-level COMMENT is rejected (near miss of B-036) [syntax]
+# B-039: body_parser/mod.rs::labels_is_rejected_at_the_view_level — LABELS after the view-level COMMENT is rejected (near miss of B-036) [text]
 statement error
 CREATE SEMANTIC VIEW dcb_labels_view AS
 TABLES (o AS dcb_orders PRIMARY KEY (id))
 METRICS (o.revenue AS sum(o.amount)) COMMENT = 'v' LABELS = (FILTER);
 ----
+LABELS is not valid at the view level
 
 # --- clause bounds ---
 
@@ -803,13 +807,14 @@ TABLES (
 )
 
 # PRE-EXISTING (TECH-DEBT #94): GET_DDL of a view created with empty DIMENSIONS () METRICS () is not re-creatable (round-trip break)
-# B-050: body_parser/mod.rs::empty_dimensions_and_metrics_both_present_is_ok — replaying the GET_DDL text of B-049 verbatim is rejected [syntax]
+# B-050: body_parser/mod.rs::empty_dimensions_and_metrics_both_present_is_ok — replaying the GET_DDL text of B-049 verbatim is rejected [text]
 statement error
 CREATE OR REPLACE SEMANTIC VIEW dcb_empty_dm AS
 TABLES (
     o AS dcb_orders PRIMARY KEY (id)
 );
 ----
+At least one of 'DIMENSIONS' or 'METRICS' is required
 
 # the failed replay left the stored view untouched
 query T nosort

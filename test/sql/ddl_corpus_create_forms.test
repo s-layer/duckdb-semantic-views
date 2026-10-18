@@ -255,19 +255,22 @@ DROP SEMANTIC VIEW x2
 
 # --- the CREATE front door: near-miss prefixes, missing name, missing or malformed body ---
 
-# S-310: rewrite.rs::sv_parse_function_rust_returns_1_for_near_miss — `CRETAE SEMANTIC VIEW` (transposed) [syntax]
+# S-310: rewrite.rs::sv_parse_function_rust_returns_1_for_near_miss — `CRETAE SEMANTIC VIEW` (transposed) [text]
 statement error
 CRETAE SEMANTIC VIEW v AS TABLES (t AS dcs_orders PRIMARY KEY (id)) DIMENSIONS (t.r AS t.region) METRICS (t.m AS SUM(1))
 ----
+Did you mean 'CREATE SEMANTIC VIEW'?
 
-# S-311: rewrite.rs::test_near_miss_creat, test_near_miss_position_zero — `CREAT SEMANTIC VIEW` (dropped letter) [syntax]
+# S-311: rewrite.rs::test_near_miss_creat, test_near_miss_position_zero — `CREAT SEMANTIC VIEW` (dropped letter) [text]
 statement error
 CREAT SEMANTIC VIEW x (tables := [])
 ----
+Did you mean 'CREATE SEMANTIC VIEW'?
 
 statement error
 CREAT SEMANTIC VIEW x ()
 ----
+Did you mean 'CREATE SEMANTIC VIEW'?
 
 # S-312: rewrite.rs::test_too_short — `create semantic vie` [syntax]
 statement error
@@ -947,10 +950,11 @@ query TTTTT nosort
 DESCRIBE SEMANTIC VIEW y_empty;
 ----
 
-# S-359: rewrite.rs::test_yaml_rewrite_create_or_replace — a near miss of S-358 in AS-body form (TABLES only, no DIMENSIONS or METRICS) is rejected, as TECH-DEBT #94's decision wants for every empty view [syntax]
+# S-359: rewrite.rs::test_yaml_rewrite_create_or_replace — a near miss of S-358 in AS-body form (TABLES only, no DIMENSIONS or METRICS) is rejected, as TECH-DEBT #94's decision wants for every empty view [text]
 statement error
 CREATE SEMANTIC VIEW as_empty AS TABLES (o AS dcs_orders PRIMARY KEY (id))
 ----
+At least one of 'DIMENSIONS' or 'METRICS' is required
 
 # --- FROM YAML FILE ---
 
