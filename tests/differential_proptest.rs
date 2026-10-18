@@ -598,6 +598,25 @@ proptest! {
         let (_, _, expanded) =
             build_projected_execution_sql(&expanded, &names, &vec![u32::MAX; names.len()], &layout);
 
+        // The columns come out in the clause order the request gives, each
+        // under its output name. The value comparison below matches columns by
+        // name, so it checks which values each name carries, and this checks
+        // where each name is.
+        let expected_order: Vec<String> = case
+            .order
+            .iter()
+            .flat_map(|group| match group {
+                Group::Dimensions => outputs[..n_dims].to_vec(),
+                Group::Metrics => outputs[n_dims..].to_vec(),
+                Group::Facts => vec![],
+            })
+            .collect();
+        let mut laid_out = conn
+            .prepare(&format!("SELECT * FROM ({expanded}) q LIMIT 0"))
+            .expect("the laid-out expansion must prepare");
+        laid_out.execute([]).expect("the laid-out expansion must run");
+        prop_assert_eq!(laid_out.column_names(), expected_order);
+
         // Independent oracle: a plain GROUP BY over the same table, naming
         // each output column by the name the request gives it.
         let dim_items: Vec<String> = case

@@ -403,7 +403,7 @@ mod tests {
     fn tokens(sql: &str) -> Vec<Token> {
         let mut out = Vec::new();
         let mut start = None;
-        let mut push = |s: usize, e: usize, out: &mut Vec<Token>| {
+        let push = |s: usize, e: usize, out: &mut Vec<Token>| {
             out.push(Token {
                 offset: s,
                 len: e - s,

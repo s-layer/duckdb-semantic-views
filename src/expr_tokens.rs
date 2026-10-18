@@ -716,10 +716,9 @@ fn splice_references(
 const QUERY_OPENERS: &[&str] = &["select", "with", "from", "values", "table"];
 
 /// The byte spans `(start, end)` of the subqueries in `expr`, in order: each `(`
-/// whose first word opens a query ([`QUERY_OPENERS`]), through its matching
-/// `)`. A subquery nested in another lies inside the outer span and is not
-/// listed separately. Literal and quoted-identifier content is skipped, as in
-/// [`scan_references`].
+/// that opens a query ([`opens_query`]), through its matching `)`. A subquery
+/// nested in another lies inside the outer span and is not listed separately.
+/// Literal and quoted-identifier content is skipped, as in [`scan_references`].
 pub(crate) fn subquery_spans(expr: &str) -> Vec<(usize, usize)> {
     let bytes = expr.as_bytes();
     let mut out = Vec::new();
@@ -729,25 +728,64 @@ pub(crate) fn subquery_spans(expr: &str) -> Vec<(usize, usize)> {
             b'\'' => i = skip_single_quoted(bytes, i),
             b'"' => i = skip_quoted_part(bytes, i),
             b'$' => i = try_skip_dollar_quoted(bytes, i).unwrap_or(i + 1),
-            b'(' => {
-                let word_start = skip_whitespace(bytes, i + 1);
-                let mut word_end = word_start;
-                while word_end < bytes.len() && crate::util::is_ident_byte(bytes[word_end]) {
-                    word_end += 1;
-                }
-                let word = &expr[word_start..word_end];
-                if QUERY_OPENERS.iter().any(|w| w.eq_ignore_ascii_case(word)) {
-                    let end = skip_balanced(bytes, i, b'(', b')');
-                    out.push((i, end));
-                    i = end;
-                } else {
-                    i += 1;
-                }
+            b'(' if opens_query(bytes, i) => {
+                let end = skip_balanced(bytes, i, b'(', b')');
+                out.push((i, end));
+                i = end;
             }
             _ => i += 1,
         }
     }
     out
+}
+
+/// Whether the `(` at `open` starts a query: its first word is one of
+/// [`QUERY_OPENERS`], or it starts with a bracketed query that a set operation
+/// continues (`((SELECT …) UNION SELECT …)`). Comments are skipped, since
+/// `semantic_view()`'s `where_clause` arrives with them; only the construct
+/// strips them first.
+fn opens_query(bytes: &[u8], open: usize) -> bool {
+    let first = skip_whitespace_and_comments(bytes, open + 1);
+    if bytes.get(first) == Some(&b'(') {
+        if !opens_query(bytes, first) {
+            return false;
+        }
+        let after = skip_whitespace_and_comments(bytes, skip_balanced(bytes, first, b'(', b')'));
+        return SET_OPERATIONS
+            .iter()
+            .any(|w| match_words(bytes, after, &[w]).is_some());
+    }
+    let mut word_end = first;
+    while word_end < bytes.len() && crate::util::is_ident_byte(bytes[word_end]) {
+        word_end += 1;
+    }
+    let word = String::from_utf8_lossy(&bytes[first..word_end]);
+    QUERY_OPENERS.iter().any(|w| w.eq_ignore_ascii_case(&word))
+}
+
+/// The words that continue a query after a bracketed one.
+const SET_OPERATIONS: &[&str] = &["union", "intersect", "except"];
+
+/// Offset of the first byte at or after `pos` that is neither whitespace nor
+/// inside a `/* … */` or `-- …` comment (or `len`).
+fn skip_whitespace_and_comments(bytes: &[u8], pos: usize) -> usize {
+    let mut j = pos;
+    loop {
+        j = skip_whitespace(bytes, j);
+        if bytes[j..].starts_with(b"/*") {
+            j = bytes[j + 2..]
+                .windows(2)
+                .position(|w| w == b"*/")
+                .map_or(bytes.len(), |p| j + 2 + p + 2);
+        } else if bytes[j..].starts_with(b"--") {
+            j = bytes[j..]
+                .iter()
+                .position(|&b| b == b'\n')
+                .map_or(bytes.len(), |p| j + p + 1);
+        } else {
+            return j;
+        }
+    }
 }
 
 /// [`scan_references`] without the references inside a subquery

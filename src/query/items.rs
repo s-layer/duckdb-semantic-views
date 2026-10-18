@@ -92,7 +92,10 @@ fn split_alias(text: &str) -> Option<(&str, &str)> {
                     i += 1;
                 }
                 let word_end = word_end(bytes, i);
-                let followed_by_gap = bytes.get(word_end).is_some_and(u8::is_ascii_whitespace);
+                // A quote ends the keyword as a space does (`AS"R"`, `AS'R'`).
+                let followed_by_gap = bytes
+                    .get(word_end)
+                    .is_some_and(|b| b.is_ascii_whitespace() || matches!(b, b'"' | b'\''));
                 if text[i..word_end].eq_ignore_ascii_case("as") && followed_by_gap {
                     last_as = Some((start, word_end));
                 }
@@ -136,8 +139,15 @@ fn skip_quoted_identifier(bytes: &[u8], i: usize) -> usize {
     bytes.len()
 }
 
-/// An alias: one identifier, bare or double-quoted, returned unquoted.
+/// An alias: one identifier, bare or double-quoted, or a string as `DuckDB`
+/// allows (`AS 'x'`), returned unquoted.
 fn parse_alias(text: &str) -> Option<String> {
+    if text.starts_with('\'') {
+        return match crate::util::extract_single_quoted_prefix(text) {
+            Ok((name, consumed)) if consumed == text.len() && !name.is_empty() => Some(name),
+            _ => None,
+        };
+    }
     if !is_name(text) {
         return None;
     }
@@ -204,17 +214,24 @@ pub fn parse_column_order(entries: &[String]) -> Result<[Group; 3], String> {
 /// each expanded member, `None` where an item has none or the member came from
 /// a wildcard.
 ///
-/// `expanded` is the list `expand_wildcards` returned for these items' members,
-/// which passes an explicit member through as written; that is how an alias
-/// finds its member again.
+/// `expanded` is the list `expand_wildcards` returned for these items' members.
+/// It keeps one spelling of each member, whichever item named it first, and
+/// matches names as `DuckDB` does (case-insensitively, quoted or not), so an
+/// alias finds its member again by the same key, `ident::normalize_ident_part`.
 ///
 /// # Errors
 ///
 /// A message when one member is written twice with different aliases, since
 /// the expansion would keep only one of them.
 pub fn aliases_for(items: &[Item], expanded: &[String]) -> Result<Vec<Option<String>>, String> {
+    let key = |member: &str| crate::ident::normalize_ident_part(member);
+    let keys: Vec<String> = items.iter().map(|item| key(&item.member)).collect();
     for (i, a) in items.iter().enumerate() {
-        if let Some(b) = items[i + 1..].iter().find(|b| b.member == a.member) {
+        if let Some(b) = items[i + 1..]
+            .iter()
+            .zip(&keys[i + 1..])
+            .find_map(|(b, k)| (*k == keys[i]).then_some(b))
+        {
             if a.alias != b.alias {
                 return Err(format!(
                     "'{}' is requested twice with different names; request each member once",
@@ -226,10 +243,12 @@ pub fn aliases_for(items: &[Item], expanded: &[String]) -> Result<Vec<Option<Str
     Ok(expanded
         .iter()
         .map(|m| {
+            let m = key(m);
             items
                 .iter()
-                .find(|item| item.member == *m)
-                .and_then(|item| item.alias.clone())
+                .zip(&keys)
+                .find(|(_, k)| **k == m)
+                .and_then(|(item, _)| item.alias.clone())
         })
         .collect())
 }
@@ -379,6 +398,44 @@ mod tests {
         );
     }
 
+    /// `AS` needs no space before a quoted alias, as in DuckDB.
+    #[test]
+    fn as_directly_before_a_quoted_alias_names_the_column() {
+        assert_eq!(
+            parse_item("o.region AS\"R\"").unwrap(),
+            item("o.region", Some("R"))
+        );
+    }
+
+    #[test]
+    fn as_directly_before_a_string_alias_names_the_column() {
+        assert_eq!(
+            parse_item("o.region AS'R'").unwrap(),
+            item("o.region", Some("R"))
+        );
+    }
+
+    /// A string names a column too, as in DuckDB (`SELECT 1 AS 'x'`).
+    #[test]
+    fn a_string_alias_names_the_column() {
+        assert_eq!(
+            parse_item("o.region AS 'R'").unwrap(),
+            item("o.region", Some("R"))
+        );
+        assert_eq!(
+            parse_item("o.region AS 'it''s'").unwrap(),
+            item("o.region", Some("it's"))
+        );
+    }
+
+    #[test]
+    fn an_empty_or_unclosed_string_alias_is_refused() {
+        for raw in ["o.region AS ''", "o.region AS 'ab", "o.region AS 'ab''"] {
+            let err = parse_item(raw).unwrap_err();
+            assert!(err.contains("not one identifier"), "{raw}: {err}");
+        }
+    }
+
     /// A member whose name has a space can be written without quotes, as it
     /// could before items took an alias (`cr20260716c_reference_scanners.test`).
     #[test]
@@ -480,6 +537,48 @@ mod tests {
             aliases_for(&items, &[]).is_ok(),
             "the expansion reports this one"
         );
+    }
+
+    /// `expand_wildcards` keeps the spelling of whichever item named a member
+    /// first, matching names as DuckDB does (case-insensitively, quoted or
+    /// not), so an alias finds its member the same way.
+    #[test]
+    fn an_alias_finds_its_member_in_another_case_after_a_wildcard() {
+        let items = [item("c.*", None), item("REGION", Some("r"))];
+        assert_eq!(
+            aliases_for(&items, &["region".to_string()]).unwrap(),
+            vec![Some("r".to_string())]
+        );
+    }
+
+    #[test]
+    fn an_alias_finds_its_quoted_member_after_a_wildcard() {
+        let items = [item("c.*", None), item("\"region\"", Some("r"))];
+        assert_eq!(
+            aliases_for(&items, &["region".to_string()]).unwrap(),
+            vec![Some("r".to_string())]
+        );
+    }
+
+    #[test]
+    fn an_alias_finds_a_member_declared_in_another_case() {
+        let items = [item("c.*", None), item("region", Some("r"))];
+        assert_eq!(
+            aliases_for(&items, &["Region".to_string()]).unwrap(),
+            vec![Some("r".to_string())]
+        );
+    }
+
+    #[test]
+    fn a_member_written_twice_in_another_case_needs_one_name() {
+        let items = [item("region", Some("a")), item("REGION", Some("b"))];
+        assert!(aliases_for(&items, &[]).unwrap_err().contains("twice"));
+    }
+
+    #[test]
+    fn a_member_written_twice_quoted_and_bare_needs_one_name() {
+        let items = [item("region", Some("a")), item("\"region\"", Some("b"))];
+        assert!(aliases_for(&items, &[]).unwrap_err().contains("twice"));
     }
 
     fn names(v: &[&str]) -> Vec<String> {

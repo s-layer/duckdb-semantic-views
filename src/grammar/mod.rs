@@ -43,7 +43,9 @@ pub(crate) enum Shape {
     /// alternative of `Statement`, so it stands only at the top level.
     Statement,
     /// A table reference (a `TableRef`): an alternative of `InnerTableRef`, so
-    /// it stands wherever a table can, joins and `LATERAL` included.
+    /// it parses wherever a table can, joins and `LATERAL` included. Whether a
+    /// reference to an outer column then binds is up to what the production
+    /// lowers to: for `SEMANTIC_VIEW(...)` it does not yet (TECH-DEBT #107).
     TableRef,
 }
 

@@ -99,6 +99,21 @@ SELECT column_name FROM (DESCRIBE SELECT * FROM SEMANTIC_VIEW(svc_sv DIMENSIONS 
 R
 Total
 
+# As in DuckDB, a string can be the alias, and AS needs no space before a
+# quoted one.
+
+query T
+SELECT column_name FROM (DESCRIBE SELECT * FROM SEMANTIC_VIEW(svc_sv DIMENSIONS region AS 'R' METRICS revenue)) ORDER BY column_name;
+----
+R
+revenue
+
+query T
+SELECT column_name FROM (DESCRIBE SELECT * FROM SEMANTIC_VIEW(svc_sv DIMENSIONS region AS"R" METRICS revenue)) ORDER BY column_name;
+----
+R
+revenue
+
 # A table alias, with column aliases, names the construct as it names any table.
 
 query TT rowsort
@@ -166,6 +181,33 @@ SELECT * FROM SEMANTIC_VIEW(svc_sv DIMENSIONS c.* METRICS revenue);
 ----
 EU	150.00
 US	70.00
+
+# After a wildcard, an alias still finds its member when the item spells the
+# name in another case or quotes it: names match as DuckDB matches them.
+
+query TT rowsort
+SELECT r, revenue FROM SEMANTIC_VIEW(svc_sv DIMENSIONS c.*, REGION AS r METRICS revenue);
+----
+EU	150.00
+US	70.00
+
+query TT rowsort
+SELECT r, revenue FROM semantic_view('svc_sv', dimensions := ['c.*', '"region" AS r'], metrics := ['revenue']);
+----
+EU	150.00
+US	70.00
+
+statement error
+SELECT * FROM SEMANTIC_VIEW(svc_sv DIMENSIONS c.*, region AS a, REGION AS b METRICS revenue);
+----
+'region' is requested twice with different names
+
+# explain_semantic_view() refuses it too.
+
+statement error
+SELECT * FROM explain_semantic_view('svc_sv', dimensions := ['c.*', 'region AS a', 'REGION AS b'], metrics := ['revenue']);
+----
+'region' is requested twice with different names
 
 # A view over the construct stores the semantic_view() call, so it expands
 # against the semantic view's current definition each time it is queried.
