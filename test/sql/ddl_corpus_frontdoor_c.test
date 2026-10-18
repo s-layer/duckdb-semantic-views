@@ -268,8 +268,8 @@ dcf_sp	memory	dcf_b
 query TTTTT nosort
 SELECT database_name, schema_name, semantic_view_name, name, data_type FROM show_semantic_metrics_all() WHERE semantic_view_name = 'dcf_sp';
 ----
-memory	dcf_a	dcf_sp	total	BIGINT
-memory	dcf_b	dcf_sp	total	BIGINT
+memory	dcf_a	dcf_sp	total	HUGEINT
+memory	dcf_b	dcf_sp	total	HUGEINT
 
 # F-087: search_path.rs::an_unterminated_call_is_left_alone — an unterminated read call is DuckDB's to reject (near miss of F-067) [syntax]
 statement error
@@ -300,7 +300,7 @@ SHOW COLUMNS IN SEMANTIC VIEW dcf_sp;
 ----
 memory	dcf_b	dcf_sp	region	VARCHAR	DIMENSION	o.region	(empty)
 memory	dcf_b	dcf_sp	amt_b	INTEGER	FACT	o.amount	(empty)
-memory	dcf_b	dcf_sp	total	BIGINT	METRIC	SUM(o.amount) * 100	(empty)
+memory	dcf_b	dcf_sp	total	HUGEINT	METRIC	SUM(o.amount) * 100	(empty)
 
 query TTTTTTTT nosort
 SELECT * FROM show_semantic_dimensions('dcf_sp');
@@ -310,7 +310,7 @@ memory	dcf_b	dcf_sp	dcf_orders	region	VARCHAR	[]	(empty)
 query TTTTTTTT nosort
 SHOW SEMANTIC METRICS IN dcf_sp;
 ----
-memory	dcf_b	dcf_sp	dcf_orders	total	BIGINT	[]	(empty)
+memory	dcf_b	dcf_sp	dcf_orders	total	HUGEINT	[]	(empty)
 
 query TTTTTTTT nosort
 SHOW SEMANTIC FACTS IN dcf_sp;
@@ -449,7 +449,7 @@ query TTTTTTTT nosort
 SHOW SEMANTIC METRICS IN dcf_sw;
 ----
 memory	main	dcf_sw	dcf_orders	cnt	BIGINT	[]	(empty)
-memory	main	dcf_sw	dcf_orders	total	BIGINT	[]	(empty)
+memory	main	dcf_sw	dcf_orders	total	HUGEINT	[]	(empty)
 
 query TTTTTTTT nosort
 SHOW SEMANTIC METRICS IN dcf_sw LIMIT 0;

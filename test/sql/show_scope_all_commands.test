@@ -43,7 +43,7 @@ memory	main	ssa_view	ssa_sales	region	VARCHAR	[]	(empty)
 query TTTTTTTT rowsort
 SHOW SEMANTIC METRICS IN SCHEMA main
 ----
-memory	main	ssa_view	ssa_sales	total	BIGINT	[]	(empty)
+memory	main	ssa_view	ssa_sales	total	HUGEINT	[]	(empty)
 
 query TTTTTTTT rowsort
 SHOW SEMANTIC FACTS IN SCHEMA main

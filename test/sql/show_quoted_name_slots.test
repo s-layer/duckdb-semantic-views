@@ -52,7 +52,7 @@ memory	main	sns weird view	sns_sales	region	VARCHAR	[]	(empty)
 query TTTTTTTT rowsort
 SHOW SEMANTIC METRICS IN "sns weird view"
 ----
-memory	main	sns weird view	sns_sales	"total amount"	BIGINT	[]	(empty)
+memory	main	sns weird view	sns_sales	"total amount"	HUGEINT	[]	(empty)
 
 # ============================================================
 # Test 2: `FOR METRIC` with a quoted, whitespace-bearing name.

@@ -256,7 +256,7 @@ DIMENSION	region	dcf_orders	EXPRESSION	region
 DIMENSION	region	dcf_orders	DATA_TYPE	VARCHAR
 METRIC	revenue	dcf_orders	TABLE	dcf_orders
 METRIC	revenue	dcf_orders	EXPRESSION	SUM(amount)
-METRIC	revenue	dcf_orders	DATA_TYPE	BIGINT
+METRIC	revenue	dcf_orders	DATA_TYPE	HUGEINT
 METRIC	revenue	dcf_orders	ACCESS_MODIFIER	PUBLIC
 
 statement ok
@@ -411,7 +411,7 @@ DIMENSION	region	dcf_orders	EXPRESSION	region
 DIMENSION	region	dcf_orders	DATA_TYPE	VARCHAR
 METRIC	revenue	dcf_orders	TABLE	dcf_orders
 METRIC	revenue	dcf_orders	EXPRESSION	SUM(amount)
-METRIC	revenue	dcf_orders	DATA_TYPE	BIGINT
+METRIC	revenue	dcf_orders	DATA_TYPE	HUGEINT
 METRIC	revenue	dcf_orders	ACCESS_MODIFIER	PUBLIC
 
 query TTTTTT nosort

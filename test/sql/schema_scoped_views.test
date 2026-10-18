@@ -89,7 +89,7 @@ SELECT total FROM semantic_view('analytics.sales', metrics := ['total'])
 query TTTTTTTT rowsort
 SHOW SEMANTIC METRICS IN SCHEMA analytics
 ----
-memory	analytics	sales	orders	total	BIGINT	[]	(empty)
+memory	analytics	sales	orders	total	HUGEINT	[]	(empty)
 
 # ============================================================
 # 2. A qualified reference reads the view it names.

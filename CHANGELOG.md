@@ -108,6 +108,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   inside a transaction are now counted by a semantic-view query in that transaction.
   Before, the query ran on a connection of its own and saw only committed data. A
   semantic view you create inside a transaction still can't be queried until you commit.
+- **A prepared `semantic_view()` query follows a later `SET search_path`.** `EXECUTE`
+  now looks the view up on the search path in effect when it runs, as DuckDB does for
+  its own tables. Before, it kept the view found when the statement was prepared.
 
 - **A subquery in `where_clause` keeps its own names.** A name inside a subquery, such as
   `amt` in `amt IN (SELECT amt FROM targets)`, was replaced with the member of that name, so
