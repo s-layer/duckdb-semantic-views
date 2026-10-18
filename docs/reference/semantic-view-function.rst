@@ -376,6 +376,8 @@ DuckDB 2.0's per-query time limit, ``SET max_execution_time`` (in milliseconds),
 
 The limit also covers the commands that report member data types, because they run a typing query against the view's tables: :ref:`DESCRIBE SEMANTIC VIEW <ref-describe-semantic-view>`, :ref:`SHOW COLUMNS IN SEMANTIC VIEW <ref-show-columns>`, :ref:`SHOW SEMANTIC DIMENSIONS <ref-show-semantic-dimensions>`, :ref:`SHOW SEMANTIC METRICS <ref-show-semantic-metrics>`, :ref:`SHOW SEMANTIC FACTS <ref-show-semantic-facts>`, and :ref:`SHOW SEMANTIC DIMENSIONS FOR METRIC <ref-show-dims-for-metric>`. ``RESET max_execution_time`` removes the limit. See :ref:`ref-err-time-limit`.
 
+As with DuckDB's own queries, the limit counts from when the query starts running. Time DuckDB spends planning a source that is slow to bind, such as a ``read_parquet`` over a long list of files, is not limited.
+
 
 .. _ref-sv-name-resolution:
 
@@ -387,6 +389,11 @@ Dimension, metric, and fact names are resolved case-insensitively, following Duc
 Wildcard patterns (``alias.*``) are expanded before name resolution. The expansion respects ``PRIVATE`` access modifiers -- private items are excluded.
 
 If a name does not match any defined dimension, metric, or fact, the error message lists available names and suggests the closest match (if one exists within 3 edits).
+
+**Tables in the definition.** A table the semantic view names without a schema, in ``TABLES`` or in a subquery inside a dimension, fact or metric expression, is the table of that name in the database and schema the view was created in. A CTE of the same name in your query, or a table of that name in your current schema, is not read in its place. A table named in a ``where_clause`` subquery is part of your query and resolves there, so it can read your CTEs.
+
+.. versionchanged:: 0.16.0
+   A table named in a member expression's subquery no longer resolves to your query's CTE of that name.
 
 
 .. _ref-sv-examples:

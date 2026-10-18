@@ -145,6 +145,31 @@ pub fn build_projected_sql(
     )
 }
 
+/// Frame `semantic_view()`'s bind payload: the database and schema stamped at
+/// CREATE, then the SQL to plan.
+///
+/// ```text
+/// u32 db_len     | db_len UTF-8 bytes      (empty: none stamped)
+/// u32 schema_len | schema_len UTF-8 bytes  (empty: none stamped)
+/// the SQL, UTF-8, to the end of the buffer
+/// ```
+///
+/// The shim (`sv_semantic_view_bind_replace`) pins a table that a member
+/// expression names by a bare name to the catalog entry it resolves to,
+/// looking in this database and schema first, as the `TABLES` entries are
+/// qualified with them (`expand::body_qualifier`).
+#[must_use]
+pub fn frame_bind_payload(database: Option<&str>, schema: Option<&str>, sql: &str) -> Vec<u8> {
+    let mut out = Vec::with_capacity(8 + sql.len());
+    for part in [database.unwrap_or(""), schema.unwrap_or("")] {
+        let len = u32::try_from(part.len()).expect("an identifier is shorter than 4 GiB");
+        out.extend_from_slice(&len.to_le_bytes());
+        out.extend_from_slice(part.as_bytes());
+    }
+    out.extend_from_slice(sql.as_bytes());
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -245,6 +270,27 @@ mod tests {
             );
             assert!(parse_varchar_list(std::ptr::null(), 8).is_err());
         }
+    }
+
+    // -- frame_bind_payload ----------------------------------------------
+
+    #[test]
+    fn the_bind_payload_carries_the_stamp_before_the_sql() {
+        let framed = frame_bind_payload(Some("db"), Some("main"), "SELECT 1");
+        let mut expected = vec![2, 0, 0, 0];
+        expected.extend_from_slice(b"db");
+        expected.extend_from_slice(&[4, 0, 0, 0]);
+        expected.extend_from_slice(b"main");
+        expected.extend_from_slice(b"SELECT 1");
+        assert_eq!(framed, expected);
+    }
+
+    #[test]
+    fn an_absent_stamp_is_framed_as_empty() {
+        let framed = frame_bind_payload(None, None, "SELECT 1");
+        let mut expected = vec![0, 0, 0, 0, 0, 0, 0, 0];
+        expected.extend_from_slice(b"SELECT 1");
+        assert_eq!(framed, expected);
     }
 
     // -- build_projected_sql ---------------------------------------------

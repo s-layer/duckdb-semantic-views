@@ -195,9 +195,10 @@ SELECT * FROM semantic_view('cq_sv', metrics := ['revenue'], where_clause := 'tr
 ----
 where_clause is one predicate, so it cannot contain ';'
 
-# A table named in a member expression's subquery resolves in the caller's
-# query, so a CTE of that name is read in its place (TECH-DEBT #108). Pinned so
-# the fix shows up here: it should read cq_tiers' 1.
+# A table named in a member expression's subquery is the table it named at
+# CREATE: the caller's CTE of that name, or a table of that name in the
+# caller's current schema, is not read in its place. A CTE the member
+# expression declares itself is still its own.
 
 statement ok
 CREATE TABLE cq_tiers (t INTEGER);
@@ -208,19 +209,116 @@ INSERT INTO cq_tiers VALUES (1);
 statement ok
 CREATE SEMANTIC VIEW cq_tiered AS
   TABLES (o AS cq_orders PRIMARY KEY (id))
-  DIMENSIONS (o.tier AS (SELECT max(t) FROM cq_tiers))
+  DIMENSIONS (
+    o.tier AS (SELECT max(t) FROM cq_tiers),
+    o.own_tier AS (WITH cq_tiers AS (SELECT 5 AS t) SELECT max(t) FROM cq_tiers)
+  )
   METRICS (o.revenue AS sum(o.amount));
 
 query II
 WITH cq_tiers AS (SELECT 99 AS t) SELECT * FROM semantic_view('cq_tiered', dimensions := ['tier'], metrics := ['revenue']);
 ----
-99	220
+1	220
+
+# The call on a join's right side, where the expansion is bound twice.
+
+query II
+WITH cq_tiers AS (SELECT 99 AS t)
+SELECT s.* FROM (SELECT 1) AS one
+CROSS JOIN semantic_view('cq_tiered', dimensions := ['tier'], metrics := ['revenue']) AS s;
+----
+1	220
+
+query II
+WITH cq_tiers AS (SELECT 99 AS t) SELECT * FROM semantic_view('cq_tiered', dimensions := ['own_tier'], metrics := ['revenue']);
+----
+5	220
+
+statement ok
+CREATE SCHEMA cq_other;
+
+statement ok
+CREATE TABLE cq_other.cq_tiers AS SELECT 7 AS t;
+
+statement ok
+SET schema = 'cq_other';
+
+query II
+SELECT * FROM semantic_view('main.cq_tiered', dimensions := ['tier'], metrics := ['revenue']);
+----
+1	220
+
+statement ok
+SET schema = 'main';
+
+statement ok
+DROP SCHEMA cq_other CASCADE;
+
+# where_clause is the caller's own text, so its subquery reads the caller's CTE.
+
+query II
+WITH cq_pick AS (SELECT 1 AS t)
+SELECT * FROM semantic_view('cq_tiered', dimensions := ['tier'], metrics := ['revenue'],
+                            where_clause := 'tier IN (SELECT t FROM cq_pick)');
+----
+1	220
 
 statement ok
 DROP SEMANTIC VIEW cq_tiered;
 
 statement ok
 DROP TABLE cq_tiers;
+
+# A temporary table the definition names is read in the session that has it,
+# still ahead of a caller's CTE of that name.
+
+statement ok
+CREATE TEMP TABLE cq_tmp_tiers AS SELECT 3 AS t;
+
+statement ok
+CREATE SEMANTIC VIEW cq_tmp_tiered AS
+  TABLES (o AS cq_orders PRIMARY KEY (id))
+  DIMENSIONS (o.tier AS (SELECT max(t) FROM cq_tmp_tiers))
+  METRICS (o.revenue AS sum(o.amount));
+
+query II
+WITH cq_tmp_tiers AS (SELECT 99 AS t) SELECT * FROM semantic_view('cq_tmp_tiered', dimensions := ['tier'], metrics := ['revenue']);
+----
+3	220
+
+statement ok
+DROP SEMANTIC VIEW cq_tmp_tiered;
+
+statement ok
+DROP TABLE cq_tmp_tiers;
+
+# A table the definition names that no longer exists is an error, even where
+# the caller's query has a CTE of that name.
+
+statement ok
+CREATE TABLE cq_gone (t INTEGER);
+
+statement ok
+CREATE SEMANTIC VIEW cq_gone_sv AS
+  TABLES (o AS cq_orders PRIMARY KEY (id))
+  DIMENSIONS (o.tier AS (SELECT max(t) FROM cq_gone))
+  METRICS (o.revenue AS sum(o.amount));
+
+statement ok
+DROP TABLE cq_gone;
+
+statement error
+WITH cq_gone AS (SELECT 99 AS t) SELECT * FROM semantic_view('cq_gone_sv', dimensions := ['tier'], metrics := ['revenue']);
+----
+names table "cq_gone", which does not exist
+
+statement error
+SELECT * FROM semantic_view('cq_gone_sv', dimensions := ['tier'], metrics := ['revenue']);
+----
+Table with name cq_gone does not exist
+
+statement ok
+DROP SEMANTIC VIEW cq_gone_sv;
 
 # A prepared statement's parameter inside where_clause is refused: the
 # expansion is bound in the caller's statement, so it would take one of the

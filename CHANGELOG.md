@@ -37,7 +37,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **`SET max_execution_time` stops semantic-view queries.** DuckDB 2.0's per-query time
   limit now applies to `semantic_view()` and to the `SHOW` / `DESCRIBE` commands that look
   up member types, which fail with DuckDB's own `Query exceeded maximum execution time`
-  like any other query instead of running past the limit.
+  like any other query instead of running past the limit. As with DuckDB's own queries,
+  the limit counts from when the query starts running, so time DuckDB spends planning a
+  source that is slow to bind, such as a long list of files, is not limited.
 
 - **Semantic-view DDL can share a query string with other statements.** One `execute()`
   call can now hold, say, `CREATE TABLE …; INSERT …; CREATE SEMANTIC VIEW …`: DuckDB
@@ -128,10 +130,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `WHERE` clause takes uncorrelated subqueries.
 
 ### Known limitations
-
-- **A table named inside a member's subquery can resolve to the query's CTE.** When a
-  dimension or fact expression holds a subquery over a table, and the query that calls
-  `semantic_view()` has a CTE of the same name, the subquery reads the CTE.
 
 - **A semantic view over a temporary table can't be queried.** The query fails with
   `Table with name ... does not exist`, because a table named without a schema is looked

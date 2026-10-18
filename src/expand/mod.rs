@@ -75,7 +75,9 @@ mod tests_semi_additive_dependency;
 
 // Public API (the pre-split expand.rs surface, plus the boxed fan-trap detail
 // structs re-exported for R-9).
-pub use resolution::{quote_ident, quote_ident_if_needed, quote_stored_ident, quote_table_ref};
+pub use resolution::{
+    body_qualifier, quote_ident, quote_ident_if_needed, quote_stored_ident, quote_table_ref,
+};
 pub use sql_gen::{expand, output_column_names};
 pub use types::{
     DimensionName, ExpandError, FactName, FanTrapError, MetricFanTrapError, MetricName,

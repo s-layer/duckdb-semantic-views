@@ -113,6 +113,25 @@ pub fn quote_table_ref(table: &str) -> String {
     }
 }
 
+/// The database and schema a bare table name in the view's definition
+/// resolves in: the ones stamped at CREATE.
+///
+/// The schema is the one the BODY resolves in, not the one the view lives in.
+/// Those differ when the CREATE name carried a qualifier — a view created as
+/// `analytics.sales` from `main` still means `main.orders` by a bare `orders`,
+/// following `DuckDB`'s rule that a view body resolves in the creating session's
+/// context. Rows written before views were schema-scoped have no
+/// `resolution_schema_name`; falling back to `schema_name` is exactly what they
+/// always did.
+#[must_use]
+pub fn body_qualifier(def: &SemanticViewDefinition) -> (Option<&str>, Option<&str>) {
+    let schema = def
+        .resolution_schema_name
+        .as_deref()
+        .or(def.schema_name.as_deref());
+    (def.database_name.as_deref(), schema)
+}
+
 /// Qualify a table name with the definition's catalog/schema, then quote it.
 ///
 /// If the table name is already dot-qualified (more than one structural part),
@@ -144,21 +163,11 @@ pub fn qualify_and_quote_table_ref(table: &str, def: &SemanticViewDefinition) ->
     }
 
     let mut parts = Vec::new();
-    if let Some(db) = &def.database_name {
+    let (db, schema) = body_qualifier(def);
+    if let Some(db) = db {
         parts.push(quote_ident(db));
     }
-    // The schema the BODY resolves in, not the one the view lives in. Those
-    // differ when the CREATE name carried a qualifier — a view created as
-    // `analytics.sales` from `main` still means `main.orders` by a bare
-    // `orders`, following DuckDB's rule that a view body resolves in the
-    // creating session's context. Rows written before views were schema-scoped
-    // have no `resolution_schema_name`; falling back to `schema_name` is
-    // exactly what they always did.
-    let body_schema = def
-        .resolution_schema_name
-        .as_ref()
-        .or(def.schema_name.as_ref());
-    if let Some(schema) = body_schema {
+    if let Some(schema) = schema {
         parts.push(quote_ident(schema));
     }
     // `table` here is logically single-part. If it parses cleanly we emit

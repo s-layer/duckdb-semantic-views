@@ -8,7 +8,7 @@ use crate::util::suggest_closest;
 
 use super::error::QueryError;
 use super::items::{aliases_for, Item, OutputColumns, RequestItems};
-use super::wire::{build_projected_sql, parse_varchar_list};
+use super::wire::{build_projected_sql, frame_bind_payload, parse_varchar_list};
 
 // The raw C-API helpers moved to the always-compiled `raw_sql` module so the
 // read-side member-type probe (TECH-DEBT #51) can share them; re-exported here
@@ -261,5 +261,10 @@ unsafe fn semantic_view_bind_body(
         items.order,
     )
     .map_err(invalid)?;
-    Ok(build_projected_sql(&expanded_sql, &column_names, &output).into_bytes())
+    let (database, schema) = crate::expand::body_qualifier(&def);
+    Ok(frame_bind_payload(
+        database,
+        schema,
+        &build_projected_sql(&expanded_sql, &column_names, &output),
+    ))
 }
