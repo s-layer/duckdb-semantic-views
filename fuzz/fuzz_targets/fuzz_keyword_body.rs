@@ -17,9 +17,12 @@ fuzz_target!(|data: &[u8]| {
     // (renderability is part of the parse contract — get_ddl runs on
     // anything CREATE accepted).
     if let Ok(kb) = parse_keyword_body(body, 0) {
-        if kb.tables.is_empty() {
-            return; // render_create_ddl rejects the legacy empty-tables shape
-        }
+        // CREATE refuses a view with no tables (TECH-DEBT #94), so the
+        // parser never returns one.
+        assert!(
+            !kb.tables.is_empty(),
+            "parse_keyword_body accepted TABLES ()"
+        );
         let def = SemanticViewDefinition {
             tables: kb.tables,
             joins: kb.relationships,

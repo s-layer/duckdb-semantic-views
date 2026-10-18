@@ -26,18 +26,15 @@ fuzz_target!(|data: &[u8]| {
     if detected == PARSE_DETECTED {
         if let Ok(Some(RewriteAction::Create { name, def, .. })) = plan_rewrite(query) {
             // Render oracle: a definition the CREATE front door accepted must
-            // reconstruct to DDL. `render_create_ddl`'s ONLY error is the
-            // documented legacy case of an empty `tables` list (reachable via
-            // `FROM YAML $$...$$`), so any OTHER failure is a real render bug.
-            // `name` is a parsed reference now that semantic views are
-            // schema-scoped; the renderer takes the bare name slot, matching
-            // the unqualified `CREATE SEMANTIC VIEW <name>` it emits.
-            match render_create_ddl(&name.name, &def) {
-                Ok(_) => {}
-                Err(_) => assert!(
-                    def.tables.is_empty(),
-                    "render_create_ddl failed on a non-legacy definition plan_rewrite accepted"
-                ),
+            // reconstruct to DDL. `render_create_ddl`'s only error is the
+            // legacy case of an empty `tables` list, which CREATE now refuses
+            // on both the AS body and FROM YAML (TECH-DEBT #94), so any
+            // failure is a bug. `name` is a parsed reference now that
+            // semantic views are schema-scoped; the renderer takes the bare
+            // name slot, matching the unqualified `CREATE SEMANTIC VIEW <name>`
+            // it emits.
+            if let Err(e) = render_create_ddl(&name.name, &def) {
+                panic!("render_create_ddl failed on a definition plan_rewrite accepted: {e}");
             }
         }
     }

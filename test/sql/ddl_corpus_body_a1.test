@@ -854,6 +854,20 @@ SELECT count(*) FROM list_semantic_views() WHERE name IN ('dcb_empty_m', 'dcb_ze
 ----
 0
 
+# A view stored before CREATE refused empty views can still have no tables.
+# GET_DDL refuses to render it (render_ddl.rs's legacy-format error); the row
+# is written directly, as CREATE no longer makes one.
+statement ok
+INSERT INTO semantic_layer._definitions (schema_name, name, definition) VALUES ('main', 'dcb_legacy_empty', '{"tables":[],"dimensions":[],"metrics":[]}');
+
+statement error
+SELECT GET_DDL('SEMANTIC_VIEW', 'dcb_legacy_empty');
+----
+Legacy definition format; please re-create using CREATE OR REPLACE SEMANTIC VIEW
+
+statement ok
+DELETE FROM semantic_layer._definitions WHERE name = 'dcb_legacy_empty';
+
 # B-057: body_parser/mod.rs::empty_materializations_clause_parses — MATERIALIZATIONS () parses to zero materializations
 statement ok
 CREATE SEMANTIC VIEW dcb_empty_mat AS TABLES (o AS dcb_orders PRIMARY KEY (id)) DIMENSIONS (o.a AS o.a) MATERIALIZATIONS ();

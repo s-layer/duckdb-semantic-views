@@ -27,14 +27,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   call can now hold, say, `CREATE TABLE …; INSERT …; CREATE SEMANTIC VIEW …`: DuckDB
   splits the string and runs each statement in order. Before, any `CREATE`, `DROP` or
   `ALTER SEMANTIC VIEW` in such a string was refused with "semantic-view DDL must be sent
-  as its own statement, one statement per call".
+  as its own statement, one statement per call". The one exception is a `DROP`, `ALTER`,
+  `DESCRIBE` or `SHOW` that names a view with an unquoted reserved word (`select`), which
+  still has to be sent on its own; quote the name to lift that.
 
 - **Semantic-view DDL runs with `allow_parser_override_extension` set to `DEFAULT`.**
   Before, every `CREATE`, `DROP`, `ALTER`, `SHOW` and `DESCRIBE` failed there with
   "parser_override is not active". Two differences remain with that setting: in the
   Python client a syntax error in the DDL shows no `LINE 1: … ^` caret, and `GET_DDL`
   shows a tab inside an expression as a space and a run of blank lines as one line
-  break. The query a view expands to is the same.
+  break. The query a view expands to is the same. A `DROP`, `ALTER`, `DESCRIBE` or `SHOW`
+  that names a view with an unquoted reserved word (`select`) still fails there with
+  "parser_override is not active"; quote the name to run it.
 
 ### Changed
 
