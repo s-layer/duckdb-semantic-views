@@ -20,11 +20,18 @@ Usage:
         on stderr, when the registry does not build <our-pin>.
     registry_target.py set <description.yml> <key> <sha>
         Point `repo.<key>` at <sha>, adding the key after `ref:` if it is missing.
-    registry_target.py release-sha <version>
+    registry_target.py release-sha <version> [<branch>]
         Print the commit the `v<version>` tag points at, run inside our checkout.
         Exit 1 when there is no such tag. The registry must build the tagged
         release, not whatever `main` has moved on to since (v0.14.0 was first
-        published pinned to a later `main`).
+        published pinned to a later `main`). With <branch> (`just release` passes
+        `origin/main`), also exit 1 unless <branch> contains that commit, so a tag
+        made on a feature branch or an unpushed commit is never published.
+    registry_target.py unpushed <version> <branch>
+        Exit 1 when HEAD has commits <branch> does not, listing them, since the
+        release pushes HEAD to <branch> and would publish them with it. The one
+        exception is a re-run after that push failed: a single commit with the
+        release's own subject that changes only description.yml.
 """
 
 from __future__ import annotations
@@ -93,7 +100,7 @@ def set_key(text: str, key: str, sha: str) -> str:
     return "".join(lines)
 
 
-def release_sha(version: str) -> str:
+def release_sha(version: str, branch: str | None = None) -> str:
     tag = f"v{version}"
     out = subprocess.run(
         ["git", "rev-parse", "--verify", "--quiet", f"refs/tags/{tag}^{{commit}}"],
@@ -102,7 +109,55 @@ def release_sha(version: str) -> str:
     )
     if out.returncode != 0:
         raise SystemExit(f"no {tag} tag in this checkout: tag the release (or fetch tags) first")
-    return out.stdout.strip()
+    sha = out.stdout.strip()
+    if branch is not None:
+        on_branch = subprocess.run(
+            ["git", "merge-base", "--is-ancestor", sha, branch], capture_output=True, text=True
+        )
+        # 1 is "not an ancestor"; anything else means git could not check.
+        if on_branch.returncode == 1:
+            raise SystemExit(
+                f"{tag} ({sha[:12]}) is not on {branch}: merge the release to {branch} "
+                f"and tag it there"
+            )
+        if on_branch.returncode != 0:
+            raise SystemExit(
+                f"could not check {tag} against {branch!r} (is it a ref in this checkout?): "
+                f"{on_branch.stderr.strip()}"
+            )
+    return sha
+
+
+def release_commit_subject(version: str) -> str:
+    return f"chore: update description.yml for v{version} release"
+
+
+def check_unpushed(version: str, branch: str) -> None:
+    out = subprocess.run(
+        ["git", "log", "--format=%H %s", f"{branch}..HEAD"], capture_output=True, text=True
+    )
+    if out.returncode != 0:
+        raise SystemExit(
+            f"could not list commits not on {branch!r} (is it a ref in this checkout?): "
+            f"{out.stderr.strip()}"
+        )
+    commits = [line.split(" ", 1) for line in out.stdout.splitlines()]
+    if not commits:
+        return
+    if len(commits) == 1 and commits[0][1] == release_commit_subject(version):
+        files = subprocess.run(
+            ["git", "diff-tree", "--no-commit-id", "--name-only", "-r", commits[0][0]],
+            capture_output=True,
+            text=True,
+            check=True,
+        ).stdout.split()
+        if files == ["description.yml"]:
+            return
+    listed = "\n".join(f"  {sha[:12]} {subject}" for sha, subject in commits)
+    raise SystemExit(
+        f"local HEAD has commits that are not on {branch}, and the release would push "
+        f"them:\n{listed}\nPush them through review, or drop them, then re-run."
+    )
 
 
 def main(argv: list[str]) -> None:
@@ -119,8 +174,10 @@ def main(argv: list[str]) -> None:
             text = f.read()
         with open(path, "w") as f:
             f.write(set_key(text, key, sha))
-    elif len(argv) == 3 and argv[1] == "release-sha":
-        print(release_sha(argv[2].strip()))
+    elif len(argv) in (3, 4) and argv[1] == "release-sha":
+        print(release_sha(argv[2].strip(), argv[3].strip() if len(argv) == 4 else None))
+    elif len(argv) == 4 and argv[1] == "unpushed":
+        check_unpushed(argv[2].strip(), argv[3].strip())
     else:
         raise SystemExit(__doc__)
 
