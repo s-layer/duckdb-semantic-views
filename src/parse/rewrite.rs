@@ -29,6 +29,29 @@ use super::show_clauses::ScopeName;
 #[cfg(test)]
 use crate::ffi_util::write_error_to_buffer;
 
+/// The DROP / ALTER / DESCRIBE messages the grammar route (`crate::grammar`)
+/// reports too, kept in one place so the two routes cannot drift apart.
+pub(crate) mod messages {
+    pub(crate) const INVALID_VIEW_NAME: &str = "Invalid view name";
+    pub(crate) const INVALID_RENAME_TARGET: &str = "Invalid new view name in RENAME TO";
+    pub(crate) const EXPECTED_COMMENT_STRING: &str =
+        "Expected single-quoted string after SET COMMENT =";
+    pub(crate) const UNSUPPORTED_ALTER: &str =
+        "Unsupported ALTER operation. Supported: RENAME TO, SET COMMENT, UNSET COMMENT.";
+
+    pub(crate) fn unexpected_after_view_name(rest: &str) -> String {
+        format!("Unexpected tokens after view name: '{rest}'")
+    }
+
+    pub(crate) fn unexpected_after_rename_target(rest: &str) -> String {
+        format!("Unexpected tokens after new view name in RENAME TO: '{rest}'")
+    }
+}
+use messages::{
+    unexpected_after_rename_target, unexpected_after_view_name, EXPECTED_COMMENT_STRING,
+    INVALID_RENAME_TARGET, INVALID_VIEW_NAME, UNSUPPORTED_ALTER,
+};
+
 // ---------------------------------------------------------------------------
 // Parsing helpers
 // ---------------------------------------------------------------------------
@@ -78,7 +101,7 @@ fn extract_raw_name_only(
     let rest = after_prefix[name_end..].trim();
     if !rest.is_empty() {
         return Err(ParseError {
-            message: format!("Unexpected tokens after view name: '{rest}'"),
+            message: unexpected_after_view_name(rest),
             position: Some(base + byte_offset_within(trimmed, rest)),
         });
     }
@@ -93,7 +116,7 @@ fn extract_raw_name_only(
 fn extract_name_only(trimmed: &str, prefix_len: usize, base: usize) -> Result<ViewRef, ParseError> {
     let raw = extract_raw_name_only(trimmed, prefix_len, base)?;
     parse_view_ref(&raw).map_err(|e| ParseError {
-        message: format!("Invalid view name: {e}"),
+        message: format!("{INVALID_VIEW_NAME}: {e}"),
         // Point the caret at the name token itself, not the end of the prefix:
         // with whitespace after the prefix the two differ. Matches the other
         // helpers in this PR (extract_raw_name_only, rewrite_alter) which all
@@ -196,7 +219,7 @@ fn rewrite_alter(
     }
     let raw_view_name = &after_prefix[..name_end];
     let view_name = parse_view_ref(raw_view_name).map_err(|e| ParseError {
-        message: format!("Invalid view name: {e}"),
+        message: format!("{INVALID_VIEW_NAME}: {e}"),
         position: Some(abs(after_prefix)),
     })?;
     let rest = after_prefix[name_end..].trim();
@@ -228,14 +251,12 @@ fn rewrite_alter(
         let trailing = after_op[new_name_end..].trim();
         if !trailing.is_empty() {
             return Err(ParseError {
-                message: format!(
-                    "Unexpected tokens after new view name in RENAME TO: '{trailing}'"
-                ),
+                message: unexpected_after_rename_target(trailing),
                 position: Some(abs(trailing)),
             });
         }
         let new_name = parse_view_ref(new_name_raw).map_err(|e| ParseError {
-            message: format!("Invalid new view name in RENAME TO: {e}"),
+            message: format!("{INVALID_RENAME_TARGET}: {e}"),
             position: Some(abs(after_op)),
         })?;
         Ok(RewriteAction::AlterRename {
@@ -254,7 +275,7 @@ fn rewrite_alter(
         let after_eq = after_set_comment[1..].trim_start();
         if !after_eq.starts_with('\'') {
             return Err(ParseError {
-                message: "Expected single-quoted string after SET COMMENT =".to_string(),
+                message: EXPECTED_COMMENT_STRING.to_string(),
                 position: Some(abs(after_eq)),
             });
         }
@@ -290,9 +311,7 @@ fn rewrite_alter(
         })
     } else {
         Err(ParseError {
-            message:
-                "Unsupported ALTER operation. Supported: RENAME TO, SET COMMENT, UNSET COMMENT."
-                    .to_string(),
+            message: UNSUPPORTED_ALTER.to_string(),
             position: Some(abs(rest)),
         })
     }

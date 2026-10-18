@@ -14,6 +14,10 @@ use super::tree::{Node, Tree};
 use super::{internal, name_or, plain_string};
 use crate::errors::ParseError;
 use crate::ident::{parse_view_ref, ViewRef};
+use crate::parse::messages::{
+    unexpected_after_rename_target, unexpected_after_view_name, EXPECTED_COMMENT_STRING,
+    INVALID_RENAME_TARGET, INVALID_VIEW_NAME, UNSUPPORTED_ALTER,
+};
 use crate::parse::RewriteAction;
 
 /// The rules, one per line. `SvViewName` comes from `show::RULES`.
@@ -37,9 +41,9 @@ pub(super) fn transform(rule: &str, tree: &Tree) -> Result<RewriteAction, ParseE
     let is_drop = rule.eq_ignore_ascii_case("SvDrop");
     // The override reads ALTER's operation from where the source name ends,
     // so a name with a gap reads as an unknown operation.
-    let name = view_ref(tree, root, "SvViewName", "Invalid view name", |rest| {
+    let name = view_ref(tree, root, "SvViewName", INVALID_VIEW_NAME, |rest| {
         if is_drop {
-            format!("Unexpected tokens after view name: '{rest}'")
+            unexpected_after_view_name(rest)
         } else {
             UNSUPPORTED_ALTER.to_string()
         }
@@ -55,8 +59,8 @@ pub(super) fn transform(rule: &str, tree: &Tree) -> Result<RewriteAction, ParseE
             tree,
             action,
             "SvNewName",
-            "Invalid new view name in RENAME TO",
-            |rest| format!("Unexpected tokens after new view name in RENAME TO: '{rest}'"),
+            INVALID_RENAME_TARGET,
+            unexpected_after_rename_target,
         )?;
         return Ok(RewriteAction::AlterRename {
             name,
@@ -67,11 +71,7 @@ pub(super) fn transform(rule: &str, tree: &Tree) -> Result<RewriteAction, ParseE
     if let Some(set) = action.find("SvAlterSetComment") {
         return Ok(RewriteAction::AlterSetComment {
             name,
-            comment: plain_string(
-                tree,
-                set,
-                "Expected single-quoted string after SET COMMENT =",
-            )?,
+            comment: plain_string(tree, set, EXPECTED_COMMENT_STRING)?,
             if_exists,
         });
     }
@@ -80,10 +80,6 @@ pub(super) fn transform(rule: &str, tree: &Tree) -> Result<RewriteAction, ParseE
     }
     Err(internal(action, "unknown ALTER operation"))
 }
-
-/// The parser override's message for an ALTER whose operation it cannot read.
-const UNSUPPORTED_ALTER: &str =
-    "Unsupported ALTER operation. Supported: RENAME TO, SET COMMENT, UNSET COMMENT.";
 
 /// The view named by the `rule` node under `parent`, folded as the parser
 /// override folds it (`parse_view_ref`). `gap` words the error for a name

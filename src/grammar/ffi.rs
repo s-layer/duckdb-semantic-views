@@ -34,9 +34,9 @@ pub unsafe extern "C" fn sv_grammar_changes_rust(out_ptr: *mut *mut u8, out_len:
 ///       (release with `sv_free_buffer`).
 ///   1 = the statement is ours but invalid: the message is in `error_out`,
 ///       and `*position_out` is its byte offset in the query, or `u32::MAX`.
-///   2 = the bridge failed (a tree that does not decode): the message is in
-///       `error_out`. A panic is rc=1 with an internal-error message, so the
-///       user sees a parser error rather than an `InternalException`.
+///       A bridge failure (a tree that does not decode) and a panic are also
+///       rc=1, with an internal-error message, so the user sees a parser error
+///       rather than an `InternalException`, which can invalidate the database.
 ///
 /// # Safety
 ///
@@ -55,16 +55,26 @@ pub unsafe extern "C" fn sv_grammar_transform_rust(
     position_out: *mut u32,
 ) -> u8 {
     transform_panic_guard(error_out, error_out_len, position_out, || {
-        if tree_ptr.is_null() {
-            write_error_to_buffer(error_out, error_out_len, "empty parse tree");
-            return 2;
-        }
-        let bytes = std::slice::from_raw_parts(tree_ptr, tree_len);
-        let tree = match Tree::decode(bytes) {
+        let decoded = if tree_ptr.is_null() {
+            Err("empty parse tree".to_string())
+        } else {
+            Tree::decode(std::slice::from_raw_parts(tree_ptr, tree_len))
+        };
+        let tree = match decoded {
             Ok(tree) => tree,
             Err(message) => {
-                write_error_to_buffer(error_out, error_out_len, &message);
-                return 2;
+                if !position_out.is_null() {
+                    *position_out = u32::MAX;
+                }
+                write_error_to_buffer(
+                    error_out,
+                    error_out_len,
+                    &format!(
+                        "semantic_views: internal error: the grammar bridge sent a parse tree \
+                         that does not decode ({message}; please report this bug)"
+                    ),
+                );
+                return 1;
             }
         };
         match super::transform(&tree).and_then(crate::parse::lower_action) {
@@ -84,4 +94,38 @@ pub unsafe extern "C" fn sv_grammar_transform_rust(
             }
         }
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::sv_grammar_transform_rust;
+
+    /// rc=2 is thrown as an `InternalException`, which can invalidate the
+    /// database; a tree that does not decode is a bridge bug, reported to the
+    /// user as an ordinary parser error.
+    #[test]
+    fn a_tree_that_does_not_decode_is_a_parser_error() {
+        let bytes = [0xffu8; 3];
+        let mut out_ptr = std::ptr::null_mut();
+        let mut out_len = 0usize;
+        let mut error = [0u8; 256];
+        let mut position = 0u32;
+        let rc = unsafe {
+            sv_grammar_transform_rust(
+                bytes.as_ptr(),
+                bytes.len(),
+                &mut out_ptr,
+                &mut out_len,
+                error.as_mut_ptr(),
+                error.len(),
+                &mut position,
+            )
+        };
+        let message = std::ffi::CStr::from_bytes_until_nul(&error)
+            .unwrap()
+            .to_string_lossy();
+        assert_eq!(rc, 1, "{message}");
+        assert!(message.contains("parse tree"), "{message}");
+        assert_eq!(position, u32::MAX);
+    }
 }

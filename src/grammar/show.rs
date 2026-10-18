@@ -9,6 +9,7 @@
 use super::tree::{Kind, Node, Tree};
 use super::{internal, name_or, plain_string};
 use crate::errors::ParseError;
+use crate::parse::messages::unexpected_after_view_name;
 use crate::parse::{
     lower_name_only_read, lower_show, show_unexpected_tokens, DdlKind, ScopeName, ShowClauses,
 };
@@ -253,9 +254,7 @@ fn required(tree: &Tree, root: &Node, rule: &str) -> Result<String, ParseError> 
     let node = root
         .find(rule)
         .ok_or_else(|| internal(root, &format!("missing {rule}")))?;
-    name_or(tree, node, |rest| {
-        format!("Unexpected tokens after view name: '{rest}'")
-    })
+    name_or(tree, node, unexpected_after_view_name)
 }
 
 #[cfg(test)]

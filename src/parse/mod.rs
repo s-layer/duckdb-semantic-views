@@ -47,6 +47,8 @@ pub(crate) use show_clauses::{show_unexpected_tokens, ScopeName, ShowClauses};
 mod rewrite;
 pub(crate) use rewrite::extract_quoted_string;
 #[cfg(any(feature = "extension", test))]
+pub(crate) use rewrite::messages;
+#[cfg(any(feature = "extension", test))]
 pub(crate) use rewrite::{lower_name_only_read, lower_show};
 pub use rewrite::{plan_rewrite, CreateMode, RewriteAction};
 

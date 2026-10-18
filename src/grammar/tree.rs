@@ -1,9 +1,9 @@
 //! The parse tree a grammar transform receives from the C++ bridge.
 //!
 //! `DuckDB`'s PEG parser hands a transform the `ParseResult` subtree its rule
-//! matched. The C++ side (`sv_grammar_finalize` in `cpp/src/shim.cpp`)
-//! serialises that subtree and the statement's tokens into one buffer; this
-//! module decodes it. The wire format, little-endian throughout:
+//! matched. The C++ side (`sv_grammar_serialise` in `cpp/src/shim.cpp`, called
+//! from `sv_grammar_lower`) serialises that subtree and the statement's tokens
+//! into one buffer; this module decodes it. The wire format, little-endian throughout:
 //!
 //! ```text
 //! buffer := node token_count:u32 token* source
@@ -192,7 +192,7 @@ impl Tree {
         out
     }
 
-    /// Decode the buffer `sv_grammar_finalize` wrote.
+    /// Decode the buffer `sv_grammar_serialise` wrote.
     pub(crate) fn decode(bytes: &[u8]) -> Result<Self, String> {
         let mut r = Reader { bytes, pos: 0 };
         let root = r.node(0)?;

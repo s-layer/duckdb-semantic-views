@@ -232,6 +232,15 @@ SELECT * FROM (SHOW SEMANTIC VIEWS LIMIT -1);
 ----
 LIMIT must be a non-negative integer, got: '-1'
 
+# A leading '+' is accepted, as the parser override's integer parse accepts it.
+query I
+SELECT count(*) FROM (SHOW SEMANTIC VIEWS LIMIT +1);
+----
+1
+
+statement ok
+SHOW SEMANTIC VIEWS LIMIT +1;
+
 statement error
 SELECT * FROM (SHOW SEMANTIC VIEWS IN gq_m);
 ----
