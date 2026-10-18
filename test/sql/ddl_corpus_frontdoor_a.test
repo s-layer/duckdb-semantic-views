@@ -35,7 +35,9 @@ require semantic_views
 # here, and the CR axis is listed as unported in the case map.
 #
 # Some statements carry literal tabs and trailing whitespace on purpose (the
-# whitespace axes of the ported properties); keep them when editing.
+# whitespace axes of the ported properties); keep them when editing. The
+# pre-commit `trailing-whitespace` hook excludes this file, and `.editorconfig`
+# tells editors not to trim it.
 
 statement ok
 CREATE TABLE dcf_orders (id INTEGER PRIMARY KEY, region VARCHAR, amount INTEGER, status VARCHAR, customer_id INTEGER);

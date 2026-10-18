@@ -324,20 +324,22 @@ DROP SEMANTIC VIEW x;
 
 # --- near-miss prefixes on the non-CREATE forms ---
 
-# S-050: rewrite.rs::test_near_miss_drop_semantc — `DROP SEMANTC VIEW` is rejected with a suggestion [syntax]
+# S-050: rewrite.rs::test_near_miss_drop_semantc — `DROP SEMANTC VIEW` is rejected with a suggestion [text]
 statement error
 DROP SEMANTC VIEW sales
 ----
+Did you mean 'DROP SEMANTIC VIEW'?
 
 # S-051: rewrite.rs::test_near_miss_show_semantic_view — `SHOW SEMANTIC VIEW` (singular) is rejected [syntax]
 statement error
 SHOW SEMANTIC VIEW
 ----
 
-# S-052: rewrite.rs::near_miss_show_materialization — `SHOW SEMANTIC MATERIALIZATION` (singular) is rejected [syntax]
+# S-052: rewrite.rs::near_miss_show_materialization — `SHOW SEMANTIC MATERIALIZATION` (singular) is rejected [text]
 statement error
 SHOW SEMANTIC MATERIALIZATION
 ----
+Did you mean 'SHOW SEMANTIC MATERIALIZATIONS'?
 
 # --- comments around prefixes and names ---
 
