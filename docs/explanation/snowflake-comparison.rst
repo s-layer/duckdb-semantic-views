@@ -354,6 +354,10 @@ is always the type a query returns for that member:
   The same goes for a metric that cannot be queried on its own because it would
   aggregate across a fan-out (see :ref:`howto-fan-traps`): its ``data_type`` is
   empty, and querying it reports the fan trap.
+- **Over a temporary table** the members are not typed yet: ``data_type`` is empty,
+  though querying them works in the session that has the table. The command reads
+  committed state on a connection of its own, which cannot see your session's
+  temporary tables or your open transaction's changes.
 - **PRIVATE members** are typed too, though they cannot be queried directly.
 - **Role-played members** -- on a table that several relationships point at -- are
   typed too, although querying one needs a metric whose ``USING`` names the role. The

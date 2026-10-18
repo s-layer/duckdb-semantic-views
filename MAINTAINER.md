@@ -187,10 +187,12 @@ The same DDL, declined by the override (DuckDB 2.0 builds)
 semantic_view('shop', dimensions := [...], metrics := [...])
    └── bind_replace table function. Bind reads the definition via catalog::CatalogReader,
        expand/ generates SQL, and DuckDB plans it as a subquery of the caller's query.
-       The shim (SvTablePinner) first pins each bare table name to its catalog entry,
-       looking in the database and schema stamped at CREATE first, so a caller's CTE
-       can't stand in for it. A TABLES entry the expansion stamped (expand::stamped_tables)
-       that the stamped schema lacks is pinned to the session's temporary table of that name.
+       TABLES entries arrive qualified with the stamp, or as temp.main for one CREATE found
+       temporary (SemanticViewDefinition::temp_tables). The shim (SvTablePinner) first
+       resolves the other names the expansion uses (a member subquery's tables, functions,
+       macros, table functions, cast types) as DuckDB resolves a view stored in the stamped
+       schema, and pins each to what it finds, so a caller's CTE or current schema can't
+       stand in for it.
 ```
 
 `expand/` is pure Rust that converts a `SemanticViewDefinition` plus a `QueryRequest` into a SQL string. DuckDB handles all actual data processing. The generated SQL looks like:

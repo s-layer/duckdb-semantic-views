@@ -1436,6 +1436,7 @@ mod tests {
             database_name: None,
             schema_name: None,
             resolution_schema_name: None,
+            temp_tables: vec![],
             comment: None,
         };
         let err = validate_graph(&def)
@@ -1649,6 +1650,7 @@ mod tests {
                 database_name: None,
                 schema_name: None,
                 resolution_schema_name: None,
+                temp_tables: vec![],
                 comment: None,
             }
         }

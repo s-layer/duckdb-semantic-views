@@ -76,6 +76,7 @@ pub(super) fn orders_view() -> SemanticViewDefinition {
         database_name: None,
         schema_name: None,
         resolution_schema_name: None,
+        temp_tables: vec![],
         comment: None,
     }
 }
@@ -129,6 +130,7 @@ pub(super) fn minimal_def(
         database_name: None,
         schema_name: None,
         resolution_schema_name: None,
+        temp_tables: vec![],
         comment: None,
     }
 }

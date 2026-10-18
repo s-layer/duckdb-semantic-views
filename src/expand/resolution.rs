@@ -132,25 +132,40 @@ pub fn body_qualifier(def: &SemanticViewDefinition) -> (Option<&str>, Option<&st
     (def.database_name.as_deref(), schema)
 }
 
-/// The table names the expansion qualifies with [`body_qualifier`]: each
-/// `TABLES` entry and materialization table written without a schema, as the
-/// name `DuckDB`'s parser reads back from the quoted, qualified reference.
-///
-/// The shim pins each of these to the stamped table and, where the stamped
-/// schema has none, to the session's temporary table of that name, so a semantic view over a temporary table can be queried in
-/// the session that has it. A table the definition names with its schema is
-/// not in this list, and stays that table only.
+/// The name a `TABLES` entry or materialization table would be found by in
+/// the temporary schema: its unquoted name when it is written without a
+/// schema, or with the `main` schema (`DuckDB` looks for `main.x` in
+/// `temp.main` first). `None` for any other spelling.
+fn temp_reachable_name(table: &str) -> Option<String> {
+    match crate::ident::parse_qualified_identifier(table) {
+        Ok(parts) => match parts.as_slice() {
+            [name] => Some(name.clone()),
+            [schema, name] if schema.eq_ignore_ascii_case("main") => Some(name.clone()),
+            _ => None,
+        },
+        Err(_) => Some(table.to_string()),
+    }
+}
+
+/// The unquoted name of `table` when it resolved to a temporary table at
+/// CREATE ([`SemanticViewDefinition::temp_tables`]): that table is
+/// `temp.main.<name>`.
 #[must_use]
-pub fn stamped_tables(def: &SemanticViewDefinition) -> Vec<String> {
+pub fn temp_table_name(table: &str, def: &SemanticViewDefinition) -> Option<String> {
+    temp_reachable_name(table)
+        .filter(|name| def.temp_tables.iter().any(|t| t.eq_ignore_ascii_case(name)))
+}
+
+/// The tables the definition names in a way a temporary table could answer
+/// (see `temp_reachable_name`), by unquoted name. CREATE records which of
+/// these resolve to a temporary table in the creating session
+/// ([`SemanticViewDefinition::temp_tables`]).
+#[must_use]
+pub fn temp_table_candidates(def: &SemanticViewDefinition) -> Vec<String> {
     let mut names: Vec<String> = Vec::new();
     let tables = def.tables.iter().map(|t| t.table.as_str());
     let materialized = def.materializations.iter().map(|m| m.table.as_str());
-    for table in tables.chain(materialized) {
-        let name = match crate::ident::parse_qualified_identifier(table) {
-            Ok(parts) if parts.len() == 1 => parts[0].clone(),
-            Ok(_) => continue,
-            Err(_) => table.to_string(),
-        };
+    for name in tables.chain(materialized).filter_map(temp_reachable_name) {
         if !names.iter().any(|n| n.eq_ignore_ascii_case(&name)) {
             names.push(name);
         }
@@ -180,6 +195,11 @@ pub fn qualify_and_quote_table_ref(table: &str, def: &SemanticViewDefinition) ->
     // Structural "is already qualified" test: a parsed identifier with more
     // than one part means the user already wrote `db.t` / `db.schema.t` /
     // `"db"."schema"."t"` etc. and we must not prepend a second qualifier.
+    // A table that resolved to a temporary table at CREATE is that one.
+    if let Some(name) = temp_table_name(table, def) {
+        return format!("\"temp\".\"main\".{}", quote_ident(&name));
+    }
+
     let is_qualified = matches!(
         crate::ident::parse_qualified_identifier(table),
         Ok(ref parts) if parts.len() > 1
@@ -354,6 +374,7 @@ mod tests {
             database_name: db.map(str::to_string),
             schema_name: schema.map(str::to_string),
             resolution_schema_name: schema.map(str::to_string),
+            temp_tables: vec![],
             comment: None,
         }
     }
@@ -793,6 +814,30 @@ mod tests {
         }
 
         #[test]
+        fn a_table_that_was_temporary_at_create_is_qualified_with_temp() {
+            let mut def = def_with_db_schema(Some("db"), Some("schema"));
+            def.temp_tables = vec!["Scratch".to_string()];
+            assert_eq!(
+                qualify_and_quote_table_ref("scratch", &def),
+                "\"temp\".\"main\".\"scratch\"",
+            );
+            assert_eq!(
+                qualify_and_quote_table_ref("t", &def),
+                "\"db\".\"schema\".\"t\"",
+            );
+            // `main.scratch` reached the temporary table at CREATE too.
+            assert_eq!(
+                qualify_and_quote_table_ref("main.scratch", &def),
+                "\"temp\".\"main\".\"scratch\"",
+            );
+            // Written with another schema, the name is that table only.
+            assert_eq!(
+                qualify_and_quote_table_ref("schema.scratch", &def),
+                "\"schema\".\"scratch\"",
+            );
+        }
+
+        #[test]
         fn quoted_bare_name_with_dot_inside_treated_as_single_part() {
             // `"a.b"` is a SINGLE quoted part (the `.` is data, not a separator).
             // The old substring-dot heuristic mistakenly treated this as
@@ -860,9 +905,9 @@ mod tests {
         }
     }
 
-    mod stamped_tables_tests {
+    mod temp_table_candidates_tests {
         use super::*;
-        use crate::expand::resolution::stamped_tables;
+        use crate::expand::resolution::temp_table_candidates;
         use crate::model::{Materialization, TableRef};
 
         fn table(table: &str) -> TableRef {
@@ -874,25 +919,33 @@ mod tests {
         }
 
         #[test]
-        fn names_written_without_a_schema_are_stamped() {
+        fn names_written_without_a_schema_or_in_main_are_listed() {
             let mut def = def_with_db_schema(Some("db"), Some("main"));
-            def.tables = vec![table("orders"), table("\"Line Items\""), table("ORDERS")];
+            def.tables = vec![
+                table("orders"),
+                table("\"Line Items\""),
+                table("ORDERS"),
+                table("MAIN.customers"),
+            ];
             def.materializations = vec![Materialization {
                 table: "daily".to_string(),
                 ..Materialization::default()
             }];
-            assert_eq!(stamped_tables(&def), ["orders", "Line Items", "daily"]);
+            assert_eq!(
+                temp_table_candidates(&def),
+                ["orders", "Line Items", "customers", "daily"]
+            );
         }
 
         #[test]
-        fn names_written_with_a_schema_are_not_stamped() {
+        fn names_in_another_schema_or_database_are_not_listed() {
             let mut def = def_with_db_schema(Some("db"), Some("main"));
-            def.tables = vec![table("main.orders"), table("db.main.customers")];
+            def.tables = vec![table("sales.orders"), table("db.main.customers")];
             def.materializations = vec![Materialization {
                 table: "agg.daily".to_string(),
                 ..Materialization::default()
             }];
-            assert!(stamped_tables(&def).is_empty());
+            assert!(temp_table_candidates(&def).is_empty());
         }
     }
 }

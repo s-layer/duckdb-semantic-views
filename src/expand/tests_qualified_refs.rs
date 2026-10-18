@@ -49,6 +49,7 @@ fn qualified_ref_def() -> SemanticViewDefinition {
         database_name: None,
         schema_name: None,
         resolution_schema_name: None,
+        temp_tables: vec![],
         comment: None,
     }
 }
@@ -126,6 +127,7 @@ fn test_expand_multiple_qualified_refs_different_tables() {
         database_name: None,
         schema_name: None,
         resolution_schema_name: None,
+        temp_tables: vec![],
         comment: None,
     };
     let req = QueryRequest {

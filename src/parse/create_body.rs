@@ -222,6 +222,7 @@ fn rewrite_ddl_keyword_body(
         database_name: None,
         schema_name: None,
         resolution_schema_name: None,
+        temp_tables: vec![],
         comment,
     };
 

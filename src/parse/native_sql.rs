@@ -247,6 +247,28 @@ pub(crate) fn lower_action(action: RewriteAction) -> Result<String, ParseError> 
 /// For IF NOT EXISTS on an already-existing view, `INSERT OR IGNORE`
 /// absorbs the duplicate silently — equivalent shape to the legacy
 /// `SELECT ... WHERE 1 = 0` fast path (zero rows returned).
+/// SQL for the `temp_tables` metadata key: the names in `definition`'s
+/// `temp_tables` (every table written without a schema, set by
+/// `enrich_definition_for_create`) that are temporary tables or views in the
+/// creating session.
+///
+/// The expression is NULL when none are, and RFC-7396 `json_merge_patch` then
+/// drops the key, so a view over no temporary table stores no `temp_tables`.
+/// A bare name resolves to the temporary schema first in `DuckDB`, so these
+/// are the tables CREATE read; the expansion names them as `temp.main.<name>`
+/// from then on rather than whatever the stamp schema holds.
+#[cfg(feature = "extension")]
+fn temp_tables_expr(definition: &str) -> String {
+    format!(
+        "(SELECT list(n) FROM (SELECT unnest(from_json(json_extract({definition}, \
+            '$.temp_tables'), '[\"VARCHAR\"]')) AS n) \
+          WHERE EXISTS (SELECT 1 FROM duckdb_tables() WHERE database_name = 'temp' \
+                          AND lower(table_name) = lower(n)) \
+             OR EXISTS (SELECT 1 FROM duckdb_views() WHERE database_name = 'temp' \
+                          AND lower(view_name) = lower(n)))"
+    )
+}
+
 #[cfg(feature = "extension")]
 fn emit_native_create_sql(
     view: &ViewRef,
@@ -307,9 +329,11 @@ fn emit_native_create_sql(
               'database_name', current_database(), \
               'schema_name', {schema_expr}, \
               'resolution_schema_name', current_schema(), \
+              'temp_tables', {temp_tables}, \
               'schema_version', {schema_version} \
             ) \
-         )::VARCHAR"
+         )::VARCHAR",
+        temp_tables = temp_tables_expr(&format!("'{enriched_escaped}'::JSON"))
     );
 
     // The generated SQL runs on the caller's connection, so its EXISTS
@@ -427,9 +451,11 @@ fn emit_native_create_from_yaml_file(
               'database_name', current_database(), \
               'schema_name', {schema_expr}, \
               'resolution_schema_name', current_schema(), \
+              'temp_tables', {temp_tables}, \
               'schema_version', {schema_version} \
             ) \
          )::VARCHAR",
+        temp_tables = temp_tables_expr("new_def::JSON"),
         schema_version = crate::model::CURRENT_SCHEMA_VERSION
     );
     let helper_from = format!(

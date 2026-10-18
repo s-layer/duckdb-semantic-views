@@ -58,6 +58,7 @@ fn pkfk_two_table_def() -> SemanticViewDefinition {
         database_name: None,
         schema_name: None,
         resolution_schema_name: None,
+        temp_tables: vec![],
         comment: None,
     }
 }
@@ -127,6 +128,7 @@ fn pkfk_three_table_def() -> SemanticViewDefinition {
         database_name: None,
         schema_name: None,
         resolution_schema_name: None,
+        temp_tables: vec![],
         comment: None,
     }
 }
@@ -190,6 +192,7 @@ fn test_pkfk_on_clause_composite() {
         database_name: None,
         schema_name: None,
         resolution_schema_name: None,
+        temp_tables: vec![],
         comment: None,
     };
     let req = QueryRequest {

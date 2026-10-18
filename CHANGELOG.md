@@ -120,9 +120,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Before, the query ran on a connection of its own and saw only committed data. A
   semantic view you create inside a transaction still can't be queried until you commit.
 - **A semantic view over a temporary table can be queried** in the session that has the
-  table. A table the view names without a schema is the one in the database and schema the
-  view was created in and, where that schema has none, your session's temporary table of
-  that name. Before, the query could not see temporary tables at all.
+  table. Each table in `TABLES` is the one CREATE found: a temporary table if that is what
+  its name meant then, otherwise the table in the database and schema the view was created
+  in. Before, the query could not see temporary tables at all. `SHOW` and `DESCRIBE` don't
+  report member types for such a view yet, and `explain_semantic_view` shows no plan for it.
 - **A prepared `semantic_view()` query follows a later `SET search_path`.** `EXECUTE`
   now looks the view up on the search path in effect when it runs, as DuckDB does for
   its own tables. Before, it kept the view found when the statement was prepared.

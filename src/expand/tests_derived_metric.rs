@@ -263,6 +263,7 @@ fn expand_derived_only_no_base_metrics_requested() {
         database_name: None,
         schema_name: None,
         resolution_schema_name: None,
+        temp_tables: vec![],
         comment: None,
     };
     let req = QueryRequest {
@@ -353,6 +354,7 @@ fn resolve_joins_includes_transitive_deps_from_derived() {
         database_name: None,
         schema_name: None,
         resolution_schema_name: None,
+        temp_tables: vec![],
         comment: None,
     };
     let req = QueryRequest {
@@ -408,6 +410,7 @@ fn expand_derived_metric_with_facts_chain() {
         database_name: None,
         schema_name: None,
         resolution_schema_name: None,
+        temp_tables: vec![],
         comment: None,
     };
     let req = QueryRequest {

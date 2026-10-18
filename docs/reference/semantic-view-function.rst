@@ -390,10 +390,12 @@ Wildcard patterns (``alias.*``) are expanded before name resolution. The expansi
 
 If a name does not match any defined dimension, metric, or fact, the error message lists available names and suggests the closest match (if one exists within 3 edits).
 
-**Tables in the definition.** A table the semantic view names without a schema, in ``TABLES`` or in a subquery inside a dimension, fact or metric expression, is the table of that name in the database and schema the view was created in. A CTE of the same name in your query, or a table of that name in your current schema, is not read in its place. Where the view's schema has no table of that name, your session's temporary table of that name is read, so a semantic view over a temporary table can be queried in the session that has the table; a table in a member expression's subquery that is in neither resolves as your session resolves it. A table the view names with its schema is that table only. A table named in a ``where_clause`` subquery is part of your query and resolves there, so it can read your CTEs.
+**Tables in the definition.** Each table in ``TABLES`` is the one CREATE found. A name written without a schema is the table of that name in the database and schema the view was created in, or your session's temporary table of that name if that is what it named at CREATE, so a semantic view over a temporary table can be queried in the session that has the table. A name written ``schema.table`` is looked up in the database the view was created in. A table created later, in your current schema or as a temporary table, is not read in its place.
+
+**Names in member expressions.** A table in a subquery inside a dimension, fact or metric expression, a function or macro, and a type in a cast resolve as they would in a DuckDB view stored in the schema the semantic view was created in: your session's temporary objects first, then that schema, then its database's default schema, then your search path. A CTE of the same name in your query, or an object of that name in your current schema, is not used in their place. A table named in a ``where_clause`` subquery is part of your query and resolves there, so it can read your CTEs. A function or type ``where_clause`` names outside its subqueries resolves like the definition's.
 
 .. versionchanged:: 0.16.0
-   A table named in a member expression's subquery no longer resolves to your query's CTE of that name, and a semantic view over a temporary table can be queried.
+   Names in member expressions no longer resolve to your query's CTEs or your current schema, and a semantic view over a temporary table can be queried.
 
 
 .. _ref-sv-examples:

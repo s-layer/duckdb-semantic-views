@@ -146,42 +146,28 @@ pub fn build_projected_sql(
 }
 
 /// Frame `semantic_view()`'s bind payload: the database and schema stamped at
-/// CREATE, the table names the expansion qualified with them, then the SQL to
-/// plan.
+/// CREATE, then the SQL to plan.
 ///
 /// ```text
 /// u32 db_len     | db_len UTF-8 bytes      (empty: none stamped)
 /// u32 schema_len | schema_len UTF-8 bytes  (empty: none stamped)
-/// u32 count      | for each: u32 len | len UTF-8 bytes
 /// the SQL, UTF-8, to the end of the buffer
 /// ```
 ///
 /// The shim (`sv_semantic_view_bind_replace`) pins a table that a member
 /// expression names by a bare name to the catalog entry it resolves to,
 /// looking in this database and schema first, as the `TABLES` entries are
-/// qualified with them (`expand::body_qualifier`). A stamped table that the
-/// stamped schema lacks reads the session's temporary table of that name
-/// (`expand::stamped_tables`).
+/// qualified with them (`expand::body_qualifier`).
 #[must_use]
-pub fn frame_bind_payload(
-    database: Option<&str>,
-    schema: Option<&str>,
-    stamped: &[String],
-    sql: &str,
-) -> Vec<u8> {
+pub fn frame_bind_payload(database: Option<&str>, schema: Option<&str>, sql: &str) -> Vec<u8> {
     fn push(out: &mut Vec<u8>, part: &str) {
         let len = u32::try_from(part.len()).expect("an identifier is shorter than 4 GiB");
         out.extend_from_slice(&len.to_le_bytes());
         out.extend_from_slice(part.as_bytes());
     }
-    let mut out = Vec::with_capacity(12 + sql.len());
+    let mut out = Vec::with_capacity(8 + sql.len());
     push(&mut out, database.unwrap_or(""));
     push(&mut out, schema.unwrap_or(""));
-    let count = u32::try_from(stamped.len()).expect("fewer than 4 billion tables");
-    out.extend_from_slice(&count.to_le_bytes());
-    for name in stamped {
-        push(&mut out, name);
-    }
     out.extend_from_slice(sql.as_bytes());
     out
 }
@@ -292,22 +278,19 @@ mod tests {
 
     #[test]
     fn the_bind_payload_carries_the_stamp_before_the_sql() {
-        let stamped = ["orders".to_string()];
-        let framed = frame_bind_payload(Some("db"), Some("main"), &stamped, "SELECT 1");
+        let framed = frame_bind_payload(Some("db"), Some("main"), "SELECT 1");
         let mut expected = vec![2, 0, 0, 0];
         expected.extend_from_slice(b"db");
         expected.extend_from_slice(&[4, 0, 0, 0]);
         expected.extend_from_slice(b"main");
-        expected.extend_from_slice(&[1, 0, 0, 0, 6, 0, 0, 0]);
-        expected.extend_from_slice(b"orders");
         expected.extend_from_slice(b"SELECT 1");
         assert_eq!(framed, expected);
     }
 
     #[test]
     fn an_absent_stamp_is_framed_as_empty() {
-        let framed = frame_bind_payload(None, None, &[], "SELECT 1");
-        let mut expected = vec![0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0];
+        let framed = frame_bind_payload(None, None, "SELECT 1");
+        let mut expected = vec![0, 0, 0, 0, 0, 0, 0, 0];
         expected.extend_from_slice(b"SELECT 1");
         assert_eq!(framed, expected);
     }

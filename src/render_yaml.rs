@@ -13,8 +13,9 @@ use crate::model::SemanticViewDefinition;
 /// Clones the definition and strips internal runtime fields that are
 /// repopulated at define time:
 /// - `created_on` (DDL-time timestamp)
-/// - `database_name` / `schema_name` / `resolution_schema_name` (connection
-///   context: where the view lives and where its body resolved)
+/// - `database_name` / `schema_name` / `resolution_schema_name` /
+///   `temp_tables` (connection context: where the view lives and where its
+///   body resolved)
 ///
 /// After stripping, `serde(skip_serializing_if)` on these fields ensures
 /// they are omitted from the YAML output entirely. (`schema_version` lives
@@ -26,6 +27,7 @@ pub fn render_yaml_export(def: &SemanticViewDefinition) -> Result<String, String
     export.database_name = None;
     export.schema_name = None;
     export.resolution_schema_name = None;
+    export.temp_tables = Vec::new();
 
     yaml_serde::to_string(&export).map_err(|e| format!("YAML serialization error: {e}"))
 }
@@ -64,8 +66,18 @@ mod tests {
             database_name: Some("mydb".to_string()),
             schema_name: Some("main".to_string()),
             resolution_schema_name: Some("main".to_string()),
+            temp_tables: vec!["orders".to_string()],
             ..Default::default()
         }
+    }
+
+    #[test]
+    fn strips_temp_tables() {
+        let yaml = render_yaml_export(&def_with_internals()).unwrap();
+        assert!(
+            !yaml.contains("temp_tables"),
+            "temp_tables should be stripped from YAML: {yaml}"
+        );
     }
 
     #[test]
@@ -150,6 +162,7 @@ mod tests {
         expected.database_name = None;
         expected.schema_name = None;
         expected.resolution_schema_name = None;
+        expected.temp_tables = Vec::new();
 
         assert_eq!(expected, reimported);
     }

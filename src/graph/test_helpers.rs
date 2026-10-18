@@ -66,6 +66,7 @@ pub(super) fn make_def(
         database_name: None,
         schema_name: None,
         resolution_schema_name: None,
+        temp_tables: vec![],
         comment: None,
     }
 }
@@ -109,6 +110,7 @@ pub(super) fn make_def_with_facts(
         database_name: None,
         schema_name: None,
         resolution_schema_name: None,
+        temp_tables: vec![],
         comment: None,
     }
 }
@@ -166,6 +168,7 @@ pub(super) fn make_def_with_derived_metrics(
         database_name: None,
         schema_name: None,
         resolution_schema_name: None,
+        temp_tables: vec![],
         comment: None,
     }
 }
@@ -221,6 +224,7 @@ pub(super) fn make_def_with_named_joins(
         database_name: None,
         schema_name: None,
         resolution_schema_name: None,
+        temp_tables: vec![],
         comment: None,
     }
 }

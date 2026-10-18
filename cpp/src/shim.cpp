@@ -3160,96 +3160,103 @@ static void sv_relocate(QueryNode &node, QueryLocation location) {
         [&](TableRef &ref) { ref.query_location = location; });
 }
 
-// Pin each table the expansion names by a bare name to the catalog entry it
-// resolves to, so DuckDB's bind of the expansion in the caller's query can't
-// read a caller's CTE of that name in its place, or a table of that name in
-// the caller's current schema. The `TABLES` entries come qualified with the
-// database and schema stamped at CREATE (`expand::body_qualifier`); this
-// covers the tables a member expression's subquery names, which the Rust side
-// sees only as text. A bare name is looked up in that database and schema
-// first, as a `TABLES` entry is, then as DuckDB's binder would look it up.
-// A `TABLES` entry the Rust side qualified with the stamp (`stamped`, from
-// `expand::stamped_tables`) that the stamped schema lacks is read from the
-// session's temporary table of that name, if it has one, so a semantic view
-// over a temporary table is read in the session that has it. Otherwise it
-// stays as stamped and fails as before; one the definition spelled with its
-// schema is that table only.
+// Resolve the names the expansion's member expressions use as DuckDB resolves
+// them in a view stored in the schema stamped at CREATE, and pin each to what it
+// finds, so DuckDB's bind of the expansion inside the caller's query can't pick
+// up the caller's CTE of that name, or an object of that name in the caller's
+// current schema. A view looks in the temporary schema, then its own schema,
+// then its database's default schema, ahead of the session's search path
+// (`Binder::GetSearchPath`); so does this, for a table (a member subquery's
+// `FROM`), a function or macro, a table function, and a type a cast names. The
+// `TABLES` entries arrive qualified already (`expand::qualify_and_quote_table_ref`,
+// with a table that was temporary at CREATE as `temp.main`); a two-part name is
+// looked up in the stamp's database first, as `TABLES` entries written that way
+// were at CREATE.
 //
-// Left as written: a CTE name the expansion has in scope, anything inside a
-// hoisted where_clause subquery (`__sv_sqN`, the caller's own text, which
-// resolves in the caller's query as written), and a name in no catalog (a
-// replacement scan such as a file path). A name in no catalog that the
-// caller's query has a CTE for is refused, since the CTE would be read.
+// Left as written: a CTE name in scope, anything inside a hoisted where_clause
+// subquery (`__sv_sqN`, the caller's own text, which resolves in the caller's
+// query), an operator, a name already qualified with its catalog, and a name in
+// no catalog (a replacement scan such as a file path). A table name in no
+// catalog that the caller's query has a CTE for is refused, since the CTE would
+// be read. The rest of where_clause is spliced into the expansion, so a function
+// or type it names is resolved here like the definition's.
 struct SvTablePinner {
     ClientContext &context;
     optional_ptr<Binder> caller;
     Identifier database;
     Identifier schema;
-    std::vector<Identifier> stamped;
     std::vector<Identifier> scope;
 
     static bool IsHoisted(const Identifier &name) {
         return StringUtil::StartsWith(name.GetIdentifierName(), "__sv_sq");
     }
 
-    optional_ptr<CatalogEntry> Lookup(QualifiedName name) {
-        EntryLookupInfo lookup(CatalogType::TABLE_ENTRY, std::move(name));
+    optional_ptr<CatalogEntry> Lookup(CatalogType type, QualifiedName name) {
+        EntryLookupInfo lookup(type, std::move(name));
         return Catalog::GetEntry(context, lookup, OnEntryNotFound::RETURN_NULL);
     }
 
-    // Whether `name` is a stamped `TABLES` entry: the stamp's path, then one
-    // of the names the Rust side qualified with it.
-    bool IsStamped(const QualifiedName &name) const {
-        vector<Identifier> path;
-        if (!database.empty()) {
-            path.push_back(database);
-        }
-        if (!schema.empty()) {
-            path.push_back(schema);
-        }
-        path.push_back(name.Name());
-        if (path.size() == 1 || name.Path() != path) {
-            return false;
-        }
-        for (auto &table : stamped) {
-            if (table == name.Name()) {
-                return true;
-            }
-        }
-        return false;
+    bool HasDatabase() {
+        return !database.empty() && Catalog::GetCatalogEntry(context, database);
     }
 
-    void PinStamped(BaseTableRef &ref) {
-        auto table = ref.GetQualifiedName().Name();
-        if (Lookup(ref.GetQualifiedName())) {
+    // The first of the places a view in the stamp's schema looks for `name`
+    // that has it.
+    optional_ptr<CatalogEntry> Anchored(CatalogType type, const Identifier &name) {
+        if (auto entry = Lookup(type, QualifiedName(Identifier::TempCatalog(), Identifier::DefaultSchema(), name))) {
+            return entry;
+        }
+        if (HasDatabase()) {
+            auto own = schema.empty() ? Identifier::DefaultSchema() : schema;
+            if (auto entry = Lookup(type, QualifiedName(database, own, name))) {
+                return entry;
+            }
+            if (own != Identifier::DefaultSchema()) {
+                return Lookup(type, QualifiedName(database, Identifier::DefaultSchema(), name));
+            }
+            return nullptr;
+        }
+        if (!schema.empty()) {
+            return Lookup(type, QualifiedName(vector<Identifier> {schema}, name));
+        }
+        return nullptr;
+    }
+
+    // A function, macro or type found where the view looks first is named by
+    // where it was found. One in the temporary schema needs no qualifier: the
+    // caller's search path starts there too.
+    template <class T>
+    void PinObject(T &expr, CatalogType type) {
+        auto &name = expr.GetQualifiedName();
+        if (name.Path().size() != 1) {
             return;
         }
-        if (Lookup(QualifiedName(TEMP_CATALOG, DEFAULT_SCHEMA, table))) {
-            ref.SetQualifiedName(TEMP_CATALOG, DEFAULT_SCHEMA, table);
+        auto entry = Anchored(type, name.Name());
+        if (entry && entry->ParentCatalog().GetName() != Identifier::TempCatalog()) {
+            expr.SetQualifiedName(entry->ParentCatalog().GetName(), entry->ParentSchema().name, name.Name());
         }
     }
 
     void Pin(BaseTableRef &ref) {
-        auto &name = ref.GetQualifiedName();
-        if (IsStamped(name)) {
-            PinStamped(ref);
+        auto &path = ref.GetQualifiedName().Path();
+        if (path.size() == 2) {
+            if (HasDatabase() && Lookup(CatalogType::TABLE_ENTRY, QualifiedName(database, path[0], path[1]))) {
+                ref.SetQualifiedName(database, path[0], path[1]);
+            }
             return;
         }
-        if (name.Path().size() != 1) {
+        if (path.size() != 1) {
             return;
         }
-        auto table = name.Name();
+        auto table = path[0];
         for (auto &cte : scope) {
             if (cte == table) {
                 return;
             }
         }
-        optional_ptr<CatalogEntry> entry;
-        if (!database.empty() && Catalog::GetCatalogEntry(context, database)) {
-            entry = Lookup(QualifiedName(database, schema.empty() ? Identifier::DefaultSchema() : schema, table));
-        }
+        auto entry = Anchored(CatalogType::TABLE_ENTRY, table);
         if (!entry) {
-            entry = Lookup(QualifiedName(table));
+            entry = Lookup(CatalogType::TABLE_ENTRY, QualifiedName(table));
         }
         if (entry) {
             ref.SetQualifiedName(entry->ParentCatalog().GetName(), entry->ParentSchema().name, table);
@@ -3264,11 +3271,32 @@ struct SvTablePinner {
     }
 
     void Expr(ParsedExpression &expr) {
-        if (expr.GetExpressionClass() == ExpressionClass::SUBQUERY) {
+        switch (expr.GetExpressionClass()) {
+        case ExpressionClass::SUBQUERY: {
             auto &subquery = expr.Cast<SubqueryExpression>().SubqueryMutable();
             if (subquery && subquery->node) {
                 Node(*subquery->node);
             }
+            break;
+        }
+        case ExpressionClass::FUNCTION: {
+            auto &function = expr.Cast<FunctionExpression>();
+            if (!function.IsOperator()) {
+                PinObject(function, CatalogType::SCALAR_FUNCTION_ENTRY);
+            }
+            break;
+        }
+        case ExpressionClass::WINDOW:
+            PinObject(expr.Cast<WindowExpression>(), CatalogType::SCALAR_FUNCTION_ENTRY);
+            break;
+        case ExpressionClass::CAST:
+            Expr(expr.Cast<CastExpression>().TargetTypeMutable());
+            break;
+        case ExpressionClass::TYPE:
+            PinObject(expr.Cast<TypeExpression>(), CatalogType::TYPE_ENTRY);
+            break;
+        default:
+            break;
         }
         ParsedExpressionIterator::EnumerateChildren(expr, [&](ParsedExpression &child) { Expr(child); });
     }
@@ -3298,9 +3326,16 @@ struct SvTablePinner {
             }
             break;
         }
-        case TableReferenceType::TABLE_FUNCTION:
-            Expr(ref.Cast<TableFunctionRef>().function);
+        case TableReferenceType::TABLE_FUNCTION: {
+            auto &function = ref.Cast<TableFunctionRef>().function;
+            if (function && function->GetExpressionClass() == ExpressionClass::FUNCTION) {
+                PinObject(function->Cast<FunctionExpression>(), CatalogType::TABLE_FUNCTION_ENTRY);
+                ParsedExpressionIterator::EnumerateChildren(*function, [&](ParsedExpression &child) { Expr(child); });
+            } else {
+                Expr(function);
+            }
             break;
+        }
         case TableReferenceType::EXPRESSION_LIST:
             for (auto &row : ref.Cast<ExpressionListRef>().values) {
                 for (auto &value : row) {
@@ -3331,13 +3366,13 @@ struct SvTablePinner {
 
     void Node(QueryNode &node) {
         auto outer = scope.size();
-        for (auto &cte : node.cte_map.map) {
-            scope.push_back(cte.first);
-        }
+        // A CTE is in scope from the next one on: its own body, unless it is
+        // recursive, reads the table of its name.
         for (auto &cte : node.cte_map.map) {
             if (!IsHoisted(cte.first) && cte.second->query_node) {
                 Node(*cte.second->query_node);
             }
+            scope.push_back(cte.first);
         }
         switch (node.type) {
         case QueryNodeType::SELECT_NODE: {
@@ -3461,11 +3496,6 @@ static unique_ptr<TableRef> sv_semantic_view_bind_replace(
         size_t offset = 0;
         std::string database = sv_read_string(framed, payload.len, offset, "semantic_view");
         std::string schema = sv_read_string(framed, payload.len, offset, "semantic_view");
-        std::vector<Identifier> stamped;
-        uint32_t stamped_count = sv_read_u32_le(framed, payload.len, offset, "semantic_view");
-        for (uint32_t i = 0; i < stamped_count; i++) {
-            stamped.emplace_back(sv_read_string(framed, payload.len, offset, "semantic_view"));
-        }
         std::string sql(framed + offset, payload.len - offset);
         Parser parser = sv_compat::builtin_parser();
         try {
@@ -3487,8 +3517,7 @@ static unique_ptr<TableRef> sv_semantic_view_bind_replace(
         auto select = unique_ptr_cast<SQLStatement, SelectStatement>(
             std::move(parser.statements[0]));
         sv_relocate(*select->node, input.ref.query_location);
-        SvTablePinner pinner {context, input.binder, Identifier(database), Identifier(schema),
-                              std::move(stamped), {}};
+        SvTablePinner pinner {context, input.binder, Identifier(database), Identifier(schema), {}};
         pinner.Node(*select->node);
         return select;
     };

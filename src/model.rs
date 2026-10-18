@@ -468,6 +468,16 @@ pub struct SemanticViewDefinition {
     /// value here and fall back to `schema_name` — exactly their old behaviour.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub resolution_schema_name: Option<String>,
+    /// The `TABLES` entries and materialization tables, by unquoted name, that
+    /// resolved to a temporary table in the creating session (written without a
+    /// schema, or as `main.<name>`: `DuckDB` looks in `temp.main` first for
+    /// both), so the expansion qualifies these with `temp.main` rather than with
+    /// [`Self::database_name`] / [`Self::resolution_schema_name`]. Such a view
+    /// can be queried in the session that has the table, and fails with
+    /// "does not exist" in any other. Stamped at CREATE, like the fields
+    /// above, and stripped from a YAML export with them.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub temp_tables: Vec<String>,
     /// View-level comment describing the purpose of this semantic view.
     /// Old stored JSON without this field deserializes to None.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -2071,6 +2081,7 @@ mod tests {
                 database_name: None,
                 schema_name: None,
                 resolution_schema_name: None,
+                temp_tables: vec![],
                 comment: None,
             };
             let json = serde_json::to_string(&def).unwrap();
@@ -2428,6 +2439,7 @@ mod tests {
                 database_name: Some("mydb".to_string()),
                 schema_name: Some("main".to_string()),
                 resolution_schema_name: Some("main".to_string()),
+                temp_tables: vec![],
                 ..Default::default()
             };
             let json = serde_json::to_string(&def).unwrap();

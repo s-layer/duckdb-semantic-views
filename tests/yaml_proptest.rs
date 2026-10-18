@@ -284,6 +284,7 @@ fn arb_definition() -> impl Strategy<Value = SemanticViewDefinition> {
                     database_name: None,
                     schema_name: None,
                     resolution_schema_name: None,
+                    temp_tables: vec![],
                     comment,
                 }
             },

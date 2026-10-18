@@ -90,6 +90,7 @@ fn fan_trap_three_table_def() -> SemanticViewDefinition {
         database_name: None,
         schema_name: None,
         resolution_schema_name: None,
+        temp_tables: vec![],
         comment: None,
     }
 }
@@ -176,6 +177,7 @@ fn fan_trap_one_to_one_safe() {
         database_name: None,
         schema_name: None,
         resolution_schema_name: None,
+        temp_tables: vec![],
         comment: None,
     };
     let req = QueryRequest {
@@ -463,6 +465,7 @@ fn semi_additive_na_dim_fans_def() -> SemanticViewDefinition {
         database_name: None,
         schema_name: None,
         resolution_schema_name: None,
+        temp_tables: vec![],
         comment: None,
     }
 }
@@ -674,6 +677,7 @@ fn window_inner_ref_def(inner_ref: &str) -> SemanticViewDefinition {
         database_name: None,
         schema_name: None,
         resolution_schema_name: None,
+        temp_tables: vec![],
         comment: None,
     }
 }

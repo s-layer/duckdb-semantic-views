@@ -155,20 +155,27 @@ fn collect_table_rows(def: &SemanticViewDefinition, rows: &mut Vec<DescribeRow>)
 
     for table in &def.tables {
         let obj_name = table.table.clone();
+        // A table that was temporary at CREATE lives in `temp.main`.
+        let (table_db, table_schema) =
+            if crate::expand::temp_table_name(&table.table, def).is_some() {
+                ("temp".to_string(), "main".to_string())
+            } else {
+                (db_name.clone(), sch_name.clone())
+            };
 
         rows.push(DescribeRow {
             object_kind: "TABLE".to_string(),
             object_name: obj_name.clone(),
             parent_entity: String::new(),
             property: "BASE_TABLE_DATABASE_NAME".to_string(),
-            property_value: db_name.clone(),
+            property_value: table_db,
         });
         rows.push(DescribeRow {
             object_kind: "TABLE".to_string(),
             object_name: obj_name.clone(),
             parent_entity: String::new(),
             property: "BASE_TABLE_SCHEMA_NAME".to_string(),
-            property_value: sch_name.clone(),
+            property_value: table_schema,
         });
         rows.push(DescribeRow {
             object_kind: "TABLE".to_string(),
