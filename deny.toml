@@ -38,6 +38,12 @@ ignore = [
 [bans]
 multiple-versions = "warn"
 wildcards = "allow"
+# The zip ignores above match by advisory ID anywhere in the graph. This keeps
+# zip itself to the one place they were reviewed for: a crate that pulls zip
+# in other than libduckdb-sys fails the check (TECH-DEBT #104).
+deny = [
+    { crate = "zip", wrappers = ["libduckdb-sys"], reason = "zip 6 advisories are ignored only for libduckdb-sys's build script" },
+]
 
 [sources]
 unknown-registry = "warn"

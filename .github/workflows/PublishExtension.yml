@@ -132,8 +132,8 @@ jobs:
       #    It runs from a scratch repo: this checkout's git config carries the
       #    GITHUB_TOKEN auth header for github.com, which would replace the token.
       #    The PAT that opens the upstream PR is checked for being live and, for a
-      #    classic PAT, for the public_repo scope. `--no-maintainer-edit` below
-      #    matters too: GitHub refuses maintainer edits on an org-owned fork.
+      #    classic PAT, for the public_repo scope. Maintainer edits stay off
+      #    when the PR is opened: GitHub refuses them on an org-owned fork.
       - name: Get app token for the fork
         id: fork-token
         uses: actions/create-github-app-token@v3
@@ -166,7 +166,7 @@ jobs:
           # Only classic PATs send X-OAuth-Scopes; a fine-grained one sends none.
           SCOPE_LINE=$(printf '%s\n' "$HDRS" | tr -d '\r' | grep -i '^x-oauth-scopes:' || true)
           SCOPES=${SCOPE_LINE#*:}
-          if [ -n "$SCOPE_LINE" ] && ! printf '%s\n' "$SCOPES" | grep -qwE 'public_repo|repo'; then
+          if [ -n "$SCOPE_LINE" ] && ! printf '%s\n' "$SCOPES" | tr ',' '\n' | tr -d ' ' | grep -qxE 'public_repo|repo'; then
             echo "::error::the PAT that opens the PR on ${CE_UPSTREAM} has scopes '${SCOPES}' but needs public_repo."
             exit 1
           fi
@@ -272,17 +272,19 @@ jobs:
           if [ -n "$OPEN" ]; then
             # It may have been opened for an earlier version: retitle it to match.
             # Cosmetic, and only the PR's author can do it, so don't fail on it.
-            gh pr edit "$OPEN" --title "$TITLE" --body "$BODY" \
+            # REST, not `gh pr edit`: that also queries org/team fields and
+            # fails without read:org, which a public_repo-only PAT lacks.
+            gh api -X PATCH "repos/${CE_UPSTREAM}/pulls/${OPEN##*/}" \
+              -f title="$TITLE" -f body="$BODY" --silent \
               || echo "::warning::could not retitle $OPEN"
             echo "CE_PR=updated the open community-extensions PR $OPEN" >> "$GITHUB_ENV"
           else
-            URL=$(gh pr create \
-              --repo "$CE_UPSTREAM" \
-              --head "${CE_FORK_OWNER}:$CE_BRANCH" \
-              --base main \
-              --no-maintainer-edit \
-              --title "$TITLE" \
-              --body "$BODY")
+            # REST for the same reason as the retitle above. Maintainer edits
+            # stay off: GitHub refuses them on an org-owned fork.
+            URL=$(gh api -X POST "repos/${CE_UPSTREAM}/pulls" \
+              -f head="${CE_FORK_OWNER}:${CE_BRANCH}" -f base=main \
+              -f title="$TITLE" -f body="$BODY" -F maintainer_can_modify=false \
+              --jq .html_url)
             echo "CE_PR=opened community-extensions PR $URL" >> "$GITHUB_ENV"
           fi
 
