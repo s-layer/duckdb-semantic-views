@@ -686,6 +686,65 @@ mod tests {
         assert_eq!(r.sql, "(c.region) IN (SELECT revenue FROM t)");
     }
 
+    /// A member name can't correlate a subquery with the outer query: inside
+    /// the subquery it is the subquery's own name, as in Snowflake, whose
+    /// `WHERE` takes uncorrelated subqueries (CHANGELOG).
+    #[test]
+    fn a_member_name_does_not_correlate_a_subquery() {
+        let r = resolve_where_clause("v", &def(), "EXISTS (SELECT 1 FROM t WHERE t.k = region)")
+            .unwrap();
+        assert_eq!(r.sql, "EXISTS (SELECT 1 FROM t WHERE t.k = region)");
+        assert!(r.source_tables.is_empty(), "{:?}", r.source_tables);
+    }
+
+    /// `semantic_view()`'s `where_clause` reaches here with its comments: only
+    /// the construct strips them first.
+    #[test]
+    fn a_subquery_with_a_comment_before_its_select_is_a_subquery() {
+        let r =
+            resolve_where_clause("v", &def(), "region IN (/* r */ SELECT region FROM t)").unwrap();
+        assert_eq!(r.sql, "(c.region) IN (/* r */ SELECT region FROM t)");
+    }
+
+    #[test]
+    fn a_subquery_with_a_line_comment_before_its_select_is_a_subquery() {
+        let r =
+            resolve_where_clause("v", &def(), "region IN ( -- r\n SELECT region FROM t)").unwrap();
+        assert_eq!(r.sql, "(c.region) IN ( -- r\n SELECT region FROM t)");
+    }
+
+    /// A set operation whose first query is bracketed is one subquery: the
+    /// names after `UNION` are its own too.
+    #[test]
+    fn a_set_operation_with_a_bracketed_first_query_is_a_subquery() {
+        let r = resolve_where_clause(
+            "v",
+            &def(),
+            "region IN ((SELECT region FROM a) UNION SELECT region FROM b)",
+        )
+        .unwrap();
+        assert_eq!(
+            r.sql,
+            "(c.region) IN ((SELECT region FROM a) UNION SELECT region FROM b)"
+        );
+    }
+
+    /// Control: brackets around arithmetic on a scalar subquery hold an
+    /// expression, so the name outside the subquery is the member.
+    #[test]
+    fn brackets_around_a_scalar_subquery_expression_are_not_a_subquery() {
+        let r = resolve_where_clause(
+            "v",
+            &def(),
+            "order_date > ((SELECT max(order_date) FROM t) - order_date)",
+        )
+        .unwrap();
+        assert_eq!(
+            r.sql,
+            "(o.ordered_at) > ((SELECT max(order_date) FROM t) - (o.ordered_at))"
+        );
+    }
+
     /// Control: parentheses that hold an expression, not a query, are part of
     /// the predicate.
     #[test]

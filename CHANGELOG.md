@@ -116,7 +116,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `amt` in `amt IN (SELECT amt FROM targets)`, was replaced with the member of that name, so
   the subquery compared each row with itself and filtered nothing, or failed to parse. Names
   inside a subquery now refer to the subquery's own tables, as in Snowflake, where the
-  `WHERE` clause takes uncorrelated subqueries.
+  `WHERE` clause takes uncorrelated subqueries. So a member can no longer be named inside a
+  subquery to correlate it with the outer query; write that condition outside the subquery.
 
 ### Known limitations
 

@@ -7,7 +7,7 @@ use crate::model::SemanticViewDefinition;
 use crate::util::suggest_closest;
 
 use super::error::QueryError;
-use super::items::RequestItems;
+use super::items::{aliases_for, RequestItems};
 use crate::expand::wildcard::{expand_wildcards, WildcardItemType};
 
 use super::table_function::{execute_sql_raw, read_varchar_from_vector};
@@ -200,16 +200,21 @@ unsafe fn explain_semantic_view_bind_body(
 
     let def = SemanticViewDefinition::from_json(&view_name, &json_str)?;
 
-    // The items are parsed and checked as semantic_view() checks them. The
-    // aliases and the column order rename and reorder only the output, which
-    // the explained SQL does not show.
-    let items = RequestItems::parse(&dimensions, &metrics, &facts, &column_order).map_err(|e| {
+    // The items are parsed as semantic_view() parses them, and a member
+    // requested twice with different aliases is refused as there. The aliases
+    // and the column order rename and reorder only the output, which the
+    // explained SQL does not show, so the check that two output columns don't
+    // share a name, which needs the expansion's column names, is left to
+    // semantic_view().
+    let invalid = |detail: String| {
         QueryError::InvalidRequest {
             view_name: view_name.clone(),
-            detail: e,
+            detail,
         }
         .to_string()
-    })?;
+    };
+    let items =
+        RequestItems::parse(&dimensions, &metrics, &facts, &column_order).map_err(invalid)?;
     // R-3 (code-review 2026-07-11): wildcard failures render through
     // QueryError::WildcardExpansion, matching semantic_view()'s wording.
     let expand_list = |list: &[crate::query::items::Item], kind: &WildcardItemType| {
@@ -224,6 +229,9 @@ unsafe fn explain_semantic_view_bind_body(
     let dimensions = expand_list(&items.dimensions, &WildcardItemType::Dimension)?;
     let metrics = expand_list(&items.metrics, &WildcardItemType::Metric)?;
     let facts = expand_list(&items.facts, &WildcardItemType::Fact)?;
+    aliases_for(&items.dimensions, &dimensions).map_err(invalid)?;
+    aliases_for(&items.metrics, &metrics).map_err(invalid)?;
+    aliases_for(&items.facts, &facts).map_err(invalid)?;
 
     let mat_name = {
         // Resolve the requested names to their stored items with the SAME
