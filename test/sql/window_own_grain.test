@@ -158,7 +158,7 @@ ENT	300
 statement error
 SELECT * FROM semantic_view('wog_sv', metrics := ['seg_balance'], dimensions := ['segment'], where_clause := 'EXISTS (SELECT 1 WHERE balance > 150)');
 ----
-Referenced column "balance" not found
+Referenced column "balance" was not found
 
 # ============================================================
 # Test 6: the boundary this increment keeps. Two window metrics whose inner
