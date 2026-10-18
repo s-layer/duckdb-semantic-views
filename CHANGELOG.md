@@ -66,7 +66,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   member could be named inside a subquery to correlate it with the outer query, as in
   `EXISTS (SELECT 1 FROM t WHERE t.k = region)`. Now `region` there refers to the
   subquery's own tables, as in Snowflake, where the `WHERE` clause takes uncorrelated
-  subqueries. Write a condition on the member outside the subquery.
+  subqueries. If those tables have no column of that name, DuckDB looks for one in the
+  semantic view's tables, where it is the stored column, not the member. Write a
+  condition on the member outside the subquery.
 - **`GET_DDL` and `READ_YAML_FROM_SEMANTIC_VIEW` follow `search_path`.** An unqualified
   view name now resolves through the session's `search_path`, as it already did for the
   DDL statements and `semantic_view()`: when several schemas hold a view of that name,
