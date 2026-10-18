@@ -42,8 +42,11 @@
 //!   declaration `revenue` — TECH-DEBT #28) with no third case/quote rule.
 //!
 //! Expressions reaching this layer are already comment-blanked at the parse
-//! entry points (PA-7, [`crate::util::blank_sql_comments`]), so the tokenizer
+//! entry points (PA-7, [`crate::util::blank_sql_comments`]), and a query's
+//! `where_clause` where `expand::where_clause` resolves it, so the tokenizer
 //! does not handle SQL comments — they are spaces by the time we see them.
+//! Only the subquery scan ([`subquery_spans`]) skips them as well, for its
+//! callers that pass text with comments in it.
 //!
 //! The **alias-qualifier** rewriters (`expand::window` / `expand::sql_gen` /
 //! `expand::semi_additive`, which rewrite the `a` in `a.city` to a scoped
@@ -788,8 +791,9 @@ enum Opens {
 const MAX_BRACKET_CHAIN: usize = 1000;
 
 /// Whether the `(` at `open` starts a query: its first word is one of
-/// [`QUERY_OPENERS`], or it starts with a bracketed query that a set operation
-/// continues (`((SELECT …) UNION SELECT …)`). Comments are skipped.
+/// [`QUERY_OPENERS`], or it starts with a bracketed query that a set operation,
+/// `ORDER BY`, `LIMIT` or `OFFSET` continues (`((SELECT …) UNION SELECT …)`).
+/// Comments are skipped.
 ///
 /// The brackets that open directly inside one another (`((( …`) are walked
 /// in a loop, not by recursion, since their number comes from the caller's
@@ -814,12 +818,12 @@ fn opens_query(bytes: &[u8], open: usize) -> Opens {
         return Opens::NoQueryBefore(first);
     }
     // The innermost bracket holds a query. Each one around it does too only if
-    // a set operation continues the bracketed query just inside it.
+    // a clause of a query continues the bracketed query just inside it.
     for &inner in &chain[1..] {
         let after = skip_whitespace_and_comments(bytes, skip_balanced(bytes, inner, b'(', b')'));
-        if !SET_OPERATIONS
+        if !QUERY_CONTINUATIONS
             .iter()
-            .any(|w| match_words(bytes, after, &[w]).is_some())
+            .any(|words| match_words(bytes, after, words).is_some())
         {
             return Opens::NoQueryBefore(inner);
         }
@@ -832,8 +836,16 @@ fn starts_comment(bytes: &[u8], pos: usize) -> bool {
     bytes[pos..].starts_with(b"/*") || bytes[pos..].starts_with(b"--")
 }
 
-/// The words that continue a query after a bracketed one.
-const SET_OPERATIONS: &[&str] = &["union", "intersect", "except"];
+/// The words that continue a query after a bracketed one: a set operation, or
+/// a clause that orders or limits the bracketed query.
+const QUERY_CONTINUATIONS: &[&[&str]] = &[
+    &["union"],
+    &["intersect"],
+    &["except"],
+    &["order", "by"],
+    &["limit"],
+    &["offset"],
+];
 
 /// Offset of the first byte at or after `pos` that is neither whitespace nor
 /// inside a `/* … */` or `-- …` comment (or `len`).
@@ -849,7 +861,7 @@ fn skip_whitespace_and_comments(bytes: &[u8], pos: usize) -> usize {
         } else if bytes[j..].starts_with(b"--") {
             j = bytes[j..]
                 .iter()
-                .position(|&b| b == b'\n')
+                .position(|&b| b == b'\n' || b == b'\r')
                 .map_or(bytes.len(), |p| j + p + 1);
         } else {
             return j;

@@ -165,6 +165,17 @@ SELECT * FROM SEMANTIC_VIEW(svc_sv DIMENSIONS region METRICS revenue
 ----
 EU	150.00
 
+# A construct can stand in a subquery of another's WHERE. Its clauses and its
+# table alias are its own: the outer alias is s, and the inner query picks the
+# regions under 100 before the outer one totals them.
+
+query T
+SELECT s.revenue FROM SEMANTIC_VIEW(svc_sv METRICS revenue
+  WHERE region IN (SELECT r FROM SEMANTIC_VIEW(svc_sv DIMENSIONS region AS r METRICS revenue) AS z
+                   WHERE z.revenue < 100)) AS s;
+----
+70.00
+
 # Comments inside the construct are ignored.
 
 query TT rowsort
@@ -241,6 +252,24 @@ PIVOT SEMANTIC_VIEW(svc_sv DIMENSIONS region METRICS revenue) ON region USING su
 ----
 150.00	70.00
 
+# FACTS returns rows unaggregated, and its place among the clauses sets its
+# columns' place too.
+
+query TT rowsort
+SELECT * FROM SEMANTIC_VIEW(svc_sv FACTS amt DIMENSIONS region);
+----
+100.00	EU
+50.00	EU
+70.00	US
+
+# explain_semantic_view() takes aliases and column_order as semantic_view()
+# does.
+
+query I
+SELECT count(*) > 0 FROM explain_semantic_view('svc_sv', dimensions := ['region AS r'], metrics := ['revenue AS total'], column_order := ['metrics']);
+----
+true
+
 # column_order sets the lists' order for semantic_view(), case-insensitively; a
 # list it leaves out follows in the default order.
 
@@ -268,6 +297,11 @@ statement error
 SELECT * FROM semantic_view('svc_sv', dimensions := ['region'], metrics := ['revenue'], column_order := ['metrics', 'Metrics']);
 ----
 column_order names 'metrics' twice
+
+statement error
+SELECT * FROM explain_semantic_view('svc_sv', dimensions := ['region'], column_order := ['rows']);
+----
+column_order entry 'rows' must be one of 'dimensions', 'metrics' or 'facts'
 
 statement error
 SELECT * FROM SEMANTIC_VIEW(svc_sv METRICS revenue METRICS orders);
@@ -315,6 +349,42 @@ statement error
 SELECT * FROM SEMANTIC_VIEW(svc_sv DIMENSIONS upper(region) METRICS revenue);
 ----
 expressions in a query item are not supported yet (TECH-DEBT #76)
+
+# A query a materialization answers is renamed and reordered too. The
+# materialization's totals differ from the base rows', so the values show the
+# query was routed to it.
+
+statement ok
+CREATE TABLE svc_region_agg (region VARCHAR, revenue DECIMAL(10,2));
+
+statement ok
+INSERT INTO svc_region_agg VALUES ('EU', 1.00), ('US', 2.00);
+
+statement ok
+CREATE SEMANTIC VIEW svc_mat AS
+  TABLES (o AS svc_orders PRIMARY KEY (id), c AS svc_customers PRIMARY KEY (id))
+  RELATIONSHIPS (order_customer AS o(customer_id) REFERENCES c)
+  DIMENSIONS (c.region AS c.region)
+  METRICS (o.revenue AS sum(o.amount))
+  MATERIALIZATIONS (by_region AS (TABLE svc_region_agg, DIMENSIONS (region), METRICS (revenue)));
+
+query TT rowsort
+SELECT * FROM SEMANTIC_VIEW(svc_mat METRICS revenue AS total DIMENSIONS region AS r);
+----
+1.00	EU
+2.00	US
+
+query T
+SELECT column_name FROM (DESCRIBE SELECT * FROM SEMANTIC_VIEW(svc_mat METRICS revenue AS total DIMENSIONS region AS r));
+----
+total
+r
+
+statement ok
+DROP SEMANTIC VIEW svc_mat;
+
+statement ok
+DROP TABLE svc_region_agg;
 
 # Cleanup
 
