@@ -492,8 +492,37 @@ pub fn output_column_names(
 /// - Neither dimensions nor metrics are requested (`EmptyRequest`)
 /// - A requested dimension or metric name is not found (`UnknownDimension`, `UnknownMetric`)
 /// - A dimension or metric name is duplicated (`DuplicateDimension`, `DuplicateMetric`)
-#[allow(clippy::too_many_lines)]
 pub fn expand(
+    view_name: &str,
+    def: &SemanticViewDefinition,
+    req: &QueryRequest,
+) -> Result<String, ExpandError> {
+    // The predicate's subqueries become CTEs ahead of the expansion, so that
+    // they are uncorrelated (`where_clause::hoist_subqueries`). What is left in
+    // the predicate is resolved as before: a `(SELECT * FROM __sv_sqN)` is
+    // still a subquery to the member scan.
+    if let Some(raw) = req.where_clause.as_deref() {
+        super::where_clause::refuse_outside_one_predicate(view_name, raw)?;
+    }
+    let Some(hoisted) = req
+        .where_clause
+        .as_deref()
+        .map(super::where_clause::hoist_subqueries)
+        .filter(|h| !h.ctes.is_empty())
+    else {
+        return expand_unhoisted(view_name, def, req);
+    };
+    let req = QueryRequest {
+        where_clause: Some(hoisted.predicate),
+        ..req.clone()
+    };
+    let sql = expand_unhoisted(view_name, def, &req)?;
+    Ok(super::where_clause::with_ctes(&sql, &hoisted.ctes))
+}
+
+/// [`expand`], for a predicate whose subqueries are already hoisted.
+#[allow(clippy::too_many_lines)]
+fn expand_unhoisted(
     view_name: &str,
     def: &SemanticViewDefinition,
     req: &QueryRequest,

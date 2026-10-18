@@ -319,6 +319,12 @@ The parameter is spelled ``where_clause`` rather than ``where`` because DuckDB r
 
 A name that is not a declared dimension or fact is left as written. It binds only if it is a column of a table the query already reads (``price`` or ``o.price`` on a single-table view, for example); it does not cause a join, so a column of any other table fails with DuckDB's ``Referenced column ... not found`` binder error. Declare the column as a dimension or fact to make it reachable.
 
+**Subqueries.** A subquery in the predicate is uncorrelated, as in Snowflake. Names inside it are its own tables' columns, never members, and it sees none of the semantic view's tables. In ``region IN (SELECT code FROM codes)``, ``region`` is the member and ``code`` is a column of ``codes``. A name the subquery's tables lack, such as ``region`` in ``EXISTS (SELECT 1 FROM codes WHERE code = region)``, fails with DuckDB's ``Referenced column ... not found`` error. Write the condition on the member outside the subquery.
+
+.. versionchanged:: 0.16.0
+
+   A member name inside a subquery used to be replaced with the member's expression, and a name the subquery's tables lacked could read a column of the semantic view's tables.
+
 **Joins and fan-out.** Tables the predicate reaches are joined in and subjected to the same reachability and fan-out checks as a queried dimension's, matching Snowflake's rule that WHERE-clause members participate in the same-logical-table constraint. A member on a role-played table -- one reached through two named relationships -- is rejected rather than bound to whichever relationship was declared first, since the predicate has no way to say which role is meant.
 
 **Where it is applied.** Before the ``GROUP BY`` when the query is a single ``SELECT`` (one grain, dimensions only, or facts), inside each grain CTE for multi-grain queries, inside the snapshot CTE ahead of the ranking for semi-additive metrics, and inside the aggregate CTE ahead of the window function for window metrics -- so a filtered number is always recomputed rather than filtered after the fact.

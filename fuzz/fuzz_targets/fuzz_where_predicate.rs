@@ -151,10 +151,14 @@ fuzz_target!(|input: FuzzInput| {
         where_clause: Some(input.predicate.clone()),
     };
 
-    // The predicate is spliced verbatim, so it joins the definition's fragments
-    // in the precondition: an unbalanced predicate yields unbalanced SQL by
-    // construction, which is the caller's error rather than a splice bug.
-    let inputs_ok = def_fragments_balanced(&input.def) && is_balanced(&input.predicate);
+    // The predicate is spliced with its comments blanked, so it joins the
+    // definition's fragments in the precondition as blanked: an unbalanced
+    // predicate yields unbalanced SQL by construction, which is the caller's
+    // error rather than a splice bug. `is_balanced` knows no comments, so it is
+    // asked about the predicate as spliced: `--'\n'` counts two quotes, but the
+    // first is inside the comment and the second opens a string never closed.
+    let spliced = semantic_views::util::blank_sql_comments(&input.predicate);
+    let inputs_ok = def_fragments_balanced(&input.def) && is_balanced(&spliced);
 
     if let Ok(sql) = expand("fuzz_view", &input.def, &req) {
         assert!(!sql.is_empty(), "successful expansion produced empty SQL");

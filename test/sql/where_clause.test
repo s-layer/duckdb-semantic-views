@@ -221,11 +221,10 @@ US	70.00
 statement ok
 DROP TABLE wc_targets;
 
-# A name inside the subquery that its own tables lack is not a member either:
-# DuckDB looks it up in the semantic view's tables, where it is the raw column.
-# Here `region` is lower(c.region), but the subquery compares c.region as
-# stored ('EU'), so nothing matches (TECH-DEBT #109). Pinned so a change shows
-# up here.
+# A subquery in the predicate is uncorrelated, as in Snowflake: a name its own
+# tables lack does not reach into the semantic view's tables. Before, DuckDB
+# found `region` there as the raw column c.region ('EU', not the dimension's
+# lower(c.region)), and the query silently matched nothing.
 
 statement ok
 CREATE TABLE wc_codes (code VARCHAR);
@@ -240,12 +239,37 @@ CREATE SEMANTIC VIEW wc_lower AS
   DIMENSIONS (c.region AS lower(c.region))
   METRICS (o.revenue AS sum(o.amount));
 
-query TT rowsort
+statement error
 SELECT * FROM semantic_view('wc_lower', metrics := ['revenue'], dimensions := ['region'], where_clause := 'EXISTS (SELECT 1 FROM wc_codes k WHERE k.code = region)');
 ----
+Referenced column "region" not found
 
+# Nor does a table alias of the view's.
+statement error
+SELECT * FROM semantic_view('wc_lower', metrics := ['revenue'], dimensions := ['region'], where_clause := 'EXISTS (SELECT 1 FROM wc_codes k WHERE k.code = c.region)');
+----
+Referenced table "c" not found
+
+# The same inside a subquery nested in another.
+statement error
+SELECT * FROM semantic_view('wc_lower', metrics := ['revenue'], dimensions := ['region'], where_clause := 'region IN (SELECT code FROM wc_codes k WHERE EXISTS (SELECT 1 FROM wc_codes j WHERE j.code = c.region))');
+----
+Referenced table "c" not found
+
+# Controls: uncorrelated subqueries of each kind still filter.
 query TT rowsort
 SELECT * FROM semantic_view('wc_lower', metrics := ['revenue'], dimensions := ['region'], where_clause := 'region IN (SELECT code FROM wc_codes)');
+----
+eu	150.00
+
+query TT rowsort
+SELECT * FROM semantic_view('wc_lower', metrics := ['revenue'], dimensions := ['region'], where_clause := 'region = (SELECT max(code) FROM wc_codes) OR NOT EXISTS (SELECT 1 FROM wc_codes WHERE code = ''us'')');
+----
+eu	150.00
+us	70.00
+
+query TT rowsort
+SELECT * FROM semantic_view('wc_lower', metrics := ['revenue'], dimensions := ['region'], where_clause := 'region = ANY (SELECT code FROM wc_codes k WHERE k.code IN (SELECT ''eu''))');
 ----
 eu	150.00
 
