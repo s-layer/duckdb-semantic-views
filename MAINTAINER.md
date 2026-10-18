@@ -598,7 +598,7 @@ and the `duckdb` / `libduckdb-sys` pins in `Cargo.toml` (the crate version encod
 DuckDB version as `1.1XY0Z.0`, e.g. DuckDB 1.5.6 = crate 1.10506.0), then build and test. Then run
 `cargo deny check advisories`. If the new `libduckdb-sys` no longer pulls in `zip 6`, it
 fails on the three zip ignores in `deny.toml` (`unused-ignored-advisory = "deny"`): delete
-them and close TECH-DEBT #104.
+them and the `zip` entry in `[bans] deny`, and close TECH-DEBT #104.
 
 The `DuckDBVersionMonitor` workflow automates the engine bump: it checks weekly for a DuckDB release newer than `.duckdb-version`, updates the engine pins and their derived locations (steps 1–3, minus a new release line's extension-ci-tools move), then opens a PR. If the build passes, the PR bumps the version. If it fails, the PR tags `@copilot` to attempt an automated fix.
 
@@ -859,9 +859,9 @@ The `just release` recipe automates steps 3-7 below:
 3. Run `just release`
 
 This will:
-- Verify you're on `main` with a clean working tree and `gh` CLI installed
-- Extract the version from `Cargo.toml` and the commit its `v<version>` tag points at (`scripts/registry_target.py release-sha`; it refuses when the tag is missing). Not `HEAD`: `main` may have moved past the release, as it had when v0.14.0's registry PR was first opened
-- Update `description.yml` with the new `ref` and `version`, and commit (a re-run for the same release finds it unchanged and goes straight to the registry PR)
+- Verify you're on `main` with a clean working tree and `gh` CLI installed, then fetch `origin/main` and fast-forward to it (it stops if local `main` has diverged)
+- Extract the version from `Cargo.toml` and stop if local `main` has commits `origin/main` does not (`scripts/registry_target.py unpushed`), since the push below would publish them; the one exception is a re-run's own unpushed `description.yml` commit for this version. Fetch its `v<version>` tag from `origin` if it is there (it stops if the local tag differs), and take the commit the tag points at (`scripts/registry_target.py release-sha`; it refuses when the tag is missing or `origin/main` does not contain the tagged commit). Not `HEAD`: `main` may have moved past the release, as it had when v0.14.0's registry PR was first opened
+- Update `description.yml` with the tagged commit under the key the registry builds our DuckDB pin from (`ref`, or an older DuckDB line's key such as `variegata`; `scripts/registry_target.py key`) and the new `version`, commit, and push to `main` if that left it ahead of `origin/main` (a re-run for the same release finds it unchanged and goes straight to the registry PR)
 - In the CE fork (default: `~/Documents/Dev/Sources/community-extensions`, override with `CE_REPO` env var): ensure an `upstream` remote, `git fetch upstream main`, and **rebranch `semantic-views` off `upstream/main`** so the PR is a clean one-file change, then copy in `description.yml`, commit, and **force-push**
 - Open a PR to `duckdb/community-extensions` (or report the existing open one, which the force-push updates in place)
 

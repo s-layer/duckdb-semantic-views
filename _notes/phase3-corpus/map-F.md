@@ -79,7 +79,7 @@ also carry an accepted control), 19 syntax-reject rows. 99 source tests/properti
 | source::test_fn | corpus row id(s) | note |
 |---|---|---|
 | show_clauses.rs::limit_zero_is_accepted | F-096 | |
-| show_clauses.rs::limit_rejects_negative_with_non_negative_message | F-097, F-098 | `-1` is a well-formed integer out of range (message pinned); `abc` is the wrong token kind ([syntax]) |
+| show_clauses.rs::limit_rejects_negative_with_non_negative_message | F-097, F-098 | `-1` is a well-formed integer out of range (message pinned); `abc` is the wrong token kind (message pinned too) ([text]) |
 | show_clauses.rs::filter_suffix_escapes_single_quotes | F-100, F-101 | LIKE / STARTS WITH quotes F-100; IN SCHEMA / IN DATABASE / `<db>.<schema>` quotes F-101 |
 | show_clauses.rs::filter_suffix_plain_values_and_limit_unchanged | F-099 | |
 | show_clauses.rs::starts_with_prefix_is_literal_not_a_like_pattern | F-102, F-103, F-100 | `_` F-102, `%` F-103, quote F-100; LIKE keeps pattern meaning in F-102 / F-103 |

@@ -773,9 +773,9 @@ METRICS (
     s.r AS SUM(t) OVER (PARTITION BY EXCLUDING_x ORDER BY d NULLS LAST)
 )
 
-# and no EXCLUDING of `region` (or anything) was recorded
+# and no EXCLUDING keyword was recorded (only the dimension name EXCLUDING_x)
 query T nosort
-SELECT count(*) FROM dcb_ddl('dcb_w_excl_x') WHERE line LIKE '%PARTITION BY EXCLUDING region%';
+SELECT count(*) FROM dcb_ddl('dcb_w_excl_x') WHERE line LIKE '%PARTITION BY EXCLUDING %';
 ----
 0
 

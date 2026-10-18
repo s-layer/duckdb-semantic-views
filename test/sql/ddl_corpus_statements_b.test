@@ -108,12 +108,11 @@ SHOW SEMANTIC FACTS LIMIT 1
 memory	main	v	dcs_orders	raw_amount	INTEGER	[]	(empty)
 
 # S-204: rewrite.rs::phase34_1_1_show_filter_tests::test_rewrite_show_dims_for_metric_with_all_clauses — LIKE, IN, FOR METRIC, STARTS WITH, LIMIT all together
+# LIKE drops cust_initial, which would sort first, and LIMIT 1 drops customer.
 query TTTT nosort
-SHOW SEMANTIC DIMENSIONS LIKE '%u%' IN v FOR METRIC revenue STARTS WITH 'c' LIMIT 3
+SHOW SEMANTIC DIMENSIONS LIKE '%r%' IN v FOR METRIC revenue STARTS WITH 'c' LIMIT 1
 ----
-dcs_orders	cust_initial	VARCHAR	false
 dcs_orders	cust_tier	VARCHAR	false
-dcs_orders	customer	VARCHAR	false
 
 # S-205: rewrite.rs::phase34_1_1_show_filter_tests::test_rewrite_show_case_insensitive — lower-case SHOW keywords and clauses
 query TTTTTTTT rowsort
@@ -151,10 +150,17 @@ SHOW SEMANTIC VIEWS STARTS WITH 'sales' LIMIT 1
 <REGEX>:\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z	sales_a	SEMANTIC_VIEW	memory	main	(empty)
 
 # S-209: rewrite.rs::phase34_1_1_show_filter_tests::test_rewrite_show_views_all_clauses, test_build_filter_suffix_all_three — LIKE, STARTS WITH and LIMIT on SHOW SEMANTIC VIEWS
+# LIKE drops sales_a and sales_b, STARTS WITH drops product_sv.
 query TTTTTT nosort
-SHOW SEMANTIC VIEWS LIKE '%_%' STARTS WITH 's' LIMIT 1
+SHOW SEMANTIC VIEWS LIKE '%c%' STARTS WITH 's'
 ----
 <REGEX>:\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z	sch_sv	SEMANTIC_VIEW	memory	dcs_sch	(empty)
+
+# LIKE drops sch_sv, LIMIT drops sales_b.
+query TTTTTT nosort
+SHOW SEMANTIC VIEWS LIKE '%a%' STARTS WITH 's' LIMIT 1
+----
+<REGEX>:\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z	sales_a	SEMANTIC_VIEW	memory	main	(empty)
 
 # S-210: rewrite.rs::phase34_1_1_show_filter_tests::test_rewrite_show_views_in_schema, test_build_filter_suffix_in_schema, show_name_slot_quoted_ident_tests::an_unquoted_schema_name_is_unchanged, show_scope_qualified_name_tests::an_unqualified_schema_name_emits_no_database_predicate — IN SCHEMA keeps only that schema (`dcs_sch.sch_sv` is excluded)
 query TTTTTT nosort

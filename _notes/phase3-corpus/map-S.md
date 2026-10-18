@@ -17,7 +17,8 @@ in source order. Corpus files (row ids `S-nnn`, numbered across all three):
 
 Rows tagged `[syntax]` are `statement error` with an empty `----` block (no message pinned);
 rows tagged `[text]` pin text that a grammar might plausibly change; `PRE-EXISTING` comments
-mark behaviour that looked wrong when the corpus was written (S-014, S-358, both since fixed). The note column repeats the first
+mark behaviour that looked wrong when the corpus was written (S-014 and S-358, since fixed; S-391,
+still open under TECH-DEBT #98). The note column repeats the first
 row's description. 6 of 276 tests are N/A.
 
 | source::test_fn | corpus row id(s) | note |
@@ -25,7 +26,7 @@ row's description. 6 of 276 tests are N/A.
 | rewrite.rs::sv_parse_function_rust_returns_2_for_select | S-001 | a plain SELECT is not intercepted |
 | rewrite.rs::sv_parse_function_rust_returns_2_for_invalid_utf8 | N/A | N/A: feeds raw invalid UTF-8 bytes to the FFI entry point; SQL text in a .test file (and every DuckDB client) is valid UTF-8, so the case cannot be expressed in SQL. |
 | rewrite.rs::sv_parse_function_rust_returns_1_with_position_for_malformed_create | S-315 | a misspelled clause keyword (`TABLSE`) ([syntax]) |
-| rewrite.rs::sv_parse_function_rust_returns_1_for_near_miss | S-310 | `CRETAE SEMANTIC VIEW` (transposed) ([syntax]) |
+| rewrite.rs::sv_parse_function_rust_returns_1_for_near_miss | S-310 | `CRETAE SEMANTIC VIEW` (transposed) ([text]) |
 | rewrite.rs::sv_parser_override_rust_returns_2_for_validation_failure | S-315 | a misspelled clause keyword (`TABLSE`) ([syntax]) |
 | rewrite.rs::leak_and_reclaim_round_trips_arbitrary_string | N/A | N/A here: FFI heap-buffer round trip of a >64 KB string. Its SQL-level effect (a >64 KB rewritten CREATE commits intact) is pinned by test/integration/test_large_view_rewrite.py; a .test row would need a >64 KB single-line statement. |
 | rewrite.rs::test_detect_create | S-300 | plain CREATE stores the AS-body; no COMMENT is stored when none is given |
@@ -85,15 +86,15 @@ row's description. 6 of 276 tests are N/A.
 | rewrite.rs::test_validate_and_rewrite_show | S-022 | SHOW SEMANTIC VIEWS with no clauses lists every view |
 | rewrite.rs::test_validate_and_rewrite_describe | S-020 | DESCRIBE SEMANTIC VIEW lists the view's objects |
 | rewrite.rs::test_validate_and_rewrite_drop_if_exists | S-012 | DROP IF EXISTS is a no-op on a missing view and drops an existing one |
-| rewrite.rs::test_near_miss_creat | S-311 | `CREAT SEMANTIC VIEW` (dropped letter) ([syntax]) |
-| rewrite.rs::test_near_miss_drop_semantc | S-050 | `DROP SEMANTC VIEW` is rejected with a suggestion ([syntax]) |
+| rewrite.rs::test_near_miss_creat | S-311 | `CREAT SEMANTIC VIEW` (dropped letter) ([text]) |
+| rewrite.rs::test_near_miss_drop_semantc | S-050 | `DROP SEMANTC VIEW` is rejected with a suggestion ([text]) |
 | rewrite.rs::test_near_miss_show_semantic_view | S-051 | `SHOW SEMANTIC VIEW` (singular) is rejected ([syntax]) |
 | rewrite.rs::test_near_miss_select | S-001 | a plain SELECT is not intercepted |
 | rewrite.rs::test_near_miss_show_tables | S-007 | SHOW TABLES is DuckDB's, and gets no near-miss suggestion |
-| rewrite.rs::test_near_miss_position_zero | S-311 | `CREAT SEMANTIC VIEW` (dropped letter) ([syntax]) |
+| rewrite.rs::test_near_miss_position_zero | S-311 | `CREAT SEMANTIC VIEW` (dropped letter) ([text]) |
 | rewrite.rs::test_parse_error_position_paren_body_rejected | S-316 | the retired parenthesised body is rejected ([syntax]) |
 | rewrite.rs::test_parse_error_position_structural | S-313 | the bare prefix with no view name ([syntax]) |
-| rewrite.rs::parse_error_position_points_at_offending_token | S-087, S-091, S-100, S-129, S-221, S-225 | an unsupported ALTER sub-operation ([syntax]) |
+| rewrite.rs::parse_error_position_points_at_offending_token | S-087, S-091, S-100, S-129, S-221, S-225 | an unsupported ALTER sub-operation ([text]) |
 | rewrite.rs::parse_error_position_survives_leading_comment | S-071 | leading comment, then an unknown SHOW clause token ([syntax]) |
 | rewrite.rs::phase25_parse_tests::as_body_create_rewrites_to_from_json | S-300, S-301 | plain CREATE stores the AS-body; no COMMENT is stored when none is given |
 | rewrite.rs::phase25_parse_tests::as_body_create_or_replace_rewrites_to_from_json | S-302 | CREATE OR REPLACE overwrites |
@@ -156,7 +157,7 @@ row's description. 6 of 276 tests are N/A.
 | rewrite.rs::detect_show_materializations_in_view | S-219 | SHOW SEMANTIC MATERIALIZATIONS IN <view> |
 | rewrite.rs::rewrite_show_materializations_all | S-218 | SHOW SEMANTIC MATERIALIZATIONS across views |
 | rewrite.rs::rewrite_show_materializations_in_view | S-219 | SHOW SEMANTIC MATERIALIZATIONS IN <view> |
-| rewrite.rs::near_miss_show_materialization | S-052 | `SHOW SEMANTIC MATERIALIZATION` (singular) is rejected ([syntax]) |
+| rewrite.rs::near_miss_show_materialization | S-052 | `SHOW SEMANTIC MATERIALIZATION` (singular) is rejected ([text]) |
 | rewrite.rs::phase43_view_comment_tests::test_view_comment_parsed | S-320 | COMMENT = '...' before AS |
 | rewrite.rs::phase43_view_comment_tests::test_view_without_comment | S-300 | plain CREATE stores the AS-body; no COMMENT is stored when none is given |
 | rewrite.rs::phase43_view_comment_tests::test_view_comment_escaped_quotes | S-321 | `''` in the view COMMENT stores one `'` |
@@ -171,7 +172,7 @@ row's description. 6 of 276 tests are N/A.
 | rewrite.rs::test_validate_rewrite_alter_if_exists_set_comment | S-084 | ALTER IF EXISTS ... SET COMMENT sets it on an existing view and is a no-op on a missing one |
 | rewrite.rs::test_validate_rewrite_alter_if_exists_unset_comment | S-085 | ALTER IF EXISTS ... UNSET COMMENT on an existing and a missing view |
 | rewrite.rs::test_validate_rewrite_alter_rename_unchanged | S-080 | ALTER ... RENAME TO |
-| rewrite.rs::test_validate_rewrite_alter_unsupported_operation | S-087 | an unsupported ALTER sub-operation ([syntax]) |
+| rewrite.rs::test_validate_rewrite_alter_unsupported_operation | S-087 | an unsupported ALTER sub-operation ([text]) |
 | rewrite.rs::test_validate_rewrite_alter_set_comment_escaped_quotes | S-082 | `''` in the comment literal stores one `'` |
 | rewrite.rs::test_validate_rewrite_alter_missing_operation | S-088 | ALTER with a name but no sub-operation ([syntax]) |
 | rewrite.rs::test_extract_dollar_quoted_untagged | S-340 | CREATE ... FROM YAML $$ <multi-line YAML> $$ |
@@ -180,7 +181,7 @@ row's description. 6 of 276 tests are N/A.
 | rewrite.rs::test_extract_dollar_quoted_no_leading_dollar | S-353 | FROM YAML not followed by a dollar quote ([syntax]) |
 | rewrite.rs::test_extract_dollar_quoted_unterminated_opening | S-354 | `$tag` with no closing `$` on the opening delimiter ([syntax]) |
 | rewrite.rs::test_extract_dollar_quoted_unterminated_body | S-355 | `$$` body with no closing `$$` ([syntax]) |
-| rewrite.rs::test_extract_dollar_quoted_rejects_invalid_tag | S-356 | a digit-led tag (`$1$`) and a tag with a space (`$ta g$`) ([syntax]) |
+| rewrite.rs::test_extract_dollar_quoted_rejects_invalid_tag | S-356 | a digit-led tag (`$1$`) and a tag with a space (`$ta g$`) ([text]) |
 | rewrite.rs::test_extract_dollar_quoted_inner_dollar | S-352 | the first closing `$$` ends the body, so a later `$$ text$$` is trailing content ([syntax]) |
 | rewrite.rs::test_extract_dollar_quoted_multiline | S-340 | CREATE ... FROM YAML $$ <multi-line YAML> $$ |
 | rewrite.rs::test_yaml_rewrite_basic_create | S-340 | CREATE ... FROM YAML $$ <multi-line YAML> $$ |
@@ -196,7 +197,7 @@ row's description. 6 of 276 tests are N/A.
 | rewrite.rs::test_from_yaml_case_insensitive | S-341 | `from yaml` and `From Yaml` |
 | rewrite.rs::test_from_yaml_mixed_case | S-341 | `from yaml` and `From Yaml` |
 | rewrite.rs::test_from_yaml_flexible_whitespace | S-342 | two spaces, a tab, a block comment, or a newline between FROM and YAML |
-| rewrite.rs::test_error_message_mentions_from_yaml | S-317 | neither AS nor FROM YAML after the name ([syntax]) |
+| rewrite.rs::test_error_message_mentions_from_yaml | S-317 | neither AS nor FROM YAML after the name ([text]) |
 | rewrite.rs::test_create_or_replace_from_yaml | S-343 | CREATE OR REPLACE ... FROM YAML replaces |
 | rewrite.rs::test_create_if_not_exists_from_yaml | S-344 | CREATE IF NOT EXISTS ... FROM YAML is a no-op on an existing view and creates a missing one |
 | rewrite.rs::test_comment_with_from_yaml | S-345 | COMMENT = '...' before FROM YAML |
@@ -220,7 +221,7 @@ row's description. 6 of 276 tests are N/A.
 | rewrite.rs::test_validate_and_rewrite_yaml_file | S-360 | CREATE ... FROM YAML FILE '<path>' |
 | rewrite.rs::test_validate_and_rewrite_yaml_file_case_insensitive | S-361 | `from yaml file` in lower case |
 | rewrite.rs::test_validate_and_rewrite_yaml_inline_still_works | S-340 | CREATE ... FROM YAML $$ <multi-line YAML> $$ |
-| rewrite.rs::test_error_message_mentions_from_yaml_file | S-317 | neither AS nor FROM YAML after the name ([syntax]) |
+| rewrite.rs::test_error_message_mentions_from_yaml_file | S-317 | neither AS nor FROM YAML after the name ([text]) |
 | rewrite.rs::skip_lws_empty | N/A | N/A: byte offset returned by the skip_leading_whitespace helper; the user-visible effect (leading whitespace before a statement) is S-031 / S-305. |
 | rewrite.rs::skip_lws_only_whitespace | N/A | N/A: byte offset returned by the skip_leading_whitespace helper; a whitespace-only statement never reaches the hook with a body (see S-005 for the empty statement). |
 | rewrite.rs::skip_lws_no_leading_match | N/A | N/A: byte offset returned by the skip_leading_whitespace helper (offset 0 with no leading whitespace); every unindented statement in the corpus exercises it. |
@@ -257,7 +258,7 @@ row's description. 6 of 276 tests are N/A.
 | rewrite.rs::phase64_quoted_ident_tests::alter_rename_target_unterminated_quote_errors | S-135 | an unterminated quoted RENAME TO target ([syntax]) |
 | rewrite.rs::phase64_quoted_ident_tests::create_quoted_fqn_captures_bare_name | S-330 | a quoted three-part name lands in that schema under the bare name |
 | rewrite.rs::phase64_quoted_ident_tests::create_mixed_quoting_captures_bare_name | S-334 | mixed quoting across three parts |
-| rewrite.rs::phase64_quoted_ident_tests::create_with_four_part_name_errors | S-338 | a four-part name is not truncated to its last part ([syntax]) |
+| rewrite.rs::phase64_quoted_ident_tests::create_with_four_part_name_errors | S-338 | a four-part name is not truncated to its last part ([text]) |
 | rewrite.rs::show_name_slot_quoted_ident_tests::in_schema_accepts_a_quoted_name_containing_whitespace | S-230 | IN SCHEMA "<name with space>" |
 | rewrite.rs::show_name_slot_quoted_ident_tests::in_database_accepts_a_quoted_name_containing_whitespace | S-231 | IN DATABASE "<name with space>" parses; no such database, so no rows |
 | rewrite.rs::show_name_slot_quoted_ident_tests::in_view_accepts_a_quoted_name_containing_whitespace | S-232 | IN "<view with space>" |
@@ -280,8 +281,8 @@ row's description. 6 of 276 tests are N/A.
 | rewrite.rs::show_scope_case_folding_tests::the_fold_is_left_to_sql_rather_than_applied_in_rust | S-253 | a non-ASCII schema name folds Unicode-aware (`É` matches `é`) ([text]) |
 | rewrite.rs::show_scope_qualified_name_tests::a_qualified_schema_name_filters_on_database_and_schema | S-260 | IN SCHEMA memory.dcs_sch |
 | rewrite.rs::show_scope_qualified_name_tests::a_quoted_qualified_schema_name_splits_on_the_unquoted_dot | S-261 | IN SCHEMA "memory"."dcs my schema" |
-| rewrite.rs::show_scope_qualified_name_tests::a_three_part_schema_name_is_rejected | S-263 | IN SCHEMA a.b.c ([syntax]) |
-| rewrite.rs::show_scope_qualified_name_tests::a_qualified_database_name_is_rejected | S-264 | IN DATABASE a.b ([syntax]) |
+| rewrite.rs::show_scope_qualified_name_tests::a_three_part_schema_name_is_rejected | S-263 | IN SCHEMA a.b.c ([text]) |
+| rewrite.rs::show_scope_qualified_name_tests::a_qualified_database_name_is_rejected | S-264 | IN DATABASE a.b ([text]) |
 | rewrite.rs::show_scope_qualified_name_tests::an_unqualified_schema_name_emits_no_database_predicate | S-210 | IN SCHEMA keeps only that schema (`dcs_sch.sch_sv` is excluded) |
 | rewrite.rs::show_scope_qualified_name_tests::a_quoted_dot_is_not_a_qualifier | S-262 | IN SCHEMA "dcs_a.b" is one schema name ([text]) |
 | rewrite.rs::show_scope_other_commands_tests::a_schema_named_startswith_is_not_the_starts_with_clause | S-270 | a schema named `startswith` is a name, not STARTS WITH |
