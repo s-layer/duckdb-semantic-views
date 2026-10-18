@@ -87,6 +87,8 @@ pub use types::{
 pub(crate) use facts::collect_derived_metric_source_tables;
 #[cfg(feature = "extension")]
 pub(crate) use materialization::find_routing_materialization_name;
-// Read-side member-type probe (TECH-DEBT #51, `query::member_types`).
+// The shim's isolated bind of `semantic_view()` (`query::table_function`).
+#[cfg(feature = "extension")]
 pub(crate) use where_clause::where_fence;
+// Read-side member-type probe (TECH-DEBT #51, `query::member_types`).
 pub(crate) use window::window_required_dimensions;

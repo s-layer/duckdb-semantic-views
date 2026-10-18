@@ -906,9 +906,12 @@ mod tests {
     }
 
     /// A probe the engine interrupts is classified as `Interrupted`, not as an
-    /// ordinary failure. The interrupt is fired repeatedly from another thread
-    /// until the statement returns, so it lands after the statement has reset
-    /// the connection's flag however the threads are scheduled.
+    /// ordinary failure. The probe DESCRIBEs its statement, which binds it
+    /// without running it, so a probe is over in about a millisecond and an
+    /// interrupt fired from another thread lands inside one only some of the
+    /// time (a statement resets the connection's flag when it starts). So the
+    /// test probes until one is interrupted, and every probe the interrupt hit
+    /// must say so.
     #[test]
     fn an_engine_interrupt_is_classified_as_interrupted() {
         struct SendConn(ffi::duckdb_connection);
@@ -924,15 +927,22 @@ mod tests {
             let conn = conn;
             while !stop.load(std::sync::atomic::Ordering::SeqCst) {
                 unsafe { ffi::duckdb_interrupt(conn.0) };
-                std::thread::sleep(std::time::Duration::from_millis(5));
+                std::thread::yield_now();
             }
         });
-        // Runs for minutes unless interrupted.
-        let got = unsafe {
-            probe_output_types(db.conn, "SELECT sum(i) AS s FROM range(1000000000000) t(i)")
-        };
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
+        let mut interrupted = false;
+        while !interrupted && std::time::Instant::now() < deadline {
+            match unsafe {
+                probe_output_types(db.conn, "SELECT sum(i) AS s FROM range(1000000000000) t(i)")
+            } {
+                Err(ProbeError::Interrupted) => interrupted = true,
+                Ok(_) => {}
+                Err(other) => panic!("an interrupted probe was not classified: {other:?}"),
+            }
+        }
         done.store(true, std::sync::atomic::Ordering::SeqCst);
         interrupter.join().expect("interrupter thread");
-        assert_eq!(got, Err(ProbeError::Interrupted));
+        assert!(interrupted, "no probe was interrupted within the deadline");
     }
 }
