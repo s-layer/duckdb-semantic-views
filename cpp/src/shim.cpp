@@ -372,6 +372,7 @@ extern "C" {
         const uint8_t *facts_ptr, size_t facts_len,
         const uint8_t *where_ptr, size_t where_len,
         const uint8_t *order_ptr, size_t order_len,
+        uint8_t fence,
         char **out_ptr, size_t *out_len,
         char *error_buf, size_t error_buf_len);
 }
@@ -3203,9 +3204,10 @@ static unique_ptr<TableRef> sv_semantic_view_bind_replace(
     SvBindCancellationScope cancellation(context, probe);
     duckdb_connection borrowed = reinterpret_cast<duckdb_connection>(&probe);
 
-    // Expand the request with `where` as its predicate, into one SELECT whose
-    // parse positions are the call's.
-    auto expand = [&](const std::string &where) {
+    // Expand the request into one SELECT whose parse positions are the call's.
+    // With `fence`, the predicate is one that names only where_clause's
+    // members (`expand::where_fence`), for the isolated bind below.
+    auto expand = [&](bool fence) {
         SvOwnedBuffer payload;
         char error_buf[1024];
         std::memset(error_buf, 0, sizeof(error_buf));
@@ -3216,9 +3218,11 @@ static unique_ptr<TableRef> sv_semantic_view_bind_replace(
             dims_buf.empty()    ? nullptr : dims_buf.data(),    dims_buf.size(),
             metrics_buf.empty() ? nullptr : metrics_buf.data(), metrics_buf.size(),
             facts_buf.empty()   ? nullptr : facts_buf.data(),   facts_buf.size(),
-            where.empty() ? nullptr : reinterpret_cast<const uint8_t *>(where.data()),
-            where.size(),
+            where_clause.empty() ? nullptr
+                                 : reinterpret_cast<const uint8_t *>(where_clause.data()),
+            where_clause.size(),
             order_buf.empty()   ? nullptr : order_buf.data(),   order_buf.size(),
+            fence ? 1 : 0,
             &payload.ptr, &payload.len,
             error_buf, sizeof(error_buf));
         cancellation.ThrowIfCancelled();
@@ -3257,16 +3261,19 @@ static unique_ptr<TableRef> sv_semantic_view_bind_replace(
         sv_relocate(*select->node, input.ref.query_location);
         return select;
     };
-    auto select = expand(where_clause);
+    auto select = expand(false);
 
     // DuckDB binds the returned subquery in the caller's scope, so a name the
     // expansion's own tables lack would bind to a column of an enclosing query
     // (a comma join's right side is bound as LATERAL) instead of failing: a
     // member expression's bare `amount` would read the outer row's `amount`.
     // Only `where_clause` may refer outward (TECH-DEBT #107). So the expansion
-    // without it is bound first on a binder of its own, with no enclosing
-    // scope, where such a name fails as it would in a query of its own; its
-    // error carries the call's position, like the real bind's.
+    // is bound first on a binder of its own, with no enclosing scope, where
+    // such a name fails as it would in a query of its own; its error carries
+    // the call's position, like the real bind's. Its predicate names only
+    // where_clause's members, so the member expressions where_clause brings in
+    // are checked too, and the expansion joins the same tables and takes the
+    // same route (a filtered query is never answered from a materialization).
     //
     // DuckDB resolves a name outward only through the binder's enclosing
     // scopes, so with none (a top-level FROM, a join's left side, a CTE or a
@@ -3275,7 +3282,7 @@ static unique_ptr<TableRef> sv_semantic_view_bind_replace(
     if (input.binder && input.binder->HasEnclosingScope()) {
         auto isolated = where_clause.empty()
                             ? unique_ptr_cast<SQLStatement, SelectStatement>(select->Copy())
-                            : expand(std::string());
+                            : expand(true);
         auto isolated_binder = Binder::CreateBinder(context);
         isolated_binder->Bind(static_cast<SQLStatement &>(*isolated));
     }

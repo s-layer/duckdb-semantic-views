@@ -127,6 +127,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Known limitations
 
+- **A table named inside a member's subquery can resolve to the query's CTE.** When a
+  dimension or fact expression holds a subquery over a table, and the query that calls
+  `semantic_view()` has a CTE of the same name, the subquery reads the CTE.
+
 - **A semantic view over a temporary table can't be queried.** The query fails with
   `Table with name ... does not exist`, because a table named without a schema is looked
   up in the database and schema the semantic view was created in.

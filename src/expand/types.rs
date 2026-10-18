@@ -519,6 +519,13 @@ pub enum ExpandError {
     /// spliced into the expansion as written, so the `;` would end the
     /// expansion's statement and start another.
     WhereClauseNotOnePredicate { view_name: String },
+    /// The `where_clause` predicate holds a prepared statement's parameter.
+    /// The expansion is bound in the caller's statement, so it would take one
+    /// of the caller's parameters (TECH-DEBT #105).
+    WhereClauseParameter {
+        view_name: String,
+        parameter: String,
+    },
     /// A `where_clause` member sits across a fan-out edge from a metric's
     /// grain. Filtering on a table requires joining it, and that join
     /// multiplies the metric's rows exactly as a grouping join would — so the
@@ -940,6 +947,16 @@ impl fmt::Display for ExpandError {
                     f,
                     "semantic view '{view_name}': where_clause is one predicate, so it cannot \
                      contain ';' outside a string"
+                )
+            }
+            Self::WhereClauseParameter {
+                view_name,
+                parameter,
+            } => {
+                write!(
+                    f,
+                    "semantic view '{view_name}': prepared statement parameters such as \
+                     {parameter} are not supported in where_clause yet (TECH-DEBT #105)"
                 )
             }
             Self::WhereClauseFanTrap {

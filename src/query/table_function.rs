@@ -69,6 +69,7 @@ pub unsafe extern "C" fn sv_semantic_view_bind_rust(
     where_len: usize,
     order_ptr: *const u8,
     order_len: usize,
+    fence: u8,
     out_ptr: *mut *mut u8,
     out_len: *mut usize,
     error_buf: *mut u8,
@@ -102,6 +103,7 @@ pub unsafe extern "C" fn sv_semantic_view_bind_rust(
                 where_len,
                 order_ptr,
                 order_len,
+                fence != 0,
             )
         },
     )
@@ -136,6 +138,7 @@ unsafe fn semantic_view_bind_body(
     where_len: usize,
     order_ptr: *const u8,
     order_len: usize,
+    fence: bool,
 ) -> Result<Vec<u8>, String> {
     use crate::ddl::read_ffi::{probe_catalog_table_present, read_str_arg};
 
@@ -193,6 +196,18 @@ unsafe fn semantic_view_bind_body(
     };
 
     let def = SemanticViewDefinition::from_json(&view_name, &json_str)?;
+
+    // For the shim's isolated bind (`fence`), the predicate becomes one that
+    // names only its members (`expand::where_fence`), so the expansion checks
+    // their expressions and joins on the query's own route without the
+    // caller's outer columns.
+    let where_clause = match where_clause {
+        Some(raw) if fence => Some(
+            crate::expand::where_fence(&view_name, &def, &raw)
+                .map_err(|e| QueryError::from(e).to_string())?,
+        ),
+        other => other,
+    };
 
     let invalid = |detail: String| {
         QueryError::InvalidRequest {

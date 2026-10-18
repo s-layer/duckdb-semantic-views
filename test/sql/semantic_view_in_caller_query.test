@@ -136,6 +136,51 @@ SELECT * FROM semantic_view('cq_bare', metrics := ['bad']), cq_outer;
 ----
 Referenced column "price" not found
 
+# The same holds for a member that only where_clause brings into the query:
+# its expression is the semantic view's, not the caller's predicate.
+
+statement ok
+CREATE SEMANTIC VIEW cq_bare_dim AS
+  TABLES (o AS cq_orders PRIMARY KEY (id))
+  DIMENSIONS (o.d AS price)
+  METRICS (o.revenue AS sum(o.amount));
+
+statement error
+SELECT * FROM cq_outer, semantic_view('cq_bare_dim', metrics := ['revenue'], where_clause := 'd = 7');
+----
+Referenced column "price" not found
+
+statement ok
+DROP SEMANTIC VIEW cq_bare_dim;
+
+# The isolated bind takes the route the query takes. A filtered query is never
+# answered from a materialization, so one whose table is gone does not stop it,
+# in a join as at the top level.
+
+statement ok
+CREATE TABLE cq_mat (region VARCHAR, revenue HUGEINT);
+
+statement ok
+CREATE SEMANTIC VIEW cq_routed AS
+  TABLES (o AS cq_orders PRIMARY KEY (id), c AS cq_customers PRIMARY KEY (id))
+  RELATIONSHIPS (order_customer AS o(customer_id) REFERENCES c)
+  DIMENSIONS (c.region AS c.region)
+  METRICS (o.revenue AS sum(o.amount))
+  MATERIALIZATIONS (m AS (TABLE cq_mat, DIMENSIONS (region), METRICS (revenue)));
+
+statement ok
+DROP TABLE cq_mat;
+
+query ITI rowsort
+SELECT p.price, s.region, s.revenue
+FROM cq_outer p, semantic_view('cq_routed', dimensions := ['region'], metrics := ['revenue'], where_clause := 'region = ''EU''') s;
+----
+7	EU	150
+9	EU	150
+
+statement ok
+DROP SEMANTIC VIEW cq_routed;
+
 statement ok
 DROP SEMANTIC VIEW cq_bare;
 
@@ -149,6 +194,42 @@ statement error
 SELECT * FROM semantic_view('cq_sv', metrics := ['revenue'], where_clause := 'true; SELECT 1');
 ----
 where_clause is one predicate, so it cannot contain ';'
+
+# A table named in a member expression's subquery resolves in the caller's
+# query, so a CTE of that name is read in its place (TECH-DEBT #108). Pinned so
+# the fix shows up here: it should read cq_tiers' 1.
+
+statement ok
+CREATE TABLE cq_tiers (t INTEGER);
+
+statement ok
+INSERT INTO cq_tiers VALUES (1);
+
+statement ok
+CREATE SEMANTIC VIEW cq_tiered AS
+  TABLES (o AS cq_orders PRIMARY KEY (id))
+  DIMENSIONS (o.tier AS (SELECT max(t) FROM cq_tiers))
+  METRICS (o.revenue AS sum(o.amount));
+
+query II
+WITH cq_tiers AS (SELECT 99 AS t) SELECT * FROM semantic_view('cq_tiered', dimensions := ['tier'], metrics := ['revenue']);
+----
+99	220
+
+statement ok
+DROP SEMANTIC VIEW cq_tiered;
+
+statement ok
+DROP TABLE cq_tiers;
+
+# A prepared statement's parameter inside where_clause is refused: the
+# expansion is bound in the caller's statement, so it would take one of the
+# caller's parameters (TECH-DEBT #105).
+
+statement error
+PREPARE cq_p AS SELECT * FROM semantic_view('cq_sv', dimensions := ['region'], metrics := ['revenue'], where_clause := 'region <> ?') WHERE region = ?;
+----
+TECH-DEBT #105
 
 # Cleanup
 
