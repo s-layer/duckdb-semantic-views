@@ -20,7 +20,7 @@
 //! whose *first* byte is non-alphabetic is still the "unexpected character"
 //! case above — only the trailing-byte shape changed.)
 
-use super::cursor::{Cursor, UnterminatedRegion};
+use super::cursor::{closer_of, BracketMismatch, Cursor, UnterminatedRegion};
 use super::lexer::TokenKind;
 use crate::errors::ParseError;
 
@@ -189,6 +189,41 @@ pub(super) fn find_clause_bounds<'a>(
             return Err(cur.err(open_tok.start, message));
         };
         let content_offset = cur.abs(open_tok.end);
+
+        // Every scanner that later splits `content` must agree on where its
+        // brackets close, which they only do when the brackets nest by kind.
+        let inner = Cursor::new(content, content_offset);
+        if let Some(m) = inner.bracket_mismatch() {
+            let kw_upper = keyword.to_ascii_uppercase();
+            let (at, message) = match m {
+                BracketMismatch::Mismatched { closer, opener } => {
+                    let found = char::from(inner.symbol(closer));
+                    let want = char::from(closer_of(inner.symbol(opener)));
+                    let open = char::from(inner.symbol(opener));
+                    (
+                        closer.start,
+                        format!(
+                            "Mismatched '{found}' in clause '{kw_upper}'; expected '{want}' to close the '{open}' before it."
+                        ),
+                    )
+                }
+                BracketMismatch::Unmatched(t) => (
+                    t.start,
+                    format!(
+                        "Unmatched '{}' in clause '{kw_upper}'.",
+                        char::from(inner.symbol(t))
+                    ),
+                ),
+                BracketMismatch::Unclosed(t) => (
+                    t.start,
+                    format!(
+                        "Unclosed '{}' in clause '{kw_upper}'.",
+                        char::from(inner.symbol(t))
+                    ),
+                ),
+            };
+            return Err(inner.err(at, message));
+        }
 
         seen.push(keyword);
         bounds.push(ClauseBound {
