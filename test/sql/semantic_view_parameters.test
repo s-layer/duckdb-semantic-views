@@ -136,7 +136,7 @@ US	70.00
 statement error
 EXECUTE svp_one('EU', 'US');
 ----
-Wrong number of parameters
+Parameter argument/count mismatch
 
 # A parameter outside WHERE has nothing to bind to: an item names a member.
 statement error
@@ -148,7 +148,7 @@ parameters are only supported in the WHERE clause of SEMANTIC_VIEW(...)
 statement error
 SELECT * FROM SEMANTIC_VIEW(svp_sv DIMENSIONS c.region METRICS o.revenue WHERE c.region = ?);
 ----
-Parameter
+Values were not provided for the following parameters: 1
 
 # --- semantic_view() and explain_semantic_view() take the values in params --
 

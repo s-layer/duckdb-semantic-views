@@ -303,6 +303,7 @@ extern "C" {
         const uint8_t *metrics_ptr, size_t metrics_len,
         const uint8_t *facts_ptr, size_t facts_len,
         const uint8_t *where_ptr, size_t where_len,
+        size_t param_count,
         const uint8_t *order_ptr, size_t order_len,
         char **out_ptr, size_t *out_len,
         char *error_buf, size_t error_buf_len);
@@ -320,6 +321,7 @@ extern "C" {
         const uint8_t *metrics_ptr, size_t metrics_len,
         const uint8_t *facts_ptr, size_t facts_len,
         const uint8_t *where_ptr, size_t where_len,
+        size_t param_count,
         const uint8_t *order_ptr, size_t order_len,
         uint8_t fence,
         char **out_ptr, size_t *out_len,
@@ -781,7 +783,8 @@ static const std::vector<SvFunctionDoc> &sv_function_docs() {
          "and/or facts, generating the joins and GROUP BY from the view "
          "definition. Pass at least one of dimensions, metrics or facts; "
          "an item may name its column ('region AS r'). where_clause filters "
-         "rows before aggregation, and column_order (e.g. ['metrics', "
+         "rows before aggregation, and refers to the values of params "
+         "(e.g. row('EU')) as $1, $2, ...; column_order (e.g. ['metrics', "
          "'dimensions']) sets the order of the columns. The SEMANTIC_VIEW(...) "
          "construct is the same query written as SQL.",
          {"SELECT * FROM semantic_view('sales', dimensions := ['region'], "
@@ -999,6 +1002,10 @@ static std::vector<std::pair<std::string, LogicalType>> sv_semantic_named_params
         // DuckDB's parser reserves that keyword in named-parameter position:
         // `where := '…'` is a syntax error before the binder ever sees it.
         {"where_clause", LogicalType::VARCHAR},
+        // The values where_clause refers to as $1, $2, ...: a row, so each
+        // keeps its own type (TECH-DEBT #105). The SEMANTIC_VIEW(...) construct
+        // passes a prepared statement's parameters here.
+        {"params", LogicalType::ANY},
         // The order the item lists' columns come out in, e.g. ['metrics',
         // 'dimensions']: Snowflake's SEMANTIC_VIEW(...) sets column order by
         // the order its clauses are written in, and the construct lowers to
@@ -1936,14 +1943,21 @@ extern "C" bool sv_bind_caller_interrupted() {
            sv_compat::is_cancelled(*sv_bind_caller, std::memory_order_relaxed);
 }
 
+// The values of the caller's `params` (TECH-DEBT #105), for the expansion an
+// explain_semantic_view() bind plans through `sv_caller_explain`.
+static thread_local const vector<Value> *sv_bind_params_values = nullptr;
+
 class SvCallerScope {
 public:
-    explicit SvCallerScope(ClientContext &caller) : caller_(caller), prev_(sv_bind_caller) {
+    explicit SvCallerScope(ClientContext &caller, const vector<Value> *params = nullptr)
+        : caller_(caller), prev_(sv_bind_caller), prev_params_(sv_bind_params_values) {
         sv_bind_caller = &caller_;
+        sv_bind_params_values = params;
     }
 
     ~SvCallerScope() {
         sv_bind_caller = prev_;
+        sv_bind_params_values = prev_params_;
     }
 
     SvCallerScope(const SvCallerScope &) = delete;
@@ -1957,7 +1971,63 @@ public:
 private:
     ClientContext &caller_;
     ClientContext *prev_;
+    const vector<Value> *prev_params_;
 };
+
+// The values of `params`: a row (`params := row('EU', 2024)`, or a struct),
+// whose fields where_clause refers to as $1, $2, ... in order. Absent or NULL
+// is no values.
+static vector<Value> sv_read_params(TableFunctionBindInput &input, const char *fn_name) {
+    auto it = input.named_parameters.find("params");
+    if (it == input.named_parameters.end() || it->second.IsNull()) {
+        return {};
+    }
+    if (!StructType::IsStruct(it->second.type())) {
+        throw BinderException("%s: params must be a row of values, e.g. params := row('EU', 2024), not %s",
+                              fn_name, it->second.type().ToString());
+    }
+    return StructValue::GetChildren(it->second);
+}
+
+// Put each value of `params` in place of the `$<n>` that refers to it in the
+// parsed expansion, as a constant of the value's own type: a value is never
+// SQL text. The Rust side lets only `$1`, `$2`, ... through where_clause and
+// checks each has a value (`expand::check_params_supplied`), so any other
+// parameter here is a bug.
+static void sv_bind_params(QueryNode &node, const vector<Value> &values) {
+    std::function<void(unique_ptr<ParsedExpression> &)> visit = [&](unique_ptr<ParsedExpression> &expr) {
+        if (!expr) {
+            return;
+        }
+        if (expr->GetExpressionClass() == ExpressionClass::PARAMETER) {
+            auto name = expr->Cast<ParameterExpression>().Identifier().GetIdentifierName();
+            idx_t slot = 0;
+            for (char c : name) {
+                if (c < '0' || c > '9' || slot > values.size()) {
+                    slot = 0;
+                    break;
+                }
+                slot = slot * 10 + idx_t(c - '0');
+            }
+            if (name.empty() || slot < 1 || slot > values.size()) {
+                throw InternalException("semantic_views: no params value for $%s", name);
+            }
+            auto constant = ConstantExpression::FromValue(values[slot - 1]);
+            constant->SetQueryLocation(expr->GetQueryLocation());
+            constant->SetAlias(expr->GetAlias());
+            expr = std::move(constant);
+            return;
+        }
+        if (expr->GetExpressionClass() == ExpressionClass::SUBQUERY) {
+            auto &subquery = expr->Cast<SubqueryExpression>().SubqueryMutable();
+            if (subquery && subquery->node) {
+                sv_bind_params(*subquery->node, values);
+            }
+        }
+        ParsedExpressionIterator::EnumerateChildren(*expr, visit);
+    };
+    ParsedExpressionIterator::EnumerateQueryNodeChildren(node, visit);
+}
 
 // Common idiom for the bind callback: open Connection, run Rust dispatcher
 // for the zero-arg case, parse payload into bd. Used by all 5 zero-arg
@@ -2914,11 +2984,13 @@ static unique_ptr<FunctionData> sv_explain_semantic_view_bind(
     if (it_w != input.named_parameters.end() && !it_w->second.IsNull()) {
         where_clause = it_w->second.GetValue<std::string>();
     }
+    auto params = sv_read_params(input, "explain_semantic_view");
     std::vector<uint8_t> sp_buf = sv_search_path_payload(context, input);
 
     // The EXPLAIN of the expanded query plans the view's tables in the caller's
-    // context, so a cancelled caller is raised bare, as in semantic_view().
-    SvCallerScope caller(context);
+    // context, so a cancelled caller is raised bare, as in semantic_view(). The
+    // plan is of the expansion with the values of `params` in place.
+    SvCallerScope caller(context, &params);
 
     SvOwnedBuffer payload;
     char error_buf[1024];
@@ -2932,6 +3004,7 @@ static unique_ptr<FunctionData> sv_explain_semantic_view_bind(
         facts_buf.empty()   ? nullptr : facts_buf.data(),   facts_buf.size(),
         where_clause.empty() ? nullptr : reinterpret_cast<const uint8_t *>(where_clause.data()),
         where_clause.size(),
+        params.size(),
         order_buf.empty()   ? nullptr : order_buf.data(),   order_buf.size(),
         &payload.ptr, &payload.len,
         error_buf, sizeof(error_buf));
@@ -3372,6 +3445,9 @@ static unique_ptr<SelectStatement> sv_caller_parse_pinned(ClientContext &context
     auto select = unique_ptr_cast<SQLStatement, SelectStatement>(std::move(parser.statements[0]));
     SvTablePinner pinner {context, nullptr, Identifier(database), Identifier(schema), {}};
     pinner.Node(*select->node);
+    if (sv_bind_params_values) {
+        sv_bind_params(*select->node, *sv_bind_params_values);
+    }
     return select;
 }
 
@@ -3521,6 +3597,7 @@ static unique_ptr<TableRef> sv_semantic_view_bind_replace(
     if (it_w != input.named_parameters.end() && !it_w->second.IsNull()) {
         where_clause = it_w->second.GetValue<std::string>();
     }
+    auto params = sv_read_params(input, "semantic_view");
     std::vector<uint8_t> sp_buf = sv_search_path_payload(context, input);
 
     // The catalog read runs in the caller's transaction; a cancelled caller
@@ -3543,6 +3620,7 @@ static unique_ptr<TableRef> sv_semantic_view_bind_replace(
             where_clause.empty() ? nullptr
                                  : reinterpret_cast<const uint8_t *>(where_clause.data()),
             where_clause.size(),
+            params.size(),
             order_buf.empty()   ? nullptr : order_buf.data(),   order_buf.size(),
             fence ? 1 : 0,
             &payload.ptr, &payload.len,
@@ -3589,6 +3667,8 @@ static unique_ptr<TableRef> sv_semantic_view_bind_replace(
         sv_relocate(*select->node, input.ref.query_location);
         SvTablePinner pinner {context, input.binder, Identifier(database), Identifier(schema), {}};
         pinner.Node(*select->node);
+        // After pinning, so a value's type or constructor is the caller's own.
+        sv_bind_params(*select->node, params);
         return select;
     };
     auto select = expand(false);
@@ -3923,10 +4003,58 @@ static arena_ptr<TransformProcess> sv_grammar_start_query(PEGTransformer &transf
     return transformer.MakeProcess<FinalizeTransformProcess>(transformer, pr, sv_grammar_finalize_query);
 }
 
+// The `Parameter` matches under `pr`, in the order they are written.
+static void sv_grammar_parameters(ParseResult &pr, vector<reference<ParseResult>> &out) {
+    if (StringUtil::CIEquals(pr.Name(), "Parameter")) {
+        out.push_back(pr);
+        return;
+    }
+    switch (pr.type) {
+    case ParseResultType::LIST:
+        for (auto &c : pr.Cast<ListParseResult>().GetChildren()) {
+            sv_grammar_parameters(c, out);
+        }
+        break;
+    case ParseResultType::REPEAT:
+        for (auto &c : pr.Cast<RepeatParseResult>().GetChildren()) {
+            sv_grammar_parameters(c, out);
+        }
+        break;
+    case ParseResultType::OPTIONAL: {
+        auto &opt = pr.Cast<OptionalParseResult>();
+        if (opt.HasResult()) {
+            sv_grammar_parameters(opt.GetResult(), out);
+        }
+        break;
+    }
+    case ParseResultType::CHOICE:
+        sv_grammar_parameters(pr.Cast<ChoiceParseResult>().GetResult(), out);
+        break;
+    default:
+        break;
+    }
+}
+
 // A table reference (`SEMANTIC_VIEW(...)`) lowers to `SELECT * FROM <ref>`,
 // whose FROM is the table reference, alias included.
+//
+// A prepared statement's parameter in the construct is one of the statement's
+// (TECH-DEBT #105). The lowering writes each as a placeholder in `params :=
+// row(...)` (`grammar::query::PARAMETER_PLACEHOLDER`), in the order they are
+// written, and each is put in its place here as DuckDB transforms it: so it is
+// numbered, named and counted in the statement as it would be anywhere else.
 static arena_ptr<TransformResultValue> sv_grammar_finalize_tableref(PEGTransformer &transformer,
                                                                     ParseResult &pr) {
+    vector<reference<ParseResult>> parameters;
+    sv_grammar_parameters(pr, parameters);
+    vector<unique_ptr<ParsedExpression>> transformed;
+    for (auto &parameter : parameters) {
+        // `Parameter` is a choice of the four spellings; each has its transform.
+        auto &spelling = parameter.get().type == ParseResultType::CHOICE
+                             ? parameter.get().Cast<ChoiceParseResult>().GetResult()
+                             : parameter.get();
+        transformed.push_back(transformer.Transform<unique_ptr<ParsedExpression>>(spelling));
+    }
     auto statements = sv_grammar_lower(transformer, pr);
     if (statements.size() != 1 || statements[0]->type != StatementType::SELECT_STATEMENT) {
         throw InternalException("semantic_views grammar: rule %s did not lower to one query", pr.Name());
@@ -3936,6 +4064,27 @@ static arena_ptr<TransformResultValue> sv_grammar_finalize_tableref(PEGTransform
         throw InternalException("semantic_views grammar: rule %s did not lower to a table reference", pr.Name());
     }
     auto table = std::move(node->Cast<SelectNode>().from_table);
+    idx_t next = 0;
+    std::function<void(unique_ptr<ParsedExpression> &)> place = [&](unique_ptr<ParsedExpression> &expr) {
+        if (!expr) {
+            return;
+        }
+        if (expr->GetExpressionClass() == ExpressionClass::PARAMETER &&
+            expr->Cast<ParameterExpression>().Identifier().GetIdentifierName() == "__sv_parameter") {
+            if (next >= transformed.size()) {
+                throw InternalException("semantic_views grammar: more parameter placeholders than parameters");
+            }
+            expr = std::move(transformed[next++]);
+            return;
+        }
+        ParsedExpressionIterator::EnumerateChildren(*expr, place);
+    };
+    ParsedExpressionIterator::EnumerateTableRefChildren(*table, place);
+    if (next != transformed.size()) {
+        throw InternalException("semantic_views grammar: %llu parameters, %llu placeholders",
+                                static_cast<unsigned long long>(transformed.size()),
+                                static_cast<unsigned long long>(next));
+    }
     return transformer.MakeResult<unique_ptr<TableRef>>(std::move(table));
 }
 

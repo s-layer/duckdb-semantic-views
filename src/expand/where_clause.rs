@@ -341,9 +341,11 @@ pub(crate) fn where_fence(
 
 /// Refuse what would reach outside the predicate: a `;` that ends the
 /// expansion's statement, or a prepared statement's parameter, which would be
-/// one of the caller's (the expansion is bound in the caller's statement,
-/// TECH-DEBT #105). Run on the predicate as written, before its subqueries are
-/// hoisted ([`hoist_subqueries`]), as well as by [`resolve_where_clause`].
+/// one of the caller's (the expansion is bound in the caller's statement).
+/// The predicate refers to the values of `params` as `$1`, `$2`, ... instead
+/// ([`param_slot`]), which the bind replaces with those values (TECH-DEBT
+/// #105). Run on the predicate as written, before its subqueries are hoisted
+/// ([`hoist_subqueries`]), as well as by [`resolve_where_clause`].
 pub(super) fn refuse_outside_one_predicate(view_name: &str, raw: &str) -> Result<(), ExpandError> {
     let blanked = crate::util::blank_sql_comments(raw);
     let raw = blanked.as_ref();
@@ -352,13 +354,47 @@ pub(super) fn refuse_outside_one_predicate(view_name: &str, raw: &str) -> Result
             view_name: view_name.to_string(),
         });
     }
-    if let Some((_, parameter)) = crate::expr_tokens::find_parameter(raw) {
+    if let Some((_, parameter)) = crate::expr_tokens::find_parameters(raw)
+        .into_iter()
+        .find(|(_, p)| param_slot(p).is_none())
+    {
         return Err(ExpandError::WhereClauseParameter {
             view_name: view_name.to_string(),
             parameter: parameter.to_string(),
         });
     }
     Ok(())
+}
+
+/// The value of `params` a predicate's `$<n>` refers to, counted from 1, or
+/// `None` for any other parameter.
+fn param_slot(parameter: &str) -> Option<usize> {
+    let digits = parameter.strip_prefix('$')?;
+    if digits.is_empty() || !digits.bytes().all(|b| b.is_ascii_digit()) {
+        return None;
+    }
+    digits.parse().ok().filter(|n| *n >= 1)
+}
+
+/// Check that every `$<n>` in the predicate has a value among the `supplied`
+/// values of `params`.
+pub(crate) fn check_params_supplied(
+    view_name: &str,
+    raw: &str,
+    supplied: usize,
+) -> Result<(), ExpandError> {
+    let blanked = crate::util::blank_sql_comments(raw);
+    let missing = crate::expr_tokens::find_parameters(blanked.as_ref())
+        .into_iter()
+        .find(|(_, p)| param_slot(p).is_some_and(|n| n > supplied));
+    match missing {
+        Some((_, reference)) => Err(ExpandError::WhereClauseParamMissing {
+            view_name: view_name.to_string(),
+            reference: reference.to_string(),
+            supplied,
+        }),
+        None => Ok(()),
+    }
 }
 
 /// The predicate with each subquery moved out into a CTE of the expansion.
@@ -919,10 +955,18 @@ mod tests {
     }
 
     /// A prepared statement's parameter is refused, outside a literal or a
-    /// quoted name; inside one it is text.
+    /// quoted name; inside one it is text. `$1`, `$2`, ... refer to `params`.
     #[test]
     fn a_parameter_is_refused() {
-        let wrong: Vec<String> = ["region = ?", "region = ?2", "region = $1", "region = $name"]
+        let refused = [
+            "region = ?",
+            "region = ?2",
+            "region = $0",
+            "region = $name",
+            "region = $1x",
+            "region = $1 OR region = ?",
+        ];
+        let wrong: Vec<String> = refused
             .iter()
             .filter_map(|p| match resolve_where_clause("v", &def(), p) {
                 Err(ExpandError::WhereClauseParameter { .. }) => None,
@@ -938,6 +982,30 @@ mod tests {
         ] {
             assert!(resolve_where_clause("v", &def(), p).is_ok(), "{p}");
         }
+    }
+
+    /// A reference to a value of `params` is kept as written, for the bind to
+    /// replace, while the members around it are substituted.
+    #[test]
+    fn a_params_reference_is_kept() {
+        let r = resolve_where_clause("v", &def(), "region = $1 AND net_price > $12").unwrap();
+        assert!(r.sql.contains("c.region"), "{}", r.sql);
+        assert!(r.sql.contains("= $1 AND"), "{}", r.sql);
+        assert!(r.sql.ends_with("> $12"), "{}", r.sql);
+    }
+
+    #[test]
+    fn every_params_reference_needs_a_value() {
+        let p = "region = $2 OR region = $1 OR region = '$9' /* $9 */";
+        assert!(check_params_supplied("v", p, 2).is_ok());
+        assert!(check_params_supplied("v", p, 3).is_ok());
+        let err = check_params_supplied("v", p, 1).unwrap_err();
+        assert_eq!(
+            err.to_string(),
+            "semantic view 'v': where_clause refers to $2, but params has 1 value"
+        );
+        let err = check_params_supplied("v", "region = $1", 0).unwrap_err();
+        assert!(err.to_string().ends_with("params has 0 values"), "{err}");
     }
 
     /// A `;` or a parameter inside a subquery is refused too: the subquery is

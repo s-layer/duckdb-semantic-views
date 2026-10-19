@@ -92,14 +92,14 @@ SELECT array_to_string(list_sort(list_transform(list_zip(parameters, parameter_t
                                 lambda x: x[1] || ':' || x[2])), ' | ')
 FROM sv_fns WHERE function_name = 'semantic_view';
 ----
-column_order:VARCHAR[] | dimensions:VARCHAR[] | facts:VARCHAR[] | metrics:VARCHAR[] | search_path:VARCHAR[] | view_name:VARCHAR | where_clause:VARCHAR
+column_order:VARCHAR[] | dimensions:VARCHAR[] | facts:VARCHAR[] | metrics:VARCHAR[] | params:ANY | search_path:VARCHAR[] | view_name:VARCHAR | where_clause:VARCHAR
 
 query T
 SELECT array_to_string(list_sort(list_transform(list_zip(parameters, parameter_types),
                                 lambda x: x[1] || ':' || x[2])), ' | ')
 FROM sv_fns WHERE function_name = 'explain_semantic_view';
 ----
-column_order:VARCHAR[] | dimensions:VARCHAR[] | facts:VARCHAR[] | metrics:VARCHAR[] | search_path:VARCHAR[] | view_name:VARCHAR | where_clause:VARCHAR
+column_order:VARCHAR[] | dimensions:VARCHAR[] | facts:VARCHAR[] | metrics:VARCHAR[] | params:ANY | search_path:VARCHAR[] | view_name:VARCHAR | where_clause:VARCHAR
 
 query T
 SELECT array_to_string(list_transform(list_zip(parameters, parameter_types),

@@ -120,6 +120,14 @@ enum Pred {
     /// (`semantic_view()` is planned inside the caller's query). The oracle
     /// compares against the column's value as a literal.
     OuterCmp(usize, CmpOp, i64),
+    /// `d{i} <op> $n`: a comparison against a value of `params` (TECH-DEBT
+    /// #105). The comparison runs with the values bound as a prepared
+    /// statement's, as the bind puts them in place; the oracle compares
+    /// against the literal.
+    ParamCmp(usize, CmpOp, i64),
+    /// `d{i} IN (<subquery comparing against $n>)`: a value of `params` inside
+    /// a subquery, which the expansion hoists into a CTE.
+    ParamInSubquery(usize, i64),
     And(Box<Pred>, Box<Pred>),
     Or(Box<Pred>, Box<Pred>),
     Not(Box<Pred>),
@@ -147,8 +155,33 @@ fn chained_fact_expr(i: usize) -> String {
 impl Pred {
     /// The `where_clause` text: member **names**, with composites parenthesized
     /// so the SQL parse matches this AST. A filter member is emitted BARE —
-    /// that is precisely the surface under test.
+    /// that is precisely the surface under test. Values of `params` are `$1`,
+    /// `$2`, ... in the order [`Pred::params`] lists them.
     fn to_member_sql(&self) -> String {
+        self.member_sql(&mut 0)
+    }
+
+    /// The values of `params` the predicate refers to, in order.
+    fn params(&self) -> Vec<i64> {
+        match self {
+            Pred::ParamCmp(_, _, k) | Pred::ParamInSubquery(_, k) => vec![*k],
+            Pred::Cmp(..)
+            | Pred::IsNull(_)
+            | Pred::IsNotNull(_)
+            | Pred::Filter(_)
+            | Pred::ChainedFact(_)
+            | Pred::InSubquery(..)
+            | Pred::OuterCmp(..) => vec![],
+            Pred::And(a, b) | Pred::Or(a, b) => [a.params(), b.params()].concat(),
+            Pred::Not(a) => a.params(),
+        }
+    }
+
+    fn member_sql(&self, taken: &mut usize) -> String {
+        let mut take = || {
+            *taken += 1;
+            format!("${taken}")
+        };
         match self {
             Pred::Cmp(i, op, k) => format!("d{i} {} {k}", op.to_sql()),
             Pred::IsNull(i) => format!("d{i} IS NULL"),
@@ -166,9 +199,20 @@ impl Pred {
             Pred::OuterCmp(i, op, k) => {
                 format!("d{i} {} sv_outer.{}", op.to_sql(), outer_column(*k))
             }
-            Pred::And(a, b) => format!("({} AND {})", a.to_member_sql(), b.to_member_sql()),
-            Pred::Or(a, b) => format!("({} OR {})", a.to_member_sql(), b.to_member_sql()),
-            Pred::Not(a) => format!("(NOT {})", a.to_member_sql()),
+            Pred::ParamCmp(i, op, _) => format!("d{i} {} {}", op.to_sql(), take()),
+            Pred::ParamInSubquery(i, _) => format!(
+                "d{i} IN (SELECT x FROM (SELECT d{i} AS x FROM t) AS s WHERE x + 1 > {})",
+                take()
+            ),
+            Pred::And(a, b) => {
+                let a = a.member_sql(taken);
+                format!("({a} AND {})", b.member_sql(taken))
+            }
+            Pred::Or(a, b) => {
+                let a = a.member_sql(taken);
+                format!("({a} OR {})", b.member_sql(taken))
+            }
+            Pred::Not(a) => format!("(NOT {})", a.member_sql(taken)),
         }
     }
 
@@ -188,7 +232,12 @@ impl Pred {
             Pred::InSubquery(i, k, _) => {
                 format!("(d{i} IN (SELECT d{i} FROM t WHERE (d{i} + 1) > {k}))")
             }
-            Pred::OuterCmp(i, op, k) => format!("(d{i} {} {k})", op.to_sql()),
+            Pred::OuterCmp(i, op, k) | Pred::ParamCmp(i, op, k) => {
+                format!("(d{i} {} {k})", op.to_sql())
+            }
+            Pred::ParamInSubquery(i, k) => {
+                format!("(d{i} IN (SELECT d{i} FROM t WHERE (d{i} + 1) > {k}))")
+            }
             Pred::And(a, b) => format!("({} AND {})", a.to_raw_sql(), b.to_raw_sql()),
             Pred::Or(a, b) => format!("({} OR {})", a.to_raw_sql(), b.to_raw_sql()),
             Pred::Not(a) => format!("(NOT {})", a.to_raw_sql()),
@@ -206,7 +255,9 @@ impl Pred {
             | Pred::IsNotNull(_)
             | Pred::ChainedFact(_)
             | Pred::InSubquery(..)
-            | Pred::OuterCmp(..) => false,
+            | Pred::OuterCmp(..)
+            | Pred::ParamCmp(..)
+            | Pred::ParamInSubquery(..) => false,
             Pred::And(a, b) | Pred::Or(a, b) => a.references_filter() || b.references_filter(),
             Pred::Not(a) => a.references_filter(),
         }
@@ -223,7 +274,9 @@ impl Pred {
             | Pred::IsNotNull(_)
             | Pred::Filter(_)
             | Pred::InSubquery(..)
-            | Pred::OuterCmp(..) => false,
+            | Pred::OuterCmp(..)
+            | Pred::ParamCmp(..)
+            | Pred::ParamInSubquery(..) => false,
             Pred::And(a, b) | Pred::Or(a, b) => {
                 a.references_chained_fact() || b.references_chained_fact()
             }
@@ -234,13 +287,14 @@ impl Pred {
     /// Whether this predicate holds a subquery. Same anti-vacuity role.
     fn has_subquery(&self) -> bool {
         match self {
-            Pred::InSubquery(..) => true,
+            Pred::InSubquery(..) | Pred::ParamInSubquery(..) => true,
             Pred::Cmp(..)
             | Pred::IsNull(_)
             | Pred::IsNotNull(_)
             | Pred::Filter(_)
             | Pred::ChainedFact(_)
-            | Pred::OuterCmp(..) => false,
+            | Pred::OuterCmp(..)
+            | Pred::ParamCmp(..) => false,
             Pred::And(a, b) | Pred::Or(a, b) => a.has_subquery() || b.has_subquery(),
             Pred::Not(a) => a.has_subquery(),
         }
@@ -256,7 +310,9 @@ impl Pred {
             | Pred::IsNotNull(_)
             | Pred::Filter(_)
             | Pred::ChainedFact(_)
-            | Pred::InSubquery(..) => false,
+            | Pred::InSubquery(..)
+            | Pred::ParamCmp(..)
+            | Pred::ParamInSubquery(..) => false,
             Pred::And(a, b) | Pred::Or(a, b) => a.references_outer() || b.references_outer(),
             Pred::Not(a) => a.references_outer(),
         }
@@ -309,6 +365,9 @@ fn arb_pred(n_dims: usize) -> impl Strategy<Value = Pred> {
             .prop_map(|(i, k, silent)| Pred::InSubquery(i, k, silent)),
         2 => (0..n_dims, arb_cmp_op(), -1i64..=3)
             .prop_map(|(i, op, k)| Pred::OuterCmp(i, op, k)),
+        2 => (0..n_dims, arb_cmp_op(), -1i64..=3)
+            .prop_map(|(i, op, k)| Pred::ParamCmp(i, op, k)),
+        1 => (0..n_dims, -1i64..=3).prop_map(|(i, k)| Pred::ParamInSubquery(i, k)),
     ];
     // depth 3, up to 8 nodes, branching 2 — deep enough for a filter member to
     // land inside a surrounding AND/OR/NOT, which is where precedence bites.
@@ -677,6 +736,10 @@ proptest! {
         };
 
         let conn = make_db(&case.schema);
+        // The values of `params`, bound as a prepared statement's: the bind of
+        // `semantic_view()` puts each in place of its `$n` as a constant.
+        let param_values = case.where_pred.as_ref().map(Pred::params).unwrap_or_default();
+        let params = || duckdb::params_from_iter(param_values.iter());
 
         // The column layout `SEMANTIC_VIEW(...)` asks for (clause order and
         // aliases), applied as `semantic_view()` applies it: by name over the
@@ -687,7 +750,7 @@ proptest! {
         let mut probe = conn
             .prepare(&format!("SELECT * FROM ({expanded}) q LIMIT 0"))
             .expect("probe must prepare");
-        probe.execute([]).expect("probe must run");
+        probe.execute(params()).expect("probe must run");
         prop_assert_eq!(&names, &probe.column_names());
         let dim_aliases =
             aliases_for(&items.dimensions, &dim_members).expect("each alias finds its member");
@@ -713,7 +776,9 @@ proptest! {
         let mut laid_out = conn
             .prepare(&format!("SELECT * FROM ({expanded}) q LIMIT 0"))
             .expect("the laid-out expansion must prepare");
-        laid_out.execute([]).expect("the laid-out expansion must run");
+        laid_out
+            .execute(params())
+            .expect("the laid-out expansion must run");
         prop_assert_eq!(laid_out.column_names(), expected_order);
 
         // Independent oracle: a plain GROUP BY over the same table, naming
@@ -777,7 +842,7 @@ proptest! {
                                       SELECT {proj} FROM ({expanded}) qd) e2) AS diff"
         );
 
-        let diff: i64 = conn.query_row(&cmp, [], |r| r.get(0)).unwrap_or_else(|e| {
+        let diff: i64 = conn.query_row(&cmp, params(), |r| r.get(0)).unwrap_or_else(|e| {
             panic!("differential comparison query failed: {e}\n--- expanded:\n{expanded}\n--- oracle:\n{oracle}")
         });
 
@@ -816,6 +881,8 @@ fn generator_varies_the_predicate_and_exercises_filter_members() {
     let mut with_subquery = 0usize;
     let mut with_outer = 0usize;
     let mut with_silent_subquery = 0usize;
+    let mut with_params = 0usize;
+    let mut with_param_in_subquery = 0usize;
     let mut compound = 0usize;
     let mut distinct: HashSet<String> = HashSet::new();
     let mut default_layout = 0usize;
@@ -859,6 +926,12 @@ fn generator_varies_the_predicate_and_exercises_filter_members() {
                     with_outer += 1;
                 }
                 let sql = p.to_member_sql();
+                if p.params().len() > 1 {
+                    with_params += 1;
+                }
+                if sql.contains("x + 1 > $") {
+                    with_param_in_subquery += 1;
+                }
                 if sql.contains("SELECT fa") {
                     with_silent_subquery += 1;
                 }
@@ -902,6 +975,11 @@ fn generator_varies_the_predicate_and_exercises_filter_members() {
         with_silent_subquery > 0,
         "generator never selected a member name from a subquery -- the shape where \
          a substituted name binds and shifts the result is untested"
+    );
+    assert!(
+        with_params > 0 && with_param_in_subquery > 0,
+        "generator never referred to two values of params ({with_params}) or to one \
+         inside a subquery ({with_param_in_subquery}) -- params is untested"
     );
     assert!(
         compound > 0,

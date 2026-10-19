@@ -350,12 +350,10 @@ Pass a Request Value from Application Code
 
 When the filter value comes from outside your code -- a date range in an HTTP
 request, a segment picked in a dashboard -- keep that input out of the
-predicate's SQL text. ``where_clause`` does accept a prepared-statement
-parameter, but the parameter supplies the **whole predicate as SQL text**, and
-the extension splices that text into the query it generates. Binding it with
-``?`` therefore escapes nothing inside it. A placeholder *inside* the predicate,
-such as ``where_clause := 'ordered_at >= ?'``, is not supported: DuckDB rejects
-the statement with a parameter count mismatch.
+predicate's SQL text. Write the predicate yourself, refer to each value as
+``$1``, ``$2``, ..., and pass the values in ``params``. Each value goes into the
+query as a value of its own type, never as SQL, so nothing in it can change
+what the predicate does.
 
 .. danger::
 
@@ -365,14 +363,13 @@ the statement with a parameter count mismatch.
    ``ordered_at >= DATE '...'``, the value ``2024-01-01' OR true --`` removes
    the date scope, and a subquery such as ``region IN (SELECT ... FROM
    other_table)`` or ``EXISTS (SELECT 1 FROM read_text('...'))`` reads any table
-   or file the connection can reach.
+   or file the connection can reach. Binding the whole predicate with
+   ``where_clause := ?`` does not help: the bound text is still SQL.
 
 Two patterns keep request input out of the SQL text.
 
-**Parse the value into a typed value, then write the literal from it.** A
-``datetime.date`` can only ever format as ``YYYY-MM-DD``, so the literal you
-build from it cannot carry SQL. Anything that does not parse is rejected before
-a query is issued:
+**Pass the value in params.** Bind each value as a prepared-statement
+parameter inside ``params``:
 
 .. code-block:: python
 
@@ -384,32 +381,39 @@ a query is issued:
    con.execute("LOAD semantic_views")
 
 
-   def revenue_by_region(since_text):
-       predicate = ""  # an empty where_clause means "no filter"
-       if since_text:
-           # Raises ValueError for anything that is not a YYYY-MM-DD date
-           since = datetime.date.fromisoformat(since_text)
-           predicate = f"ordered_at >= DATE '{since.isoformat()}'"
+   def revenue_by_region(since):
        return con.execute(
            """
            SELECT * FROM semantic_view('order_metrics',
                dimensions := ['region'],
                metrics := ['revenue', 'order_count'],
-               where_clause := ?
+               where_clause := 'ordered_at >= $1',
+               params := row(?)
            ) ORDER BY region
            """,
-           [predicate],
+           [since],
        ).fetchall()
 
 
-   revenue_by_region("2024-01-01")
+   revenue_by_region(datetime.date(2024, 1, 1))
    # [('East', Decimal('300.00'), 2), ('West', Decimal('150.00'), 1)]
 
-   revenue_by_region(None)
-   # [('East', Decimal('400.00'), 3), ('West', Decimal('550.00'), 2)]
+The ``SEMANTIC_VIEW(...)`` construct takes the parameter directly in its
+``WHERE``, and passes it in ``params`` for you:
 
-   revenue_by_region("2024-01-01' OR true --")
-   # ValueError: Invalid isoformat string: "2024-01-01' OR true --"
+.. code-block:: python
+
+   con.execute(
+       """
+       SELECT * FROM SEMANTIC_VIEW(order_metrics
+           DIMENSIONS region
+           METRICS revenue, order_count
+           WHERE ordered_at >= ?
+       ) ORDER BY region
+       """,
+       [datetime.date(2024, 1, 1)],
+   ).fetchall()
+   # [('East', Decimal('300.00'), 2), ('West', Decimal('150.00'), 1)]
 
 **Map request choices to named filters.** When the choices are a fixed set,
 declare each one as a :ref:`named filter <howto-filtering-named>` and look the
@@ -478,10 +482,10 @@ Troubleshooting
    the filter is first used, not at ``CREATE``. Check that the member's
    expression really evaluates to a boolean.
 
-**A prepared statement fails with a parameter count mismatch**
-   The ``?`` is inside the predicate string, where DuckDB does not see it as a
-   parameter. Bind the whole ``where_clause`` value instead, built as shown in
-   :ref:`howto-filtering-app`.
+**A parameter inside where_clause is refused**
+   A ``?`` or ``$name`` inside the predicate string would be one of the calling
+   statement's own parameters, so it is refused. Write ``$1``, ``$2``, ... and
+   pass the values in ``params``, as shown in :ref:`howto-filtering-app`.
 
 **Quoting looks wrong**
    ``where_clause`` is a SQL string literal, so every single quote inside it is

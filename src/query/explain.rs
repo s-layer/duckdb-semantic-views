@@ -67,6 +67,7 @@ pub unsafe extern "C" fn sv_explain_semantic_view_bind_rust(
     facts_len: usize,
     where_ptr: *const u8,
     where_len: usize,
+    param_count: usize,
     order_ptr: *const u8,
     order_len: usize,
     out_ptr: *mut *mut u8,
@@ -97,6 +98,7 @@ pub unsafe extern "C" fn sv_explain_semantic_view_bind_rust(
                 facts_len,
                 where_ptr,
                 where_len,
+                param_count,
                 order_ptr,
                 order_len,
             )
@@ -129,6 +131,7 @@ unsafe fn explain_semantic_view_bind_body(
     facts_len: usize,
     where_ptr: *const u8,
     where_len: usize,
+    param_count: usize,
     order_ptr: *const u8,
     order_len: usize,
 ) -> Result<Vec<u8>, String> {
@@ -189,6 +192,13 @@ unsafe fn explain_semantic_view_bind_body(
     };
 
     let def = SemanticViewDefinition::from_json(&view_name, &json_str)?;
+
+    // `$1`, `$2`, ... in the predicate are the values of `params`, which the
+    // shim puts in their place when it plans the expansion (TECH-DEBT #105).
+    if let Some(raw) = &where_clause {
+        crate::expand::check_params_supplied(&view_name, raw, param_count)
+            .map_err(|e| QueryError::from(e).to_string())?;
+    }
 
     // The items are parsed and checked as semantic_view() checks them: a member
     // requested twice with different aliases, or two output columns with one

@@ -25,6 +25,7 @@ Syntax
        [ metrics := [ '<metric_name>' [, ...] ] , ]
        [ facts := [ '<fact_name>' [, ...] ] , ]
        [ where_clause := '<predicate>' , ]
+       [ params := row( <value> [, ...] ) , ]
        [ column_order := [ '<list_name>' [, ...] ] ]
    )
 
@@ -58,6 +59,9 @@ Parameters
    * - ``where_clause``
      - VARCHAR (named)
      - Optional predicate applied **before** metrics are aggregated -- the equivalent of Snowflake's ``SEMANTIC_VIEW( ... WHERE <predicate> )``. See :ref:`ref-sv-pre-agg-filtering`. An omitted, empty, or whitespace-only value is treated as absent.
+   * - ``params``
+     - row (named)
+     - Optional values for ``where_clause``, which refers to them as ``$1``, ``$2``, ... in order. Each is put in the predicate as a value of its own type, never as SQL text. See :ref:`values from params <ref-sv-where-params>`.
    * - ``column_order``
      - VARCHAR[] (named)
      - Optional order of the lists' columns in the result, as list names: ``'dimensions'``, ``'metrics'`` and ``'facts'``, matched case-insensitively. A list you leave out follows in the default order, dimensions, then metrics, then facts. Naming a list twice, or something that is not a list, is an error. See :ref:`ref-sv-output`.
@@ -67,7 +71,7 @@ Parameters
 
 At least one of ``dimensions``, ``metrics``, or ``facts`` must be specified. ``where_clause`` alone is not a query.
 
-Every argument accepts a prepared-statement parameter (``?`` or ``$1``) in place of a literal, including the view name, the three lists, and ``where_clause``. See :ref:`ref-sv-pre-agg-filtering` before binding a user-supplied predicate.
+Every argument accepts a prepared-statement parameter (``?`` or ``$1``) in place of a literal, including the view name, the three lists, ``where_clause`` and the values in ``params``. A parameter written *inside* the ``where_clause`` text is not one: pass the value in ``params`` instead (see :ref:`values from params <ref-sv-where-params>`).
 
 .. warning::
 
@@ -260,7 +264,22 @@ where each ``<item>`` is ``<member_name> [ [AS] <alias> ]`` or ``<table_alias>.*
        column_order := ['metrics', 'dimensions']
    );
 
-The construct parses wherever a table can: in a join, a CTE, a subquery or a view body, with a table alias and column aliases. A view over it stores the ``semantic_view()`` call, so it expands against the semantic view's current definition each time it is queried. Items are member names for now: an expression is refused, and so is a prepared statement's ``?`` inside the construct. To bind a parameter, call ``semantic_view()`` and pass it as a whole argument.
+The construct parses wherever a table can: in a join, a CTE, a subquery or a view body, with a table alias and column aliases. A view over it stores the ``semantic_view()`` call, so it expands against the semantic view's current definition each time it is queried. Items are member names for now: an expression is refused.
+
+A prepared statement's parameter (``?``, ``$1`` or ``$name``) in the construct's ``WHERE`` is one of the statement's parameters, numbered in the order it is written along with the rest of the statement:
+
+.. code-block:: sql
+
+   PREPARE by_region AS
+   SELECT * FROM SEMANTIC_VIEW(shop
+       DIMENSIONS region
+       METRICS revenue
+       WHERE ordered_at >= ? AND region = ?
+   );
+
+   EXECUTE by_region(DATE '2024-01-01', 'East');
+
+It lowers to ``where_clause := 'ordered_at >= $1 AND region = $2'`` with the parameters in ``params``. A parameter anywhere else in the construct is refused: an item names a member.
 
 .. versionadded:: 0.16.0
 
@@ -313,6 +332,23 @@ Pre-Aggregation -- ``where_clause``
 
 Each region's ``revenue`` is recomputed over only the matching orders: East loses its December 2023 order and falls from 340.0000 to 250.0000. An outer ``WHERE`` cannot express this: by then the aggregation has already run over every row, and ``ordered_at`` is not in the output to filter by.
 
+.. _ref-sv-where-params:
+
+**Values from params.** To compare against a value supplied at run time, write ``$1``, ``$2``, ... in the predicate and pass the values in ``params``, a row whose fields are taken in order:
+
+.. code-block:: sql
+
+   SELECT * FROM semantic_view('shop',
+       dimensions := ['region'],
+       metrics := ['revenue'],
+       where_clause := 'ordered_at >= $1 AND region <> $2',
+       params := row(DATE '2024-01-01', 'West')
+   );
+
+Each value goes into the predicate as a constant of its own type, never as SQL text, so a value holding a quote is just a string. A value can itself be a prepared-statement parameter (``params := row(?, ?)``), which is what the ``SEMANTIC_VIEW(...)`` construct passes. A reference with no value in ``params`` is an error, and so is any other parameter in the predicate (``?``, ``$name``): it would be one of the calling statement's own parameters.
+
+.. versionadded:: 0.16.0
+
 The parameter is spelled ``where_clause`` rather than ``where`` because DuckDB reserves ``where`` in named-parameter position -- ``where := '...'`` is a parse error before the extension is consulted.
 
 **What the predicate may name.** Declared dimensions and facts, referenced by their logical names; each is substituted to its expression, wrapped in parentheses so a member that binds looser than its surrounding context keeps its grouping. Members declared :ref:`LABELS = (FILTER) <howto-annotations-filters>` are the intended case, but any dimension or fact works -- the label records intent and does not gate resolution. Naming a **metric** is rejected, matching Snowflake: the filter runs before aggregation, so an aggregate has no value yet.
@@ -333,7 +369,7 @@ An omitted, empty, or whitespace-only ``where_clause`` is treated as absent. The
 
 .. warning::
 
-   The predicate is SQL text that runs with the caller's privileges, and it may contain anything a ``WHERE`` clause can, including subqueries over other tables. Passing it as a prepared-statement parameter (``where_clause := ?``) saves you quoting the string, but it does **not** make untrusted text safe. Never build the predicate from request input. Validate each user-supplied value against the values you expect (a date, a region from a known list), and prefer predicates made of :ref:`named filters <howto-annotations-filters>` that you declared, so that user input chooses which filter applies rather than supplying SQL.
+   The predicate is SQL text that runs with the caller's privileges, and it may contain anything a ``WHERE`` clause can, including subqueries over other tables. Passing it as a prepared-statement parameter (``where_clause := ?``) saves you quoting the string, but it does **not** make untrusted text safe. Never build the predicate from request input. Write the predicate yourself and pass each user-supplied value in ``params``, where it is a value and never SQL (see :ref:`values from params <ref-sv-where-params>`), and prefer predicates made of :ref:`named filters <howto-annotations-filters>` that you declared, so that user input chooses which filter applies rather than supplying SQL.
 
 
 .. _ref-sv-ordering:
