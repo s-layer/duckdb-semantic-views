@@ -87,20 +87,25 @@ SELECT * FROM semantic_view('cq_tmp', metrics := ['total']);
 ----
 Table with name cq_scratch does not exist
 
-# The member types SHOW reports and explain_semantic_view's plan are still found
-# on a connection of the extension's own, which cannot see the session's
-# temporary tables, so they are missing for this view (TECH-DEBT #19).
+# The member types SHOW reports and explain_semantic_view's plan are found in
+# the caller's session too, so they see its temporary table.
 
 query TT
 SELECT name, data_type FROM (SHOW SEMANTIC METRICS IN cq_tmp);
 ----
-total	(empty)
+total	HUGEINT
 
 query I
 SELECT count(*) FROM explain_semantic_view('cq_tmp', metrics := ['total'])
-WHERE explain_output LIKE '-- (not available -- Catalog Error: Table with name cq_scratch does not exist!%';
+WHERE explain_output LIKE '%not available%';
 ----
-1
+0
+
+query I
+SELECT count(*) > 0 FROM explain_semantic_view('cq_tmp', metrics := ['total'])
+WHERE explain_output LIKE '%Table: temp.main.cq_scratch%';
+----
+true
 
 # DESCRIBE names the temporary schema as the table's.
 

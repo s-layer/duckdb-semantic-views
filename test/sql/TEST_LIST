@@ -89,6 +89,7 @@ test/sql/v080_transactional_ddl.test
 test/sql/where_clause.test
 test/sql/semantic_view_construct.test
 test/sql/semantic_view_in_caller_query.test
+test/sql/read_in_caller_transaction.test
 test/sql/window_own_grain.test
 test/sql/show_quoted_name_slots.test
 test/sql/show_scope_all_commands.test
