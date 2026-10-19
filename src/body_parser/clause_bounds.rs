@@ -369,4 +369,46 @@ mod tests {
         // "dimensions" starts at byte 11 within the body ("metrics () " == 11).
         assert_eq!(err.position, Some(base + 11));
     }
+
+    /// Fuzz #277 / #285: every scanner below the clause split counts `(`, `[`
+    /// and `{` as one depth, while `take_parens` counts only `(`/`)`. A clause
+    /// whose brackets don't nest by kind therefore splits one way on the first
+    /// parse and another way once rendered back, so the round trip drifts.
+    /// Each closer must close the opener of its own kind.
+    #[test]
+    fn a_closer_of_the_wrong_kind_is_refused() {
+        let text = "TABLES (o AS orders) METRICS (o.x AS SUM(o.a]))";
+        let err = find_clause_bounds(text, 0).unwrap_err();
+        assert_eq!(
+            err.message,
+            "Mismatched ']' in clause 'METRICS'; expected ')' to close the '(' before it."
+        );
+        assert_eq!(err.position, Some(text.find(']').unwrap()));
+    }
+
+    #[test]
+    fn a_closer_with_nothing_open_is_refused() {
+        let text = "TABLES (o AS orders) METRICS (o.x AS o.a})";
+        let err = find_clause_bounds(text, 0).unwrap_err();
+        assert_eq!(err.message, "Unmatched '}' in clause 'METRICS'.");
+        assert_eq!(err.position, Some(text.find('}').unwrap()));
+    }
+
+    #[test]
+    fn an_opener_left_open_is_refused() {
+        let text = "TABLES (o AS orders) DIMENSIONS (o.d AS o.a[1)";
+        let err = find_clause_bounds(text, 0).unwrap_err();
+        assert_eq!(err.message, "Unclosed '[' in clause 'DIMENSIONS'.");
+        assert_eq!(err.position, Some(text.find('[').unwrap()));
+    }
+
+    /// The control: brackets of every kind, nested by kind, and brackets
+    /// inside strings, quoted names and dollar-quoted strings, are accepted.
+    #[test]
+    fn brackets_nested_by_kind_are_accepted() {
+        let text = "TABLES (o AS orders) METRICS (o.x AS SUM(o.a[1]) + {'k': (1)}.k, \
+                    o.y AS COUNT(\"a]\") + LENGTH(']}') + LENGTH($$)[$$))";
+        let bounds = find_clause_bounds(text, 0).unwrap();
+        assert_eq!(bounds.len(), 2);
+    }
 }
