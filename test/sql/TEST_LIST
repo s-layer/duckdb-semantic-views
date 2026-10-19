@@ -120,3 +120,4 @@ test/sql/bare_column_scoping.test
 test/sql/member_data_type.test
 test/sql/show_dims_for_metric_required_refs.test
 test/sql/cor3_cast_type_not_a_reference.test
+test/sql/scalar_errors_are_input_errors.test

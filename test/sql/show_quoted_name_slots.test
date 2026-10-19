@@ -159,10 +159,12 @@ SHOW SEMANTIC VIEWS IN DATABASE memory
 # so without an explicit check the whole tail would have become the schema.
 # ============================================================
 
+# DuckDB 2.0's tokenizer rejects the quoting before semantic_views sees the
+# statement, so this is the engine's wording; the Rust unit tests cover ours.
 statement error
 SHOW SEMANTIC VIEWS IN SCHEMA "oops
 ----
-Invalid schema name
+unterminated quoted identifier
 
 # ============================================================
 # Test 9: the view slot must NOT strip its quotes — a quoted DOT.

@@ -69,6 +69,7 @@ These are intentional trade-offs made during v0.1.0 development. Each was the be
 - **Origin:** v0.5.0 Phase 15, C++ shim infrastructure
 - **Decision:** `duckdb.cpp` (the DuckDB amalgamation, ~23MB / ~300K lines) is compiled alongside `shim.cpp` via the `cc` crate. First build takes ~2.5 minutes; cached on subsequent builds. This provides ALL DuckDB C++ symbols (constructors, RTTI, vtables) without manual stubs. Symbol visibility restricts exports to the entry point only, preventing ODR conflicts with the host DuckDB process. The amalgamation must be version-pinned to match `TARGET_DUCKDB_VERSION`.
 - **Action:** The compilation cost is one-time per clean build. `build.rs` feature-gates the C++ compilation behind `CARGO_FEATURE_EXTENSION`, so `cargo test` (default features) is unaffected.
+- **Update (DuckDB 2.0 epic, Phase 2):** Superseded. DuckDB 2.0 ships no amalgamation, so `scripts/ensure_engine.py` builds the engine's `duckdb_static` library with DuckDB's own CMake (from the PyPI sdist, or from a harness's `./duckdb` tree), caches it under `.engine/`, and `build.rs` links it and compiles the shim against the engine's full headers (`cpp/engine.manifest`). The visibility restriction is unchanged. See MAINTAINER.md, "The DuckDB engine build".
 
 ### 11. ✅ C_STRUCT_UNSTABLE ABI (evaluated, kept; replaced by pinned C_STRUCT for DuckDB 2.0)
 
@@ -182,6 +183,7 @@ Areas where test coverage is reduced compared to ideal, with justification.
   - **Consequence for schema-scoped resolution:** the read-side table functions cannot resolve an unqualified semantic-view name against the caller's schema on their own. Resolution is therefore threaded in **at rewrite time** — the parser override embeds the caller's search path, which DuckDB evaluates on the caller's connection before the table function is bound.
   - **The injection landed 2026-08-03** (`src/parse/search_path.rs`). Every resolving read table function gained a `search_path` named parameter (`LIST(VARCHAR)`), and the parser override appends `search_path := list_concat(current_schemas(false), [current_schema()])` to each call it sees. What makes this work is that **DuckDB constant-folds table-function arguments on the caller's connection, before the bind callback runs** — so an ordinary scalar expression is the one channel into a bind that the two walls above do not close. (A subquery is not: `Table function cannot contain subqueries`.) `current_schemas(true)` is deliberately not used — it prepends the *temp* schema, itself named `main`, which would win over a real schema of that name.
     - **Not covered: the two scalar functions.** `get_ddl` and `read_yaml_from_semantic_view` are scalars, which have no named parameters, so giving them the path needs a second registered arity. They keep the no-path fallback — the unique match, else an ambiguity error — which is conservative rather than wrong. Recorded under #25.
+  - **Update (DuckDB 2.0 epic, Phase 2): the header wall is gone.** The shim now compiles against the engine's full headers, which define `ClientData` (`duckdb/main/client_data.hpp`, with `catalog_search_path`), so a bind could read the caller's search path off its `ClientContext` without a query and so without the `context_lock` deadlock. The rewrite-time injection is kept for now: it works, it is covered, and replacing it changes how every resolving read function binds, which belongs in its own change with its own tests, not in the engine port. Doing so would also give the two scalar functions (`get_ddl`, `read_yaml_from_semantic_view`) the caller's path, closing the #25 gap. The `context_lock` wall above is unaffected and still blocks reading on the caller's transaction.
   - **That injection is forward-compatible and should be deleted when this entry resolves.** The action above would fix the session-config problem incidentally: once reads run on the caller's context, `current_schemas()` inside the catalog query simply evaluates in the caller's session and the injected argument becomes redundant. So the two are the *same* upstream ask, not separate ones — but the injection is what makes DuckDB-conventional resolution possible in the meantime.
 
 ### 20. ✅ Bounded LRU evictions are silent at the parser-override site
@@ -195,7 +197,10 @@ Areas where test coverage is reduced compared to ideal, with justification.
 - **Why this is acceptable:** The 16-database threshold covers every realistic interactive and CI workload. Daemon processes that load against many databases are the only affected scenario and they get a clear actionable error when they hit the wall.
 - **Action if the wall starts to bite:** Either bump the capacity (no other code change needed) or replace the LRU with an explicit registration lifecycle tied to extension-unload (DuckDB does not currently expose an unload hook that we can hook into).
 
-### 21. ❓ `CALL disable_peg_parser()` resets `allow_parser_override_extension`
+### 21. ✅ `CALL disable_peg_parser()` resets `allow_parser_override_extension` — OBSOLETE 2026-10-16 (DuckDB 2.0 removed the PEG toggles)
+
+> **2026-10-16.** DuckDB 2.0 made the PEG parser the only parser and removed `enable_peg_parser()` / `disable_peg_parser()`, so nothing resets the setting behind the caller's back any more. A session can still set `allow_parser_override_extension` back to `DEFAULT` itself, which turns semantic-view DDL off until it sets `FALLBACK` again; `peg_compat.test` section 4 now pins that. The original entry follows.
+
 
 - **Origin:** v0.8.0 milestone close, surfaced by `peg_compat.test`.
 - **Decision:** DuckDB's `disable_peg_parser` pragma resets `allow_parser_override_extension` to its `default` value (`DEFAULT_OVERRIDE`), which silently bypasses our hook entirely. Subsequent semantic DDL on that connection produces the default parser's `Parser Error: syntax error at or near "SEMANTIC"`. Working around this requires the caller to explicitly re-set `allow_parser_override_extension='FALLBACK'` after disabling PEG.
@@ -583,13 +588,41 @@ Areas where test coverage is reduced compared to ideal, with justification.
 - **What is still open:** the scanner has no general notion of a keyword, only these taught positions. A member named like a non-reserved word in any other keyword position is still spliced: a collation name (`x COLLATE nocase`), `NULLS FIRST` / `NULLS LAST`, and any further grammar DuckDB adds. Reserved words (`FROM`, `AND`, `AS`, …) cannot be member names without quoting, so they are not at risk, and a word followed by a string literal (`LIKE '…'`, `TRIM(BOTH 'x' FROM y)`) is now skipped by the typed-literal rule.
 - **What would finish it:** classify tokens with DuckDB's own parser instead of a hand-written scanner, which the PEG grammar work in `.planning/PEG-PARSER-EPIC.md` makes possible. Until then, teach `scan_chains` each new position test-first, on the same pattern.
 
-### 88. ❌ The DuckDB 2.0 shim port has three behaviours only a 2.0 build can settle — OPEN
+### 92. ❌ `cargo test`, the proptests and coverage run on DuckDB 1.5.6, not the 2.0 engine the extension ships for — OPEN
 
-- **Origin:** 2026-10-15, Phase 2 of the DuckDB 2.0 epic (`.planning/PEG-PARSER-EPIC.md`). The C++ shim was ported to the 2.0 headers behind `SV_DUCKDB_2` before 2.0 GA; that path is syntax-checked only, not linked or run. Each gap is marked `TODO(duckdb-2.0)` at its site.
-- **Statement text from tokens (`shim.cpp`, `sv_statement_from_tokens`):** 2.0's `parse_function` hands the extension tokens with no source offsets, so the shim rebuilds a normalised statement (one space between tokens, no comments). Under 2.0 the error caret can land on the wrong column unless the statement starts at byte 0 with the normalised spacing, the Rust validator sees the normalised text, and the multi-statement hint from #85 can miss its substring lookup and fall back to the generic error.
-- **Interrupt latency (`shim.cpp`, `sv_query_interruptible`):** the 2.0 loop is written from the dev-build `QueryResult::CompleteInternal` source; whether cancellation still stops `semantic_view()` promptly with a bare `Interrupted!` is unverified.
-- **Per-query deadline (`parser_extension_compat.hpp`, `sv_compat::is_interrupted`):** 2.0 adds a max-execution-time deadline enforced apart from the interrupt flag, so a timed-out caller is not seen by the shim's probe connections. This matches v1.5, which had no deadline.
-- **What would finish it:** at 2.0 GA, build against the released libraries, run `just test-all` (the caret, interrupt and multi-statement tests exercise the first two; nothing yet tests a deadline), and either confirm each behaviour or fix it (for the caret, map the token list back onto the original query text; for the deadline, forward it to the probe connections). Also make `sv_compiled_duckdb_version()` work under `SV_DUCKDB_2`: the engine's `src/include` tree does not define `DUCKDB_VERSION` (upstream injects it through CMake), so return `duckdb::DuckDB::LibraryVersion()` there or have build.rs pass the define from `.duckdb-version`, never a hand-written value that could drift from the linked library. Then delete the `TODO(duckdb-2.0)` notes.
+- **Origin:** 2026-10-16, review of PR #262 (Phase 2 of the DuckDB 2.0 epic). The extension now links and loads only in DuckDB 2.0 (#90), but duckdb-rs has no 2.0 release, so the crate stays on `=1.10506.0` (`.duckdb-capi-version`) and its `bundled` feature compiles DuckDB 1.5.6 into every `cargo test` binary.
+- **What runs on which engine:** `cargo test` / `just test-rust` (unit tests, the differential and metamorphic proptests, the catalog tests), the doctests and the coverage gate run on 1.5.6. `just test-sql`, `test-ducklake-ci`, the Python integration suites and the examples load the real extension into the 2.0 wheel. So the numeric oracles CLAUDE.md relies on for query semantics (`differential_proptest`, `star_schema_proptest`, `multi_hop_join_proptest`, `semi_additive_proptest`, `window_metric_proptest`) compare our expansion against an oracle on a different engine from the one users load. A query that is right on 1.5.6 and wrong on 2.0 passes them.
+- **Shown by:** the search-path lambda in `src/catalog/writes.rs`. Its arrow form (`s -> lower(s)`) passed every Rust test on 1.5.6 and is a binder error on 2.0. The fix (`lambda s: lower(s)`) is checked on 2.0 only by the sqllogictests; no Rust test runs it on the engine it targets.
+- **What still holds:** every behaviour the user sees goes through the 2.0 suites above, and the expansion is SQL text whose meaning 1.5.6 and 2.0 share outside known differences like the lambda syntax. The gap is randomized coverage on 2.0, not all coverage on 2.0.
+- **What would finish it:** move the `bundled` dev build to 2.0 once duckdb-rs publishes a crate for it (bump `.duckdb-capi-version` with it, or split the test crate's pin from the C API pin), or run the oracle side of the differential harnesses against the 2.0 wheel (for example through the Python `duckdb` package or a 2.0 `libduckdb` in place of the bundled build). Either way, re-run the proptests on 2.0 and close this.
+
+### 91. ❌ The shim's DuckDB 1.5 branches are no longer compiled — OPEN
+
+- **Origin:** 2026-10-16, Phase 2 of the DuckDB 2.0 epic (v0.15.0). The shim was ported to 2.0 behind one `SV_DUCKDB_2` macro (`cpp/include/parser_extension_compat.hpp`, `#ifdef SV_DUCKDB_2` blocks in `cpp/src/shim.cpp`), and `build.rs` now always defines it, because it links the 2.0 engine `scripts/ensure_engine.py` builds. The `#else` branches (the v1.5 code, unchanged) are dead: nothing compiles them, so they can rot without a red.
+- **Why not removed here:** decision D2 drops DuckDB 1.x with this phase, but deleting the branches is a large mechanical diff best reviewed apart from the build change, and keeping them makes the port reviewable against the code it replaced.
+- **What would finish it:** delete every `#else` branch and the macro itself (the define in `build.rs`, the v1.5 re-declarations at the top of the compat header), so each `sv_compat::` helper is the 2.0 expression alone or is inlined.
+
+### 90. ❌ The engine pin is a DuckDB 2.0 pre-release — OPEN
+
+- **Origin:** 2026-10-16, Phase 2 of the DuckDB 2.0 epic. v0.15.0 is built ahead of DuckDB 2.0.0 GA (scheduled 2026-10-21) against the newest pre-release that has a PyPI wheel: `v2.0.0-alpha47600` (`.duckdb-version`), wheel `2.0.0.dev2610151406` (`.duckdb-pypi-version`), engine commit `d4355d01c5`. The extension loads only in that exact build.
+- **The interim parts:** the pre-release has no release tag upstream, so `BuildAll.yml` / `BuildQuick.yml` pass its commit as `duckdb_version` plus `duckdb_tag: v2.0.0-alpha47600`, which the Makefile's `set_duckdb_tag` turns into a tag on the clone; `.duckdb-pypi-version` exists only because the wheel name is not the version; and the PEP 723 headers pin the dev wheel. `just release` cannot publish this pin: the registry builds against its own default engine, which `scripts/registry_target.py` matches by name.
+- **The pin pair is checked by asking the wheel.** The engine is built from the sdist of the wheel `.duckdb-pypi-version` names, under `.duckdb-version`'s label, and the engine source carries no label or commit to contradict a wrong pair. `just test-engine-pins` (`test/integration/test_engine_pins.py`) runs under that wheel and checks it reports `.duckdb-version` and was built from the workflows' `duckdb_version` commit.
+- **What would finish it:** at GA, set `.duckdb-version` to `v2.0.0`, delete `.duckdb-pypi-version`, put `v2.0.0` in both workflows' `duckdb_version` and drop `duckdb_tag`, repin the PEP 723 headers to `2.0.0`, rebuild and run `just test-all`. Rewrite the CHANGELOG's DuckDB 2.0 bullet, which names the pre-release, to name `v2.0.0`. The version monitor does all but the test run once 2.0.0 is the latest release. Then check what the registry's default engine is called (`DUCKDB_LATEST_STABLE` has been a commit SHA, not a tag) and teach `registry_target.py` to match it to the pin if it is still a SHA.
+
+### 89. ❌ The DuckDB 2.0 wheel's ADBC driver cannot load extensions unless `duckdb` is imported — OPEN (upstream)
+
+- **Origin:** 2026-10-16, running the ADBC suites against the `2.0.0.dev2610151406` wheel. `INSTALL` / `LOAD` on a connection from `adbc_driver_duckdb` fail with `Permission Error: … this build does not link the loadable_extensions library` unless the `duckdb` Python module has been imported in the process first; the driver lives in the same shared library and the import is what wires up extension loading. 1.5 needed no import. `examples/transactional_ddl.py` passed only because it imports `duckdb` for its first half.
+- **Workaround:** `test/integration/test_adbc_queries.py` and `test_adbc_transactions.py` import `duckdb` before the driver, with a comment pointing here. Nothing is skipped: both suites run in full.
+- **What would finish it:** re-check on each 2.0 wheel (a script that imports only `adbc_driver_duckdb` and runs `LOAD '<path>'`). When the driver loads extensions on its own, delete the two imports. If GA ships with it, report it upstream (duckdb-python), since every ADBC user loading an extension hits it.
+
+### 88. ✅ The DuckDB 2.0 shim port has three behaviours only a 2.0 build can settle — RESOLVED 2026-10-16
+
+- **Origin:** 2026-10-15, Phase 2 of the DuckDB 2.0 epic (`.planning/PEG-PARSER-EPIC.md`). The C++ shim was ported to the 2.0 headers behind `SV_DUCKDB_2` before 2.0 GA, syntax-checked only.
+- **Resolved by building and running it** against the `v2.0.0-alpha47600` engine (v0.15.0, TECH-DEBT #90):
+  - **Statement text from tokens.** 2.0's `parse_function` gets tokens with no offsets, and the 2.0 Python client renders no caret for a parser error. The shim now records the query `parser_override` saw (`sv_override_query`), finds the failed statement's tokens in it (`sv_locate_tail`, from the end, skipping whitespace and comments between tokens), validates that exact text, and renders the caret itself with `QueryErrorContext::Format`. The token-joined text is only the fallback when the tokens cannot be located. The caret tests (`test_caret_position.py`, the caret `.test` files) and the multi-statement hint (`test_multi_statement_ddl_error.py`) pass unchanged.
+  - **Interrupt latency.** `sv_query_interruptible`'s 2.0 loop (`Submit` + `Materialize` + `ExecuteTask` / `WaitForTask`) passes `test_query_interrupt.py`: the cancelled query stops early with a bare `Interrupted!`.
+  - **Per-query deadline.** It was not forwarded: under `SET max_execution_time`, `semantic_view()` and every metadata bind that probes member types ran to completion past the deadline (confirmed red for each statement in `test_query_interrupt.py`, which now runs every cancellation check under both an interrupt and a deadline). `sv_compat::is_cancelled` / `throw_if_cancelled` now treat the caller's passed deadline like its interrupt flag: it is forwarded to the probe connection, and the query fails with the engine's own bare "Query exceeded maximum execution time".
+  - **`sv_compiled_duckdb_version()`** returns `DuckDB::LibraryVersion()` of the linked engine under `SV_DUCKDB_2`.
 
 ### 87. ❌ Under a role-played BASE table, a window over a metric off the root binds to the first-declared relationship (silent) — OPEN
 
@@ -814,12 +847,16 @@ Areas where test coverage is reduced compared to ideal, with justification.
 - **Origin:** 2026-08-28, fixing the Haybarn distribution's build of this extension (its
   `make configure` failed on every platform, and its binary would then have been compiled
   against upstream headers rather than the fork's).
-- **What ships:** `scripts/ensure_amalgamation.py` generates the amalgamation from an
-  engine source tree in `./duckdb` when a harness supplies one, and the `DUCKDB_TEST_VERSION`
-  pin stands down when `DUCKDB_GIT_VERSION` names an engine other than our pinned release.
-  Both paths are entered **only** by a CI harness we do not run: our own `BuildAll` /
-  `BuildQuick` workflows call upstream `_extension_distribution.yml`, which supplies no
-  engine tree, so every workflow in this repo exercises the *download* path exclusively.
+- **What ships:** `scripts/ensure_engine.py` builds the engine from a source tree in
+  `./duckdb` when a harness supplies one (else from the pinned release's sdist), and the
+  `DUCKDB_TEST_VERSION` pin stands down when `DUCKDB_GIT_VERSION` names an engine other than
+  our pinned release.
+- **Update (DuckDB 2.0 epic, Phase 2):** our own `BuildAll` / `BuildQuick` now run the tree
+  path too, since extension-ci-tools clones the upstream engine into `./duckdb` and the
+  engine is built from it. What stays uncovered is a *distribution's* tree: no workflow here
+  builds against a fork's engine, its labels or its headers. The amalgamation-specific
+  findings below (generating `libhaybarn-src.zip`) are historical; the fork-labelling rules
+  now live in `ensure_engine.py`'s `tree_label`.
 - **What is covered:** `tests/build_config.rs` drives the real `Makefile` and the real
   script over a stub engine tree and a `file://` release zip, so the *selection* rules,
   the version guard and the provenance stamp are guarded under `cargo test`. What no test
@@ -847,7 +884,7 @@ Areas where test coverage is reduced compared to ideal, with justification.
     upstream DuckDB and tests extensions against *that*). The check above was driven
     through their CLI instead.
 - **What would finish it:** a scheduled workflow that clones a distribution engine at its
-  release tag, builds with `AMALGAMATION_SRC_DIR` pointed at it, and runs the suite against
+  release tag into `./duckdb`, builds the extension against it, and runs the suite against
   that distribution's own test runner — the same shape as `DuckDBVersionMonitor`, which
   already exists to catch upstream drift on a schedule.
 

@@ -348,6 +348,26 @@ Found while porting (2026-10-15):
 - **Some errors become the engine's wording**, e.g. an unknown named parameter now reads
   "Invalid named parameter %s for function %s"; expect small test-expectation changes.
 
+**Step 3 done ahead of GA (2026-10-16), against a pre-release.** Built and tested against
+`v2.0.0-alpha47600` (wheel `2.0.0.dev2610151406`, engine commit `d4355d01c5`), the
+newest pre-release with a wheel, so the PR only needs its pins moved at GA (TECH-DEBT #90).
+What changed from the plan:
+
+- *Engine source.* Not the release's static libraries plus a source checkout: the engine is
+  built with its own CMake from the PyPI sdist (`scripts/ensure_engine.py`, cached under
+  `.engine/`), which carries the exact source the wheel was built from, `third_party/`
+  included, and needs no GitHub. A harness-supplied `./duckdb` tree is built instead when
+  present, under its own release label.
+- *Pins split.* `.duckdb-version` is the engine; `.duckdb-capi-version` (v1.5.6) is the C API
+  the binary declares, which the duckdb-rs crates and `MINIMUM_DUCKDB_VERSION` follow.
+- *The three `TODO(duckdb-2.0)` items* are settled (TECH-DEBT #88): the caret is rendered by
+  the shim from the query text `parser_override` saw; the interrupt loop passes its tests;
+  the per-query deadline was a real gap and is now forwarded.
+- *Found:* the 2.0 wheel's ADBC driver loads extensions only once `duckdb` is imported
+  (TECH-DEBT #89); the deprecated `->` lambda is a binder error on 2.0 (the catalog write
+  path and two tests used it); DuckDB's tokenizer now rejects bad quoting before the
+  extension sees the statement.
+
 ### Phase 3: DDL and introspection as grammar productions
 
 - CREATE (including `FROM YAML`), ALTER, DROP, DESCRIBE, every SHOW form, and
@@ -482,7 +502,7 @@ the same fixture answers both.
 | D4 | Store member expressions as verbatim source text (today) or as DuckDB-normalised text? | The spike shows a transform can rebuild the expression's exact code text, spacing included, from its tokens. Only comments inside an expression are lost, and they become spaces. Recommendation: keep storing that text, and document comment loss as a known divergence with a TECH-DEBT entry and a round-trip test pinning it. That preserves `GET_DDL` fidelity. Moving to AST storage would also retire #73 and IDENT-2/3/4, but it is a separate decision. |
 | D5 | Snowflake metadata clauses (`AI_*`, `TAG`, `COPY GRANTS`, `SAMPLE_VALUES`, `IS_ENUM`, Cortex search, `MAX_STALENESS`): reject (today), or accept and store? | Accept, store, show in DESCRIBE, and round-trip through GET_DDL/YAML, so Snowflake DDL pastes as is. `COPY GRANTS` and `MAX_STALENESS` are accepted as no-ops. Budget it: about 9 clauses, each touching model + JSON + YAML + `render_ddl` + DESCRIBE. |
 | D6 | BI placeholder views share the table/view namespace (a semantic view can't share a name with a table). OK? | Yes, behind the Phase 5 spike. It is what lets BI tools see them at all. |
-| D7 | Version line for the 2.0 cut? | Ship Phase 2 as v0.15.0 (v0.14.0 shipped on 1.5.6 as the last 1.5 line, published to the registry's `variegata` key). Consider v1.0.0 once Phase 4 lands **and** D4's expression storage format has settled. |
+| D7 | Version line for the 2.0 cut? | Ship Phase 2 as v0.15.0 (v0.14.0 shipped on 1.5.6 as the last 1.5 line, published to the registry's `variegata` key). Phases 3 and 4 ship together as v0.16.0 (Paul, 2026-10-16); versions for Phases 5 to 8 are decided as each lands. Consider v1.0.0 once Phase 4 lands **and** D4's expression storage format has settled. |
 
 ## 8. Done when
 

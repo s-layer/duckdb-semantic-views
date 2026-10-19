@@ -57,18 +57,22 @@ test/data/duckdb_extensions/
 # dbt reference material (not part of the project)
 dbt/
 
-# Vendored DuckDB amalgamation (header ~1.8MB, source ~23MB)
-# Re-fetched locally via: just update-headers
-# Re-fetched in CI via: DuckDB Version Monitor workflow
-cpp/include/duckdb.hpp
-cpp/include/duckdb.cpp
-# Provenance of the installed amalgamation (written by scripts/ensure_amalgamation.py)
-cpp/include/.amalgamation_id
+# The DuckDB engine build the C++ shim links against (written by
+# scripts/ensure_engine.py; read by build.rs)
+cpp/engine.manifest
 
 # Extension build output (populated by just build / make release)
 build/
 
-# Versioned amalgamation cache (populated by build/update-headers, survives branch switches)
+# DuckDB engine build cache (populated by make ensure_engine, survives branch switches)
+.engine/
+
+# What DuckDB 1.x (amalgamation) builds left behind. make ensure_engine removes
+# the copies in cpp/include, which would shadow the engine's own duckdb.hpp, and
+# build.rs refuses to compile while one is there.
+cpp/include/duckdb.hpp
+cpp/include/duckdb.cpp
+cpp/include/.amalgamation_id
 .amalgamation/
 
 # Engine source tree supplied by a CI harness (community-extensions and its

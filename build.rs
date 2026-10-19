@@ -1,60 +1,84 @@
 // build.rs
-// Cargo build script — compiles C++ shim and restricts exported symbols when building the
-// loadable extension.
+// Cargo build script — compiles the C++ shim, links the DuckDB engine it is written
+// against, and restricts exported symbols when building the loadable extension.
 //
 // Design: Only the `extension` feature triggers C++ compilation and symbol visibility
 // configuration. During `cargo test` (default/bundled feature), this script exits immediately.
 //
-// C++ compilation: The cc crate compiles shim.cpp against the vendored DuckDB amalgamation
-// header (cpp/include/duckdb.hpp). This produces a static library that gets linked into the
-// cdylib extension binary.
+// C++ compilation: the cc crate compiles shim.cpp against the DuckDB engine's own headers
+// (`src/include` plus the third-party include directories), and the engine's static
+// libraries are linked into the cdylib. Both come from `cpp/engine.manifest`, which
+// `scripts/ensure_engine.py` (`make ensure_engine`) writes after building the engine. The
+// shim needs DuckDB's C++ internals (the parser-extension hook has no C-API equivalent),
+// and a host only exports the C API, so the extension carries its own copy of the engine
+// code it calls; `src/load_guard.rs` refuses any host that is not the exact release that
+// copy was built from. DuckDB 2.0 ships no amalgamation, which is what the 1.x builds
+// compiled here instead.
 //
 // Symbol visibility: restricts the exported symbols of the cdylib to the C_STRUCT entry
 // point (semantic_views_init_c_api) on Linux and macOS. Without this, Rust stdlib symbols
-// leak into the extension binary.
+// and the engine's C++ symbols leak into the extension binary.
 // Note: semantic_views_version is appended by the CI post-build script after compilation;
 // it is NOT compiled into the binary and must not appear in the symbol list.
-//
-// Windows Win32 macro patching: duckdb.cpp includes <windows.h> mid-file, which defines
-// macros that conflict with DuckDB C++ identifiers (GetObject -> GetObjectA, interface ->
-// struct). WIN32_LEAN_AND_MEAN/NOGDI do not reliably suppress these across all Windows SDK
-// versions. On Windows, build.rs generates a patched copy of duckdb.cpp in OUT_DIR with
-// explicit #undef blocks inserted after each <windows.h> include.
 //
 // LSP support: `compile_commands.json` is regenerated on every `cargo build` / `cargo
 // check`, sourcing flags from the same `CppBuildSpec` as the cc-crate invocation so
 // clangd sees exactly what the build sees. clangd is pointed at the file via the
-// checked-in `.clangd` at the repo root (`CompilationDatabase: target`).
+// checked-in `.clangd` at the repo root (`CompilationDatabase: target`). Until
+// `make ensure_engine` has run there is no manifest, so the entry names only `cpp/include`.
 //
 // Output location: always `<CARGO_MANIFEST_DIR>/target/compile_commands.json` so the
 // hardcoded `.clangd` path stays valid. When `CARGO_TARGET_DIR` is set to something
 // other than `<CARGO_MANIFEST_DIR>/target`, a second copy is also written there to
 // keep the build-system invariant (everything generated lives under the cargo target
 // dir). Both `target/` directories are gitignored, so neither copy is committed.
-//
-// Windows caveat: the cc-crate compile substitutes a patched copy of duckdb.cpp from
-// `OUT_DIR` (see `patch_duckdb_cpp_for_windows` below), but `compile_commands.json`
-// still names `cpp/include/duckdb.cpp`. Clangd on Windows therefore parses the
-// unpatched amalgamation and may surface `GetObject` / `interface` macro-conflict
-// diagnostics that the actual build does not see. The diagnostics are cosmetic; the
-// produced extension binary is still built from the patched source.
+
+/// Where `scripts/ensure_engine.py` records the engine build to use.
+const ENGINE_MANIFEST: &str = "cpp/engine.manifest";
+
+/// The engine build `cpp/engine.manifest` names: its header directories and its
+/// static libraries, `duckdb_static` first.
+struct EngineManifest {
+    includes: Vec<String>,
+    libs: Vec<String>,
+}
+
+fn read_engine_manifest() -> Option<EngineManifest> {
+    let text = std::fs::read_to_string(ENGINE_MANIFEST).ok()?;
+    let mut manifest = EngineManifest {
+        includes: Vec::new(),
+        libs: Vec::new(),
+    };
+    for line in text.lines() {
+        if let Some(path) = line.strip_prefix("include ") {
+            manifest.includes.push(path.to_string());
+        } else if let Some(path) = line.strip_prefix("lib ") {
+            manifest.libs.push(path.to_string());
+        }
+    }
+    Some(manifest)
+}
 
 /// Single source of truth for C++ build flags. Both the cc-crate compile invocation and
 /// the `compile_commands.json` writer read from this so the LSP cannot drift from the build.
 struct CppBuildSpec {
     std: &'static str,
-    include: &'static str,
+    includes: Vec<String>,
     files: Vec<&'static str>,
     /// (name, value) — value is None for bare `-Dname` defines.
     defines: Vec<(&'static str, Option<&'static str>)>,
 }
 
-fn cpp_build_spec(is_windows: bool) -> CppBuildSpec {
+fn cpp_build_spec(is_windows: bool, engine: Option<&EngineManifest>) -> CppBuildSpec {
+    let mut includes = vec!["cpp/include".to_string()];
+    if let Some(engine) = engine {
+        includes.extend(engine.includes.iter().cloned());
+    }
     let mut spec = CppBuildSpec {
         std: "c++17",
-        include: "cpp/include",
-        files: vec!["cpp/include/duckdb.cpp", "cpp/src/shim.cpp"],
-        defines: Vec::new(),
+        includes,
+        files: vec!["cpp/src/shim.cpp"],
+        defines: vec![("SV_DUCKDB_2", None)],
     };
     if is_windows {
         spec.defines.push(("WIN32_LEAN_AND_MEAN", None));
@@ -82,11 +106,10 @@ fn cpp_build_spec(is_windows: bool) -> CppBuildSpec {
 fn write_compile_commands_json(spec: &CppBuildSpec) {
     let dir = std::env::current_dir().map_or_else(|_| ".".to_string(), |p| p.display().to_string());
 
-    let mut flags: Vec<String> = vec![
-        "clang++".to_string(),
-        format!("-std={}", spec.std),
-        format!("-I{}", spec.include),
-    ];
+    let mut flags: Vec<String> = vec!["clang++".to_string(), format!("-std={}", spec.std)];
+    for include in &spec.includes {
+        flags.push(format!("-I{include}"));
+    }
     for (name, val) in &spec.defines {
         match val {
             Some(v) => flags.push(format!("-D{name}={v}")),
@@ -157,33 +180,56 @@ fn write_compile_commands_json(spec: &CppBuildSpec) {
     }
 }
 
+// DuckDB's CMake builds the engine against the static MSVC runtime (/MT), and
+// .cargo/config.toml turns on `crt-static` to match. A RUSTFLAGS set in the
+// environment replaces that config's rustflags instead of adding to them, and
+// the link then mixes runtimes, so say so here rather than as an LNK2038 at the
+// end of the build.
+#[cfg(feature = "extension")]
+fn check_msvc_static_runtime(is_windows: bool) {
+    let target_env = std::env::var("CARGO_CFG_TARGET_ENV").unwrap_or_default();
+    let target_features = std::env::var("CARGO_CFG_TARGET_FEATURE").unwrap_or_default();
+    assert!(
+        !is_windows
+            || target_env != "msvc"
+            || target_features.split(',').any(|f| f == "crt-static"),
+        "the DuckDB engine is built against the static MSVC runtime (/MT), but this \
+         build does not link it statically (no `crt-static` target feature). A \
+         RUSTFLAGS in the environment replaces the `+crt-static` that \
+         .cargo/config.toml sets: add `-C target-feature=+crt-static` to it."
+    );
+}
+
 fn main() {
     // Always emit compile_commands.json so clangd works without `--features extension`.
     // Single source of truth: the same CppBuildSpec drives the cc-crate compile below.
     let target_os = std::env::var("CARGO_CFG_TARGET_OS").unwrap_or_default();
     let is_windows = target_os == "windows";
-    write_compile_commands_json(&cpp_build_spec(is_windows));
+    let engine = read_engine_manifest();
+    write_compile_commands_json(&cpp_build_spec(is_windows, engine.as_ref()));
 
-    // Always rerun if the C++ surface or this script changes — keeps both the cc-crate
-    // build cache and compile_commands.json fresh. Once any rerun-if-changed is emitted,
-    // cargo treats the list as exhaustive, so include every relevant input.
-    //
-    // duckdb.hpp / duckdb.cpp are gitignored (downloaded by `just update-headers`).
-    // Cargo treats a `rerun-if-changed` whose path is missing as "always rerun", which
-    // would force every `cargo check` on a fresh checkout to re-execute this script.
-    // Gate them on existence so they only join the dependency graph once present.
+    // Always rerun if the C++ surface, the engine or this script changes — keeps both
+    // the cc-crate build cache and compile_commands.json fresh. Once any
+    // rerun-if-changed is emitted, cargo treats the list as exhaustive, so include
+    // every relevant input. A missing path counts as "always rerun", so the
+    // gitignored manifest joins the list only once it exists.
     println!("cargo:rerun-if-changed=build.rs");
     println!("cargo:rerun-if-changed=cpp/src/shim.cpp");
     println!("cargo:rerun-if-changed=cpp/src/shim.hpp");
     println!("cargo:rerun-if-changed=cpp/include/parser_extension_compat.hpp");
-    if std::path::Path::new("cpp/include/duckdb.hpp").exists() {
-        println!("cargo:rerun-if-changed=cpp/include/duckdb.hpp");
+    if std::path::Path::new(ENGINE_MANIFEST).exists() {
+        println!("cargo:rerun-if-changed={ENGINE_MANIFEST}");
     }
-    if std::path::Path::new("cpp/include/duckdb.cpp").exists() {
-        println!("cargo:rerun-if-changed=cpp/include/duckdb.cpp");
+    // Cargo does not fingerprint `rustc-link-lib` inputs, so an engine rebuilt in
+    // place would otherwise keep the previous link. Only the libraries that exist
+    // are listed, for the same reason as the manifest.
+    for lib in engine.iter().flat_map(|e| &e.libs) {
+        if std::path::Path::new(lib).exists() {
+            println!("cargo:rerun-if-changed={lib}");
+        }
     }
-    // Toggling SV_SKIP_CPP_BUILD flips whether the C++ shim/amalgamation is
-    // compiled below, so it must invalidate the build-script cache. Without
+    // Toggling SV_SKIP_CPP_BUILD flips whether the C++ shim is compiled and the
+    // engine linked below, so it must invalidate the build-script cache. Without
     // this, a `cargo build --features extension` right after a
     // `SV_SKIP_CPP_BUILD=1 cargo clippy` could reuse the skipped output and
     // link against a never-built shim.
@@ -197,90 +243,88 @@ fn main() {
     }
 
     // SV_SKIP_CPP_BUILD lets `cargo clippy`/`cargo check --features extension`
-    // type-check the extension-gated Rust WITHOUT compiling the ~25 MB DuckDB
-    // amalgamation + C++ shim (a ~10-min cc build). Analysis-only cargo modes
-    // never link the final cdylib, so the missing DuckDB symbols and link
-    // directives don't matter — this is purely to make linting the FFI layer
-    // fast (locally and in CI) and does NOT produce a loadable extension.
-    // A real `cargo build --features extension` must leave this unset.
+    // type-check the extension-gated Rust WITHOUT building the DuckDB engine or
+    // compiling the C++ shim. Analysis-only cargo modes never link the final
+    // cdylib, so the missing DuckDB symbols and link directives don't matter —
+    // this is purely to make linting the FFI layer fast (locally and in CI) and
+    // does NOT produce a loadable extension. A real `cargo build --features
+    // extension` must leave this unset.
     if std::env::var("SV_SKIP_CPP_BUILD").is_ok() {
         println!(
-            "cargo:warning=SV_SKIP_CPP_BUILD set: skipping DuckDB amalgamation + C++ shim compile \
+            "cargo:warning=SV_SKIP_CPP_BUILD set: skipping the C++ shim compile and engine link \
              (analysis-only; the resulting artifact will NOT link/load as an extension)"
         );
         return;
     }
 
-    // Compile the DuckDB amalgamation source + C++ shim.
-    // duckdb.cpp provides all DuckDB C++ symbol definitions (constructors, RTTI,
-    // vtables) so the shim can use ParserExtension, TableFunction, etc. without
-    // relying on symbol export from the host process (Python DuckDB compiles with
-    // -fvisibility=hidden). Symbol visibility in the cdylib is restricted below
-    // so these definitions stay internal to the extension binary.
-    //
-    // First build: ~2-5 min (duckdb.cpp is ~300K lines). Cached by cc crate after.
+    // Compile the C++ shim against the engine's headers and link the engine's
+    // static libraries, which provide every DuckDB C++ symbol the shim uses
+    // (constructors, RTTI, vtables) without relying on symbol export from the host
+    // process (Python DuckDB compiles with -fvisibility=hidden). Symbol visibility
+    // in the cdylib is restricted below so these definitions stay internal to the
+    // extension binary.
     //
     // The cc crate is an optional build-dependency gated on the `extension` feature.
     #[cfg(feature = "extension")]
     {
-        // On Windows, generate a patched copy of duckdb.cpp in OUT_DIR.
-        // duckdb.cpp is gitignored and re-downloaded from DuckDB releases in CI,
-        // so patches must be applied at build time, not committed.
-        //
-        // The patch inserts explicit #undef blocks for Win32 macros that conflict
-        // with DuckDB C++ identifiers, following the same pattern DuckDB already
-        // uses for CreateDirectory/MoveFile/RemoveDirectory in the same file.
-        let duckdb_cpp_path = if is_windows {
-            patch_duckdb_cpp_for_windows()
-        } else {
-            "cpp/include/duckdb.cpp".to_string()
+        let Some(engine) = engine.as_ref() else {
+            panic!(
+                "{ENGINE_MANIFEST} is missing: the DuckDB engine the C++ shim links against \
+                 has not been built. Run `make ensure_engine` (or `just build`), which \
+                 builds it with scripts/ensure_engine.py."
+            );
         };
-
-        let spec = cpp_build_spec(is_windows);
+        // `cpp/include` is on the include path ahead of the engine's headers, so
+        // the v1.x amalgamation a pre-engine build left there would be compiled
+        // in place of the engine's `duckdb.hpp`. `make ensure_engine` removes it.
+        let stale = std::path::Path::new("cpp/include/duckdb.hpp");
+        assert!(
+            !stale.exists(),
+            "{} is the DuckDB 1.x amalgamation a pre-engine build left behind, and it \
+             would shadow the engine's own duckdb.hpp. Run `make ensure_engine` (or \
+             `just build`), which removes it, or delete it.",
+            stale.display()
+        );
+        check_msvc_static_runtime(is_windows);
+        let spec = cpp_build_spec(is_windows, Some(engine));
         let mut build = cc::Build::new();
-        build
-            .cpp(true)
-            .std(spec.std)
-            .include(spec.include)
-            .warnings(false); // Suppress warnings from DuckDB amalgamation
+        build.cpp(true).std(spec.std).warnings(false); // DuckDB headers are not warning-clean
 
         // cl (and clang-cl) compile C++ without exception unwinding unless told,
-        // so a DuckDB exception thrown through a frame would skip its destructors;
-        // DuckDB's own CMake build gets /EHsc from CMake's defaults. shim.cpp
-        // refuses to compile without it.
+        // so a DuckDB exception thrown through a shim frame would skip its
+        // destructors; DuckDB's own CMake build gets /EHsc from CMake's
+        // defaults. shim.cpp refuses to compile without it.
         if std::env::var("CARGO_CFG_TARGET_ENV").is_ok_and(|env| env == "msvc") {
             build.flag("/EHsc");
         }
-
-        // Substitute the patched duckdb.cpp path on Windows; other files come from spec.
+        for include in &spec.includes {
+            build.include(include);
+        }
         for file in &spec.files {
-            if *file == "cpp/include/duckdb.cpp" {
-                build.file(&duckdb_cpp_path);
-            } else {
-                build.file(file);
-            }
+            build.file(file);
         }
         for (name, val) in &spec.defines {
             build.define(name, *val);
         }
-
-        if is_windows {
-            // MSVC preprocessor defines applied before any source is compiled.
-            // WIN32_LEAN_AND_MEAN — reduces Windows headers included by windows.h
-            // NOMINMAX — prevents min/max macros that break std::numeric_limits<T>::max()
-            // NOGDI — defense-in-depth: asks wingdi.h to skip GetObject macro definition
-            // DUCKDB_STATIC_BUILD — prevents DUCKDB_API expanding to __declspec(dllimport)
-            //
-            // Note: GetObject and `interface` are also explicitly #undef-d in the patched
-            // duckdb.cpp (see patch_duckdb_cpp_for_windows below), because NOGDI and
-            // WIN32_LEAN_AND_MEAN are not reliable across all Windows SDK configurations.
-            //
-            // /bigobj: duckdb.cpp (~300K lines) exceeds MSVC's default 65,536-section COFF limit.
-            // flag_if_supported is a no-op on non-MSVC toolchains.
-            build.flag_if_supported("/bigobj");
-        }
-
         build.compile("semantic_views_shim");
+
+        // `duckdb_static` first: a single-pass linker resolves its references to
+        // the third-party libraries listed after it.
+        for lib in &engine.libs {
+            let path = std::path::Path::new(lib);
+            let dir = path.parent().expect("engine library has a directory");
+            let stem = path
+                .file_stem()
+                .and_then(|s| s.to_str())
+                .expect("engine library has a file name");
+            let name = if path.extension().is_some_and(|e| e == "a") {
+                stem.strip_prefix("lib").unwrap_or(stem)
+            } else {
+                stem
+            };
+            println!("cargo:rustc-link-search=native={}", dir.display());
+            println!("cargo:rustc-link-lib=static={name}");
+        }
     }
 
     // Symbol visibility: restrict the cdylib's exported symbols to the DuckDB CPP
@@ -289,7 +333,6 @@ fn main() {
     // Exports: semantic_views_init_c_api (Rust entry point, C_STRUCT ABI)
     //
     // Windows: __declspec(dllexport) on the #[no_mangle] entry point handles visibility.
-    let target_os = std::env::var("CARGO_CFG_TARGET_OS").unwrap_or_default();
     let out_dir = std::env::var("OUT_DIR").unwrap();
 
     match target_os.as_str() {
@@ -331,187 +374,4 @@ fn main() {
             // Other platforms need no extra link flags.
         }
     }
-}
-
-/// Generate a patched copy of `duckdb.cpp` in `OUT_DIR` for Windows builds.
-///
-/// `duckdb.cpp` includes `<windows.h>` mid-file (after all `DuckDB` declarations are
-/// already processed from `duckdb.hpp`). The `windows.h` include can define macros that
-/// conflict with identifiers in the `DuckDB` C++ implementation code that follows:
-///
-/// - `GetObject` → `GetObjectA` (`wingdi.h`): conflicts with `ComplexJSON::GetObject`
-///   (line ~36327) and `ObjectCache::GetObject` (line ~37656).
-/// - `interface` → `struct` (`objbase.h`): conflicts with `MultiFileReader` `interface`
-///   variable names (line ~65873+).
-///
-/// A third, unrelated MSVC conflict is also handled here (Patch 3): the bundled `fmt` 6.1.2
-/// references `stdext::checked_array_iterator`, which recent MSVC STL versions removed. That
-/// patch flips the `#ifdef _SECURE_SCL` guard to take `fmt`'s portable raw-pointer path.
-///
-/// The fix adds explicit `#undef` blocks after each `<windows.h>` include, following
-/// the same pattern `DuckDB` already uses for `CreateDirectory`/`MoveFile`/`RemoveDirectory`
-/// in the same file. We patch at build time (not at commit time) because `duckdb.cpp`
-/// is gitignored and re-downloaded from `DuckDB` releases in CI.
-///
-/// Returns the path to the patched file (or the original if already patched).
-#[cfg(feature = "extension")]
-fn patch_duckdb_cpp_for_windows() -> String {
-    let orig = "cpp/include/duckdb.cpp";
-    let out_dir = std::env::var("OUT_DIR").expect("OUT_DIR not set");
-    let patched = format!("{out_dir}/duckdb_patched.cpp");
-
-    let content = std::fs::read_to_string(orig).expect(
-        "failed to read cpp/include/duckdb.cpp — \
-             run 'make ensure_amalgamation' or 'just update-headers' to download it",
-    );
-
-    // Idempotent: if already patched (e.g. local dev copy with manual edits), use as-is.
-    // We check for one of our undef markers to detect prior patching.
-    if content.contains("undef GetObject") {
-        std::fs::write(&patched, &content).expect("failed to write duckdb_patched.cpp to OUT_DIR");
-        return patched;
-    }
-
-    // --- Patch 1: after the first <windows.h> include (DLL loading helpers block) ---
-    //
-    // DuckDB <= 1.4.x had two separate <windows.h> includes. The first was in a
-    // DLL loading helpers block, marked by "// Platform-specific helpers". DuckDB 1.5.0
-    // consolidated to a single <windows.h> include (handled by Patch 2 below), so
-    // this patch is expected to be a no-op for DuckDB >= 1.5.0.
-    //
-    // Original context (DuckDB 1.4.x duckdb.cpp ~line 25363-25372):
-    //   #endif // defined(_WIN32)
-    //
-    //   // Platform-specific helpers        <-- patch inserted before this
-    let win32_undef_block = "\
-        // Undefine Windows macros that conflict with DuckDB C++ identifiers.\n\
-        // GetObject (wingdi.h) -> clashes with ComplexJSON::GetObject, ObjectCache::GetObject\n\
-        // interface (objbase.h) -> clashes with MultiFileReader 'interface' variable names\n\
-        #if defined(_WIN32)\n\
-        #  ifdef GetObject\n\
-        #    undef GetObject\n\
-        #  endif\n\
-        #  ifdef interface\n\
-        #    undef interface\n\
-        #  endif\n\
-        #endif\n\n";
-
-    let patch1_before = "#endif // defined(_WIN32)\n\n// Platform-specific helpers";
-    let patch1_after =
-        format!("#endif // defined(_WIN32)\n\n{win32_undef_block}// Platform-specific helpers");
-
-    let content = if content.contains(patch1_before) {
-        content.replace(patch1_before, &patch1_after)
-    } else {
-        // Expected for DuckDB >= 1.5.0 where the first windows.h include was removed.
-        content
-    };
-
-    // --- Patch 2: after the second <windows.h> include (file system helpers block) ---
-    //
-    // Original context (duckdb.cpp ~line 38078-38094):
-    //   #if defined(_WIN32)
-    //   #ifndef NOMINMAX ... #endif
-    //   #ifndef _WINSOCKAPI_ ... #endif
-    //   #include <windows.h>
-    //   #undef CreateDirectory    <-- DuckDB already undefs some macros here
-    //   #undef MoveFile
-    //   #undef RemoveDirectory
-    //                             <-- we append our undefs after RemoveDirectory
-    //   #endif
-    //   #else
-    //   #include <sys/mman.h>
-    //
-    // A second windows.h include can re-define interface (used as C++ identifier name
-    // starting at ~line 65873). GetObject undef is defensive here.
-    let patch2_before = "#undef CreateDirectory\n#undef MoveFile\n#undef RemoveDirectory\n\n#endif\n\n#else\n#include <sys/mman.h>";
-    let patch2_after = "#undef CreateDirectory\n#undef MoveFile\n#undef RemoveDirectory\n\
-        #ifdef GetObject\n\
-        #  undef GetObject\n\
-        #endif\n\
-        #ifdef interface\n\
-        #  undef interface\n\
-        #endif\n\n\
-        #endif\n\n#else\n#include <sys/mman.h>";
-
-    // AR-9: a patch-2 miss is a HARD error, not a `cargo:warning`. This
-    // function only runs on Windows builds (build.rs `is_windows` guard), and
-    // the bundled amalgamation is version-pinned, so the marker is present for
-    // every version we ship against. If it moves (a DuckDB bump reshaping the
-    // <windows.h> block) the #undef is silently dropped and the second
-    // windows.h include re-defines the C++ identifier `interface` — the MSVC
-    // build then fails much later with opaque C2xxxx errors far from the cause.
-    // Fail the build here, at the patch site, with an actionable message.
-    let content = if content.contains(patch2_before) {
-        content.replace(patch2_before, patch2_after)
-    } else {
-        panic!(
-            "duckdb.cpp Win32 patch 2 FAILED: expected marker not found. The bundled \
-             DuckDB amalgamation changed shape (most likely a version bump), so this \
-             Windows-only #undef patch no longer applies. Left unpatched, the MSVC build \
-             fails later with opaque errors when the second <windows.h> include re-defines \
-             the C++ identifier `interface`. Update `patch2_before` in \
-             build.rs::patch_duckdb_cpp_for_windows to match the new amalgamation."
-        );
-    };
-
-    // --- Patch 3: neutralize fmt's removed-MSVC-API reference ---
-    //
-    // The bundled fmt 6.1.2 (FMT_VERSION 60102, ~line 16639) selects a checked iterator on
-    // MSVC via:
-    //
-    //   #ifdef _SECURE_SCL
-    //   template <typename T> using checked_ptr = stdext::checked_array_iterator<T*>;
-    //   ...
-    //   #else
-    //   template <typename T> using checked_ptr = T*;   // portable path
-    //   #endif
-    //
-    // `_SECURE_SCL` is defined by the MSVC STL headers whenever they are included, so MSVC
-    // always takes the first branch. Recent MSVC STL versions REMOVED stdext::checked_array_iterator
-    // entirely (the stdext namespace no longer exists), so that branch fails to compile with
-    //   error C2653: 'stdext': is not a class or namespace name
-    // This is a hard removal, not a deprecation, so no _SILENCE_* macro restores it, and the
-    // `#ifdef` guard (defined-ness, not value) means -D_SECURE_SCL=0 would still take it.
-    //
-    // We flip the guard to `#if 0` so the compiler takes fmt's portable `checked_ptr = T*`
-    // path — exactly what every non-Windows platform already compiles, and what release builds
-    // want (checked iterators are a debug-only aid). The stdext reference becomes dead code.
-    let patch3_before = "#ifdef _SECURE_SCL\n// Make a checked iterator to avoid MSVC warnings.\ntemplate <typename T> using checked_ptr = stdext::checked_array_iterator<T*>;";
-    let patch3_after = "#if 0 // semantic-views patch: stdext::checked_array_iterator removed from modern MSVC STL — force fmt's portable raw-pointer path\n// Make a checked iterator to avoid MSVC warnings.\ntemplate <typename T> using checked_ptr = stdext::checked_array_iterator<T*>;";
-
-    // AR-9: a patch-3 miss is a HARD error ONLY when the dangerous reference is
-    // still present but has drifted out of `patch3_before`'s exact shape — that
-    // is the case #60 cared about (a silently-unapplied patch shipping a broken
-    // MSVC build). But DuckDB's bundled fmt no longer emits the
-    // `stdext::checked_array_iterator` block at all (it is absent as of the
-    // v1.5.4 amalgamation — `grep` finds zero occurrences of `stdext`), so the
-    // original unconditional hard-fail was a false positive that has kept every
-    // Windows build red since the marker disappeared. Distinguish the two:
-    //   - `patch3_before` present            -> apply the guard flip;
-    //   - `stdext::checked_array_iterator` present but not in that shape
-    //                                        -> the patch drifted: fail loudly;
-    //   - neither present                    -> nothing to neutralize, MSVC
-    //                                           already compiles fmt's portable
-    //                                           `checked_ptr = T*` path: skip.
-    let content = if content.contains(patch3_before) {
-        content.replace(patch3_before, patch3_after)
-    } else if content.contains("stdext::checked_array_iterator") {
-        panic!(
-            "duckdb.cpp Win32 patch 3 FAILED: `stdext::checked_array_iterator` is present but \
-             not in the exact form `patch3_before` matches, so the guard flip was silently \
-             dropped. Left unpatched, MSVC selects fmt's removed \
-             `stdext::checked_array_iterator` and fails with `error C2653: 'stdext' is not a \
-             class or namespace name`. Update `patch3_before` in \
-             build.rs::patch_duckdb_cpp_for_windows to match the new amalgamation."
-        );
-    } else {
-        // fmt's MSVC checked-iterator block was removed upstream; there is no
-        // `stdext` reference for MSVC to reject. Nothing to patch.
-        content
-    };
-
-    std::fs::write(&patched, content).expect("failed to write duckdb_patched.cpp to OUT_DIR");
-
-    patched
 }

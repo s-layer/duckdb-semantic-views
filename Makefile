@@ -4,11 +4,25 @@ PROJ_DIR := $(dir $(abspath $(lastword $(MAKEFILE_LIST))))
 
 EXTENSION_NAME=semantic_views
 
-# Target DuckDB version — read from .duckdb-version (single source of truth)
-TARGET_DUCKDB_VERSION=$(shell cat .duckdb-version)
+# Two DuckDB versions matter, and since DuckDB 2.0 they differ:
+#
+# TARGET_DUCKDB_VERSION is the C API version the extension is built against
+# (.duckdb-capi-version). extension-ci-tools stamps it into the binary's
+# metadata, and duckdb-rs declares it to the loader; DuckDB 2.0 loads a C_STRUCT
+# extension pinned to the v1.5.6 C API (see UNSTABLE_C_API_FLAG below). The name
+# is extension-ci-tools', which reads it.
+TARGET_DUCKDB_VERSION=$(shell cat .duckdb-capi-version)
+#
+# ENGINE_DUCKDB_VERSION is the DuckDB release the extension runs in
+# (.duckdb-version): the C++ shim is compiled against that engine, and the
+# extension refuses to load anywhere else.
+ENGINE_DUCKDB_VERSION=$(shell cat .duckdb-version)
+# Its `duckdb` PyPI release: the version without its `v`, unless
+# .duckdb-pypi-version names a pre-release wheel (2.0.0.devN for an alpha).
+ENGINE_PYPI_VERSION=$(shell cat .duckdb-pypi-version 2>/dev/null || sed 's/^v//' .duckdb-version)
 
-# Pin the test-runner DuckDB pip package to match the build version.
-# base.Makefile defaults to latest PyPI; strip `v` prefix for PEP 440 compliance.
+# Pin the test-runner DuckDB pip package to the engine the extension is built for.
+# base.Makefile defaults to latest PyPI.
 #
 # Scoped to builds against the upstream release we target. A downstream
 # distribution builds community extensions against its own engine, and its
@@ -17,12 +31,15 @@ TARGET_DUCKDB_VERSION=$(shell cat .duckdb-version)
 # number there asks pip for a version that exists in no index and fails `make
 # configure` on every platform, so leave the choice to the harness.
 #
-# DUCKDB_GIT_VERSION is the engine tag being built against: empty locally,
-# `vX.Y.Z` in upstream CI, `haybarn-v1.5.5-rc1` (or `main`, for a nightly) when
-# it is something else. `?=` so an explicit value from the environment wins
-# either way.
-ifeq ($(filter-out $(TARGET_DUCKDB_VERSION),$(DUCKDB_GIT_VERSION)),)
-DUCKDB_TEST_VERSION ?= $(subst v,,$(TARGET_DUCKDB_VERSION))
+# DUCKDB_GIT_VERSION is the engine ref being built against: empty locally,
+# `vX.Y.Z` or a commit in upstream CI, `haybarn-v1.5.5-rc1` (or `main`, for a
+# nightly) when it is something else. DUCKDB_TAG, when set, is the release label
+# the harness gave that commit (extension-ci-tools' `duckdb_tag` input; see
+# set_duckdb_tag below), and names the engine instead. `?=` so an explicit value
+# from the environment wins either way.
+SV_ENGINE_REF := $(or $(DUCKDB_TAG),$(DUCKDB_GIT_VERSION),$(ENGINE_DUCKDB_VERSION))
+ifeq ($(SV_ENGINE_REF),$(ENGINE_DUCKDB_VERSION))
+DUCKDB_TEST_VERSION ?= $(ENGINE_PYPI_VERSION)
 endif
 
 all: configure debug
@@ -32,7 +49,7 @@ include extension-ci-tools/makefiles/c_api_extensions/base.Makefile
 include extension-ci-tools/makefiles/c_api_extensions/rust.Makefile
 
 # Set UNSTABLE_C_API_FLAG AFTER the include (base.Makefile resets it).
-# C_STRUCT ABI pinned to the TARGET_DUCKDB_VERSION C API, with a C++ helper for
+# C_STRUCT ABI pinned to the TARGET_DUCKDB_VERSION (v1.5.6) C API, with a C++ helper for
 # the parser hooks (Option A): Rust owns the entry point
 # (semantic_views_init_c_api), the C++ helper registers the hooks.
 #
@@ -62,35 +79,51 @@ UNSTABLE_C_API_FLAG=--abi-type C_STRUCT
 # OFFLINE_EXTENSION_TESTS never reach the wrapper, because prepare_test_list
 # below leaves them out of the list and prints their SKIPPED lines. (The
 # wrapper's own --offline-excused flag is for running it directly.)
-TEST_RUNNER=$(PYTHON_VENV_BIN) scripts/run_sqllogictest.py --required-extension semantic_views
+TEST_RUNNER=$(SV_CRASH_REPORT) $(PYTHON_VENV_BIN) scripts/run_sqllogictest.py --required-extension semantic_views
 
-# The DuckDB the C++ shim is compiled against. build.rs links the amalgamation
-# INTO the extension binary (the parser hook the shim registers is C++ internals
-# with no C-API equivalent), so it is an ABI contract with whatever engine loads
-# the result -- not a convenience download.
-#
-# AMALGAMATION_SRC_DIR: an engine source tree supplied by the harness. A
-#   distribution that builds community extensions against its own engine clones
-#   it into ./duckdb (Haybarn's fork of _extension_distribution.yml does this
-#   from `override_duckdb_repository`); when it is there, that IS the engine the
-#   extension will be loaded into, so the amalgamation is generated from it.
-#   Upstream community-extensions clones one there too; a tree past an upstream
-#   release tag (its DuckDB development-branch default) is refused, not built.
-# AMALGAMATION_URL: the pinned upstream release, used when no tree is present
-#   (local development, upstream CI). Gitignored, ~25 MB, cached under
-#   .amalgamation/<id>/ so it survives branch switches.
-#
-# Both are overridable from the environment; see scripts/ensure_amalgamation.py
-# for the selection rules, the provenance stamp and the version guard.
-AMALGAMATION_SRC_DIR ?= duckdb
-AMALGAMATION_URL ?= https://github.com/duckdb/duckdb/releases/download/$(TARGET_DUCKDB_VERSION)/libduckdb-src.zip
+# On Windows a crash of the runner (an access violation) is re-run under cdb so
+# the log shows the native stack and the faulting module; the exit status stays
+# the crash's. See scripts/windows_crash_report.py. Empty elsewhere.
+ifeq ($(OS),Windows_NT)
+SV_CRASH_REPORT=$(PYTHON_VENV_BIN) scripts/windows_crash_report.py --
+else
+SV_CRASH_REPORT=
+endif
 
-.PHONY: ensure_amalgamation
-ensure_amalgamation:
-	@$(PYTHON_BIN) scripts/ensure_amalgamation.py \
-		--version "$(TARGET_DUCKDB_VERSION)" \
-		--src-dir "$(AMALGAMATION_SRC_DIR)" \
-		--url "$(AMALGAMATION_URL)"
+# The DuckDB engine the C++ shim is compiled and linked against. build.rs links a
+# static build of it INTO the extension binary (the parser hook the shim
+# registers is C++ internals with no C-API equivalent), so it is an ABI contract
+# with whatever engine loads the result -- the extension refuses any other.
+#
+# ENGINE_SRC_DIR: an engine source tree supplied by the harness. A distribution
+#   that builds community extensions against its own engine clones it into
+#   ./duckdb (upstream community-extensions and Haybarn's fork both do); when it
+#   is there, that IS the engine the extension will be loaded into, so it is
+#   built as the harness labels it.
+# Otherwise the release pinned in .duckdb-version is built from the PyPI sdist of
+#   the matching `duckdb` package. Gitignored, cached under .engine/<id>/ so it
+#   survives branch switches.
+#
+# See scripts/ensure_engine.py for the selection rules and the cache layout.
+ENGINE_SRC_DIR ?= duckdb
+
+.PHONY: ensure_engine
+ensure_engine:
+	@$(PYTHON_BIN) scripts/ensure_engine.py --src-dir "$(ENGINE_SRC_DIR)"
+
+# extension-ci-tools runs this after cloning the engine into ./duckdb when the
+# caller passes `duckdb_tag` (base.Makefile's own rule does nothing for C API
+# extensions). Our build workflows pass it while the engine we target is a
+# pre-release with no release tag upstream: `duckdb_version` names its commit,
+# and this tag gives the clone the release label (.duckdb-version), which
+# scripts/ensure_engine.py then builds it under, as the wheel was.
+# A re-run in the same clone finds the tag already there; it is left alone if
+# it is at HEAD, and the run fails rather than move a tag that is not.
+set_duckdb_tag:
+	cd duckdb && if git rev-parse -q --verify "refs/tags/$(DUCKDB_TAG)" >/dev/null; then \
+	  test "$$(git rev-parse "$(DUCKDB_TAG)^{commit}")" = "$$(git rev-parse HEAD)" \
+	    || { echo "set_duckdb_tag: $(DUCKDB_TAG) exists and is not HEAD" >&2; exit 1; }; \
+	else git tag $(DUCKDB_TAG); fi
 
 configure: venv platform extension_version
 
@@ -115,12 +148,12 @@ clean_all: clean_configure clean
 # so that it links against the DuckDB that loads it at runtime.
 # --no-default-features removes duckdb/bundled; --features extension adds
 # duckdb/loadable-extension + duckdb/vscalar.
-build_extension_library_debug: check_configure ensure_amalgamation
+build_extension_library_debug: check_configure ensure_engine
 	DUCKDB_EXTENSION_NAME=$(EXTENSION_NAME) DUCKDB_EXTENSION_MIN_DUCKDB_VERSION=$(TARGET_DUCKDB_VERSION) cargo build $(CARGO_OVERRIDE_DUCKDB_RS_FLAG) $(TARGET_INFO) --no-default-features --features extension
 	$(PYTHON_VENV_BIN) -c "from pathlib import Path;Path('$(EXTENSION_BUILD_PATH)/debug/extension/$(EXTENSION_NAME)').mkdir(parents=True, exist_ok=True)"
 	$(PYTHON_VENV_BIN) -c "import shutil;shutil.copyfile('$(TARGET_PATH)/debug$(IS_EXAMPLE)/$(RUST_LIBNAME)', '$(EXTENSION_BUILD_PATH)/debug/$(EXTENSION_LIB_FILENAME)')"
 
-build_extension_library_release: check_configure ensure_amalgamation
+build_extension_library_release: check_configure ensure_engine
 	DUCKDB_EXTENSION_NAME=$(EXTENSION_NAME) DUCKDB_EXTENSION_MIN_DUCKDB_VERSION=$(TARGET_DUCKDB_VERSION) cargo build $(CARGO_OVERRIDE_DUCKDB_RS_FLAG) --release $(TARGET_INFO) --no-default-features --features extension
 	$(PYTHON_VENV_BIN) -c "from pathlib import Path;Path('$(EXTENSION_BUILD_PATH)/release/extension/$(EXTENSION_NAME)').mkdir(parents=True, exist_ok=True)"
 	$(PYTHON_VENV_BIN) -c "import shutil;shutil.copyfile('$(TARGET_PATH)/release$(IS_EXAMPLE)/$(RUST_LIBNAME)', '$(EXTENSION_BUILD_PATH)/release/$(EXTENSION_LIB_FILENAME)')"
@@ -142,13 +175,14 @@ patch-runner: check_configure
 TEST_LIST_PATH := test/sql/TEST_LIST
 
 # Offline mode for sandboxes that cannot reach extensions.duckdb.org (LOCAL USE
-# ONLY). A few tests need a DuckDB extension that is neither bundled in the pip
-# `duckdb` wheel nor in this repo, so DuckDB must download it on first use:
-#   test/sql/peg_compat.test  -- `CALL enable_peg_parser()` autoloads `autocomplete`
-# Behind a proxy that blocks the download, that file fails at its first PEG
-# statement and, because the runner stops at the first failing file, halts the
-# whole suite. With SV_OFFLINE_EXTENSIONS=1 those files are left out of the run
-# and each is reported with a loud SKIPPED line; every other file still runs.
+# ONLY). A test that needs a DuckDB extension that is neither bundled in the pip
+# `duckdb` wheel nor in this repo makes DuckDB download it on first use. Behind
+# a proxy that blocks the download, such a file fails and, because the runner
+# stops at the first failing file, halts the whole suite. List those files in
+# OFFLINE_EXTENSION_TESTS: with SV_OFFLINE_EXTENSIONS=1 they are left out of the
+# run and each is reported with a loud SKIPPED line; every other file still runs.
+# None needs one today. test/sql/peg_compat.test did while it called
+# `enable_peg_parser()` (which autoloads `autocomplete`); DuckDB 2.0 removed it.
 #
 # Deliberately an explicit opt-in, NOT a sqllogictest `require autocomplete`:
 # `require` skips silently whenever the extension cannot be loaded, CI
@@ -156,7 +190,7 @@ TEST_LIST_PATH := test/sql/TEST_LIST
 # red. Without the variable nothing changes -- CI runs the file and fails hard
 # if it cannot load the extension -- and the variable is refused outright when
 # `CI` is set (GitHub Actions sets CI=true), so it cannot leak into CI.
-OFFLINE_EXTENSION_TESTS := test/sql/peg_compat.test
+OFFLINE_EXTENSION_TESTS :=
 ifeq ($(SV_OFFLINE_EXTENSIONS),1)
 ifneq ($(CI),)
 $(error SV_OFFLINE_EXTENSIONS=1 skips tests and is for local offline runs only; refusing because CI='$(CI)')
@@ -172,7 +206,7 @@ endif
 prepare_test_list:
 ifeq ($(SV_OFFLINE_EXTENSIONS),1)
 	@mkdir -p $(dir $(EFFECTIVE_TEST_LIST))
-	@grep -vxF $(foreach t,$(OFFLINE_EXTENSION_TESTS),-e $(t)) $(TEST_LIST_PATH) > $(EFFECTIVE_TEST_LIST)
+	@$(if $(OFFLINE_EXTENSION_TESTS),grep -vxF $(foreach t,$(OFFLINE_EXTENSION_TESTS),-e $(t)),cat) $(TEST_LIST_PATH) > $(EFFECTIVE_TEST_LIST)
 	@for t in $(OFFLINE_EXTENSION_TESTS); do \
 	  echo "SKIPPED (SV_OFFLINE_EXTENSIONS=1): $$t -- needs a DuckDB extension downloaded from extensions.duckdb.org; NOT run"; \
 	done

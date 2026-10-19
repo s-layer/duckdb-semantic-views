@@ -18,8 +18,15 @@ Load Errors
 These errors occur when ``LOAD semantic_views`` runs.
 
 
+.. _ref-err-load-version:
+
 Built for a different DuckDB release
 ------------------------------------
+
+.. versionchanged:: 0.15.0
+
+   This release is built for DuckDB 2.0. Earlier releases were built for
+   DuckDB 1.5, and v0.14.1 is the last of them.
 
 .. code-block:: text
 
@@ -28,18 +35,20 @@ Built for a different DuckDB release
    for this DuckDB has been published, install it with: FORCE INSTALL
    semantic_views FROM community;
 
-**Cause:** Each build of the extension is compiled against one exact DuckDB release. The file being loaded was built for ``<built>``, but the running DuckDB is ``<host>``. The extension checks this before it starts, so the ``LOAD`` fails instead of crashing DuckDB.
+DuckDB prefixes the message with ``An error was thrown during initialization of the extension '<path>':``.
 
-**Fix:** Install the build that matches the running DuckDB, then load it:
+**Cause:** Each build of the extension is compiled against one exact DuckDB release. The file being loaded was built for ``<built>``, but the running DuckDB is ``<host>``. The extension checks this before it starts, so the ``LOAD`` fails instead of crashing DuckDB. A common source is an extension file installed before a DuckDB upgrade or downgrade.
+
+**Fix:** Run ``SELECT version();`` to see which DuckDB you are running, then install the build that matches it and load it. ``FORCE INSTALL`` replaces the installed file even when one is already present:
 
 .. code-block:: sql
 
    FORCE INSTALL semantic_views FROM community;
    LOAD semantic_views;
 
-If no build for ``<host>`` has been published yet, the install fails. Until one is, run DuckDB ``<built>``.
+If no build for ``<host>`` has been published yet, the install fails. Until one is, run DuckDB ``<built>``. DuckDB 1.5 gets no release newer than v0.14.1.
 
-When ``<host>`` is a development or nightly DuckDB build (its version contains a ``-``, such as ``v1.5.7-dev42``), the message ends with ``Load a semantic_views build compiled against this DuckDB.`` instead. The community repository only has builds for tagged releases, so build the extension from source against that DuckDB.
+When ``<host>`` is a development or nightly DuckDB build (its version contains a ``-``, such as ``v2.0.1-dev42``), the message ends with ``Load a semantic_views build compiled against this DuckDB.`` instead. The community repository only has builds for tagged releases, so build the extension from source against that DuckDB.
 
 
 .. _ref-err-ddl:
@@ -163,6 +172,28 @@ Parser strictness
 - **Malformed identifier slots** are rejected instead of being stored as unqueryable names: a whitespace-separated multi-token name (``o.d junk AS ...``, which used to name the dimension ``d junk``) and an empty quoted identifier ``""`` in a name or alias slot now error. An unqualified entry name whose expression happens to contain a dot (``region AS upper(o.region)``) now reports the missing ``alias.name`` qualifier rather than a misleading "Expected 'AS'".
 - **Trailing tokens** after the view name on a name-only statement (``DROP`` / ``DESCRIBE`` / :ref:`SHOW COLUMNS IN SEMANTIC VIEW <ref-show-columns>`) are rejected -- ``DROP SEMANTIC VIEW a b c`` no longer executes and silently discards the extra tokens. ``ALTER`` sub-operations do the same.
 - **DDL prefix keywords require a word boundary** -- ``DROP SEMANTIC VIEWS`` (plural typo) no longer drops a view named ``s``, and ``CREATE SEMANTIC VIEWfoo`` is no longer recognized as ``CREATE SEMANTIC VIEW``.
+
+
+.. _ref-err-quoted-identifier:
+
+Malformed quoted identifier
+---------------------------
+
+.. versionchanged:: 0.15.0
+
+   DuckDB 2.0 rejects these statements before the extension sees them, so the
+   messages are DuckDB's own. Earlier releases reported
+   ``Unterminated quoted identifier`` and ``empty quoted identifier``.
+
+.. code-block:: text
+
+   Parser Error: unterminated quoted identifier
+
+   Parser Error: zero-length delimited identifier
+
+**Cause:** A double-quoted identifier in a semantic-view statement has no closing ``"`` (for example ``ORDER BY "unclosed ASC`` in a window metric, or ``SHOW SEMANTIC VIEWS IN SCHEMA "oops``), or is empty (``TABLES ("" AS orders ...)``).
+
+**Fix:** Close the quote, or give the identifier a name. Quote only names that need it (spaces, special characters, reserved words): DuckDB matches identifiers case-insensitively whether they are quoted or not, so quoting does not change which name matches.
 
 
 .. _ref-err-one-statement:
@@ -968,6 +999,27 @@ Window metric required dimension missing
 **Cause:** A window function metric references a dimension in its ``PARTITION BY EXCLUDING``, ``PARTITION BY``, or ``ORDER BY`` clause, but that dimension was not included in the query's ``dimensions := [...]`` list. The ``<reason>`` value indicates which clause requires the dimension (``PARTITION BY EXCLUDING``, ``PARTITION BY``, or ``ORDER BY``).
 
 **Fix:** Add the required dimension to the query. Use :ref:`SHOW SEMANTIC DIMENSIONS FOR METRIC <ref-show-dims-for-metric>` to see which dimensions are required (``required = TRUE``) for a window metric.
+
+
+.. _ref-err-time-limit:
+
+Query time limit exceeded
+-------------------------
+
+.. versionadded:: 0.15.0
+
+.. code-block:: text
+
+   INTERRUPT Error: Query exceeded maximum execution time
+
+**Cause:** The session has a per-query time limit (``SET max_execution_time``, in milliseconds), and the query ran past it. This is DuckDB's own error. It applies to ``semantic_view()`` and to the ``SHOW`` and ``DESCRIBE`` commands that report member data types (see :ref:`ref-sv-time-limits`).
+
+**Fix:** Raise the limit, or turn it off for the session:
+
+.. code-block:: sql
+
+   SET max_execution_time = 60000;  -- 60 seconds
+   RESET max_execution_time;        -- no limit
 
 
 .. _ref-err-concurrent-ddl:

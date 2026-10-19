@@ -18,6 +18,8 @@ Then you query by picking which dimensions and metrics you want. The extension g
 
 ## Quick start
 
+Requires DuckDB 2.0. Each release of the extension loads only in the DuckDB release it was built for; on DuckDB 1.5, stay on v0.14.0.
+
 ```sql
 INSTALL semantic_views FROM community;
 LOAD semantic_views;
@@ -299,7 +301,7 @@ Includes getting-started and multi-table tutorials, full DDL and query reference
 
 Rust, built on the [DuckDB extension template for Rust](https://github.com/duckdb/extension-template-rs).
 
-You need: Rust (stable), just, make, Python 3.
+You need: Rust (stable), just, make, CMake, Python 3. The first `just build` compiles the DuckDB engine from source, which takes a while; later builds reuse it. See [MAINTAINER.md](MAINTAINER.md) for details.
 
 ```bash
 just setup     # one-time: installs dev tools, configures build

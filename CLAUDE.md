@@ -160,50 +160,18 @@ At the end of every milestone, before tagging:
 - `cargo test` — runs without the extension feature (in-memory DuckDB)
 - `just test-sql` — requires a fresh `just build` to pick up code changes
 
-### Offline amalgamation fallback (blocked GitHub — agent/sandbox sessions only)
+### The DuckDB engine build
 
-`just build` → `make ensure_amalgamation` (`scripts/ensure_amalgamation.py`)
-downloads the DuckDB amalgamation (`cpp/include/duckdb.{hpp,cpp}`) from the DuckDB
-**GitHub release**. This is the normal, canonical path — use it whenever GitHub is
-reachable (i.e. always, on a normal local machine). (The script prefers an engine
-source tree in `./duckdb` when a CI harness supplied one; locally there is none, so
-it downloads.)
-
-Some sandboxed agent sessions run behind an egress proxy that blocks
-`github.com/duckdb/duckdb` (the release fetch returns HTTP 403), so `just build`
-can't get the amalgamation. In that case only, regenerate the identical files
-from GitHub-free hosts:
-
-```bash
-python3 scripts/fetch_amalgamation_offline.py
-```
-
-It pulls the DuckDB source from the PyPI sdist (`files.pythonhosted.org`) and
-DuckDB's own amalgamation generator from jsDelivr (`cdn.jsdelivr.net`), writes
-`cpp/include/duckdb.{hpp,cpp}` and caches them under `.amalgamation/<version>/`,
-so the subsequent `just build` finds the correct version present and skips its
-own (blocked) download. Output is byte-identical to the release amalgamation
-except `DUCKDB_SOURCE_ID` (a placeholder — the real SHA isn't reachable without
-GitHub).
-
-**The placeholder source-id does NOT block loading the extension.** Neither DuckDB
-nor the extension's own load-time check (`src/load_guard.rs`, which compares the
-version string only) enforces a source-id match, so it **loads and runs** —
-`just test-sql` / `just test-all` (and `make test_debug`) pass end-to-end against
-it (empirically verified). So in
-a blocked-GitHub session, after `python3 scripts/fetch_amalgamation_offline.py`,
-run the **full** local gate — `just build` + `just test-sql` — as usual. Do
-**not** assume the offline extension "can't load" and skip local sqllogictest in
-favour of CI: it does load, and CLAUDE.md's quality gate expects sqllogictest to
-run. (`just build` needs the `extension-ci-tools` git submodule checked out —
-`git submodule update --init` — and `make configure` for the venv/platform
-metadata, both of which `just setup` handles.)
-
-Do **not** use the offline fetcher on a normal local machine — it's a fallback,
-not a replacement for `just build`.
+`just build` → `make ensure_engine` (`scripts/ensure_engine.py`) builds the DuckDB
+engine the C++ shim links against (DuckDB 2.0 has no amalgamation) from the PyPI
+sdist of the pinned release, with CMake, and caches it under `.engine/<id>/`. The
+first build of an engine takes ~20 minutes on four cores; afterwards `just build`
+only checks the cache. It needs `cmake` (and uses `ninja` when present) and reaches
+only PyPI (`pypi.org`, `files.pythonhosted.org`), so it works in sandboxes that block
+GitHub. Run long builds in the background and redirect to a file (Rule 1 below).
 
 To lint the `extension`-gated FFI layer without any C++ build at all (no
-amalgamation needed), use (see MAINTAINER.md):
+engine needed), use (see MAINTAINER.md):
 
 ```bash
 SV_SKIP_CPP_BUILD=1 cargo clippy --no-default-features --features extension -- -D warnings

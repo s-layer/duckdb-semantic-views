@@ -52,9 +52,9 @@ TIMEOUT_SECONDS = 600
 # at run time. CI runs them (it has network access); a local sandbox that
 # cannot reach that host may skip them, loudly, with SV_OFFLINE_EXTENSIONS=1.
 NEEDS_DOWNLOADED_EXTENSION: dict[str, str] = {
-    "race_guards_and_unification.py": (
-        "CALL enable_peg_parser() autoloads the `autocomplete` extension"
-    ),
+    # Empty. race_guards_and_unification.py was listed here while it called
+    # enable_peg_parser(), which autoloads `autocomplete`; DuckDB 2.0 removed
+    # the toggle (the PEG parser is the only one) and the example with it.
 }
 
 # Examples that are known to fail, keyed by file name: (substring the failure

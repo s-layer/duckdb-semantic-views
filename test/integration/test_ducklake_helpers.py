@@ -30,8 +30,8 @@ def exit_skipped_if_offline(what: str, error: Exception) -> None:
 
     Called when installing a downloadable extension (e.g. ``ducklake``) failed.
     With ``SV_OFFLINE_EXTENSIONS=1`` -- the same opt-in the Makefile's
-    sqllogictest target honours (see CLAUDE.md, "Offline amalgamation
-    fallback") -- print a loud SKIPPED line and exit 0, so a sandbox that cannot
+    sqllogictest target honours (see the Makefile's OFFLINE_EXTENSION_TESTS)
+    -- print a loud SKIPPED line and exit 0, so a sandbox that cannot
     reach extensions.duckdb.org can still run the rest of ``just test-all``.
 
     Otherwise return, and the caller re-raises: without the variable the test

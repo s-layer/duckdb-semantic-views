@@ -36,7 +36,7 @@ test:
 # nextest cannot run doctests, so they run separately (T-12): the default set,
 # plus the `extension`-gated FFI doctests (the load-bearing `compile_fail`
 # ABI-safety guard in src/ddl/read_ffi.rs). The FFI run type-checks only —
-# SV_SKIP_CPP_BUILD skips the C++ amalgamation, and a `compile_fail` doctest
+# SV_SKIP_CPP_BUILD skips the C++ shim and engine link, and a `compile_fail` doctest
 # never links — and is scoped to `read_ffi` because other doctests assume the
 # default `duckdb` feature.
 test-rust:
@@ -60,7 +60,7 @@ lint:
     cargo deny check
 
 # Fast lint — what the pre-commit hook runs. The extension-feature clippy skips
-# the C++ amalgamation build (SV_SKIP_CPP_BUILD) and lints the same production
+# the C++ shim build and engine link (SV_SKIP_CPP_BUILD) and lints the same production
 # code (every `cfg(not(feature = "extension"))` item in src/ is test-only or
 # lint-suppressed): ~1 min cold, seconds warm. `just lint` / CI remain the
 # authoritative full-coverage gate.
@@ -76,8 +76,9 @@ fmt:
 coverage:
     cargo llvm-cov nextest --fail-under-lines 80
 
-# Ensure the Python venv exists and its duckdb pip package matches
-# .duckdb-version. Called automatically by test recipes that use the venv runner.
+# Ensure the Python venv exists and its duckdb pip package is the engine release
+# the extension is built for (.duckdb-pypi-version, else .duckdb-version without
+# its `v`). Called automatically by test recipes that use the venv runner.
 #
 # The `make configure` guard makes those recipes self-contained. `test-sql`
 # reaches the venv via `build` (which fails loudly on `check_configure`), but
@@ -91,7 +92,7 @@ _ensure-test-deps:
       echo "configure/venv missing — running make configure first..."; \
       make configure; \
     fi
-    @VER=$(cat .duckdb-version | sed 's/^v//'); \
+    @VER=$(cat .duckdb-pypi-version 2>/dev/null || sed 's/^v//' .duckdb-version); \
     INSTALLED=$(configure/venv/bin/python -c "import duckdb; print(duckdb.__version__)" 2>/dev/null || echo ""); \
     if [ "$INSTALLED" = "$VER" ]; then \
       exit 0; \
@@ -122,8 +123,8 @@ test-sql: build test-sql-prebuilt
 # earlier job rather than building its own, so it needs an entry point that
 # does NOT re-enter `make debug`. Splitting the recipe rather than letting CI
 # call `make test_debug` directly keeps `_ensure-test-deps` on both paths: it
-# reinstalls the venv's `duckdb` pip package when it does not match
-# `.duckdb-version`, without which the runner can test against a different
+# reinstalls the venv's `duckdb` pip package when it is not the engine release
+# the extension is built for, without which the runner can test against a different
 # DuckDB than the extension was built for. Local `just test-sql` is unchanged —
 # it still builds first and then runs exactly this.
 #
@@ -216,6 +217,13 @@ test-concurrent: build
     uv run test/integration/test_concurrent_reads_per_call_conn.py
     uv run test/integration/test_concurrent_writes_per_call_conn.py
 
+# The wheel pin (.duckdb-pypi-version) must be the build of the engine pin
+# (.duckdb-version) and, while the workflows pin the engine by commit, of that
+# commit: the engine is built from that wheel's sdist under the engine pin's
+# label, and nothing in the source could contradict a wrong pair. Needs no build.
+test-engine-pins:
+    uv run test/integration/test_engine_pins.py
+
 # `LOAD semantic_views` twice in one process must be idempotent (parser-hook
 # re-registration guard, WR-09 D-21). Behavioral half of the structural test
 # in tests/parser_hook_idempotent.rs — both must stay wired.
@@ -224,13 +232,15 @@ test-load-idempotent: build
 
 # A DuckDB other than the one we build for must refuse `LOAD semantic_views`
 # with the load-time version check's message, not crash (see src/load_guard.rs).
-# Runs under a DuckDB 2.0 development build from PyPI. That host pin lives here and
-# not in the script's PEP 723 header on purpose: every header pin must equal
-# .duckdb-version (tests::duckdb_derived_pins_agree) and the version monitor rewrites
-# them all, while this one must differ from it. When the build moves to a new DuckDB,
-# point it at a release other than the new one (at 2.0 GA: the last 1.5 release).
+# Runs under DuckDB 1.5.6, the last 1.5 release: its C API is the one we declare
+# (.duckdb-capi-version), so DuckDB's own loader accepts the binary and only our
+# check refuses it. That host pin lives here and not in the script's PEP 723
+# header on purpose: every header pin must equal .duckdb-pypi-version
+# (tests::duckdb_derived_pins_agree) and the version monitor rewrites them all,
+# while this one must differ from it. When the build moves to a new DuckDB, keep
+# it on a release other than the new one.
 test-load-version-guard: build
-    uv run --with duckdb==2.0.0.dev2610011535 test/integration/test_load_version_guard.py
+    uv run --with duckdb==1.5.6 test/integration/test_load_version_guard.py
 
 # CREATE SEMANTIC VIEW ... FROM YAML FILE under the v0.10.0 read-elimination
 # architecture (Phase 65 Plan 04 D-11): OR REPLACE / IF NOT EXISTS, friendly
@@ -305,8 +315,8 @@ test-interrupt: build
 # PEP 723 header declares (transactional_ddl.py: adbc-driver-manager, pyarrow).
 # Nothing is skipped silently: scripts/run_examples.py prints PASS / FAIL /
 # SKIPPED / XFAIL / XPASS for every file, and its two allow-lists are explicit:
-#   - NEEDS_DOWNLOADED_EXTENSION (race_guards_and_unification.py autoloads
-#     `autocomplete`): run normally; SKIPPED loudly only with
+#   - NEEDS_DOWNLOADED_EXTENSION (examples that download a DuckDB extension at
+#     run time; none at present): run normally; SKIPPED loudly only with
 #     SV_OFFLINE_EXTENSIONS=1, which is refused when CI is set;
 #   - EXPECTED_FAILURES: a known failure must fail with its recorded error and
 #     cite a TECH-DEBT entry; any other error is a FAIL.
@@ -338,7 +348,7 @@ test-multi-statement-error: build
 # exact set the `python-integration` CI job runs (IntegrationChecks.yml) —
 # keep the two in sync by editing THIS recipe, not the workflow.
 # (test-ducklake-ci is excluded: it has its own dedicated CI job.)
-test-integration: test-legacy-schema-spelling test-vtab-crash test-caret test-adbc test-adbc-queries test-large-view test-multi-db test-readonly test-concurrent test-load-idempotent test-load-version-guard test-yaml-file-create test-attach-migration test-readonly-fresh-drop test-chunk-boundary test-differential test-show-scope-case test-show-scope-qualified test-get-ddl-qualified test-interrupt test-examples test-sqllogictest-guards test-multi-statement-error
+test-integration: test-engine-pins test-legacy-schema-spelling test-vtab-crash test-caret test-adbc test-adbc-queries test-large-view test-multi-db test-readonly test-concurrent test-load-idempotent test-load-version-guard test-yaml-file-create test-attach-migration test-readonly-fresh-drop test-chunk-boundary test-differential test-show-scope-case test-show-scope-qualified test-get-ddl-qualified test-interrupt test-examples test-sqllogictest-guards test-multi-statement-error
 
 # Run all tests: Rust unit tests + SQL logic tests + DuckLake integration + all Python integration suites
 # Note: test-iceberg requires `just setup-ducklake` first. test-ducklake-ci uses synthetic data.
@@ -421,13 +431,15 @@ fuzz-all time="300":
 fuzz-cmin target="fuzz_json_parse":
     cargo +nightly fuzz cmin {{target}}
 
-# Re-install the vendored DuckDB amalgamation (duckdb.hpp + duckdb.cpp).
-# Run after a DuckDB version bump. Version is read from .duckdb-version; the
-# source is the pinned upstream release, or an engine source tree in ./duckdb
-# when a CI harness supplied one (see scripts/ensure_amalgamation.py).
-# Caches under .amalgamation/<id>/, then installs into cpp/include/.
-update-headers:
-    @python3 scripts/ensure_amalgamation.py --force
+# Rebuild the DuckDB engine the C++ shim links against, even when it is cached.
+# `just build` builds it on first use and whenever the pins change, so this is
+# only for a cache entry you no longer trust. The engine is the release pinned
+# in .duckdb-version, built from the PyPI sdist of its `duckdb` package, or an
+# engine source tree in ./duckdb when a CI harness supplied one (see
+# scripts/ensure_engine.py). Cached under .engine/<id>/; cpp/engine.manifest
+# points build.rs at it.
+update-engine:
+    @python3 scripts/ensure_engine.py --force
 
 # Clean build artifacts
 clean:

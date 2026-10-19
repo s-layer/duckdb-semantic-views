@@ -58,6 +58,16 @@ jobs:
       - name: Install pinned Rust toolchain
         uses: ./.github/actions/setup-pinned-rust
 
+      # The DuckDB engine the C++ shim links against is built from source
+      # (scripts/ensure_engine.py, run by `make debug`), which takes far longer
+      # than the extension itself. It only changes with the engine pins or the
+      # script that builds it, so the build is cached across runs.
+      - name: Cache the DuckDB engine build
+        uses: actions/cache@v4
+        with:
+          path: .engine
+          key: duckdb-engine-${{ runner.os }}-${{ hashFiles('.duckdb-version', '.duckdb-pypi-version', 'scripts/ensure_engine.py') }}
+
       - name: Build extension
         run: make configure debug
 
@@ -132,6 +142,16 @@ jobs:
       # a behaviour change for anyone running one leaf directly (`just
       # test-caret` would stop building first), so it is left alone here rather
       # than bundled into a CI change.
+      # The DuckDB engine the C++ shim links against is built from source
+      # (scripts/ensure_engine.py, run by `make debug`), which takes far longer
+      # than the extension itself. It only changes with the engine pins or the
+      # script that builds it, so the build is cached across runs.
+      - name: Cache the DuckDB engine build
+        uses: actions/cache@v4
+        with:
+          path: .engine
+          key: duckdb-engine-${{ runner.os }}-${{ hashFiles('.duckdb-version', '.duckdb-pypi-version', 'scripts/ensure_engine.py') }}
+
       - name: Build extension
         run: make configure debug
 
@@ -155,8 +175,7 @@ jobs:
       # `sqllogictest` job below runs through fails a run that skips
       # `require semantic_views`, executes nothing, or waves a network error
       # through as a pass), and `test-multi-statement-error`. These need network:
-      # uv fetches each example's PEP 723 dependencies, and
-      # race_guards_and_unification.py autoloads `autocomplete`.
+      # uv fetches each example's PEP 723 dependencies.
       # SV_OFFLINE_EXTENSIONS is refused here because CI is set.
       - name: Run Python integration suites
         run: just test-integration
@@ -200,8 +219,8 @@ jobs:
 
       # `test-sql-prebuilt` is `test-sql` minus the build — same body, so the
       # two cannot drift, and `_ensure-test-deps` still runs (it reinstalls the
-      # venv's `duckdb` pip package when it does not match `.duckdb-version`, so
-      # the runner cannot test against a different DuckDB than the one the
+      # venv's `duckdb` pip package when it is not the engine release the
+      # extension is built for, so the runner cannot test against a different DuckDB than the one the
       # extension was built for). Plain `just test-sql` would rebuild the
       # extension this job just downloaded.
       #

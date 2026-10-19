@@ -273,6 +273,31 @@ Use standard SQL ``ORDER BY`` and ``LIMIT`` on the outer query:
    LIMIT 10;
 
 
+.. _ref-sv-time-limits:
+
+Time Limits
+===========
+
+.. versionadded:: 0.15.0
+
+DuckDB 2.0's per-query time limit, ``SET max_execution_time`` (in milliseconds), applies to ``semantic_view()`` the same way it applies to any other query. A query that runs past the limit stops with DuckDB's own error:
+
+.. code-block:: sql
+
+   SET max_execution_time = 5000;  -- 5 seconds per query
+
+   SELECT * FROM semantic_view('shop',
+       dimensions := ['region'],
+       metrics := ['revenue']
+   );
+
+.. code-block:: text
+
+   INTERRUPT Error: Query exceeded maximum execution time
+
+The limit also covers the commands that report member data types, because they run a typing query against the view's tables: :ref:`DESCRIBE SEMANTIC VIEW <ref-describe-semantic-view>`, :ref:`SHOW COLUMNS IN SEMANTIC VIEW <ref-show-columns>`, :ref:`SHOW SEMANTIC DIMENSIONS <ref-show-semantic-dimensions>`, :ref:`SHOW SEMANTIC METRICS <ref-show-semantic-metrics>`, :ref:`SHOW SEMANTIC FACTS <ref-show-semantic-facts>`, and :ref:`SHOW SEMANTIC DIMENSIONS FOR METRIC <ref-show-dims-for-metric>`. ``RESET max_execution_time`` removes the limit. See :ref:`ref-err-time-limit`.
+
+
 .. _ref-sv-name-resolution:
 
 Name Resolution

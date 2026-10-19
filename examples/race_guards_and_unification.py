@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # /// script
 # dependencies = [
-#   "duckdb==1.5.6",
+#   "duckdb==2.0.0.dev2610151406",
 # ]
 # requires-python = ">=3.10"
 # ///
@@ -11,7 +11,7 @@ uv run examples/race_guards_and_unification.py
 Demonstrates v0.8.0 features:
   1. Architectural unification — every DDL form (CREATE / DROP / ALTER /
      DESCRIBE / SHOW) goes through the same parser_override path, with one
-     net effect: identical behaviour under DuckDB's Bison and PEG parsers.
+     net effect: it works under DuckDB 2.0's PEG parser as it did under Bison.
   2. DROP / ALTER race guards — a snapshot-consistent existence check on
      the caller's connection guarantees the user sees a clear error if a
      concurrent commit lands between the catalog pre-check and the DML.
@@ -90,24 +90,17 @@ def main() -> None:
         con.execute(CREATE_VIEW)
 
         # ------------------------------------------------------------------
-        # 1. Unified path: DESCRIBE / SHOW work even after toggling the PEG
-        #    parser. Pre-v0.8.0 these forms required Bison.
+        # 1. Unified path: DESCRIBE / SHOW go through parser_override like
+        #    every other DDL form. Pre-v0.8.0 these forms required Bison;
+        #    DuckDB 2.0 has only the PEG parser, and they work there too.
         # ------------------------------------------------------------------
-        section("1. Unified parser path: DESCRIBE / SHOW under both parsers")
-        for label, switch in [("Bison (default)", None), ("PEG", "enable_peg_parser")]:
-            if switch:
-                con.execute(f"CALL {switch}()")
-            print(f"\n[{label}] DESCRIBE SEMANTIC VIEW sales (rowcount):")
-            rows = con.execute("DESCRIBE SEMANTIC VIEW sales").fetchall()
-            print(f"  {len(rows)} property rows")
-            print(f"[{label}] SHOW SEMANTIC VIEWS:")
-            for row in con.execute("SHOW SEMANTIC VIEWS").fetchall():
-                print(f"  {row}")
-
-        # Restore default parser AND the FALLBACK setting that disable_peg
-        # resets — see TECH-DEBT item 21.
-        con.execute("CALL disable_peg_parser()")
-        con.execute("SET allow_parser_override_extension='FALLBACK'")
+        section("1. Unified parser path: DESCRIBE / SHOW under the PEG parser")
+        print("\nDESCRIBE SEMANTIC VIEW sales (rowcount):")
+        rows = con.execute("DESCRIBE SEMANTIC VIEW sales").fetchall()
+        print(f"  {len(rows)} property rows")
+        print("SHOW SEMANTIC VIEWS:")
+        for row in con.execute("SHOW SEMANTIC VIEWS").fetchall():
+            print(f"  {row}")
 
         # ------------------------------------------------------------------
         # 2. Race guard: DROP a missing name surfaces a clear error.

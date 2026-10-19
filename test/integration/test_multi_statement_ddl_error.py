@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # /// script
-# dependencies = ["duckdb==1.5.6"]
+# dependencies = ["duckdb==2.0.0.dev2610151406"]
 # requires-python = ">=3.10"
 # ///
 """
@@ -35,6 +35,17 @@ Each scenario runs on a fresh in-memory database and reports independently:
                                trailing comment) and succeeded.
   control_stale_after_typo     the same, but the first database's string
                                failed on a typo before reaching its DDL.
+  control_stale_caret_query    an invalid DDL in a multi-statement string on
+                               one database, then the same invalid DDL alone on
+                               another database whose override is off: the
+                               second error must quote its own query, not the
+                               first one's.
+  control_stale_caret_success  a DDL that succeeds on one database, then the
+                               same DDL on another whose override is off: the
+                               "not active" error must not quote the first.
+  control_stale_caret_parse_error  a query that fails to parse before reaching
+                               its DDL on one database, then the same DDL on
+                               another whose override is off: likewise.
 
 Run: uv run test/integration/test_multi_statement_ddl_error.py (or
 `just test-multi-statement-error`).
@@ -181,6 +192,55 @@ def scenario_control_stale_after_typo():
     check_not_blamed_after("SELEC 1; " + DDL, expect_first_error=True)
 
 
+def scenario_control_stale_caret_query():
+    bad = DDL.replace("DIMENSIONS", "DIMENSIONZ", 1)
+    off, on = connect(), connect()
+    try:
+        off.execute("SET allow_parser_override_extension = 'DEFAULT'")
+        # The DDL starts on line 2 here, so an error quoting this query says so.
+        first = error_of(on, "SELECT 'other query';\n" + bad)
+        msg = error_of(off, bad)
+    finally:
+        off.close()
+        on.close()
+    assert first is not None and "LINE 2:" in first, f"setup: unexpected first error: {first}"
+    assert msg is not None, "an invalid DDL must fail"
+    assert "LINE 2:" not in msg, f"must not quote another query; got: {msg}"
+
+
+def scenario_control_stale_caret_success():
+    off, on = connect(), connect()
+    try:
+        on.execute("CREATE TABLE orders (id INTEGER, region VARCHAR, amount DOUBLE)")
+        off.execute("SET allow_parser_override_extension = 'DEFAULT'")
+        # One statement, on its second line, that the override rewrites and runs.
+        on.execute("\n" + DDL)
+        msg = error_of(off, DDL)
+    finally:
+        off.close()
+        on.close()
+    assert msg is not None, "DDL with the override switched off must fail"
+    assert OLD_HINT in msg, f"override-off database must keep its message; got: {msg}"
+    assert "LINE 2:" not in msg, f"must not quote another query; got: {msg}"
+
+
+def scenario_control_stale_caret_parse_error():
+    off, on = connect(), connect()
+    try:
+        on.execute("CREATE TABLE orders (id INTEGER, region VARCHAR, amount DOUBLE)")
+        off.execute("SET allow_parser_override_extension = 'DEFAULT'")
+        # A query that fails to parse before the override handles any of it,
+        # with the DDL on its second line.
+        error_of(on, "SELEC 1;\n" + DDL)
+        msg = error_of(off, DDL)
+    finally:
+        off.close()
+        on.close()
+    assert msg is not None, "DDL with the override switched off must fail"
+    assert OLD_HINT in msg, f"override-off database must keep its message; got: {msg}"
+    assert "LINE 2:" not in msg, f"must not quote another query; got: {msg}"
+
+
 SCENARIOS = [
     scenario_ddl_after_other_statements,
     scenario_ddl_before_other_statement,
@@ -190,6 +250,9 @@ SCENARIOS = [
     scenario_control_stale_other_database,
     scenario_control_stale_after_success,
     scenario_control_stale_after_typo,
+    scenario_control_stale_caret_query,
+    scenario_control_stale_caret_success,
+    scenario_control_stale_caret_parse_error,
 ]
 
 

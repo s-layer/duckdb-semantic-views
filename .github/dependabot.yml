@@ -30,8 +30,9 @@ updates:
         patterns:
           - "*"
     ignore:
-      # DuckDB-coupled: pinned exactly (version = "=x.y.z") and bumped in lockstep
-      # with .duckdb-version by DuckDBVersionMonitor.yml. Never auto-bumped here —
+      # DuckDB-coupled: pinned exactly (version = "=x.y.z") to the C API the
+      # extension declares (.duckdb-capi-version) and moved only with it;
+      # duckdb-rs has no DuckDB 2.0 release. Never auto-bumped here —
       # an individual Dependabot PR would decouple the crate from the DuckDB pin.
       # (ignore also auto-excludes these from the rust-dependencies group.)
       - dependency-name: "duckdb"

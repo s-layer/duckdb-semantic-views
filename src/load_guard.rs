@@ -10,8 +10,9 @@
 //!
 //! The comparison is on the version string only, which is what `DuckDB` compared
 //! for us under the previous `C_STRUCT_UNSTABLE` ABI. Source ids are not compared:
-//! a build from the offline amalgamation (CLAUDE.md) carries a placeholder one and
-//! must still load.
+//! an engine built from a source tree with no git metadata (the `PyPI` sdist
+//! `scripts/ensure_engine.py` builds from, for one) may not carry the real one,
+//! and must still load.
 
 /// `Ok` when `host` is the `DuckDB` release `built` names, otherwise the
 /// message the failed `LOAD` reports.

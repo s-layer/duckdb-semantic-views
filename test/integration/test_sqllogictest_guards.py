@@ -37,8 +37,17 @@ wrapper script in isolation:
   offline_not_excused  under SV_OFFLINE_EXTENSIONS=1 a network error is still a
                        failure for a file NOT on the offline list.
   offline_refused_in_ci  SV_OFFLINE_EXTENSIONS=1 with CI set is refused.
+  internal_error_matched  a `statement error` block whose expected substring
+                       matches, but the error is an INTERNAL one. DuckDB keeps
+                       the original message inside the INTERNAL wrapper (for
+                       example a scalar function that throws without being
+                       marked fallible), so the substring check alone passes a
+                       crash path. Simulated with error(), as the network cases
+                       are.
 
   control_pass         a normal file: must still exit 0.
+  control_expected_error  the same expected-error block on an ordinary error:
+                       must still exit 0.
   control_platform     `require windows` on a non-Windows host: a legitimate
                        platform skip, must still exit 0 (BuildAll runs the
                        suite on Windows and macOS, where such skips are real).
@@ -136,6 +145,16 @@ query I
 SELECT error('{message}: simulated by test_sqllogictest_guards.py')
 ----
 1
+"""
+
+EXPECTED_ERROR_TEST = """\
+# name: {name}
+require semantic_views
+
+statement error
+SELECT error('{message}: simulated by test_sqllogictest_guards.py')
+----
+simulated by test_sqllogictest_guards.py
 """
 
 PLATFORM_SKIP_TEST = """\
@@ -264,6 +283,16 @@ def case_offline_refused_in_ci(workdir: Path):
     ), "refusing because CI='true'"
 
 
+def case_internal_error_matched(workdir: Path):
+    body = EXPECTED_ERROR_TEST.replace("{message}", "INTERNAL Error: Scalar function threw")
+    return run_make(workdir, body), "raised an INTERNAL error"
+
+
+def case_control_expected_error(workdir: Path):
+    body = EXPECTED_ERROR_TEST.replace("{message}", "Invalid Input Error")
+    return run_make(workdir, body), None
+
+
 def case_control_offline_excused(workdir: Path):
     body = NETWORK_ERROR_TEST.replace("{message}", "HTTP Error 503")
     proc = run_wrapper(
@@ -293,7 +322,9 @@ CASES = [
     case_network_error_unable_to_connect,
     case_offline_not_excused,
     case_offline_refused_in_ci,
+    case_internal_error_matched,
     case_control_pass,
+    case_control_expected_error,
     case_control_platform,
     case_control_offline_excused,
 ]

@@ -114,7 +114,7 @@ Discovering Functions over SQL
 
 Every function the extension registers has an entry in DuckDB's ``duckdb_functions()`` table function, with a description and its real parameter names and types. Every function except the internal helper also carries at least one runnable example. A tool or agent connected over SQL can learn the whole surface from there.
 
-In DuckDB 1.5, ``duckdb_functions()`` has no column that names the extension a function came from. Filter on the ``categories`` column instead: every function this extension registers carries the ``semantic_views`` category, and no built-in DuckDB function does.
+DuckDB 2.0's ``duckdb_functions()`` has an ``extension_name`` column, but it is ``NULL`` for this extension's functions. Filter on the ``categories`` column instead: every function this extension registers carries the ``semantic_views`` category, and no built-in DuckDB function does.
 
 .. code-block:: sql
 

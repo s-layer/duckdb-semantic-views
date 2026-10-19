@@ -1,0 +1,86 @@
+# The two scalar functions, get_ddl and read_yaml_from_semantic_view, report
+# their errors (unknown view, ambiguous name, unsupported object type) as
+# ordinary Invalid Input errors, never as an INTERNAL error.
+#
+# DuckDB 2.0 requires a scalar function that can throw to be marked fallible.
+# One that is not, and throws while the binder constant-folds it (every call
+# with literal arguments), is reported as "INTERNAL Error: Scalar function ...
+# threw an execution error, but the function is not marked as fallible". The
+# older tests matched only a substring of the message, which the INTERNAL
+# wrapper kept, so they stayed green.
+#
+# Each case pins the error class prefix, which the INTERNAL wrapper lacks.
+
+require semantic_views
+
+statement ok
+CREATE SCHEMA se_a;
+
+statement ok
+CREATE SCHEMA se_b;
+
+statement ok
+CREATE TABLE se_a.t (id INTEGER, region VARCHAR);
+
+statement ok
+CREATE TABLE se_b.t (id INTEGER, region VARCHAR);
+
+statement ok
+CREATE SEMANTIC VIEW se_a.dup AS TABLES (t AS se_a.t PRIMARY KEY (id)) DIMENSIONS (t.region AS region);
+
+statement ok
+CREATE SEMANTIC VIEW se_b.dup AS TABLES (t AS se_b.t PRIMARY KEY (id)) DIMENSIONS (t.region AS region);
+
+# --- literal arguments (folded by the binder) ----------------------------------
+
+statement error
+SELECT get_ddl('SEMANTIC_VIEW', 'se_nosuch');
+----
+Invalid Input Error: get_ddl: semantic view 'se_nosuch' does not exist
+
+statement error
+SELECT get_ddl('TABLE', 'se_nosuch');
+----
+Invalid Input Error: get_ddl: GET_DDL: unsupported object type 'TABLE'
+
+statement error
+SELECT get_ddl('SEMANTIC_VIEW', 'dup');
+----
+Invalid Input Error: get_ddl: semantic view 'dup' is ambiguous
+
+statement error
+SELECT get_ddl('SEMANTIC_VIEW', 'se_nosuch', true);
+----
+Invalid Input Error: get_ddl: semantic view 'se_nosuch' does not exist
+
+statement error
+SELECT read_yaml_from_semantic_view('se_nosuch');
+----
+Invalid Input Error: read_yaml_from_semantic_view: semantic view 'se_nosuch' does not exist
+
+statement error
+SELECT read_yaml_from_semantic_view('dup');
+----
+Invalid Input Error: read_yaml_from_semantic_view: semantic view 'dup' is ambiguous
+
+# --- arguments from a table (evaluated at execution) ---------------------------
+
+statement ok
+CREATE TABLE se_names AS SELECT 'se_nosuch' AS n;
+
+statement error
+SELECT get_ddl('SEMANTIC_VIEW', n) FROM se_names;
+----
+Invalid Input Error: get_ddl: semantic view 'se_nosuch' does not exist
+
+statement error
+SELECT read_yaml_from_semantic_view(n) FROM se_names;
+----
+Invalid Input Error: read_yaml_from_semantic_view: semantic view 'se_nosuch' does not exist
+
+# --- the connection is still usable afterwards ---------------------------------
+
+query I
+SELECT get_ddl('SEMANTIC_VIEW', 'se_a.dup') LIKE 'CREATE OR REPLACE SEMANTIC VIEW dup%';
+----
+true

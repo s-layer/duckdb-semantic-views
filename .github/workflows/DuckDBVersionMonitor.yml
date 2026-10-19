@@ -26,12 +26,23 @@ jobs:
           CURRENT=$(cat .duckdb-version)
           echo "latest=$LATEST" >> $GITHUB_OUTPUT
           echo "current=$CURRENT" >> $GITHUB_OUTPUT
-          if [ "$LATEST" != "$CURRENT" ]; then
-            echo "is_new=true" >> $GITHUB_OUTPUT
-          else
-            echo "is_new=false" >> $GITHUB_OUTPUT
-          fi
-          echo "Latest DuckDB: $LATEST (current pin: $CURRENT)"
+          # Newer, not merely different: the pin can be ahead of the latest
+          # release (a 2.0 pre-release while 1.5.x is still "latest"), and that
+          # must not be "bumped" back. A release is newer than a pre-release of
+          # the same version (v2.0.0 > v2.0.0-alpha47600).
+          IS_NEW=$(python3 - "$CURRENT" "$LATEST" <<'PY'
+          import re, sys
+          def key(tag):
+              m = re.match(r"^v(\d+)\.(\d+)\.(\d+)(-.+)?$", tag)
+              if not m:
+                  sys.exit(f"unexpected DuckDB version {tag!r}")
+              return (*map(int, m.groups()[:3]), m.group(4) is None)
+          current, latest = sys.argv[1:]
+          print("true" if key(latest) > key(current) else "false")
+          PY
+          )
+          echo "is_new=$IS_NEW" >> $GITHUB_OUTPUT
+          echo "Latest DuckDB: $LATEST (current pin: $CURRENT, newer: $IS_NEW)"
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
@@ -56,64 +67,37 @@ jobs:
       - name: Update version pins
         if: steps.latest.outputs.is_new == 'true'
         run: |
-          # Update .duckdb-version
-          echo "${{ steps.latest.outputs.latest }}" > .duckdb-version
-
-          # Determine duckdb-rs crate version from DuckDB version
-          # DuckDB 1.X.Y -> duckdb-rs 1.1XY00.0 (e.g., 1.5.0 -> 1.10500.0, 1.6.0 -> 1.10600.0)
+          # Only the ENGINE pin moves. The C API pin (.duckdb-capi-version, the
+          # duckdb/libduckdb-sys crates and MINIMUM_DUCKDB_VERSION) stays where it
+          # is: the extension declares the v1.5.6 C API on purpose (see the
+          # Makefile's UNSTABLE_C_API_FLAG), and moving it is a deliberate change,
+          # not a weekly bump.
           VER="${{ steps.latest.outputs.latest }}"
-          MAJOR=$(echo $VER | sed 's/v//' | cut -d. -f1)
-          MINOR=$(echo $VER | sed 's/v//' | cut -d. -f2)
-          PATCH=$(echo $VER | sed 's/v//' | cut -d. -f3)
-          CRATE_VER="${MAJOR}.1$(printf '%02d' $MINOR)$(printf '%02d' $PATCH).0"
-          echo "DuckDB $VER -> duckdb-rs $CRATE_VER"
-
-          # Update Cargo.toml
-          sed -i "s/duckdb = { version = \"=[^\"]*\"/duckdb = { version = \"=$CRATE_VER\"/" Cargo.toml
-          sed -i "s/libduckdb-sys = \"=[^\"]*\"/libduckdb-sys = \"=$CRATE_VER\"/" Cargo.toml
-
-          # Update the version declared to the loader at extension init. Guarded
-          # by tests::duckdb_version_pins_agree, which fails the build if this
-          # drifts from .duckdb-version.
-          sed -i "s|\(MINIMUM_DUCKDB_VERSION: &str = \)\"v[0-9.]*\"|\1\"$VER\"|" src/lib.rs
+          echo "$VER" > .duckdb-version
+          # A release's wheel is the version without its `v`; the pre-release
+          # wheel name is only needed while the pin is a pre-release.
+          rm -f .duckdb-pypi-version
 
           # Update Python PEP 723 headers. The `[0-9]` prefix is required: an
           # unanchored `[0-9.]*` also matches the empty string, which mangles
-          # non-pin occurrences such as the f-string `duckdb=={pyver}` in
-          # scripts/fetch_amalgamation_offline.py into `duckdb==X.Y.Z{pyver}`.
+          # non-pin occurrences such as an f-string `duckdb=={pyver}` into
+          # `duckdb==X.Y.Z{pyver}`. `[0-9a-z.]*` also takes a pre-release
+          # suffix (2.0.0.dev2610151406) along.
           DDB_VER=$(echo $VER | sed 's/v//')
-          find . -name '*.py' -not -path './extension-ci-tools/*' -not -path './.venv/*' -exec \
-            sed -i "s/duckdb==[0-9][0-9.]*/duckdb==$DDB_VER/" {} \;
+          find . -name '*.py' -not -path './extension-ci-tools/*' -not -path './.venv/*' -not -path './.engine/*' -exec \
+            sed -i "s/duckdb==[0-9][0-9a-z.]*/duckdb==$DDB_VER/" {} \;
 
-          # Update CI workflow files (uses:, duckdb_version, ci_tools_version, IMPORTANT comment)
+          # Update CI workflow files: the engine ref and the IMPORTANT comment.
+          # A release has its tag upstream, so the `duckdb_tag` stand-in a
+          # pre-release needs goes. extension-ci-tools is versioned apart from
+          # DuckDB since 2.0 (one `v2.0-<codename>` branch per release line), so
+          # its ref and the submodule stay; a new release line needs them moved
+          # by hand, and the build below fails until they are.
           for WF in .github/workflows/BuildAll.yml .github/workflows/BuildQuick.yml; do
-            sed -i "s|extension-ci-tools/\.github/workflows/_extension_distribution\.yml@v[0-9.]*|extension-ci-tools/.github/workflows/_extension_distribution.yml@$VER|" "$WF"
-            sed -i "s/duckdb_version: v[0-9.]*/duckdb_version: $VER/" "$WF"
-            sed -i "s/ci_tools_version: v[0-9.]*/ci_tools_version: $VER/" "$WF"
-            sed -i "s/currently v[0-9.]*/currently $VER/" "$WF"
+            sed -i "s/duckdb_version: [^ ]*/duckdb_version: $VER/" "$WF"
+            sed -i "/^ *duckdb_tag: /d" "$WF"
+            sed -i "s/currently v[^ )]*/currently $VER/" "$WF"
           done
-
-          # Update extension-ci-tools submodule to matching branch.
-          #
-          # The refspec must be explicit. actions/checkout clones submodules with
-          # `submodule update --depth=1`, and --depth implies --single-branch, so
-          # the clone's remote.origin.fetch is narrowed to
-          # `+refs/heads/main:refs/remotes/origin/main`. A bare `git fetch origin`
-          # therefore only ever updates origin/main and can never create
-          # origin/$VER — the previous `rev-parse --verify origin/$VER` failed on
-          # every run since v1.5.0 and the `else` branch swallowed it, so the
-          # submodule silently stayed on the v1.5.0 tip across three bumps.
-          #
-          # No `|| echo WARNING` here: if extension-ci-tools has no branch for
-          # this DuckDB version then BuildAll/BuildQuick's
-          # `_extension_distribution.yml@$VER` does not resolve either, so the
-          # bump cannot work and the run must go red rather than open a PR.
-          git -C extension-ci-tools fetch --depth=1 origin "+refs/heads/$VER:refs/remotes/origin/$VER"
-          git -C extension-ci-tools checkout --detach "refs/remotes/origin/$VER"
-          echo "extension-ci-tools submodule -> $VER ($(git -C extension-ci-tools rev-parse --short HEAD))"
-
-          # Download new amalgamation
-          just update-headers
 
       - name: Record changelog entry
         if: steps.latest.outputs.is_new == 'true'
@@ -133,6 +117,8 @@ jobs:
           # would sail through and open a "build passed" PR that CI then rejects.
           # These are pure-Rust unit tests — no C++ build needed.
           SV_SKIP_CPP_BUILD=1 cargo test --lib --no-default-features --features extension
+          # `make release` builds the new engine from its PyPI sdist first
+          # (scripts/ensure_engine.py); that is most of this step's time.
           make configure && make release && make test_release
         continue-on-error: true
 

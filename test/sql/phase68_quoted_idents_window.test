@@ -111,6 +111,8 @@ SELECT count(*) FROM explain_semantic_view('p68_b2_v2', dimensions := ['region',
 # surfaces a parser-level error first.
 # ========================================
 
+# DuckDB 2.0's tokenizer rejects the quoting before semantic_views sees the
+# statement, so this is the engine's wording; the Rust unit tests cover ours.
 statement error
 CREATE SEMANTIC VIEW p68_b2_bad AS
   TABLES (o AS p68_b2_orders PRIMARY KEY (id))
@@ -120,7 +122,7 @@ CREATE SEMANTIC VIEW p68_b2_bad AS
     o.running_total AS SUM(total) OVER (PARTITION BY EXCLUDING region ORDER BY "unclosed ASC)
   )
 ----
-Unterminated quoted identifier
+unterminated quoted identifier
 
 # ========================================
 # Cleanup

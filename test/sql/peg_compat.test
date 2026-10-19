@@ -1,13 +1,15 @@
-# PEG parser compatibility smoke test for DuckDB 1.5.0+.
+# PEG parser compatibility smoke test.
 #
-# DuckDB 1.5.0 introduced an opt-in PEG parser (CALL enable_peg_parser()).
+# DuckDB 1.5.0 introduced an opt-in PEG parser (CALL enable_peg_parser());
+# DuckDB 2.0 made it the only parser. Phase 3 of the PEG epic deletes this
+# file once the DDL is grammar productions.
 #
 # v0.8.0 collapsed all DDL onto the parser_override hook. parser_override is
 # registered on ParserExtension and called BEFORE the active parser; the hook
 # returns native SQL that the live parser then parses. Because the synthesised
 # SQL (INSERT/DELETE/UPDATE on _definitions for write-side, SELECT * FROM
 # read-side table function for DESCRIBE/SHOW/GET_DDL/READ_YAML) only uses
-# vanilla SQL constructs, every form works under Bison and PEG identically.
+# vanilla SQL constructs, every form worked under Bison and PEG identically.
 #
 # The legacy `parse_function` Bison-only fallback as a write-side execution
 # path is gone (the table-function-based DDL was deleted in v0.8.0's Phase 59
@@ -17,11 +19,11 @@
 # SHOW used to require Bison; v0.8.0 makes them parser-agnostic.
 #
 # This test documents the expected behavior:
-#   1. All DDL works under the default Bison parser
-#   2. Under PEG: every DDL form (CREATE / DROP / ALTER / DESCRIBE / SHOW /
-#      FROM YAML FILE) works — parser_override fires first
-#   3. Querying existing views works under PEG (semantic_view() is a table function)
-#   4. All DDL works again after disabling PEG parser
+#   1-3. Every DDL form (CREATE / DROP / ALTER / DESCRIBE / SHOW /
+#        FROM YAML FILE) works — parser_override fires first — and querying
+#        existing views works (semantic_view() is a table function)
+#   4. With parser_override switched off, DDL fails with the re-arm hint,
+#      and works again once FALLBACK is restored
 #
 # Requirements covered:
 #   DKDB-05: PEG parser compatibility documented
@@ -39,7 +41,7 @@ statement ok
 INSERT INTO peg_test_data VALUES (1, 10.0), (2, 20.0);
 
 # ============================================================
-# 2. Bison parser (default): DDL and query work
+# 2. DDL and query work
 # ============================================================
 
 statement ok
@@ -55,11 +57,9 @@ SELECT * FROM semantic_view('peg_bison_test', dimensions := ['dim_id'], metrics 
 2	20.0
 
 # ============================================================
-# 3. Enable PEG parser: every DDL form works via parser_override.
+# 3. DuckDB 2.0: the PEG parser is the only parser (enable_peg_parser() and
+#    disable_peg_parser() are gone), so every DDL form below runs under PEG.
 # ============================================================
-
-statement ok
-CALL enable_peg_parser();
 
 # CREATE goes through parser_override (parser-agnostic) — works under PEG.
 statement ok
@@ -122,20 +122,19 @@ SELECT * FROM semantic_view('peg_bison_test', dimensions := ['dim_id'], metrics 
 2	20.0
 
 # ============================================================
-# 4. Disable PEG parser: DDL works again
+# 4. parser_override switched off: DDL fails with the re-arm hint
 # ============================================================
 #
-# Caveat: DuckDB's `CALL disable_peg_parser()` resets
-# `allow_parser_override_extension` to its default (`default`), which silently
-# bypasses parser_override hooks. The extension installs `FALLBACK` on load,
-# so a process that never enables PEG never hits this. Tests that toggle PEG
-# must restore FALLBACK explicitly. Documented in MAINTAINER.md.
+# On 1.5, `CALL disable_peg_parser()` reset `allow_parser_override_extension`
+# to its default (`default`), which silently bypasses parser_override hooks.
+# 2.0 has no such call, but the setting can still be put back by hand; the
+# extension installs `FALLBACK` on load. Documented in MAINTAINER.md.
 
 statement ok
-CALL disable_peg_parser();
+SET allow_parser_override_extension='DEFAULT';
 
-# B8 (Phase 62) — disable_peg_parser silently resets
-# allow_parser_override_extension to DEFAULT. Without re-arming FALLBACK,
+# B8 (Phase 62) — with allow_parser_override_extension at DEFAULT and FALLBACK not
+# re-armed,
 # parser_override does NOT fire on this connection; the default parser
 # fails on the unrecognised CREATE SEMANTIC VIEW prefix; DuckDB calls
 # our parse_function which sees a well-formed semantic-view DDL and
@@ -164,7 +163,7 @@ SELECT * FROM semantic_view('peg_restored_test', dimensions := ['dim_id'], metri
 1	10.0
 2	20.0
 
-# DESCRIBE works again with Bison.
+# DESCRIBE works again.
 statement ok
 DESCRIBE SEMANTIC VIEW peg_bison_test
 

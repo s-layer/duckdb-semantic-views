@@ -1,14 +1,14 @@
 #!/usr/bin/env python3
 # /// script
 # dependencies = [
-#   "duckdb==1.5.6",
+#   "duckdb==2.0.0.dev2610151406",
 #   "adbc-driver-manager>=1.10",
 #   "pyarrow>=16",
 # ]
 # requires-python = ">=3.10"
 # ///
 # Note: `import adbc_driver_duckdb` resolves to the module bundled inside
-# the `duckdb` wheel (see duckdb-1.5.x dist-info/RECORD). There is no
+# the `duckdb` wheel (see its dist-info/RECORD). There is no
 # separate `adbc-driver-duckdb` package on PyPI, so it does not appear in
 # the dependencies list above.
 """

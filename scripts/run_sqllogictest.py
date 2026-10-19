@@ -33,6 +33,13 @@ runner would have reported success without actually testing anything:
    the opt-in it leaves its ``OFFLINE_EXTENSION_TESTS`` out of the list.
    Any other file that hits a network error still fails, offline or
    not.
+6. A file in which any statement or query raised an ``INTERNAL Error`` fails,
+   even where a ``statement error`` / expected-error block matched a substring
+   of it. DuckDB wraps some failures (e.g. a scalar function that throws
+   without being marked fallible) in an INTERNAL error that keeps the original
+   message inside it, so a substring check passes on what is really a crash
+   path. Upstream lists "INTERNAL" in ``always_fail_error_messages`` but never
+   consults it.
 
 The required extensions default to ``semantic_views``; pass
 ``--required-extension NAME`` (repeatable) to change that. ``--offline-excused
@@ -40,9 +47,9 @@ FILE`` (repeatable) is described in 5. Every other argument is forwarded to the
 runner untouched.
 
 The upstream package is pinned by extension-ci-tools and already patched by
-scripts/patch_sqllogictest.py; this wrapper hooks five of its methods
+scripts/patch_sqllogictest.py; this wrapper hooks six of its methods
 (``SQLLogicRunner.reset`` / ``skip_error_message``,
-``SQLLogicContext.execute_statement`` / ``execute_query``,
+``SQLLogicContext.execute_statement`` / ``execute_query`` / ``get_connection``,
 ``SQLLogicTestExecutor.execute_test``). If a runner bump
 renames them, the ``getattr`` checks below fail loudly rather than letting the
 guards go quiet.
@@ -51,10 +58,13 @@ guards go quiet.
 from __future__ import annotations
 
 import argparse
+import faulthandler
+import io
 import os
 import sys
 from dataclasses import dataclass, field
 
+import duckdb
 from duckdb_sqllogictest import python_runner, result
 from duckdb_sqllogictest.result import ExecuteResult
 
@@ -67,6 +77,36 @@ class FileOutcome:
     skip_reason: str = ""
     requires: set[str] = field(default_factory=set)
     network_errors: list[str] = field(default_factory=list)
+    internal_errors: list[str] = field(default_factory=list)
+
+
+class _InternalErrorWatch:
+    """Connection proxy that records every INTERNAL error before re-raising it.
+
+    Only ``execute`` is watched: that is how the runner runs ``statement``
+    blocks, the only place an expected error can be written. ``query`` must
+    stay the real method, because DuckDB's replacement scan resolves the
+    runner's ``original_rel`` from the calling frame's locals, which a wrapper
+    frame would hide; a query that raises fails its block anyway.
+    """
+
+    def __init__(self, conn, sink):
+        self._conn = conn
+        self._sink = sink
+
+    def _watch(self, fn, *args, **kwargs):
+        try:
+            return fn(*args, **kwargs)
+        except duckdb.Error as e:
+            if "INTERNAL Error" in str(e) and self._sink:
+                self._sink[-1].internal_errors.append(str(e).splitlines()[0])
+            raise
+
+    def execute(self, *args, **kwargs):
+        return self._watch(self._conn.execute, *args, **kwargs)
+
+    def __getattr__(self, name):
+        return getattr(self._conn, name)
 
 
 def _require_params(test) -> set[str]:
@@ -88,6 +128,14 @@ def _hook(cls, name):
 
 
 def main() -> int:
+    # A crash in the engine or the extension kills the process with no Python
+    # error, and on Windows an access violation leaves only make's exit code.
+    # faulthandler prints where each thread was, and line buffering keeps the
+    # runner's `[n/N] <file>` line, which a pipe would otherwise hold in a
+    # buffer the crash discards.
+    faulthandler.enable()
+    if isinstance(sys.stdout, io.TextIOWrapper):
+        sys.stdout.reconfigure(line_buffering=True)
     pre = argparse.ArgumentParser(add_help=False)
     pre.add_argument("--required-extension", action="append", default=None)
     pre.add_argument("--offline-excused", action="append", default=[])
@@ -163,6 +211,14 @@ def main() -> int:
 
         setattr(result.SQLLogicContext, method, counted)
 
+    # 6. Record every INTERNAL error, whether or not an expected error matched it.
+    orig_get_connection = _hook(result.SQLLogicContext, "get_connection")
+
+    def get_connection(self, name=None):
+        return _InternalErrorWatch(orig_get_connection(self, name), current)
+
+    result.SQLLogicContext.get_connection = get_connection
+
     # 2./4. Record each file's result and skip reason.
     orig_execute_test = _hook(python_runner.SQLLogicTestExecutor, "execute_test")
 
@@ -206,6 +262,12 @@ def main() -> int:
 
     for outcome in outcomes.values():
         needs_required = bool(outcome.requires & required)
+        if outcome.internal_errors:
+            problems.append(
+                f"{outcome.path}: raised an INTERNAL error, which an expected-error "
+                f"substring cannot excuse: {outcome.internal_errors[0]}"
+            )
+            continue
         if outcome.network_errors:
             first = outcome.network_errors[0]
             if offline and os.path.normpath(outcome.path) in excused:
@@ -249,7 +311,7 @@ def main() -> int:
     statements = sum(o.executed for o in outcomes.values())
     if problems:
         print(
-            f"sqllogictest: FAILED -- {len(problems)} file(s) did not really run "
+            f"sqllogictest: FAILED -- {len(problems)} file(s) failed the wrapper's checks "
             f"(required extensions: {', '.join(sorted(required))}):",
             file=sys.stderr,
         )

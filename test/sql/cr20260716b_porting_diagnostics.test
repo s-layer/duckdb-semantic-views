@@ -106,13 +106,15 @@ is not a single identifier
 # F-11: an empty quoted identifier `""` in a name slot is rejected.
 # ========================================
 
+# DuckDB 2.0's tokenizer rejects the quoting before semantic_views sees the
+# statement, so this is the engine's wording; the Rust unit tests cover ours.
 statement error
 CREATE SEMANTIC VIEW t16_f11 AS
 TABLES ("" AS t16_orders PRIMARY KEY (id))
 DIMENSIONS (t16_orders.region AS t16_orders.region)
 METRICS (t16_orders.total AS SUM(t16_orders.qty))
 ----
-empty quoted identifier
+zero-length delimited identifier
 
 # ========================================
 # F-14: an unqualified entry name (dot only inside the expression) reports the

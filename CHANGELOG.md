@@ -9,7 +9,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-_No unreleased changes yet._
+### Added
+
+- **`SET max_execution_time` stops semantic-view queries.** DuckDB 2.0's per-query time
+  limit now applies to `semantic_view()` and to the `SHOW` / `DESCRIBE` commands that look
+  up member types, which fail with DuckDB's own `Query exceeded maximum execution time`
+  like any other query instead of running past the limit.
+
+### Changed
+
+- **The extension now runs on DuckDB 2.0, and only there.** This release is built
+  against DuckDB 2.0 and loads only in that exact DuckDB release. Until DuckDB 2.0.0 is
+  released it is built against the `v2.0.0-alpha47600` pre-release (the `duckdb`
+  `2.0.0.dev2610151406` Python wheel) and loads only there. If you stay on DuckDB 1.5, keep
+  v0.14.1, the last release for 1.5.
+- **Two identifier errors now come from DuckDB.** In semantic-view DDL, an unterminated
+  quoted identifier and an empty one (`""`) are now rejected by DuckDB 2.0 before the
+  extension sees the statement. The errors read `unterminated quoted identifier` and
+  `zero-length delimited identifier` instead of the extension's own wording.
+
+### Known limitations
+
+- **ADBC needs `import duckdb` first.** With the DuckDB 2.0 Python wheel, a connection from
+  `adbc_driver_duckdb` cannot `INSTALL` or `LOAD` any extension, this one included, unless
+  the `duckdb` Python module has been imported in the same process first. Add
+  `import duckdb` before you import the ADBC driver.
 
 ## [0.14.1] - 2026-10-16
 

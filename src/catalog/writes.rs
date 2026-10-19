@@ -129,7 +129,7 @@ pub(crate) fn resolved_schema_expr(
             // names a path they did not set, and disagrees with the read side,
             // which prints its input verbatim.
             let path = crate::parse::search_path::SEARCH_PATH_SQL;
-            let folded = format!("list_transform({path}, s -> lower(s))");
+            let folded = format!("list_transform({path}, lambda s: lower(s))");
             // 1-based position of a row's schema on the path, or NULL when the
             // schema is not on it. `count(rank)` therefore counts the reachable
             // candidates, and `arg_min` over it picks the earliest.

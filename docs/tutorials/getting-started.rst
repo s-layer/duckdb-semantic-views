@@ -13,7 +13,7 @@ In this tutorial, you will install the DuckDB Semantic Views extension, define y
 
 **Prerequisites:**
 
-- DuckDB installed (CLI or Python package)
+- DuckDB 2.0 installed (CLI or Python package)
 - Basic SQL knowledge (SELECT, GROUP BY, aggregate functions)
 
 .. _tutorial-gs-install:
@@ -49,6 +49,14 @@ Install the Extension
       or ``con.sql()``. Give each semantic-view statement its own call: a string
       that combines a ``CREATE SEMANTIC VIEW`` with other statements is
       rejected (see :ref:`explanation-txn-ddl-one-statement`).
+
+.. important::
+
+   Each release of the extension is built for one DuckDB release and loads only
+   there. This release needs DuckDB 2.0. On DuckDB 1.5, stay on v0.14.0, the
+   last release built for 1.5. If ``LOAD`` stops with ``semantic_views was built
+   for DuckDB ... and cannot run in DuckDB ...``, the installed extension and
+   your DuckDB do not match; see :ref:`ref-err-load-version` for the fix.
 
 
 .. _tutorial-gs-create-table:

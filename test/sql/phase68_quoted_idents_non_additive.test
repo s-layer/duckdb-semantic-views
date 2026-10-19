@@ -118,13 +118,15 @@ SELECT count(*) FROM explain_semantic_view('p68_b1_v2', dimensions := ['order da
 # error. Post-B1, is_quoting_balanced surfaces a parser-level error first.
 # ========================================
 
+# DuckDB 2.0's tokenizer rejects the quoting before semantic_views sees the
+# statement, so this is the engine's wording; the Rust unit tests cover ours.
 statement error
 CREATE SEMANTIC VIEW p68_b1_bad AS
   TABLES (o AS p68_b1_orders PRIMARY KEY (id))
   DIMENSIONS (o."order date" AS o."order date")
   METRICS (o.qty_sum NON ADDITIVE BY ("unclosed DESC) AS SUM(o.qty))
 ----
-Unterminated quoted identifier
+unterminated quoted identifier
 
 # ========================================
 # Cleanup

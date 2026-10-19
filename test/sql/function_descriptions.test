@@ -47,7 +47,7 @@ SELECT function_name FROM sv_fns WHERE description IS NULL ORDER BY ALL;
 
 query T
 SELECT function_name FROM sv_fns
-WHERE len(list_filter(parameters, p -> regexp_full_match(p, 'col[0-9]+'))) > 0
+WHERE len(list_filter(parameters, lambda p: regexp_full_match(p, 'col[0-9]+'))) > 0
 ORDER BY ALL;
 ----
 
@@ -89,21 +89,21 @@ ORDER BY ALL;
 
 query T
 SELECT array_to_string(list_sort(list_transform(list_zip(parameters, parameter_types),
-                                x -> x[1] || ':' || x[2])), ' | ')
+                                lambda x: x[1] || ':' || x[2])), ' | ')
 FROM sv_fns WHERE function_name = 'semantic_view';
 ----
 dimensions:VARCHAR[] | facts:VARCHAR[] | metrics:VARCHAR[] | search_path:VARCHAR[] | view_name:VARCHAR | where_clause:VARCHAR
 
 query T
 SELECT array_to_string(list_sort(list_transform(list_zip(parameters, parameter_types),
-                                x -> x[1] || ':' || x[2])), ' | ')
+                                lambda x: x[1] || ':' || x[2])), ' | ')
 FROM sv_fns WHERE function_name = 'explain_semantic_view';
 ----
 dimensions:VARCHAR[] | facts:VARCHAR[] | metrics:VARCHAR[] | search_path:VARCHAR[] | view_name:VARCHAR | where_clause:VARCHAR
 
 query T
 SELECT array_to_string(list_transform(list_zip(parameters, parameter_types),
-                      x -> x[1] || ':' || x[2]), ' | ')
+                      lambda x: x[1] || ':' || x[2]), ' | ')
 FROM sv_fns WHERE function_name = 'show_semantic_dimensions_for_metric';
 ----
 view_name:VARCHAR | metric_name:VARCHAR | search_path:VARCHAR[]

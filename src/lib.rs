@@ -20,13 +20,16 @@ pub mod render_yaml;
 pub(crate) mod sql_lit;
 pub mod util;
 
-/// Minimum `DuckDB` version this extension declares compatibility with, passed to
+/// The `DuckDB` C API version this extension declares to the loader, passed to
 /// `duckdb_rs_extension_api_init` at load time.
 ///
-/// This must stay in lockstep with the `DuckDB` version the crate is built and
-/// tested against. The three sources of truth — this constant, the
-/// `.duckdb-version` file, and the pinned `libduckdb-sys` version in
-/// `Cargo.toml` — are asserted consistent by `tests::duckdb_version_pins_agree`.
+/// Since `DuckDB` 2.0 this is not the engine the extension runs in: the binary
+/// is built against the v1.5.6 C API (`.duckdb-capi-version`), which 2.0 still
+/// loads, while the C++ shim is compiled against one exact engine release
+/// (`.duckdb-version`) and `load_guard` refuses any other host. The three
+/// sources of the C API version — this constant, `.duckdb-capi-version`, and
+/// the pinned `libduckdb-sys` version in `Cargo.toml` — are asserted consistent
+/// by `tests::duckdb_version_pins_agree`.
 pub const MINIMUM_DUCKDB_VERSION: &str = "v1.5.6";
 
 /// Test helpers for integration tests.
@@ -348,9 +351,9 @@ mod extension {
     type RegisterFn = unsafe extern "C" fn(ffi::duckdb_database, *mut c_char, usize) -> bool;
 
     extern "C" {
-        /// The `DuckDB` release the shim and its amalgamation were compiled
-        /// from (`DUCKDB_VERSION`), for the load-time check in
-        /// `semantic_views_init_c_api_internal`.
+        /// The `DuckDB` release the shim was compiled and linked against
+        /// (`DuckDB::LibraryVersion()` of the engine build), for the load-time
+        /// check in `semantic_views_init_c_api_internal`.
         fn sv_compiled_duckdb_version() -> *const c_char;
     }
 
@@ -674,25 +677,26 @@ mod extension {
 
 #[cfg(test)]
 mod tests {
-    /// Machine-guards the three `DuckDB` version sources of truth against drift
-    /// (AR-8): `MINIMUM_DUCKDB_VERSION`, the `.duckdb-version` file, and the
-    /// pinned `libduckdb-sys` version in `Cargo.toml` must all describe the
-    /// same `DuckDB` release.
+    /// Machine-guards the three sources of the `DuckDB` C API version against
+    /// drift (AR-8): `MINIMUM_DUCKDB_VERSION`, the `.duckdb-capi-version` file,
+    /// and the pinned `libduckdb-sys` version in `Cargo.toml` must all describe
+    /// the same `DuckDB` release.
     #[test]
     fn duckdb_version_pins_agree() {
         let manifest_dir = env!("CARGO_MANIFEST_DIR");
 
-        // `.duckdb-version` is the canonical human-readable version, e.g. "v1.5.4".
-        let version_file =
-            std::fs::read_to_string(std::path::Path::new(manifest_dir).join(".duckdb-version"))
-                .expect("read .duckdb-version");
+        // `.duckdb-capi-version` is the canonical human-readable version, e.g. "v1.5.6".
+        let version_file = std::fs::read_to_string(
+            std::path::Path::new(manifest_dir).join(".duckdb-capi-version"),
+        )
+        .expect("read .duckdb-capi-version");
         let canonical = version_file.trim();
 
         // The version declared to the loader must match it verbatim.
         assert_eq!(
             super::MINIMUM_DUCKDB_VERSION,
             canonical,
-            "MINIMUM_DUCKDB_VERSION disagrees with .duckdb-version"
+            "MINIMUM_DUCKDB_VERSION disagrees with .duckdb-capi-version"
         );
 
         // The libduckdb-sys pin encodes the same release as
@@ -724,7 +728,7 @@ mod tests {
             .unwrap_or_else(|| panic!("could not parse libduckdb-sys pin from: {pin_line}"));
         assert_eq!(
             encoded, expected_encoded,
-            "libduckdb-sys pin =1.{encoded}.0 disagrees with .duckdb-version {canonical} \
+            "libduckdb-sys pin =1.{encoded}.0 disagrees with .duckdb-capi-version {canonical} \
              (expected =1.{expected_encoded}.0)"
         );
     }
@@ -741,9 +745,9 @@ mod tests {
     fn collect_py_files(dir: &std::path::Path, out: &mut Vec<std::path::PathBuf>) {
         // `duckdb` is an engine source tree, not ours: a CI harness clones the
         // DuckDB it is building against into `./duckdb`, which
-        // `scripts/ensure_amalgamation.py` then generates the amalgamation
-        // from. Scanning it would judge *its* pins against *our*
-        // `.duckdb-version` — a file we neither own nor may rewrite.
+        // `scripts/ensure_engine.py` then builds the engine from. Scanning it
+        // would judge *its* pins against *our* `.duckdb-pypi-version` — a file
+        // we neither own nor may rewrite.
         const SKIP_DIRS: [&str; 5] = [
             "target",
             "build",
@@ -779,24 +783,32 @@ mod tests {
         &rest[..end]
     }
 
-    /// Extends [`duckdb_version_pins_agree`] to the *derived* pin locations —
+    /// Guards the pins derived from the engine release (`.duckdb-version`) —
     /// the ones the `DuckDBVersionMonitor` workflow rewrites with `sed` rather
-    /// than deriving at build time: PEP 723 `duckdb==X.Y.Z` headers in every
-    /// Python file, and the DuckDB / extension-ci-tools tags in `BuildAll.yml`
-    /// and `BuildQuick.yml`.
+    /// than deriving at build time: PEP 723 `duckdb==` headers in every Python
+    /// file, which name the engine's `duckdb` PyPI release
+    /// (`.duckdb-pypi-version`, or `.duckdb-version` without its `v`), and the
+    /// engine and extension-ci-tools refs in `BuildAll.yml` and `BuildQuick.yml`.
     ///
-    /// A bump that updates `.duckdb-version` but leaves one of these stale — or
-    /// mangles it, as an over-broad `duckdb==[0-9.]*` pattern does to
-    /// `f"...duckdb=={pyver}..."` in `scripts/fetch_amalgamation_offline.py` —
-    /// fails here instead of at runtime or in a platform-specific build.
+    /// A bump that updates the pin files but leaves one of these stale — or
+    /// mangles it, as an over-broad `duckdb==[0-9.]*` pattern does to a
+    /// `f"...duckdb=={pyver}..."` format string — fails here instead of at
+    /// runtime or in a platform-specific build.
     #[test]
     fn duckdb_derived_pins_agree() {
         let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+        let read = |name: &str| {
+            std::fs::read_to_string(root.join(name))
+                .ok()
+                .map(|s| s.trim().to_owned())
+                .filter(|s| !s.is_empty())
+        };
 
-        let version_file =
-            std::fs::read_to_string(root.join(".duckdb-version")).expect("read .duckdb-version");
-        let canonical = version_file.trim(); // e.g. "v1.5.5"
-        let numeric = canonical.strip_prefix('v').unwrap_or(canonical); // e.g. "1.5.5"
+        let canonical = read(".duckdb-version").expect("read .duckdb-version"); // e.g. "v2.0.0"
+                                                                                // The engine's `duckdb` PyPI release: the version without its `v`, unless
+                                                                                // a pre-release engine names its wheel in .duckdb-pypi-version.
+        let pypi = read(".duckdb-pypi-version")
+            .unwrap_or_else(|| canonical.strip_prefix('v').unwrap_or(&canonical).to_owned());
 
         // --- PEP 723 headers in Python files -------------------------------
         let mut py_files = Vec::new();
@@ -816,9 +828,9 @@ mod tests {
                 pins_seen += 1;
                 assert_eq!(
                     token,
-                    numeric,
+                    pypi,
                     "stale or mangled DuckDB pin `duckdb=={token}` in {} \
-                     (.duckdb-version says {canonical})",
+                     (the engine's PyPI release is {pypi})",
                     path.strip_prefix(root).unwrap_or(path).display()
                 );
             }
@@ -831,32 +843,67 @@ mod tests {
              has the scan gone vacuous?"
         );
 
-        // --- DuckDB tags in the build workflows ----------------------------
-        const MARKERS: [&str; 4] = [
-            "_extension_distribution.yml@",
-            "duckdb_version: ",
-            "ci_tools_version: ",
-            "currently ",
-        ];
+        // --- Engine and extension-ci-tools refs in the build workflows -----
+        //
+        // The engine ref is `duckdb_version:`. While the target engine is a
+        // pre-release with no release tag, that is the commit it was built
+        // from, and `duckdb_tag:` gives the clone the release label the build
+        // must carry (scripts/ensure_engine.py builds a tagged tree under its
+        // tag); otherwise `duckdb_version:` is the release tag itself. Either
+        // way the release label equals `.duckdb-version`, and the comment
+        // naming it ("currently vX") does too.
+        //
+        // extension-ci-tools is versioned apart from the engine since 2.0 (a
+        // `v2.0-<codename>` branch), so its two refs must only agree with each
+        // other and across both workflows.
+        let mut ci_tools: Option<String> = None;
         for workflow in ["BuildAll.yml", "BuildQuick.yml"] {
             let path = root.join(".github/workflows").join(workflow);
             let src = std::fs::read_to_string(&path)
                 .unwrap_or_else(|e| panic!("read {}: {e}", path.display()));
-            for marker in MARKERS {
-                let mut hits = 0_usize;
-                for (idx, _) in src.match_indices(marker) {
-                    hits += 1;
-                    assert_eq!(
-                        token_after(&src, idx, marker),
-                        canonical,
-                        "stale DuckDB tag after `{marker}` in {workflow} \
-                         (.duckdb-version says {canonical})"
-                    );
-                }
+            let single = |marker: &str| -> Option<&str> {
+                let hits: Vec<&str> = src
+                    .match_indices(marker)
+                    .map(|(idx, _)| token_after(&src, idx, marker))
+                    .collect();
                 assert!(
-                    hits > 0,
-                    "no `{marker}` found in {workflow} — the pin check has gone vacuous"
+                    hits.len() <= 1,
+                    "more than one `{marker}` in {workflow}: {hits:?}"
                 );
+                hits.first().copied()
+            };
+            let need = |marker: &str| -> &str {
+                single(marker).unwrap_or_else(|| {
+                    panic!("no `{marker}` found in {workflow} — the pin check has gone vacuous")
+                })
+            };
+
+            let engine_ref = need("duckdb_version: ");
+            let label = single("duckdb_tag: ").unwrap_or(engine_ref);
+            assert_eq!(
+                label, canonical,
+                "the engine {workflow} builds is labelled {label} \
+                 (duckdb_tag, else duckdb_version), but .duckdb-version says {canonical}"
+            );
+            assert_eq!(
+                need("currently "),
+                canonical,
+                "stale version in the `currently ...` comment of {workflow} \
+                 (.duckdb-version says {canonical})"
+            );
+
+            let uses = need("_extension_distribution.yml@");
+            let input = need("ci_tools_version: ");
+            assert_eq!(
+                uses, input,
+                "{workflow} calls extension-ci-tools@{uses} but passes ci_tools_version {input}"
+            );
+            match &ci_tools {
+                None => ci_tools = Some(uses.to_owned()),
+                Some(other) => assert_eq!(
+                    uses, other,
+                    "BuildAll.yml and BuildQuick.yml use different extension-ci-tools refs"
+                ),
             }
         }
     }

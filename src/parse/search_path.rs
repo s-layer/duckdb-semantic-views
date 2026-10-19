@@ -8,8 +8,10 @@
 //! `Connection(*context.db)` that carries neither the caller's search path nor
 //! its current schema, and neither is reachable from the bind callback — the
 //! caller's `ClientContext` cannot be queried re-entrantly (its `context_lock`
-//! is not recursive) and `ClientData::catalog_search_path` is not exposed by
-//! the amalgamation. Entry #19 records both walls.
+//! is not recursive). Entry #19 records that wall, and a second one, the
+//! amalgamation's forward-declared `ClientData`, which the DuckDB 2.0 engine
+//! build removed: reading `ClientData::catalog_search_path` in the bind is now
+//! possible, and replacing this injection with it is recorded there.
 //!
 //! What *is* available is the caller's connection at **bind time**: `DuckDB`
 //! constant-folds table-function arguments there, on the caller's connection,

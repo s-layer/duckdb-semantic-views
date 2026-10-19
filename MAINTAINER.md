@@ -31,8 +31,9 @@ Install these before anything else.
 | `just` | `cargo install just` or `brew install just` | Command runner (like `make` but simpler -- run `just` to see all commands) |
 | Python 3 | You likely already have this | Needed for the SQLLogicTest runner and DuckLake integration tests |
 | Git | With submodule support | The repo uses Git submodules for DuckDB CI tooling |
+| CMake (and optionally Ninja) | `brew install cmake ninja` / `apt install cmake ninja-build` | Builds the DuckDB engine the C++ shim links against (once per engine version; see [Which DuckDB the C++ shim compiles against](#which-duckdb-the-c-shim-compiles-against)) |
 
-You do **not** need to install DuckDB separately. The build system downloads the correct DuckDB binary automatically (`make configure`), and unit tests compile DuckDB from source via the `bundled` feature.
+You do **not** need to install DuckDB separately. The build system installs the matching `duckdb` Python package for the test runner (`make configure`) and builds the engine the extension links against from its PyPI sdist on the first `just build`; unit tests compile DuckDB from source via the `bundled` feature.
 
 ## Quick Start
 
@@ -128,7 +129,8 @@ examples/                      # Runnable Python demos — every one runs in CI 
 
 scripts/                       # Build/test helpers, among them:
 ├── run_examples.py            #   `just test-examples` runner (PASS/FAIL/SKIPPED/XFAIL per example)
-└── run_sqllogictest.py        #   strict sqllogictest wrapper — the Makefile's TEST_RUNNER
+├── run_sqllogictest.py        #   strict sqllogictest wrapper — the Makefile's TEST_RUNNER
+└── windows_crash_report.py    #   Windows only: re-runs a runner that crashed under cdb for the native stack
 
 test/
 ├── sql/                       # sqllogictest files (run via test/sql/TEST_LIST — drift is a CI error)
@@ -182,8 +184,8 @@ Every table and scalar function is registered through the C++ Catalog API helper
 
 #### Two FALLBACK_OVERRIDE quirks worth knowing
 
-1. **DuckDB silently drops `DISPLAY_EXTENSION_ERROR` from `parser_override` in FALLBACK mode** (`ParseInternal` in the v1.5.2 amalgamation). The success path is unaffected — `parser_override` rewrites recognised DDL into native SQL on the caller's connection. For *validation* errors (e.g. `semantic view 'X' does not exist`, unknown clause), `parser_override` instead returns `DISPLAY_ORIGINAL_ERROR`; the default parser then fails on the unrecognised DDL prefix; DuckDB calls our registered `parse_function`, which re-runs validation and returns `DISPLAY_EXTENSION_ERROR` with `error_location` set to the offending byte offset. `ParserException::SyntaxError` formats the caret automatically. See `sv_parse_function_rust` in `src/parse/ffi.rs`. (TECH-DEBT 22 was resolved by this mechanism in Phase 62; the older `sql_throwing` / synthesised-`SELECT error('...')` workaround was deleted.)
-2. **`CALL disable_peg_parser()` resets `allow_parser_override_extension` to `default`,** which silently bypasses our hook. After toggling PEG you must re-issue `SET allow_parser_override_extension='FALLBACK'`. The extension installs `FALLBACK` on load, so a process that never enables PEG is unaffected. See TECH-DEBT.md item 21.
+1. **DuckDB silently drops `DISPLAY_EXTENSION_ERROR` from `parser_override` in FALLBACK mode** (`ParseInternal`, found on v1.5.2). The success path is unaffected — `parser_override` rewrites recognised DDL into native SQL on the caller's connection. For *validation* errors (e.g. `semantic view 'X' does not exist`, unknown clause), `parser_override` instead returns `DISPLAY_ORIGINAL_ERROR`; the default parser then fails on the unrecognised DDL prefix; DuckDB calls our registered `parse_function` (`sv_parse_stub` in `cpp/src/shim.cpp`), which re-runs validation (`sv_parse_function_rust` in `src/parse/ffi.rs`) and fails the parse with the error. On DuckDB 1.5 the stub got the statement text and returned `DISPLAY_EXTENSION_ERROR` with `error_location`, and `ParserException::SyntaxError` formatted the caret. On 2.0 the stub gets tokens without offsets and DuckDB shows no location for a parser error outside the ClientContext path, so the stub does it itself: it finds the failed statement's tokens in the query the override recorded (`sv_override_query`, via `sv_locate_tail`), validates that exact text, and renders the caret with `QueryErrorContext::Format`. When the tokens cannot be located (the override is off, so nothing was recorded) it validates text rebuilt from the tokens and shows no caret. (TECH-DEBT 22 was resolved by this mechanism in Phase 62; the older `sql_throwing` / synthesised-`SELECT error('...')` workaround was deleted.)
+2. **Setting `allow_parser_override_extension` back to `DEFAULT` silently bypasses our hook.** The extension installs `FALLBACK` on load; a session that resets it gets the parser's own syntax error for semantic-view DDL until it sets `FALLBACK` again (`test/sql/peg_compat.test`, section 4). On DuckDB 1.5, `CALL disable_peg_parser()` did that reset as a side effect (TECH-DEBT item 21); 2.0 removed the PEG toggles.
 
 ### Feature Flag Split
 
@@ -233,48 +235,85 @@ just build-release  # builds build/release/semantic_views.duckdb_extension (opti
   - `cdylib`: the `.duckdb_extension` shared library file (for DuckDB to load)
   - `lib`: a regular Rust library (for unit tests and fuzz targets to link against)
 
-The Makefile also handles installing the correct DuckDB amalgamation, running the SQLLogicTest runner, and packaging the extension with metadata.
+The Makefile also handles building the DuckDB engine the C++ shim links against, running the SQLLogicTest runner, and packaging the extension with metadata.
 
 #### Which DuckDB the C++ shim compiles against
 
-`build.rs` compiles the DuckDB amalgamation (`cpp/include/duckdb.{hpp,cpp}`) *into*
-the extension binary alongside `cpp/src/shim.cpp`, because the parser hook the shim
-registers is C++ internals with no C-API equivalent. That makes the amalgamation an ABI
-contract with whatever engine loads the result, so `make ensure_amalgamation`
-(`scripts/ensure_amalgamation.py`) picks it in this order:
+`build.rs` links a static build of the DuckDB engine *into* the extension binary
+alongside `cpp/src/shim.cpp`, because the parser hook the shim registers is C++ internals
+with no C-API equivalent. That makes the engine an ABI contract with whatever DuckDB loads
+the result: the shim reads host objects by layout, so the extension refuses any host but
+the exact release it was built against (`src/load_guard.rs`).
 
-1. **An engine source tree** — `AMALGAMATION_SRC_DIR`, default `./duckdb`. A distribution
-   that builds community extensions against its own engine clones it there: Haybarn's fork
-   of `_extension_distribution.yml` does exactly that from `override_duckdb_repository`.
-   When the tree is present it *is* the engine the extension will be loaded into, so the
-   amalgamation is generated from it with the engine's own `scripts/amalgamation.py` (a
-   couple of seconds). This is what keeps an alternative distribution — e.g.
-   [Haybarn](https://github.com/Query-farm-haybarn), whose fork adds fields to structs in
-   the headers the shim compiles against — building against the engine that will actually
-   load the result. Upstream community-extensions checks a tree out at `./duckdb` as
-   well; since its default moved to DuckDB's development branch, that tree is past our
-   release and is refused (see below); those builds need the harness pinned to the release.
-2. **The pinned upstream release** — `AMALGAMATION_URL`, the `libduckdb-src.zip` asset for
-   `.duckdb-version`. This is the local-developer and upstream-CI path.
+DuckDB 2.0 ships no amalgamation, and its release archives carry no C++ headers, so
+`make ensure_engine` (`scripts/ensure_engine.py`) builds the engine from source with its
+own CMake build (the `duckdb_static` target; `cmake` is required, `ninja` is used when
+present) and writes `cpp/engine.manifest`, the include directories and static libraries
+`build.rs` compiles and links against. The source is, in this order:
 
-An engine tree is checked against `.duckdb-version` from its **own** label — the harness's
-`OVERRIDE_GIT_DESCRIBE`, else `git describe --tags` — before it is used, and a mismatch
-fails the build rather than compiling. That evidence has to come from the tree, not from
-the amalgamation it produces: the generator takes the label it stamps into `DUCKDB_VERSION`
-from `OVERRIDE_GIT_DESCRIBE`, which this script sets, so checking the generated header
-would only ask the tree a question we had just answered for it. A tree with neither form of
-evidence is refused rather than relabelled, and so is one past its release tag
-(`v1.5.6-15774-g<sha>`, DuckDB's development branch): it names the release but is not it. The download path is verified the same way,
-against the header in the zip.
+1. **An engine source tree** — `ENGINE_SRC_DIR`, default `./duckdb`. A harness that builds
+   the extension against a specific engine clones it there (extension-ci-tools and
+   community-extensions do, as does Haybarn's fork). That tree *is* the engine the
+   extension will be loaded into, so it is built under the label the host's own build of
+   it carries, never our pin. The label is, in this order:
+   - a release label the harness exports (`DUCKDB_VERSION`, else `OVERRIDE_GIT_DESCRIBE`),
+     used as given;
+   - any other harness label, used verbatim, as DuckDB's CMake does with the same
+     variable (a fork's `haybarn-v1.5.5-rc1-42-g<sha>`, a `git describe`). A harness value
+     that is a git reference rather than a label is skipped: a commit (extension-ci-tools
+     passes `duckdb_version` as one, and no host reports a commit as its version) or a
+     branch or tag name of the tree (`main`);
+   - the release tag the tree is checked out at;
+   - CMake's own `vX.Y.0-devN`. That is a guess, and the build says so: N is the clone's
+     commit count, so it matches only a host built from a clone of the same depth.
 
-Whatever the source, it is staged and validated in a temporary directory before being
-promoted into `.amalgamation/<id>/` — otherwise a wrong URL would leave a complete-looking
-cache entry that every later run restores and fails on — and the installed pair is stamped
-in `cpp/include/.amalgamation_id`. The stamp is
-the provenance guard: a fork labels its amalgamation with the upstream version it is based
-on, so `DUCKDB_VERSION` alone cannot tell the two apart, and a rebuild after switching
-engines would otherwise be a silent no-op. `tests/build_config.rs` covers the selection
-rules; `just update-headers` re-installs from scratch.
+   A tree that is not the pinned release is reported, not refused: the result loads only
+   in a DuckDB built from that tree.
+2. **The pinned release** — `.duckdb-version`, from the PyPI sdist of the matching
+   `duckdb` package (`.duckdb-pypi-version` while the pin is a pre-release). The sdist
+   carries the exact engine source the wheel was built from, `third_party/` included, and
+   PyPI is reachable from sandboxes that block GitHub. The archive must be that release
+   (its `PKG-INFO`), and it is built with `DUCKDB_VERSION` set to the pin. The engine
+   source carries no label or commit of its own, so nothing in the build could notice a
+   wheel pin that names some other engine: `just test-engine-pins` checks the pair by
+   asking the wheel which engine and commit it is. This is the local-developer path and
+   the one our own CI jobs take.
+
+The engine is built for the target the extension is: on macOS with DuckDB's 11.0
+deployment target, and for the architecture in `OSX_BUILD_ARCH` when extension-ci-tools
+cross-compiles (osx_amd64 on an arm64 runner). On Windows, DuckDB's CMake forces the
+static MSVC runtime (`/MT`), so `.cargo/config.toml` links the extension with
+`+crt-static` to match; the `cc`-compiled shim follows that. A `RUSTFLAGS` in the
+environment replaces that config's flags rather than adding to them, so `build.rs`
+refuses an MSVC build without `crt-static` instead of failing at the link.
+The shim is also compiled with `/EHsc`, which the `cc` crate does not add on its own:
+without it MSVC skips the destructors of a frame a C++ exception unwinds through, and a
+bind that threw left its cancellation watcher thread running against a dead stack frame
+(the windows_amd64 access violations from #248 on). `shim.cpp` refuses to compile without it.
+
+Builds are cached under `.engine/<id>/` (the static libraries, plus the extracted source
+for the pinned release's headers), keyed on the pin or on the tree's label and commit, so
+switching branches or engines is a cache hit; the wheel pin and a cross-compile
+architecture are part of the key, and a tree with no git commit, or with uncommitted
+changes to tracked files, is rebuilt every time. The first build of an engine takes a while (~20 minutes on four cores); after that
+`make` only checks the cache. An entry counts as cached only when its own `manifest`
+(written last, atomically) is complete and every include directory and library it names
+still exists; the manifest is deleted before a rebuild starts, and anything an interrupted
+or failed run left (a partial source tree, a build directory with another generator's
+CMake cache) is discarded and rebuilt.
+
+The include directories are the engine's `src/include` and, for each `third_party/`
+library, its `include/` directory when it has one (else its root), as DuckDB's own CMake
+does. A library root next to an `include/` holds files such as brotli's `VERSION`, which
+macOS's case-insensitive file system returns for `#include <version>`. `ensure_engine`
+also deletes the DuckDB 1.x amalgamation (`cpp/include/duckdb.{hpp,cpp}`,
+`.amalgamation_id`) that a pre-2.0 build of this repo left behind: `duckdb.hpp` there
+would shadow the engine's for the shim's quoted includes, and `build.rs` refuses to build
+while it exists. `cpp/engine.manifest` is rewritten only when it changes, so
+an unchanged engine keeps `cargo build` incremental; every rebuild of the libraries
+changes it (its `built` line), and `build.rs` also watches the libraries themselves, so a
+rebuilt engine is always relinked. `tests/build_config.rs` covers the
+selection rules; `just update-engine` rebuilds the cached engine from scratch.
 
 ### Common Build Errors
 
@@ -297,30 +336,31 @@ Fix: `rustup update stable`
 | Command | What It Tests | How It Works |
 |---------|---------------|--------------|
 | `just test-rust` | Unit tests (model, catalog, expand) | Runs `cargo nextest run` with bundled DuckDB -- fast, no extension loading |
-| `just test-sql` | SQL logic tests (DDL + query round-trips) | Builds the extension, loads it in DuckDB, and runs the `.test` files **enumerated in `test/sql/TEST_LIST`** — the runner takes `--file-list`, not a directory glob, so a file missing from that list is silently skipped. `just check-test-list` makes that a hard error. The runner is invoked through `scripts/run_sqllogictest.py` (the Makefile's `TEST_RUNNER`), which fails the run when `require semantic_views` cannot be met (a missing or renamed extension file — the bare runner SKIPs every file and exits 0), when a listed file never runs (unparseable), when a file is SKIPPED for any reason other than a `require` of something else (e.g. `require windows`, listed loudly), when a file reports SUCCESS having executed zero statements, and when a file hits an error the runner silently ignores ("HTTP", "Unable to connect" — upstream counts those as a pass; under the local `SV_OFFLINE_EXTENSIONS=1` opt-in too: the files that need a downloaded extension are left out of the list before the wrapper runs, see below). It ends with `sqllogictest: N file(s) ran, M statements/queries executed`. |
+| `just test-sql` | SQL logic tests (DDL + query round-trips) | Builds the extension, loads it in DuckDB, and runs the `.test` files **enumerated in `test/sql/TEST_LIST`** — the runner takes `--file-list`, not a directory glob, so a file missing from that list is silently skipped. `just check-test-list` makes that a hard error. The runner is invoked through `scripts/run_sqllogictest.py` (the Makefile's `TEST_RUNNER`), which fails the run when `require semantic_views` cannot be met (a missing or renamed extension file — the bare runner SKIPs every file and exits 0), when a listed file never runs (unparseable), when a file is SKIPPED for any reason other than a `require` of something else (e.g. `require windows`, listed loudly), when a file reports SUCCESS having executed zero statements, when any statement raised an `INTERNAL Error` (even one a `statement error` block matched: DuckDB keeps the original message inside the INTERNAL wrapper, e.g. for a scalar function that throws without being marked fallible), and when a file hits an error the runner silently ignores ("HTTP", "Unable to connect" — upstream counts those as a pass; under the local `SV_OFFLINE_EXTENSIONS=1` opt-in too: the files that need a downloaded extension are left out of the list before the wrapper runs, see below). It ends with `sqllogictest: N file(s) ran, M statements/queries executed`. |
 | `just test-sql-prebuilt` | The above, minus the build | Same body as `test-sql` (which is defined as `build` + this), for callers that already have `build/debug/semantic_views.duckdb_extension`. CI's `SQL logic tests` job uses it because it downloads a prebuilt artifact; running `test-sql` there would rebuild what it just downloaded. |
 | `just test-ducklake-ci` | DuckLake integration (synthetic data) | Builds extension, runs the Python DuckLake CI test — the leg included in `test-all`. With `SV_OFFLINE_EXTENSIONS=1` (local only, see below) it prints a `SKIPPED` line and exits 0 when the `ducklake` extension cannot be downloaded. |
 | `just test-ducklake` | DuckLake integration (real jaffle-shop data) | Builds extension, runs the Python test against DuckLake tables; requires `just setup-ducklake` first |
 | `just test-integration` | Python integration suites | Runs the full `test/integration/*.py` suite list (caret, ADBC, multi-db, concurrency, differential, interrupt, …), plus `test-examples`, `test-sqllogictest-guards` and `test-multi-statement-error` |
-| `just test-examples` | Every `examples/*.py` | Builds the extension, then `scripts/run_examples.py` runs each example under `uv run --script` (so each gets its own PEP 723 dependencies — `transactional_ddl.py` gets `adbc-driver-manager`/`pyarrow`) from the repo root, and fails on any non-zero exit. Every file prints `PASS`/`FAIL`/`SKIPPED`/`XFAIL`/`XPASS`; nothing is skipped silently. Two explicit allow-lists in the script: `NEEDS_DOWNLOADED_EXTENSION` (`race_guards_and_unification.py` autoloads `autocomplete`; runs normally, `SKIPPED` only under `SV_OFFLINE_EXTENSIONS=1`, which is refused when `CI` is set) and `EXPECTED_FAILURES` (must fail with its recorded error and cite TECH-DEBT; a different error is a `FAIL`, a pass is a loud `XPASS` warning so the entry gets deleted). Pass file names to run a subset. Part of `test-integration`. |
-| `just test-sqllogictest-guards` | The sqllogictest wrapper itself | Drives the real `make test_debug` with a one-file `TEST_LIST` per scenario and asserts each silent-skip case — missing extension, renamed extension, zero statements executed, unparseable file, `halt`, and a query failing with an "HTTP" / "Unable to connect" error (which the runner's `ignore_error_messages` counts as a pass) — now exits non-zero with its own reason, and that a normal file and a `require windows` platform skip still exit 0. The offline scenarios drive the wrapper directly: under `SV_OFFLINE_EXTENSIONS=1` only a file passed as `--offline-excused` may hit a network error, reported as `SKIPPED` (`make` passes none; it leaves `OFFLINE_EXTENSION_TESTS` out of the list instead); any other file still fails, and the variable is refused when `CI` is set (`test/integration/test_sqllogictest_guards.py`). Part of `test-integration`. |
+| `just test-examples` | Every `examples/*.py` | Builds the extension, then `scripts/run_examples.py` runs each example under `uv run --script` (so each gets its own PEP 723 dependencies — `transactional_ddl.py` gets `adbc-driver-manager`/`pyarrow`) from the repo root, and fails on any non-zero exit. Every file prints `PASS`/`FAIL`/`SKIPPED`/`XFAIL`/`XPASS`; nothing is skipped silently. Two explicit allow-lists in the script: `NEEDS_DOWNLOADED_EXTENSION` (examples that download a DuckDB extension at run time, none at present; such a file runs normally, `SKIPPED` only under `SV_OFFLINE_EXTENSIONS=1`, which is refused when `CI` is set) and `EXPECTED_FAILURES` (must fail with its recorded error and cite TECH-DEBT; a different error is a `FAIL`, a pass is a loud `XPASS` warning so the entry gets deleted). Pass file names to run a subset. Part of `test-integration`. |
+| `just test-sqllogictest-guards` | The sqllogictest wrapper itself | Drives the real `make test_debug` with a one-file `TEST_LIST` per scenario and asserts each silent-skip case — missing extension, renamed extension, zero statements executed, unparseable file, `halt`, a query failing with an "HTTP" / "Unable to connect" error (which the runner's `ignore_error_messages` counts as a pass), and an expected-error block that matched an INTERNAL error — now exits non-zero with its own reason, and that a normal file, an expected-error block on an ordinary error, and a `require windows` platform skip still exit 0. The offline scenarios drive the wrapper directly: under `SV_OFFLINE_EXTENSIONS=1` only a file passed as `--offline-excused` may hit a network error, reported as `SKIPPED` (`make` passes none; it leaves `OFFLINE_EXTENSION_TESTS` out of the list instead); any other file still fails, and the variable is refused when `CI` is set (`test/integration/test_sqllogictest_guards.py`). Part of `test-integration`. |
 | `just test-multi-statement-error` | The multi-statement DDL error (TECH-DEBT #85) | Semantic-view DDL inside a multi-statement `execute()` string must fail with the "one statement per call" message, not the misleading "parser_override is not active" one, while the real override-off case keeps its message. Part of `test-integration`. |
-| `just test-interrupt` | Query cancellation (TECH-DEBT #42) | Builds the extension and fires `con.interrupt()` from a second thread mid-query; asserts `semantic_view()` aborts early (not just eventually) and reports a bare `Interrupted!`, then the same for the SHOW / DESCRIBE member-type probes (single-view, DIMENSIONS FOR METRIC and cross-view) over a source whose bind expands thousands of globs. Part of `test-integration`. |
-| `just test-load-version-guard` | The load-time DuckDB version check | Builds the extension and `LOAD`s it, in a child process, into a DuckDB other than `.duckdb-version` (a 2.0 development build from PyPI, pinned in the `test-load-version-guard` recipe via `uv run --with`). Asserts the load fails with the check's message from `src/load_guard.rs` rather than loading or crashing; without the check a v1.5.6 build segfaults the 2.0 host. When the build moves to a new DuckDB, repin the recipe to a different release. Part of `test-integration`. |
+| `just test-interrupt` | Query cancellation (TECH-DEBT #42) | Builds the extension and fires `con.interrupt()` from a second thread mid-query; asserts `semantic_view()` aborts early (not just eventually) and reports a bare `Interrupted!`, then the same for the SHOW / DESCRIBE member-type probes (single-view, DIMENSIONS FOR METRIC and cross-view) over a source whose bind expands thousands of globs. Every check runs a second time under DuckDB 2.0's `SET max_execution_time` deadline, which must surface as the engine's bare "Query exceeded maximum execution time". Part of `test-integration`. |
+| `just test-load-version-guard` | The load-time DuckDB version check | Builds the extension and `LOAD`s it, in a child process, into a DuckDB other than `.duckdb-version` (DuckDB 1.5.6, the last 1.5 release, whose C API is the one we declare; pinned in the `test-load-version-guard` recipe via `uv run --with`). Asserts the load fails with the check's message from `src/load_guard.rs` rather than loading or crashing; without the check a v1.5.6 build segfaulted a 2.0 host. When the build moves to a new DuckDB, repin the recipe to a different release. Part of `test-integration`. |
+| `just test-engine-pins` | The wheel pin against the engine pin | Runs under the wheel `.duckdb-pypi-version` names and checks it is that release, that its engine reports `.duckdb-version`, and, while BuildAll / BuildQuick pin the engine by commit, that it was built from that commit. The engine is built from this wheel's sdist under `.duckdb-version`'s label, and nothing in the source could contradict a wrong pair. No build needed. Part of `test-integration`. |
 | `just test-legacy-schema-spelling` | Legacy-catalog migration (TECH-DEBT #44) | Builds a real pre-scoping database file (`_definitions` keyed on `name` alone), opens it through a real `LOAD`, and asserts the migration records the **catalog's** spelling of a schema rather than the row's — then that `CREATE OR REPLACE` replaces the migrated row instead of duplicating it. Part of `test-integration`. |
 | `just test-all` | Rust + SQL logic + DuckLake CI + integration | Runs `test-rust`, `test-sql`, `test-ducklake-ci`, and `test-integration` sequentially |
 
 #### Offline runs: `SV_OFFLINE_EXTENSIONS=1` (local only)
 
-Three legs need a DuckDB extension that is neither in the pip `duckdb` wheel nor in this repo, so DuckDB downloads it from `extensions.duckdb.org` on first use: `test/sql/peg_compat.test` (`CALL enable_peg_parser()` autoloads `autocomplete`), `just test-ducklake-ci` (`INSTALL ducklake`) and, in `just test-examples`, `examples/race_guards_and_unification.py` (autoloads `autocomplete`). Behind a proxy that blocks that host they fail, and `peg_compat.test` halts the whole sqllogictest run at its first PEG statement.
+Some legs need a DuckDB extension that is neither in the pip `duckdb` wheel nor in this repo, so DuckDB downloads it from `extensions.duckdb.org` on first use. Today that is only `just test-ducklake-ci` (`INSTALL ducklake`); `test/sql/peg_compat.test` and `examples/race_guards_and_unification.py` were listed too while they called `enable_peg_parser()` (which autoloads `autocomplete`), until DuckDB 2.0 removed it. Behind a proxy that blocks that host they fail, and a failing sqllogictest file halts the whole run.
 
-Setting `SV_OFFLINE_EXTENSIONS=1` (e.g. `SV_OFFLINE_EXTENSIONS=1 just test-sql`) makes all three report themselves instead:
+Setting `SV_OFFLINE_EXTENSIONS=1` (e.g. `SV_OFFLINE_EXTENSIONS=1 just test-sql`) makes them report themselves instead:
 
-- the Makefile's `test_extension_{debug,release}_internal` targets (behind `just test-sql` / `make test_debug`) run a copy of `TEST_LIST` without the files in `OFFLINE_EXTENSION_TESTS` (written to `build/test_list_offline`), print `SKIPPED (SV_OFFLINE_EXTENSIONS=1): <file> -- … NOT run` for each, and end with `N test files passed (single process) -- 1 SKIPPED offline`;
+- the Makefile's `test_extension_{debug,release}_internal` targets (behind `just test-sql` / `make test_debug`) run a copy of `TEST_LIST` without the files in `OFFLINE_EXTENSION_TESTS` (written to `build/test_list_offline`), print `SKIPPED (SV_OFFLINE_EXTENSIONS=1): <file> -- … NOT run` for each, and end with `N test files passed (single process) -- M SKIPPED offline` (the list is empty today, so nothing is left out);
 - `test/integration/test_ducklake_ci.py` prints a `SKIPPED` line and exits 0 when `INSTALL ducklake` fails (`test_ducklake_helpers.exit_skipped_if_offline`);
 - `scripts/run_examples.py` reports the files in its `NEEDS_DOWNLOADED_EXTENSION` list as `SKIPPED` without running them.
 
-It is an explicit opt-in on purpose. A sqllogictest `require autocomplete` would skip silently wherever the extension cannot load, CI included, so a broken download in CI would switch the coverage off without a red. Without the variable nothing changes (CI runs all three and fails hard if it cannot load the extension), and with it set **and** `CI` set (GitHub Actions sets `CI=true`) the Makefile, the Python helper and the examples runner all refuse to run. A new test file that needs a downloadable extension goes in `OFFLINE_EXTENSION_TESTS` in the Makefile.
+It is an explicit opt-in on purpose. A sqllogictest `require autocomplete` would skip silently wherever the extension cannot load, CI included, so a broken download in CI would switch the coverage off without a red. Without the variable nothing changes (CI runs them all and fails hard if it cannot load the extension), and with it set **and** `CI` set (GitHub Actions sets `CI=true`) the Makefile, the Python helper and the examples runner all refuse to run. A new test file that needs a downloadable extension goes in `OFFLINE_EXTENSION_TESTS` in the Makefile.
 | `just coverage` | Coverage report | Runs unit tests with `cargo-llvm-cov`, fails if below 80% line coverage |
 | `just lint` | Code quality (authoritative) | `cargo fmt --check` + full default-features `cargo clippy` + `cargo deny check`. The clippy step compiles the ~25 MB bundled DuckDB, so a cold run is ~10 min. |
 | `just lint-fast` | Fast lint (pre-commit) | `cargo fmt --check` + the extension-feature clippy with `SV_SKIP_CPP_BUILD` (no C++ build). What the pre-commit hook runs; lints the same production code in ~1 min cold, seconds warm. |
@@ -328,6 +368,8 @@ It is an explicit opt-in on purpose. A sqllogictest `require autocomplete` would
 ### The Critical Difference: `cargo test` vs `just test-sql`
 
 `cargo test` (or `just test-rust`) runs unit tests with a **bundled** DuckDB compiled into the test binary. It exercises `model.rs`, `catalog/`, and `expand/` -- the pure Rust logic.
+
+**The bundled DuckDB is not the engine the extension ships for.** duckdb-rs has no 2.0 release, so the bundled build is DuckDB 1.5.6 (the `.duckdb-capi-version` pin), while the extension links and loads only in the DuckDB 2.0 engine in `.duckdb-version`. `cargo test`, the differential proptests and the coverage gate therefore check 1.5.6; only `just test-sql`, `test-ducklake-ci` and the Python integration suites run on 2.0. TECH-DEBT #92 records the gap and what would close it.
 
 `just test-sql` builds the **actual extension binary** and loads it into a real DuckDB process via `LOAD`. This catches:
 - ABI mismatches between the Rust code and the DuckDB version
@@ -353,7 +395,7 @@ Net: treat the 80% figure as a floor on the bundled core's line coverage, not as
 SV_SKIP_CPP_BUILD=1 cargo clippy --no-default-features --features extension -- -D warnings
 ```
 
-`SV_SKIP_CPP_BUILD` makes `build.rs` skip the ~25 MB DuckDB amalgamation + C++ shim compile. Clippy only type-checks (it never links the final `cdylib`), so the C++ half is irrelevant and the check needs no amalgamation download — it runs in seconds. Use the same command locally before touching any FFI (`src/query/{table_function,explain}.rs`, `src/ddl/*_ffi.rs`, `src/parse/ffi.rs`) code. Do **not** set `SV_SKIP_CPP_BUILD` for a real `just build` — the extension won't link without the C++ shim.
+`SV_SKIP_CPP_BUILD` makes `build.rs` skip the C++ shim compile and the DuckDB engine link. Clippy only type-checks (it never links the final `cdylib`), so the C++ half is irrelevant and the check needs no engine build — it runs in seconds. Use the same command locally before touching any FFI (`src/query/{table_function,explain}.rs`, `src/ddl/*_ffi.rs`, `src/parse/ffi.rs`) code. Do **not** set `SV_SKIP_CPP_BUILD` for a real `just build` — the extension won't link without the C++ shim.
 
 **This is also what the pre-commit hook runs** (`just lint-fast` / `.cargo-husky/hooks/pre-commit`). The default-features `cargo clippy -- -D warnings` compiles the bundled DuckDB amalgamation — a ~10 min COLD build (its cargo profile differs from `cargo test`'s, so a green `cargo test` does not warm it, and tight disk evicts it between runs), which used to stall every `git commit`. The extension-feature clippy lints the same production code with no C++ build, because every `#[cfg(not(feature = "extension"))]` item in `src/` is either inside a `#[cfg(test)]` module (clippy without `--tests` skips it) or the `test_helpers` module (which carries `#[allow(clippy::pedantic, ...)]`). CI's default-features `Clippy (pedantic lints, deny warnings)` step remains the authoritative full-coverage gate.
 
@@ -447,94 +489,99 @@ For release builds, change the path to `build/release/semantic_views.duckdb_exte
 
 ## Updating the DuckDB Version Pin
 
-The DuckDB version is pinned in a single source of truth: **`.duckdb-version`** (repo root). All other locations are derived from it.
+Since DuckDB 2.0 two DuckDB versions are pinned, and they differ:
+
+- **The engine** — **`.duckdb-version`** (repo root), the DuckDB release the extension
+  runs in. The C++ shim is compiled and linked against it, and the extension refuses to
+  load in any other release. **`.duckdb-pypi-version`** names its `duckdb` PyPI release
+  while the pin is a pre-release (`2.0.0.dev2610151406` for `v2.0.0-alpha47600`); for a
+  release, delete the file and the version without its `v` is used.
+- **The C API** — **`.duckdb-capi-version`**, the C API the binary is built against and
+  declares to the loader: v1.5.6, which DuckDB 2.0 still loads as a `C_STRUCT` extension
+  (see `UNSTABLE_C_API_FLAG` in the Makefile). It moves only by a deliberate decision, not
+  with engine bumps, and the `duckdb` / `libduckdb-sys` crates follow it (no duckdb-rs
+  release targets 2.0).
 
 | File | How It Gets the Version |
 |------|------------------------|
-| `.duckdb-version` | **Source** — single `vX.Y.Z` line |
-| `Makefile` | Reads `.duckdb-version` via `$(shell cat .duckdb-version)`. `DUCKDB_TEST_VERSION` (the runner's `duckdb` pip package) is pinned from it **only** when `DUCKDB_GIT_VERSION` is empty or names that same release — a harness building against another engine ships its own runner package under its own versioning |
-| `cpp/include/duckdb.{hpp,cpp}` | Installed by `scripts/ensure_amalgamation.py` — generated from the engine tree in `./duckdb` when a harness supplied one, else downloaded from the release for `.duckdb-version`; verified against it either way |
-| `Cargo.toml` | `duckdb` and `libduckdb-sys` `"=X.Y.Z"` — updated by monitor workflow |
-| `src/lib.rs` | `MINIMUM_DUCKDB_VERSION` — the version declared to DuckDB at extension init; updated by monitor workflow |
-| `test/**/*.py`, `configure/*.py` | PEP 723 `"duckdb==X.Y.Z"` — updated by monitor workflow. One deliberate exception: `test_load_version_guard.py` needs a host *other* than `.duckdb-version`, so it has no header pin; its host comes from `uv run --with duckdb==…` in the `test-load-version-guard` recipe, which neither the monitor nor the pin test touches. Point it at a release other than the new one on each bump. |
-| `.github/workflows/BuildAll.yml` | `uses:` tag, `duckdb_version`, `ci_tools_version` — updated by monitor workflow |
-| `.github/workflows/BuildQuick.yml` | `uses:` tag, `duckdb_version`, `ci_tools_version` — updated by monitor workflow |
-| `extension-ci-tools` submodule | Checked out to the `vX.Y.Z` branch of `duckdb/extension-ci-tools` — updated by monitor workflow. Supplies the makefiles local `make` uses; CI's platform builds fetch `ci_tools_version` independently, so drift here shows up as a local-vs-CI build difference rather than a red check. |
+| `.duckdb-version` | **Engine source** — single `vX.Y.Z[-alphaN]` line |
+| `.duckdb-pypi-version` | **Engine's PyPI release**, only while the engine is a pre-release |
+| `.duckdb-capi-version` | **C API source** — single `vX.Y.Z` line |
+| `Makefile` | `TARGET_DUCKDB_VERSION` (extension-ci-tools' name: the metadata stamp and `DUCKDB_EXTENSION_MIN_DUCKDB_VERSION`) from `.duckdb-capi-version`; `ENGINE_DUCKDB_VERSION` / `ENGINE_PYPI_VERSION` from the engine pins. `DUCKDB_TEST_VERSION` (the runner's `duckdb` pip package) is pinned to the engine's PyPI release **only** when the harness's engine is that release (`DUCKDB_TAG`, else `DUCKDB_GIT_VERSION`, empty or naming it) — a harness building against another engine ships its own runner package under its own versioning |
+| `cpp/engine.manifest` | Written by `scripts/ensure_engine.py` — the engine tree in `./duckdb` when a harness supplied one, else the release in `.duckdb-version` built from its PyPI sdist and verified against the pin |
+| `Cargo.toml` | `duckdb` and `libduckdb-sys` `"=1.1XY0Z.0"` — the **C API** version, by hand |
+| `src/lib.rs` | `MINIMUM_DUCKDB_VERSION` — the C API version declared to DuckDB at extension init, by hand |
+| `test/**/*.py`, `examples/*.py`, `configure/*.py` | PEP 723 `"duckdb==…"` — the engine's PyPI release; updated by monitor workflow. One deliberate exception: `test_load_version_guard.py` needs a host *other* than `.duckdb-version`, so it has no header pin; its host comes from `uv run --with duckdb==…` in the `test-load-version-guard` recipe (1.5.6), which neither the monitor nor the pin test touches. Keep it on a release other than the new one on each bump. |
+| `.github/workflows/BuildAll.yml` | `duckdb_version` (the engine's release tag, or its commit plus `duckdb_tag: <release>` while it is an untagged pre-release) and the `currently …` comment — updated by monitor workflow. The `uses:` ref and `ci_tools_version` name the extension-ci-tools branch for the release line (`v2.0-cyanoptera`), by hand |
+| `.github/workflows/BuildQuick.yml` | Same as `BuildAll.yml` |
+| `extension-ci-tools` submodule | Checked out to the extension-ci-tools branch the workflows name, by hand. Supplies the makefiles local `make` uses; CI's platform builds fetch `ci_tools_version` independently, so drift here shows up as a local-vs-CI build difference rather than a red check. |
 
 Every row above **except the submodule** is machine-guarded against drift by two unit tests in `src/lib.rs`:
-`tests::duckdb_version_pins_agree` (`.duckdb-version` ↔ `MINIMUM_DUCKDB_VERSION` ↔ the
-`libduckdb-sys` pin) and `tests::duckdb_derived_pins_agree` (the PEP 723 headers and the
-two build workflows). Miss a location and `cargo test` fails. The two *conditional* rows —
-which runner gets pinned, and which engine the amalgamation comes from — are guarded by
-`tests/build_config.rs`, which drives the real `Makefile` and the real script in throwaway
-directories.
+`tests::duckdb_version_pins_agree` (`.duckdb-capi-version` ↔ `MINIMUM_DUCKDB_VERSION` ↔ the
+`libduckdb-sys` pin) and `tests::duckdb_derived_pins_agree` (the PEP 723 headers against
+the engine's PyPI release, and in the two build workflows the engine label against
+`.duckdb-version` and the extension-ci-tools refs against each other). Miss a location
+and `cargo test` fails. The *conditional* rows — which runner gets pinned, and which
+engine gets built — are guarded by `tests/build_config.rs`, which drives the real
+`Makefile` and the real script in throwaway directories.
 
-The submodule cannot be guarded that way — the correct commit is a *remote* branch tip, so
-no offline test can know it. It is guarded instead by the monitor's submodule step failing
-hard when the branch does not resolve. If you move that step, keep it fatal: the version it
-replaced logged `WARNING: ... not found, keeping current` and exited 0, which left the
-submodule on the v1.5.0 tip across the v1.5.2, v1.5.3 and v1.5.4 bumps without anything
-going red.
+The submodule cannot be guarded that way — the correct commit is a *remote* branch tip,
+so no offline test can know it. Move it together with the workflows' extension-ci-tools
+ref. (Before 2.0 the monitor moved it, and its step had to fail hard when the branch did
+not resolve: a version that logged a warning and exited 0 left the submodule on the
+v1.5.0 tip across three bumps without anything going red.)
 
 ### Steps to Update Manually
 
-Replace `X.Y.Z` below with the target DuckDB version (e.g., `1.5.1`). The duckdb-rs crate version encodes the DuckDB version as `1.1XY0Z.0` (e.g., DuckDB 1.5.1 = crate 1.10501.0).
+**An engine bump** (a new 2.x release):
 
-1. Update `.duckdb-version`:
-   ```
-   vX.Y.Z
-   ```
+1. Update `.duckdb-version` to `vX.Y.Z`, and delete `.duckdb-pypi-version` (or, for a
+   pre-release, set it to the wheel's version).
 
-2. Update `Cargo.toml` (using the encoded crate version):
-   ```toml
-   duckdb = { version = "=1.1XY0Z.0", default-features = false }
-   libduckdb-sys = "=1.1XY0Z.0"
-   ```
-   Then run `cargo deny check advisories`. If the new `libduckdb-sys` no longer pulls
-   in `zip 6`, it fails on the three zip ignores in `deny.toml`
-   (`unused-ignored-advisory = "deny"`): delete them and the `zip` entry in
-   `[bans] deny`, and close TECH-DEBT #104.
-
-3. Update `MINIMUM_DUCKDB_VERSION` in `src/lib.rs` (the version handed to
-   `duckdb_rs_extension_api_init` at load time):
-   ```rust
-   pub const MINIMUM_DUCKDB_VERSION: &str = "vX.Y.Z";
-   ```
-
-4. Update Python PEP 723 headers (all `# dependencies = ["duckdb==..."]` lines):
+2. Update the Python PEP 723 headers (all `# dependencies = ["duckdb==..."]` lines):
    ```bash
-   find . -name '*.py' -exec grep -l 'duckdb==' {} \; | xargs sed -i '' 's/duckdb==[0-9][0-9.]*/duckdb==X.Y.Z/g'
+   find . -name '*.py' -not -path './extension-ci-tools/*' -not -path './.engine/*' -exec grep -l 'duckdb==' {} \; \
+     | xargs sed -i '' 's/duckdb==[0-9][0-9a-z.]*/duckdb==X.Y.Z/g'
    ```
    The leading `[0-9]` matters. A looser pattern (`[^"]*`, or `[0-9.]*`, both of which
-   also match the empty string) rewrites `duckdb==` occurrences that are not pins —
-   notably the f-string `f"no sdist published for duckdb=={pyver} on PyPI"` in
-   `scripts/fetch_amalgamation_offline.py`.
+   also match the empty string) rewrites `duckdb==` occurrences that are not pins, such
+   as an f-string `f"...duckdb=={pyver}..."`.
 
-5. Update both CI workflow files (`BuildAll.yml` and `BuildQuick.yml`) — the `uses:` tag, `duckdb_version`, and `ci_tools_version`:
+3. Update both CI workflow files (`BuildAll.yml` and `BuildQuick.yml`): `duckdb_version`
+   becomes the release tag, the `duckdb_tag` line goes (it is only for an untagged
+   pre-release), and the `currently …` comment follows. If the release starts a new
+   release line, also move the `uses:` ref, `ci_tools_version` and the submodule to that
+   line's extension-ci-tools branch:
    ```yaml
-   uses: duckdb/extension-ci-tools/.github/workflows/_extension_distribution.yml@vX.Y.Z
+   uses: duckdb/extension-ci-tools/.github/workflows/_extension_distribution.yml@v2.0-cyanoptera
    ...
      duckdb_version: vX.Y.Z
-     ci_tools_version: vX.Y.Z
+     ci_tools_version: v2.0-cyanoptera
    ```
-
-6. Move the `extension-ci-tools` submodule to the matching branch. The explicit
-   refspec is required — the submodule clone is usually shallow, and `--depth`
-   implies `--single-branch`, so a bare `git fetch origin` will not create
-   `origin/vX.Y.Z`:
    ```bash
-   git -C extension-ci-tools fetch --depth=1 origin "+refs/heads/vX.Y.Z:refs/remotes/origin/vX.Y.Z"
-   git -C extension-ci-tools checkout --detach refs/remotes/origin/vX.Y.Z
+   git -C extension-ci-tools fetch --depth=1 origin "+refs/heads/<branch>:refs/remotes/origin/<branch>"
+   git -C extension-ci-tools checkout --detach refs/remotes/origin/<branch>
    ```
+   The explicit refspec is required — the submodule clone is usually shallow, and
+   `--depth` implies `--single-branch`, so a bare `git fetch origin` will not create the
+   branch.
 
-7. Download the new amalgamation, build, and run all tests:
+4. Build (this builds the new engine first) and run all tests:
    ```bash
-   just update-headers && just build && just test-all
+   just build && just test-all
    ```
 
-8. Commit all files together.
+5. Commit all files together.
 
-The `DuckDBVersionMonitor` workflow automates all of this: it checks for new DuckDB releases weekly, updates `.duckdb-version` and all derived locations (including CI workflow files), then opens a PR. If the build passes, the PR bumps the version. If it fails, the PR tags `@copilot` to attempt an automated fix.
+**A C API bump** is a separate decision (it changes which DuckDB releases accept the
+binary at all): update `.duckdb-capi-version`, `MINIMUM_DUCKDB_VERSION` in `src/lib.rs`,
+and the `duckdb` / `libduckdb-sys` pins in `Cargo.toml` (the crate version encodes the
+DuckDB version as `1.1XY0Z.0`, e.g. DuckDB 1.5.6 = crate 1.10506.0), then build and test. Then run
+`cargo deny check advisories`. If the new `libduckdb-sys` no longer pulls in `zip 6`, it
+fails on the three zip ignores in `deny.toml` (`unused-ignored-advisory = "deny"`): delete
+them and the `zip` entry in `[bans] deny`, and close TECH-DEBT #104.
+
+The `DuckDBVersionMonitor` workflow automates the engine bump: it checks weekly for a DuckDB release newer than `.duckdb-version`, updates the engine pins and their derived locations (steps 1–3, minus a new release line's extension-ci-tools move), then opens a PR. If the build passes, the PR bumps the version. If it fails, the PR tags `@copilot` to attempt an automated fix.
 
 ### Version Monitor PAT
 
@@ -934,19 +981,19 @@ semantic_views was built for DuckDB v1.5.6 and cannot run in DuckDB v2.0.0, beca
 Error: Catalog Error: Failed to load extension: Symbol not found
 ```
 
-**Why:** The extension was built against a different DuckDB version than the one loading it. Our C++ shim depends on DuckDB internals, which change between releases, so the extension binary must match exactly. The extension declares the `C_STRUCT` ABI pinned to the v1.5.6 C API, so DuckDB itself accepts it in any newer host; the first message is our own load-time check (`src/load_guard.rs`) refusing it instead.
+**Why:** The extension was built against a different DuckDB version than the one loading it. Our C++ shim depends on DuckDB internals, which change between releases, so the extension binary must match exactly. The extension declares the `C_STRUCT` ABI pinned to the v1.5.6 C API, so DuckDB itself accepts it in any host from 1.5.6 on; the first message is our own load-time check (`src/load_guard.rs`) refusing it instead.
 
-**Fix:** Ensure the DuckDB Python package version matches the pin in `Cargo.toml`:
+**Fix:** Ensure the DuckDB Python package is the engine release the extension was built for (`.duckdb-version`, whose PyPI release is `.duckdb-pypi-version` while it is a pre-release):
 
 ```bash
 pip show duckdb           # check installed version
-grep 'duckdb.*version' Cargo.toml  # check pinned version
+cat .duckdb-version .duckdb-pypi-version 2>/dev/null  # check the engine pin
 ```
 
 If they differ, either update the pin (see [Updating the DuckDB Version Pin](#updating-the-duckdb-version-pin)) or install the matching Python DuckDB version:
 
 ```bash
-pip install "duckdb==$(sed 's/^v//' .duckdb-version)"
+pip install "duckdb==$(cat .duckdb-pypi-version 2>/dev/null || sed 's/^v//' .duckdb-version)"
 ```
 
 ### `cargo test` passes but `just test-sql` fails
@@ -1007,14 +1054,14 @@ Do **not** set a directory-level nightly override (`rustup override set nightly`
 
 | Workflow | Trigger | What It Does |
 |----------|---------|--------------|
-| **BuildQuick** | Pull requests (skips doc-only changes) | Fast feedback: extension **build** on Linux x86_64 only, via the DuckDB extension-ci-tools reusable workflow. No `push` trigger (runs on PRs + manual dispatch) — `main` gets the full platform matrix from BuildAll. It invokes `make test_release`, but that runs **no tests** here: `linux_amd64` is on upstream's `SKIP_TESTS` list (see the note below), so this workflow is build-only. |
+| **BuildQuick** | Pull requests (skips doc-only changes) | Fast feedback: extension **build** on Linux x86_64 only, via the DuckDB extension-ci-tools reusable workflow. No `push` trigger (runs on PRs + manual dispatch) — `main` gets the full platform matrix from BuildAll. It invokes `make test_release`, but that runs **no tests** here: `linux_amd64` is on upstream's `SKIP_TESTS` list (see the note below), so this workflow is build-only. Both build workflows call extension-ci-tools' `v2.0-cyanoptera` branch with the engine pinned in `.duckdb-version`; while that is an untagged pre-release they pass its commit as `duckdb_version` plus `duckdb_tag: <release>`, which the Makefile's `set_duckdb_tag` turns into a tag on the clone so the engine is built under its release label. |
 | **BuildAll** | Push to `main` (skips doc-only changes) | Full build across 5 platforms: Linux x86_64/arm64, macOS x86_64/arm64, Windows x86_64. Excludes WASM, musl, mingw variants. **Runs the full sqllogictest suite on `windows_amd64` and `osx_arm64`** (release build, ~30–55 s each). The other three do not test: `linux_amd64` and `linux_arm64` are skipped by upstream, and `osx_amd64` is cross-compiled on an arm64 runner so its binary cannot be executed. |
 | **CodeQuality** | Push to `main` + pull requests (skips doc-only changes) | `TEST_LIST` sync check; fuzz-target registration sync check (`.rs` files vs `fuzz/Cargo.toml` `[[bin]]` entries vs the `Fuzz.yml` matrix); `cargo fmt --check`; clippy (default **and** `--features extension`); doctests (default + the FFI `compile_fail` ABI guard); extension-feature unit tests; `cargo-deny` (license/advisory audit); 80%-line coverage floor via `cargo-llvm-cov`. Runs as **three parallel jobs** — `Lint & format`, `Doctests & extension unit tests`, `Coverage (80% minimum)` — so their three separate cold compiles of the bundled DuckDB amalgamation (clippy=check, doctests=build, coverage=instrumented) overlap on different runners instead of running serially (~32 min → ~12 min). |
-| **IntegrationChecks** | Push to `main` + pull requests (skips doc-only changes) | Four jobs. `Build debug extension` runs `make configure debug` **once** and uploads the binary; the DuckLake CI test and the **sqllogictest suite** (`just test-sql-prebuilt`) `needs:` it and download that artifact instead of rebuilding. The Python integration job builds its own, because every leaf recipe under `just test-integration` declares `build` as a dependency, so its recipe graph re-enters `make debug` regardless; that job also runs **every example** (`just test-examples`) and the sqllogictest-wrapper guards (`just test-sqllogictest-guards`) and the multi-statement DDL error check (`just test-multi-statement-error`), all via `test-integration`. This is the authoritative sqllogictest gate for pull requests. |
+| **IntegrationChecks** | Push to `main` + pull requests (skips doc-only changes) | Four jobs. `Build debug extension` runs `make configure debug` **once** and uploads the binary; the DuckLake CI test and the **sqllogictest suite** (`just test-sql-prebuilt`) `needs:` it and download that artifact instead of rebuilding. The Python integration job builds its own, because every leaf recipe under `just test-integration` declares `build` as a dependency, so its recipe graph re-enters `make debug` regardless; that job also runs **every example** (`just test-examples`) and the sqllogictest-wrapper guards (`just test-sqllogictest-guards`) and the multi-statement DDL error check (`just test-multi-statement-error`), all via `test-integration`. This is the authoritative sqllogictest gate for pull requests. Both building jobs cache `.engine/` (the DuckDB engine build, keyed on the engine pins and `scripts/ensure_engine.py`), so only a pin change pays for an engine build. |
 | **DocsCheck** | Pull requests | Sphinx docs build with `-W` (warnings as errors). Deliberately **not** path-filtered, so documentation/text-only changes are still validated when the heavier workflows skip. No `push` trigger (runs on PRs + manual dispatch) — `main` gets the build+deploy from Docs. |
 | **Docs** | Push to `main` | Same `-W` Sphinx build, then deploys the site to GitHub Pages. |
 | **Fuzz** | Push touching `src/**`, `fuzz/**`, or the Cargo manifests | Runs all nine fuzz targets for 10 minutes each. Detects crashes via artifact files (not exit codes), uploads them, opens a `bug`/`fuzzing` issue, and fails the job on any crash. A `changes` guard job re-checks the push's **net** diff and skips the matrix when the trigger fired only because of the push-range quirk below. |
-| **DuckDBVersionMonitor** | Weekly (Monday 09:00 UTC) + manual | Queries the DuckDB GitHub API for the latest / LTS release. If newer than the pin, updates all derived version locations, builds, and tests, then opens a version-bump PR on success or a breakage PR (tagging `@copilot`) on failure. |
+| **DuckDBVersionMonitor** | Weekly (Monday 09:00 UTC) + manual | Queries the DuckDB GitHub API for the latest / LTS release. If newer than the pin (a release counts as newer than a pre-release of the same version), updates the engine pin and its derived locations (never the C API pin), builds, and tests, then opens a version-bump PR on success or a breakage PR (tagging `@copilot`) on failure. |
 | **PublishExtension** | Manual (`workflow_dispatch`) only | Release automation for the Community Extension registry. Inputs: `version`, `dry_run`, and `registry_pr_only` (open the registry PR for the release already tagged on `main`). A preflight checks that the app token can push to the fork before anything is tagged. |
 
 Most workflows also accept a manual `workflow_dispatch` trigger for debugging.
@@ -1037,7 +1084,7 @@ Two consequences worth keeping in mind:
 1. **`BuildQuick` builds only `linux_amd64`, so it never tests.** Its `make test_release` step prints `Skipping tests..` and exits 0, which reads as a green build. Before #223 that meant **no** sqllogictest ran on pull requests at all — long enough for an incorrect assertion to reach `main` in #217 (an `IDENT-6` case asserting a quoted name is reported unquoted, corrected in #219). The `sqllogictest` job in `IntegrationChecks` is the authoritative PR gate; do **not** "simplify" it away on the assumption that BuildQuick covers it.
 2. **Cross-platform sqllogictest is real, but only on `main`,** via BuildAll's Windows and macOS-arm64 legs. A PR therefore gets Linux-only SQL coverage by design (the suite carries no platform-conditional directives — every file is a plain `require semantic_views`), and platform-specific breakage surfaces on the `main` push instead.
 
-You can tell the two apart in a job log without reading it all: a real run prints `Running RELEASE tests..`, then one `[n/N] test/sql/….test` line per file, then `sqllogictest: N file(s) ran, M statements/queries executed` (from `scripts/run_sqllogictest.py`, which fails the run rather than print it if any listed file skipped `require semantic_views`, never ran, or executed nothing) and `N test files passed (single process)`; a skipped one prints `Skipping tests..` and nothing else. The `ignoring old recipe for target 'test_extension_*_internal'` warnings are **not** a symptom of skipping — they appear in runs that do execute the suite, and simply record this project's Makefile overriding upstream's recipe.
+You can tell the two apart in a job log without reading it all: a real run prints `Running RELEASE tests..`, then one `[n/N] test/sql/….test` line per file, then `sqllogictest: N file(s) ran, M statements/queries executed` (from `scripts/run_sqllogictest.py`, which fails the run rather than print it if any listed file skipped `require semantic_views`, never ran, or executed nothing) and `N test files passed (single process)`; a skipped one prints `Skipping tests..` and nothing else. On Windows, a runner that dies of an access violation is run a second time under `cdb` (`scripts/windows_crash_report.py`, which the Makefile puts in front of `TEST_RUNNER` there): the log then holds the registers, native stack and loaded modules between `===== SV CRASH REPORT =====` markers, and the job still fails with the first run's status. The `ignoring old recipe for target 'test_extension_*_internal'` warnings are **not** a symptom of skipping — they appear in runs that do execute the suite, and simply record this project's Makefile overriding upstream's recipe.
 
 **Documentation-only skip.** `BuildAll`, `BuildQuick`, `CodeQuality`, and `IntegrationChecks` carry a shared `paths-ignore` (`**/*.md`, `_notes/**`, `docs/**`, `LICENSE`), so a change that touches only documentation/text does not run the extension build, sqllogictest, Rust lint/coverage, or the integration suites. `Fuzz` achieves the same via its `paths` allowlist. `DocsCheck` is intentionally exempt so prose changes still get the `-W` docs build. A change that also touches any non-doc file runs everything as normal. When editing these triggers, keep the four `paths-ignore` lists in sync.
 

@@ -11,7 +11,7 @@ Transactional DDL and Known Limitations
 
 ``CREATE``, ``DROP``, and ``ALTER SEMANTIC VIEW`` are fully transactional: they participate in your surrounding ``BEGIN`` / ``COMMIT`` / ``ROLLBACK`` block the way ordinary DuckDB DDL does. ADBC, dbt-duckdb, and any other transaction-aware client see the same semantics.
 
-This page covers the everyday behavior first, then a short list of edge cases. Most of them surface only in unusual situations -- several connections issuing DDL against the same database at the same time, or scripts that explicitly toggle DuckDB's experimental PEG parser.
+This page covers the everyday behavior first, then a short list of edge cases. Most of them surface only in unusual situations -- several connections issuing DDL against the same database at the same time, or scripts that change the parser setting the extension relies on.
 
 For the common workload -- open a database, run DDL at start-up, then query -- the next two sections cover everything that applies.
 
@@ -267,24 +267,31 @@ Strings of ordinary SQL statements are unaffected.
 
 .. _explanation-txn-ddl-peg:
 
-DuckDB's Experimental PEG Parser
-=================================
+The Parser Override Setting
+===========================
 
-DuckDB ships an experimental alternative grammar called the "PEG parser" alongside its default parser. The extension supports both, so semantic-view DDL works either way.
+.. versionchanged:: 0.15.0
 
-One interaction needs care. If you turn the PEG parser **off** mid-session with ``CALL disable_peg_parser()``, that call also resets a related setting that the extension depends on. Subsequent semantic-view DDL on the same connection will then fail with:
+   DuckDB 2.0 parses every statement with its PEG parser and no longer has
+   ``enable_peg_parser()`` or ``disable_peg_parser()``. On DuckDB 1.5, calling
+   ``disable_peg_parser()`` reset the setting described below as a side effect.
+   That can no longer happen.
+
+``CREATE SEMANTIC VIEW`` and the other semantic-view statements are not part of DuckDB's own grammar. The extension handles them through DuckDB's parser-override hook, which DuckDB consults only while the ``allow_parser_override_extension`` setting is ``'FALLBACK'``. The extension sets it to ``'FALLBACK'`` when it loads and leaves it in place.
+
+If a session sets ``allow_parser_override_extension`` back to ``'DEFAULT'``, semantic-view DDL on that connection stops working and fails with:
 
 .. code-block:: text
 
    Parser Error: semantic_views: parser_override is not active for this connection (allow_parser_override_extension is 'DEFAULT' or 'STRICT'). Re-enable with: SET allow_parser_override_extension='FALLBACK';
 
-After disabling the PEG parser, restore the setting with one statement:
+Restore the setting with one statement:
 
 .. code-block:: sql
 
    SET allow_parser_override_extension = 'FALLBACK';
 
-Sessions that never call ``disable_peg_parser`` are unaffected: the extension installs the setting at load time and leaves it in place. (Semantic-view DDL inside a multi-statement query string fails with a different message; see :ref:`explanation-txn-ddl-one-statement`.)
+Sessions that never change the setting are unaffected. (Semantic-view DDL inside a multi-statement query string fails with a different message; see :ref:`explanation-txn-ddl-one-statement`.)
 
 
 .. _explanation-txn-ddl-summary:
@@ -302,7 +309,7 @@ The other items on this page only matter in specific situations:
 - Concurrent ``CREATE IF NOT EXISTS`` from two connections can produce a constraint or commit-conflict error on one of them; catch it and treat as success.
 - Semantic views are single-catalog: run their DDL from the database you loaded the extension into, not from a ``USE``-d attached database.
 - Send semantic-view DDL one statement per call, not inside a multi-statement string.
-- Toggling ``disable_peg_parser`` requires re-setting one parser option afterwards.
+- Setting ``allow_parser_override_extension`` back to ``'DEFAULT'`` turns semantic-view DDL off until you set it to ``'FALLBACK'`` again.
 
 See also:
 

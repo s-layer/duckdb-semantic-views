@@ -2,55 +2,44 @@
 
 **Source root:** src/
 **Language:** rust
-**Generated:** 2026-09-30, against `main` @ `67af10f` (v0.13.0)
-**Total exported symbols:** 165 Rust `pub` items (scan-exports.sh) + 19 registered SQL functions
-**Documented symbols:** 18 of 19 SQL functions (all user-facing ones); 0 of 165 Rust items
-**Undocumented symbols:** 1 SQL function (internal); 165 Rust items (internal: see Notes)
+**Generated:** 2026-10-16, worktree on `59589d4` (v0.15.0 release candidate, DuckDB 2.0 build) against `origin/main`
+**Total exported symbols:** Rust `pub` items (internal; see previous report) + 18 registered SQL functions
+**Undocumented symbols:** 0 user-facing (the internal `__sv_compute_create_from_yaml` remains correctly undocumented)
+**Potentially stale pages:** 7 (scoped to this release's changes; see below)
 
-## Why the audit counts two surfaces
+## Undocumented Symbols
 
-`scan-exports.sh` finds Rust `pub` items (`KeywordBody`, `CiName`, `QueryRequest`,
-`FanTrapError`, `expand()` and so on). This project ships a DuckDB **extension**, not a Rust
-crate. Users never link against these items; they are `pub` only for crate-internal module
-boundaries, tests and fuzz targets. Leaving all 165 out of user docs is correct and none is
-listed as a gap.
+None new. The registered SQL functions were listed from `duckdb_functions()` after `LOAD`ing
+the v2.0.0-alpha47600 build into the matching DuckDB 2.0 Python package: the same 18 functions
+as v0.14.0 (17 documented, 1 internal). No DDL statement or `semantic_view()` parameter was added.
 
-What users *do* use is the SQL surface. The registered functions were taken from
-`duckdb_functions()` by diffing it before and after `LOAD`ing `build/debug/semantic_views.duckdb_extension`
-on DuckDB 1.5.6. The DDL statements were checked against the `reference/` pages.
+The release changes behaviour, not surface:
 
-## Undocumented Exports
+- built for, and loadable only in, DuckDB 2.0 (DuckDB 1.5 users stay on v0.14.0)
+- `SET max_execution_time` now stops `semantic_view()` and the SHOW / DESCRIBE commands that
+  probe member types (`INTERRUPT Error: Query exceeded maximum execution time`)
+- unterminated / zero-length quoted identifiers in semantic-view DDL are rejected by DuckDB 2.0's
+  tokenizer (`unterminated quoted identifier`, `zero-length delimited identifier`)
+- the load-time version check's message: `semantic_views was built for DuckDB X and cannot run in DuckDB Y ...`
 
-| Symbol | File | Type |
-|--------|------|------|
-| `__sv_compute_create_from_yaml(file_path, view_name, comment, search_path)` | src/ (DDL rewrite target) | table function — **internal**, `__sv_` prefix; the rewrite target for `CREATE SEMANTIC VIEW … FROM YAML FILE`. Correctly undocumented. |
+Side effects of the DuckDB 2.0 move that the docs also describe:
 
-## SQL surface coverage
+- `enable_peg_parser()` / `disable_peg_parser()` no longer exist (2.0's parser is the PEG parser)
+- `duckdb_functions()` now has an `extension_name` column, but it is NULL for this extension's functions
+- arrow lambdas (`x -> ...`) are deprecated in favour of `lambda x: ...` (no doc page uses one)
 
-| Function | Documented as | Pages | Notes |
-|----------|---------------|------:|-------|
-| `semantic_view(view_name, dimensions, metrics, facts, where_clause)` | itself | 30 | All named parameters documented |
-| `explain_semantic_view(…)` | itself | 15 | All named parameters documented |
-| `get_ddl(object_type, object_name[, use_fully_qualified_names])` | `GET_DDL(...)` | 14 | **Name mismatch:** `reference/get-ddl.rst` calls the 2nd parameter `<name>`; `duckdb_functions()` reports `object_name` (as of #236) |
-| `read_yaml_from_semantic_view(view_name)` | itself | 9 | ok |
-| `list_semantic_views` / `list_terse_semantic_views` | `SHOW [TERSE] SEMANTIC VIEWS` | 9 / 2 | `list_semantic_views()` still named as a `FROM` source (intended) |
-| `describe_semantic_view` | `DESCRIBE SEMANTIC VIEW` | 14 | Statement-first by design (#235) |
-| `show_columns_in_semantic_view` | `SHOW COLUMNS IN SEMANTIC VIEW` | 4 | ok |
-| `show_semantic_{dimensions,metrics,facts,materializations}[_all]` | `SHOW SEMANTIC …` | 2–9 | ok |
-| `show_semantic_dimensions_for_metric` | `SHOW SEMANTIC DIMENSIONS … FOR METRIC` | 6 | ok |
+## Potentially Stale Pages
 
-The `search_path` parameter on every table function is reserved for the extension (the
-parser rewrite supplies it), and the function descriptions say so. It is correctly left out of
-user docs; `search_path` appears only as the DuckDB session setting.
+The timestamp heuristic flags every page (src/ changed after all of them). Narrowed to pages whose
+content touches the release's changes, by grepping docs/ and README.md for DuckDB versions,
+the PEG parser, quoted-identifier errors, loading, and time limits:
 
-## Notes
+- `docs/tutorials/getting-started.rst` (install step states no DuckDB version requirement)
+- `docs/reference/functions.rst` ("In DuckDB 1.5, duckdb_functions() has no column ...")
+- `docs/explanation/transactional-ddl-and-limitations.rst` (PEG-parser section built on `disable_peg_parser()`)
+- `docs/explanation/index.rst` (abstract mentions "the PEG parser" caveat)
+- `docs/reference/error-messages.rst` (no load-version or time-limit entries; quoted-identifier errors now DuckDB's)
+- `docs/reference/semantic-view-function.rst` (no mention of query time limits)
+- `README.md` (quick start states no DuckDB version; Building omits CMake)
 
-- **v0.13.0's headline feature is barely documented.** "Every function the extension
-  registers is documented in `duckdb_functions()`" is in the CHANGELOG, and
-  `examples/function_discovery.py` demos it. But the only doc page that mentions
-  `duckdb_functions()` is `changelog.md`. No how-to or reference page shows how a tool or agent
-  discovers the functions, their parameter names and their examples over a SQL connection.
-- **The `get_ddl` parameter-name drift** is minor, but it's the kind #236 set out to fix:
-  someone reading `duckdb_functions()` sees `object_name`, while the docs say `<name>`.
-- The DDL reference covers all verbs: `CREATE` (incl. `FROM YAML`), `ALTER`, `DROP`, `DESCRIBE`,
-  `SHOW` × 7 variants, `GET_DDL`, and `READ_YAML_FROM_SEMANTIC_VIEW`.
+No other page states a DuckDB 1.x version, pins `duckdb==1.5…`, or contains a version matrix.

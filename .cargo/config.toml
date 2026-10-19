@@ -1,0 +1,7 @@
+# DuckDB's CMake builds its engine against the static MSVC runtime (/MT, a
+# plain `set(CMAKE_MSVC_RUNTIME_LIBRARY ...)` that no -D can override), and the
+# extension links that engine. Linking the static CRT here too makes the Rust
+# code and the `cc`-compiled shim (which follows this target feature) agree
+# with it; otherwise the link mixes /MT and /MD objects (LNK2038).
+[target.'cfg(all(windows, target_env = "msvc"))']
+rustflags = ["-C", "target-feature=+crt-static"]

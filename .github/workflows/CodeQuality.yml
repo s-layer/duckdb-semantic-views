@@ -93,9 +93,9 @@ jobs:
 
       # Also lint the `extension`-gated FFI layer, which the default-feature
       # clippy above never compiles. SV_SKIP_CPP_BUILD makes build.rs skip the
-      # ~25 MB DuckDB amalgamation + C++ shim compile: clippy only type-checks
+      # C++ shim compile and the DuckDB engine link: clippy only type-checks
       # (never links the cdylib), so the C++ half is irrelevant here and the
-      # step needs no amalgamation download.
+      # step needs no engine build.
       - name: Clippy (extension feature, deny warnings)
         run: SV_SKIP_CPP_BUILD=1 cargo clippy --no-default-features --features extension -- -D warnings
 
