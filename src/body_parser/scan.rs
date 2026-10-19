@@ -228,49 +228,40 @@ pub(crate) fn identifier_slot_error(slot: &str) -> Option<String> {
 /// whitespace (which the parser trims away); no depth-0 comma (which would
 /// split it into multiple columns); and balanced quotes and brackets that
 /// never dip negative (so it neither leaks an open quote/paren into the list
-/// nor closes the enclosing `(...)` early). Both the `(`/`)`-only balance
-/// `take_parens` tracks and the `()[]{}` balance `split_at_depth0_commas`
-/// tracks are enforced. Idempotent on already-`quote_ident`ed input: a
-/// well-formed `"..."` token has no depth-0 comma and balanced quotes, so it
-/// returns `true` and is left as-is (never re-quoted).
+/// nor closes the enclosing `(...)` early), each closer of the same kind as
+/// the opener it closes, which the clause scan requires. Idempotent on
+/// already-`quote_ident`ed input: a well-formed `"..."` token has no depth-0
+/// comma and balanced quotes, so it returns `true` and is left as-is (never
+/// re-quoted).
 pub(crate) fn column_roundtrips_verbatim(s: &str) -> bool {
     if s.is_empty() || s.trim() != s {
         return false;
     }
     let bytes = s.as_bytes();
     let mut st = QuoteState::default();
-    let mut paren_depth: i32 = 0; // '(' / ')' only — matches take_parens
-    let mut bracket_depth: i32 = 0; // ()[]{} — matches split_at_depth0_commas
+    // Open brackets, innermost last. Each closer must close the opener of its
+    // own kind, as the clause scan requires (`Cursor::bracket_mismatch`), so
+    // `take_parens`' `(`/`)` count and `split_at_depth0_commas`' all-kinds
+    // count agree on it.
+    let mut open: Vec<u8> = Vec::new();
     let mut i = 0;
     while i < bytes.len() {
         let (next, live) = st.step(bytes, i);
         if live {
             match bytes[i] {
-                b'(' => {
-                    paren_depth += 1;
-                    bracket_depth += 1;
-                }
-                b')' => {
-                    paren_depth -= 1;
-                    bracket_depth -= 1;
-                    if paren_depth < 0 || bracket_depth < 0 {
+                b @ (b'(' | b'[' | b'{') => open.push(b),
+                b @ (b')' | b']' | b'}') => {
+                    if open.pop().map(super::cursor::closer_of) != Some(b) {
                         return false;
                     }
                 }
-                b'[' | b'{' => bracket_depth += 1,
-                b']' | b'}' => {
-                    bracket_depth -= 1;
-                    if bracket_depth < 0 {
-                        return false;
-                    }
-                }
-                b',' if bracket_depth == 0 => return false,
+                b',' if open.is_empty() => return false,
                 _ => {}
             }
         }
         i = next;
     }
-    paren_depth == 0 && bracket_depth == 0 && !st.in_string && !st.in_ident && !st.in_dollar()
+    open.is_empty() && !st.in_string && !st.in_ident && !st.in_dollar()
 }
 
 /// True when `s`, emitted verbatim in a single-identifier slot (a table alias,

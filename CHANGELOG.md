@@ -28,6 +28,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   extension sees the statement. The errors read `unterminated quoted identifier` and
   `zero-length delimited identifier` instead of the extension's own wording.
 
+### Fixed
+
+- **Brackets in semantic-view DDL must pair up by kind.** `CREATE SEMANTIC VIEW` now refuses
+  a clause where a closing bracket doesn't match the one it closes (a `]` or `}` closing a
+  `(`), or where one is never opened or never closed, with an error that names the bracket
+  and the clause. Such a body used to be accepted, and could be split into members
+  differently from how it was written, so `GET_DDL` rendered back a different view.
+  `CREATE SEMANTIC VIEW ... FROM YAML` refuses a member expression with such brackets for
+  the same reason, and `GET_DDL` quotes a column name that has them.
+
 ### Known limitations
 
 - **ADBC needs `import duckdb` first.** With the DuckDB 2.0 Python wheel, a connection from
