@@ -1587,6 +1587,29 @@ mod tests {
             ],
             ..Default::default()
         };
+        // The first parse is refused for the mismatch itself, so the fixpoint
+        // below returns at its stage-0 escape for this reason and no other.
+        let rendered = render_create_ddl("fuzz_view", &def).unwrap();
+        let body = body_of(&rendered).expect("rendered DDL has an AS body");
+        let err = crate::body_parser::parse_keyword_body(body, 0).unwrap_err();
+        assert!(err.message.starts_with("Mismatched "), "{}", err.message);
+        assert_render_fixpoint(&def);
+    }
+
+    #[test]
+    fn test_render_quotes_a_pk_column_whose_brackets_do_not_nest_by_kind() {
+        // `([)]` balances by `(`/`)` and by all bracket kinds together, so the
+        // verbatim check let it out bare, and the parser now refuses it (#286).
+        let mut def = minimal_def();
+        def.tables[0].pk_columns = vec!["([)]".to_string()];
+        let rendered = render_create_ddl("v", &def).unwrap();
+        assert!(
+            rendered.contains("PRIMARY KEY (\"([)]\")"),
+            "the column must be quoted:\n{rendered}"
+        );
+        let body = body_of(&rendered).expect("rendered DDL has an AS body");
+        crate::body_parser::parse_keyword_body(body, 0)
+            .unwrap_or_else(|e| panic!("rendered DDL must re-parse: {}\n{rendered}", e.message));
         assert_render_fixpoint(&def);
     }
 
