@@ -49,6 +49,34 @@ fn key(name: &str, pin: &str, build_yml: &str, build_py: &str) -> Result<String,
     }
 }
 
+/// `registry_target.py key <pin> <build.yml> <build.py> <pin-commit>`: as
+/// [`key`], also passing the commit the pin's tag points at.
+fn key_with_commit(
+    name: &str,
+    pin: &str,
+    build_yml: &str,
+    build_py: &str,
+    pin_commit: &str,
+) -> Result<String, String> {
+    let dir = scratch(name);
+    let (yml, py) = (dir.join("build.yml"), dir.join("build.py"));
+    std::fs::write(&yml, build_yml).expect("write build.yml");
+    std::fs::write(&py, build_py).expect("write build.py");
+    let out = run(&[
+        "key",
+        pin,
+        yml.to_str().unwrap(),
+        py.to_str().unwrap(),
+        pin_commit,
+    ]);
+    let _ = std::fs::remove_dir_all(&dir);
+    if out.status.success() {
+        Ok(String::from_utf8_lossy(&out.stdout).trim().to_string())
+    } else {
+        Err(String::from_utf8_lossy(&out.stderr).to_string())
+    }
+}
+
 /// `registry_target.py set <description.yml> <key> <sha>`, returning the file.
 fn set(name: &str, descriptor: &str, key: &str, sha: &str) -> String {
     let dir = scratch(name);
@@ -177,6 +205,38 @@ fn a_pin_other_than_the_registry_defaults_label_is_refused_naming_it() {
         "{err}"
     );
     assert!(err.contains("v2.0.0-alpha46057"), "{err}");
+}
+
+/// DuckDB 2.0 GA may be the registry's default as a bare commit, with no
+/// `duckdb_tag` label to name it. A release pin whose tag points at that commit
+/// is the default build, so it goes in `ref` (v0.15.0 delta review, F1).
+#[test]
+fn a_pin_whose_tag_is_the_registry_default_commit_goes_in_ref() {
+    assert_eq!(
+        key_with_commit(
+            "pin-commit",
+            "v2.0.0",
+            BUILD_YML_SHA,
+            BUILD_PY,
+            "b15358c371daf10dad799a43b6167f6ccdce84d8",
+        )
+        .as_deref(),
+        Ok("ref")
+    );
+}
+
+/// A pin whose tag points at another commit is still refused, naming the pin.
+#[test]
+fn a_pin_whose_tag_is_another_commit_is_refused() {
+    let err = key_with_commit(
+        "pin-other-commit",
+        "v2.0.0",
+        BUILD_YML_SHA,
+        BUILD_PY,
+        "0123456789abcdef0123456789abcdef01234567",
+    )
+    .unwrap_err();
+    assert!(err.contains("does not build DuckDB v2.0.0"), "{err}");
 }
 
 /// The label alone settles nothing for the older lines: they still go in
