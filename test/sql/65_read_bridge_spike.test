@@ -27,12 +27,13 @@
 #       sorted by name (matching the v0.9.0 Rust VTab ordering).
 #   B4: The function is visible in duckdb_functions() with type
 #       table_function (confirms C++ Catalog API registration succeeded).
-#   B5: Bind opens a per-call Connection on every invocation -- two
-#       successive SELECTs return correct results (no stale state
-#       leaked from the first bind).
+#   B5: Each bind reads the catalog afresh -- two successive SELECTs
+#       return correct results (no stale state leaked from the first
+#       bind).
 #
-# Requirements covered: LIFE-01 (per-call Connection bind pattern for
-# read-side functions), LIFE-02 (Rust dispatcher reachable from C++
+# Requirements covered: LIFE-01 (no long-lived connection behind the
+# read-side functions; reads now run in the caller's context, TECH-DEBT
+# #19), LIFE-02 (Rust dispatcher reachable from C++
 # Catalog API bind callback).
 
 require semantic_views
@@ -89,7 +90,7 @@ WHERE name = 'bridge_v1';
 bridge_v1	SEMANTIC_VIEW
 
 # B5: two successive SELECTs return the same result -- no per-bind state
-# leakage. Each call opens its own per-call Connection so the second
+# leakage. Each call reads the catalog in its own bind, so the second
 # invocation must succeed independently of the first.
 query I
 SELECT count(*) FROM list_semantic_views();

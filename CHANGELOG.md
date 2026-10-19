@@ -132,7 +132,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   what is committed. Before, every read saw the last committed definitions, so a view
   created in an open transaction could not be queried or described until you committed.
   The member types `SHOW` and `DESCRIBE` report, and the plan `explain_semantic_view()`
-  shows, follow a source table changed in the transaction too.
+  shows, follow a source table changed in the transaction too. These reads scan the
+  catalog table directly, so it must be a DuckDB table: if the primary database comes
+  from a storage extension instead, reads report that `semantic_layer._definitions` is
+  not a DuckDB table.
 - **A semantic view over a temporary table can be queried** in the session that has the
   table. Each table in `TABLES` is the one CREATE found: a temporary table if that is what
   its name meant then, otherwise the table in the database and schema the view was created

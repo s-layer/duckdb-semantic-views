@@ -341,7 +341,8 @@ mod extension {
     // INVARIANT: every read-side function is registered through the C++ Catalog
     // API path (no duckdb-rs `register_*_with_extra_info` / `_with_state`
     // calls), and `init_extension` allocates no long-lived extension-owned
-    // `duckdb_connection` — reads run on per-call borrowed connections.
+    // `duckdb_connection` — reads run in the caller's own context and
+    // transaction (TECH-DEBT #19) and open no connection at all.
     // `tests/no_long_lived_conn.rs` is the structural guard that fails CI if a
     // future change re-introduces a long-lived connection here.
 

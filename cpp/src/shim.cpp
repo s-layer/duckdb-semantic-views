@@ -3023,8 +3023,8 @@ static unique_ptr<FunctionData> sv_explain_semantic_view_bind(
 // `sv_semantic_named_params`) plus an init_local state constructor, and
 // registers via `sv_register_table_function_core` (C-7) — the hand-rolled
 // TableFunction construction it used to duplicate now lives once, in the core.
-// Borrow contract is unchanged: the bind receives `ClientContext &` and opens
-// per-call Connections; no long-lived extension-owned connection. Failures
+// The bind receives `ClientContext &` and plans in it (`sv_caller_explain`,
+// TECH-DEBT #19); no connection is opened. Failures
 // surface through the forwarded `error_buf` (D-08/D-09).
 static bool sv_register_explain_semantic_view_impl(duckdb_database db_handle,
                                                    char *error_buf,
@@ -3454,9 +3454,12 @@ static unique_ptr<SelectStatement> sv_caller_parse_pinned(ClientContext &context
 extern "C" {
     // Payload: u8 present (whether the catalog table exists); the database
     // name; u32 row count; per row the nullable cells schema_name, name,
-    // definition.
-    uint8_t sv_caller_definitions(char **out_ptr, size_t *out_len) {
-        return sv_caller_run(out_ptr, out_len, [](ClientContext &context, string &out) {
+    // definition. With `only_name` set, only the rows whose name is
+    // `name` byte for byte, so a per-row lookup copies one view, not all.
+    uint8_t sv_caller_definitions(uint8_t only_name, const uint8_t *name_ptr, size_t name_len,
+                                  char **out_ptr, size_t *out_len) {
+        return sv_caller_run(out_ptr, out_len, [&](ClientContext &context, string &out) {
+            const string wanted(reinterpret_cast<const char *>(name_ptr), name_ptr ? name_len : 0);
             auto database = DatabaseManager::Get(context).GetDefaultDatabase();
             optional_ptr<CatalogEntry> entry;
             if (!database.empty()) {
@@ -3505,6 +3508,12 @@ extern "C" {
                     break;
                 }
                 for (idx_t row = 0; row < chunk.size(); ++row) {
+                    if (only_name) {
+                        auto name = chunk.GetValue(1, row);
+                        if (name.IsNull() || StringValue::Get(name) != wanted) {
+                            continue;
+                        }
+                    }
                     for (idx_t column = 0; column < chunk.ColumnCount(); ++column) {
                         sv_caller_put_value(rows, chunk.GetValue(column, row));
                     }

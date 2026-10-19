@@ -390,8 +390,8 @@ fn emit_native_create_sql(
 /// and emit a transactional INSERT that selects from the
 /// `__sv_compute_create_from_yaml(path, name, kind, comment)` helper TF
 /// (registered via the C++ Catalog API in `cpp/src/shim.cpp`). The helper's
-/// bind callback opens a per-call `Connection(*context.db)`, runs
-/// `read_text()` against the user-supplied path, calls into Rust to parse
+/// bind callback reads the user-supplied path through `DuckDB`'s `FileSystem`
+/// API (subject to `enable_external_access`), calls into Rust to parse
 /// and enrich the YAML, and returns a metadata-less JSON in a single row.
 /// The outer INSERT wraps that row with `json_merge_patch` to add the
 /// metadata fields (`created_on`, `database_name`, `schema_name`) on the
@@ -400,8 +400,7 @@ fn emit_native_create_sql(
 ///
 /// Phase 65 Plan 06: pure-SQL, no extension-owned catalog connection. The YAML
 /// read happens inside the `__sv_compute_create_from_yaml` helper TF's
-/// bind callback (per-call `Connection(*context.db)`), not on any
-/// long-lived extension-owned connection.
+/// bind callback, through the `FileSystem` API, with no connection.
 #[cfg(feature = "extension")]
 fn emit_native_create_from_yaml_file(
     file_path: &str,

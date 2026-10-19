@@ -87,6 +87,14 @@ SELECT * FROM semantic_view('cq_tmp', metrics := ['total']);
 ----
 Table with name cq_scratch does not exist
 
+# explain_semantic_view still prints the expanded SQL there, and says why the
+# plan is missing.
+query I con2
+SELECT count(*) FROM explain_semantic_view('cq_tmp', metrics := ['total'])
+WHERE explain_output LIKE '-- (not available -- %Table with name cq_scratch does not exist%';
+----
+1
+
 # The member types SHOW reports and explain_semantic_view's plan are found in
 # the caller's session too, so they see its temporary table.
 

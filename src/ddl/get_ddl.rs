@@ -107,9 +107,7 @@ unsafe fn get_ddl(
     let search_path = unsafe { crate::ddl::read_ffi::read_search_path(sp_ptr, sp_len) }?;
 
     // FF-9: a catalog-read failure is distinct from "no views" (propagated).
-    let reader = CatalogReader::for_caller()?;
-    let json = reader
-        .lookup(&view, &search_path)?
+    let json = CatalogReader::lookup_in_caller(&view, &search_path)?
         .ok_or_else(|| crate::catalog::view_not_found_msg(&view.to_string()))?;
     // C-2: `from_json` for the canonical "invalid definition for semantic
     // view '<name>'" context on corrupt rows.

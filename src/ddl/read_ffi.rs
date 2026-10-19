@@ -66,7 +66,13 @@ extern "C" {
     /// whose read is running on this thread (`false` outside one).
     fn sv_bind_caller_interrupted() -> bool;
 
-    fn sv_caller_definitions(out_ptr: *mut *mut u8, out_len: *mut usize) -> u8;
+    fn sv_caller_definitions(
+        only_name: u8,
+        name_ptr: *const u8,
+        name_len: usize,
+        out_ptr: *mut *mut u8,
+        out_len: *mut usize,
+    ) -> u8;
     fn sv_caller_describe(
         database_ptr: *const u8,
         database_len: usize,
@@ -208,16 +214,24 @@ pub struct CallerDefinitions {
     pub rows: Vec<(Option<String>, Option<String>, Option<String>)>,
 }
 
-/// Read every row of `semantic_layer._definitions` in the caller's
-/// transaction, its own uncommitted changes included.
+/// Read the rows of `semantic_layer._definitions` in the caller's
+/// transaction, its own uncommitted changes included: every row, or with
+/// `only_name` only those whose name is that one byte for byte.
 ///
 /// # Errors
 ///
 /// The scan's error, or a malformed payload.
-pub fn caller_definitions() -> Result<CallerDefinitions, String> {
-    // SAFETY: the out-pointers are live locals of `caller_call`.
-    let bytes =
-        caller_call(|p, l| unsafe { sv_caller_definitions(p, l) }).map_err(|e| e.to_string())?;
+pub fn caller_definitions(only_name: Option<&str>) -> Result<CallerDefinitions, String> {
+    let (filter, name) = match only_name {
+        Some(name) => (1, name),
+        None => (0, ""),
+    };
+    // SAFETY: the out-pointers are live locals of `caller_call`; `name` is
+    // borrowed for the call and read as `len` bytes.
+    let bytes = caller_call(|p, l| unsafe {
+        sv_caller_definitions(filter, name.as_ptr(), name.len(), p, l)
+    })
+    .map_err(|e| e.to_string())?;
     let mut payload = Payload {
         bytes: &bytes,
         at: 0,

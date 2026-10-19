@@ -90,8 +90,7 @@ SET enable_external_access = false
 #
 # Note: we only assert that the CREATE itself succeeds. Querying the
 # view via `semantic_view(...)` after the gate is closed exercises
-# DuckDB internals (ValueRelation expansion via per-call connection)
-# that can independently trip the access gate — that path is out of
+# DuckDB internals that can independently trip the access gate — that path is out of
 # scope for this CR-01 test, which only pins the helper-TF's read
 # call.
 

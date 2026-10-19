@@ -5,8 +5,9 @@
 // registration pattern proven by `65-READ-PATH-SPIKE.md`. Bind callbacks
 // registered via this path receive a native `ClientContext &` (not the
 // duckdb-rs `BindInfo` wrapper which marshals `ClientContext` away), so they
-// can open per-call `Connection(*context.db)` for catalog reads and YAML
-// parsing without needing a long-lived extension-owned `duckdb_connection`.
+// can read the catalog in the caller's own context and transaction (the
+// `sv_caller_*` entry points, TECH-DEBT #19) without any connection, long-lived
+// or per-call.
 //
 // This header is consumed both by C++ translation units inside the shim
 // (e.g. `shim.cpp` itself, future helper-TF translation units) and by Rust
@@ -187,14 +188,10 @@ bool sv_register_scalar_function(
 
 // Phase 65 Plan 05 (Task 1 / Wave 0 bridge spike) — register the read-side
 // `list_semantic_views()` table function via the C++ Catalog API. The bind
-// callback opens a per-call `Connection(*context.db)` and bridges to the
-// Rust dispatcher (`sv_list_semantic_views_bind_rust`) which performs the
-// catalog read on the per-call connection. The bridge mechanism (cast of
-// the C++ `Connection *` to `duckdb_connection` — confirmed by reading
-// `duckdb.cpp:266432-266447` where `duckdb_connect` does
-// `reinterpret_cast<duckdb_connection>(new Connection(...))`) is the
-// load-bearing primitive that the remaining 16 read-side migrations will
-// reuse. See `65-05-SPIKE-SUMMARY.md` for the LOC extrapolation.
+// callback sets the caller's context for the thread (`SvCallerScope`) and
+// calls the Rust dispatcher (`sv_list_semantic_views_bind_rust`), which reads
+// the catalog in the caller's transaction through `sv_caller_definitions`
+// (TECH-DEBT #19). Every other read-side function works the same way.
 //
 // This entry point is the registration helper; the bind/function/init
 // callbacks themselves live inside `shim.cpp` (file-static) and are
@@ -246,12 +243,12 @@ bool sv_register_show_semantic_dimensions_for_metric(duckdb_database db_handle,
                                                      char *error_buf, size_t error_buf_len);
 
 // Phase 65 Plan 05 Task 4 (Wave 3) — register the migrated read-side
-// scalars via the C++ Catalog API. The exec callbacks open a per-call
-// `Connection probe(*state.GetContext().db)` (the scalar analog of the
-// bind-side `Connection(*context.db)` used by the 15 migrated TFs) and
-// bridge to the matching Rust dispatcher (`sv_get_ddl_exec_rust`,
-// `sv_read_yaml_from_semantic_view_exec_rust`) — same borrow contract as
-// the TF dispatchers. See `cpp/src/shim.cpp` per-callback comment blocks.
+// scalars via the C++ Catalog API. The exec callbacks set the caller's
+// context (`SvCallerScope` on `state.GetContext()`) and call the matching
+// Rust dispatcher (`sv_get_ddl_exec_rust`,
+// `sv_read_yaml_from_semantic_view_exec_rust`), which looks the view up in
+// the caller's transaction, as the table functions do. See
+// `cpp/src/shim.cpp` per-callback comment blocks.
 //
 // `get_ddl(object_type VARCHAR, name VARCHAR
 //          [, use_fully_qualified_names BOOLEAN]) -> VARCHAR` — 2 or 3 args,
@@ -265,8 +262,9 @@ bool sv_register_read_yaml_from_semantic_view(duckdb_database db_handle,
 // Phase 65 Plan 05 Task 5 (Wave 5) — register the migrated
 // `explain_semantic_view(view_name VARCHAR, dimensions := LIST(VARCHAR),
 // metrics := LIST(VARCHAR), facts := LIST(VARCHAR))` table function via
-// the C++ Catalog API. The bind opens a per-call
-// `Connection(*context.db)` and bridges to `sv_explain_semantic_view_bind_rust`.
+// the C++ Catalog API. The bind sets the caller's context (`SvCallerScope`)
+// and calls `sv_explain_semantic_view_bind_rust`, which plans the expansion
+// in that context (`sv_caller_explain`).
 // Registers through the shared spec-based core (C-7,
 // `cpp/src/shim.cpp::sv_register_table_function_core`) with the named
 // LIST(VARCHAR) parameters (`dimensions`/`metrics`/`facts`, from the single
@@ -275,22 +273,18 @@ bool sv_register_read_yaml_from_semantic_view(duckdb_database db_handle,
 bool sv_register_explain_semantic_view(duckdb_database db_handle,
                                        char *error_buf, size_t error_buf_len);
 
-// Phase 65 Plan 05 Task 6 (Wave 6) — register the migrated
-// `semantic_view(view_name VARCHAR, dimensions := LIST(VARCHAR),
-// metrics := LIST(VARCHAR), facts := LIST(VARCHAR))` table function via
-// the C++ Catalog API. The bind opens a per-call
-// `Connection(*context.db)`, dispatches to `sv_semantic_view_bind_rust`
-// for catalog lookup + expand + type inference, then runs the actual
-// execution SQL on a per-call Connection owned by the init_global state
-// so chunks can be streamed across exec invocations. H1 catalog_conn /
-// H2 query_conn are NOT consumed by this path — Plan 06 retires H1,
-// Batch 3 of Plan 05 retires H2.
+// Register the `semantic_view(view_name VARCHAR, dimensions := LIST(VARCHAR),
+// metrics := LIST(VARCHAR), facts := LIST(VARCHAR), ...)` table function via
+// the C++ Catalog API. It is a `bind_replace` function (#42): the bind sets
+// the caller's context (`SvCallerScope`), calls `sv_semantic_view_bind_rust`
+// for the catalog lookup (in the caller's transaction, TECH-DEBT #19) and the
+// expansion, and returns the expanded query as a subquery that DuckDB plans
+// in the caller's statement. No connection is opened.
 //
 // Registers through the shared spec-based core (C-7,
 // `cpp/src/shim.cpp::sv_register_table_function_core`) with the shared named
-// LIST(VARCHAR) parameters and an init_global state constructor; the core's
-// generalized D-05 check accepts init_global as the required per-execution
-// state constructor. Failures surface via `error_buf` (D-08/D-09), never stderr.
+// parameters and a `bind_replace` callback. Failures surface via `error_buf`
+// (D-08/D-09), never stderr.
 bool sv_register_semantic_view(duckdb_database db_handle,
                                char *error_buf, size_t error_buf_len);
 
