@@ -753,7 +753,8 @@ fn validate_yaml_joins(def: &SemanticViewDefinition) -> Result<(), String> {
 /// parser will read.
 ///
 /// 1. `column_roundtrips_verbatim` — balanced quotes and brackets that never
-///    dip negative (an unbalanced `)` closes the enclosing clause early), no
+///    dip negative (an unbalanced `)` closes the enclosing clause early), each
+///    closer of the same kind as its opener (the clause scan refuses `(]`), no
 ///    depth-0 comma (which would split one member or argument into two), and no
 ///    surrounding whitespace (which the parser trims, silently storing a
 ///    different string than the one given).
