@@ -73,12 +73,21 @@ query TT
 EXECUTE svp_one(NULL);
 ----
 
-# A parameter takes the type of the member it is compared with.
+# A value keeps its own type: here a DATE.
 statement ok
 PREPARE svp_date AS SELECT * FROM SEMANTIC_VIEW(svp_sv DIMENSIONS c.region METRICS o.revenue WHERE o.odate >= ?);
 
 query TT rowsort
 EXECUTE svp_date(DATE '2024-01-01');
+----
+EU	100.00
+US	70.00
+it's	5.00
+
+# A string value is a string constant, which compares with a DATE as a string
+# literal would.
+query TT rowsort
+EXECUTE svp_date('2024-01-01');
 ----
 EU	100.00
 US	70.00
@@ -130,6 +139,16 @@ PREPARE svp_sub AS SELECT * FROM SEMANTIC_VIEW(svp_sv DIMENSIONS c.region METRIC
 query TT
 EXECUTE svp_sub(2);
 ----
+US	70.00
+
+# A parameter in a construct nested in the WHERE: the inner one is first.
+statement ok
+PREPARE svp_nested AS SELECT * FROM SEMANTIC_VIEW(svp_sv DIMENSIONS c.region METRICS o.revenue WHERE c.region IN (SELECT region FROM SEMANTIC_VIEW(svp_sv DIMENSIONS c.region METRICS o.revenue WHERE o.amt > ?)) AND o.odate >= ?);
+
+query TT rowsort
+EXECUTE svp_nested(60, DATE '2024-01-01');
+----
+EU	100.00
 US	70.00
 
 # The statement has as many parameters as it shows.
@@ -203,6 +222,42 @@ statement error
 SELECT * FROM semantic_view('svp_sv', dimensions := ['c.region'], metrics := ['o.revenue'], where_clause := 'c.region = $1', params := 'US');
 ----
 params must be a row of values
+
+# --- A parameter a stored member holds (TECH-DEBT #95) -----------------------
+# Only the predicate's parameters take values. One that a member's expression
+# holds has none to take, so the query is refused rather than give it one.
+
+statement ok
+CREATE SEMANTIC VIEW svp_held AS
+  TABLES (c AS svp_customers PRIMARY KEY (id))
+  DIMENSIONS (c.p AS $1, c.region AS c.region);
+
+statement error
+SELECT * FROM semantic_view('svp_held', dimensions := ['p']);
+----
+holds the prepared statement parameter $1
+
+statement error
+SELECT * FROM semantic_view('svp_held', dimensions := ['p', 'region'], where_clause := 'region = $1', params := row('EU'));
+----
+holds the prepared statement parameter $1
+
+statement ok
+PREPARE svp_held_q AS SELECT * FROM SEMANTIC_VIEW(svp_held DIMENSIONS c.p, c.region WHERE c.region = ?);
+
+statement error
+EXECUTE svp_held_q('EU');
+----
+holds the prepared statement parameter $1
+
+query I
+SELECT count(*) FROM explain_semantic_view('svp_held', dimensions := ['p', 'region'], where_clause := 'region = $1', params := row('EU'))
+WHERE explain_output LIKE '%not available%holds the prepared statement parameter $1%';
+----
+1
+
+statement ok
+DROP SEMANTIC VIEW svp_held;
 
 statement ok
 DROP SEMANTIC VIEW svp_sv;
