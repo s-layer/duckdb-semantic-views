@@ -48,10 +48,16 @@ import sys
 # `DUCKDB_VERSION: v1.5.6` (the layout through v1.5.6).
 LATEST_STABLE = re.compile(r"^\s*DUCKDB_LATEST_STABLE:\s*['\"]?([^'\"\s]+)", re.M)
 VERSION_DEFAULT = re.compile(r"^\s*DUCKDB_VERSION:\s*(?:\$\{\{.*\|\|\s*)?['\"]?([^'\"\s}]+)", re.M)
-# The build job's `duckdb_tag: ${{ inputs.duckdb_tag || 'v2.0.0-alpha46057' }}`: the
-# release label a default *commit* is built under (extension-ci-tools tags its clone
-# with it), so a pin naming that label is the registry's default build.
-DEFAULT_TAG = re.compile(r"^\s*duckdb_tag:\s*\$\{\{.*\|\|\s*['\"]([^'\"\s}]+)", re.M)
+# A job's `duckdb_version:` / `duckdb_tag:` in its `with:` block, as an
+# `${{ inputs.x || '<default>' }}` expression or a plain value. The build job's
+# `duckdb_tag` is the release label a default *commit* is built under
+# (extension-ci-tools tags its clone with it), so a pin naming that label is the
+# registry's default build.
+JOB_VERSION = re.compile(r"^\s*duckdb_version:[ \t]*(?:\$\{\{.*\|\|\s*)?['\"]?([^'\"\s}]+)", re.M)
+JOB_TAG = re.compile(r"^\s*duckdb_tag:[ \t]*(?:\$\{\{.*\|\|\s*)?['\"]?([^'\"\s}]+)", re.M)
+# A top-level key under `jobs:` (or under `on:`), which starts the next block.
+BLOCK = re.compile(r"^  [A-Za-z0-9_-]+:[ \t]*$", re.M)
+RELEASE_TAG = re.compile(r"^v\d+\.\d+\.\d+")
 # One `== '<version>'` branch of build.py and the descriptor key it reads.
 VERSION_BRANCH = re.compile(
     r"os\.environ\['DUCKDB_VERSION'\]\s*==\s*'([^']+)'\s*:\s*"
@@ -64,12 +70,30 @@ def registry_default(build_yml: str) -> str | None:
     return m.group(1) if m else None
 
 
+def default_label(build_yml: str, default: str) -> str | None:
+    """
+    Return the release label the registry builds its default *commit* under, if any.
+
+    Read only from the job whose own `duckdb_version` is that commit, so another job's
+    label (an older line's build) is never mistaken for the default's. A default that
+    is itself a release tag needs no label, and a stale one left beside it is ignored.
+    """
+    if RELEASE_TAG.match(default):
+        return None
+    starts = [m.start() for m in BLOCK.finditer(build_yml)] + [len(build_yml)]
+    for start, end in zip(starts, starts[1:]):
+        block = build_yml[start:end]
+        version, tag = JOB_VERSION.search(block), JOB_TAG.search(block)
+        if version and tag and version.group(1) == default:
+            return tag.group(1)
+    return None
+
+
 def descriptor_key(pin: str, build_yml: str, build_py: str) -> str:
     default = registry_default(build_yml)
     if default is None:
         raise SystemExit("could not find the registry's default DuckDB in build.yml")
-    tag = DEFAULT_TAG.search(build_yml)
-    label = tag.group(1) if tag else None
+    label = default_label(build_yml, default)
     if pin in (default, label):
         return "ref"
     keys = {version: key for version, key in VERSION_BRANCH.findall(build_py)}
@@ -78,7 +102,7 @@ def descriptor_key(pin: str, build_yml: str, build_py: str) -> str:
     supported = ", ".join(sorted(keys)) or "none"
     raise SystemExit(
         f"the registry does not build DuckDB {pin}: its default is {default}"
-        f"{f' (built as {label})' if label and label != default else ''} and the "
+        f"{f' (built as {label})' if label else ''} and the "
         f"older releases it builds are {supported}. Align .duckdb-version with one of "
         "those (or wait for the registry) before publishing."
     )

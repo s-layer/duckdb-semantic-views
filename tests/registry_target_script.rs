@@ -189,6 +189,95 @@ fn an_older_line_still_goes_in_its_key_when_the_default_has_a_label() {
     );
 }
 
+/// The default commit itself is still the default when a label is present.
+#[test]
+fn the_default_commit_goes_in_ref_when_the_default_has_a_label() {
+    assert_eq!(
+        key(
+            "label-sha",
+            "b15358c371daf10dad799a43b6167f6ccdce84d8",
+            BUILD_YML_SHA_TAGGED,
+            BUILD_PY
+        )
+        .as_deref(),
+        Ok("ref")
+    );
+}
+
+/// GA may name its release with a plain `duckdb_tag: v2.0.0` in the build
+/// job's `with:` block rather than an `inputs.duckdb_tag ||` default.
+#[test]
+fn a_bare_duckdb_tag_label_is_read() {
+    let yml = "\
+jobs:
+  prepare:
+    env:
+      DUCKDB_LATEST_STABLE: 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'
+  build:
+    with:
+      duckdb_version: aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+      duckdb_tag: v2.0.0
+";
+    assert_eq!(
+        key("bare-label", "v2.0.0", yml, BUILD_PY).as_deref(),
+        Ok("ref")
+    );
+}
+
+/// Only the label of the job that builds the default commit counts: another
+/// job's `duckdb_tag` (here an older line's, listed first) is not the default,
+/// and that line keeps its own key.
+#[test]
+fn another_jobs_label_is_not_the_default() {
+    let yml = "\
+jobs:
+  prepare:
+    env:
+      DUCKDB_LATEST_STABLE: 'b15358c371daf10dad799a43b6167f6ccdce84d8'
+  build-older:
+    with:
+      duckdb_version: ${{ inputs.duckdb_version || 'v1.5.6' }}
+      duckdb_tag: ${{ inputs.duckdb_tag || 'v1.5.6' }}
+  build:
+    with:
+      duckdb_version: ${{ inputs.duckdb_version || 'b15358c371daf10dad799a43b6167f6ccdce84d8' }}
+      duckdb_tag: ${{ inputs.duckdb_tag || 'v2.0.0-alpha46057' }}
+";
+    assert_eq!(
+        key("two-jobs", "v1.5.6", yml, BUILD_PY).as_deref(),
+        Ok("variegata")
+    );
+    assert_eq!(
+        key("two-jobs-default", "v2.0.0-alpha46057", yml, BUILD_PY).as_deref(),
+        Ok("ref")
+    );
+}
+
+/// A default that is itself a release tag needs no label, and a stale label
+/// left behind next to it is not a second default.
+#[test]
+fn a_stale_label_beside_a_tagged_default_is_ignored() {
+    let yml = "\
+jobs:
+  prepare:
+    env:
+      DUCKDB_LATEST_STABLE: 'v2.0.0'
+  build:
+    with:
+      duckdb_version: ${{ inputs.duckdb_version || 'v2.0.0' }}
+      duckdb_tag: ${{ inputs.duckdb_tag || 'v2.0.0-alpha46057' }}
+";
+    assert_eq!(
+        key("tagged-default", "v2.0.0", yml, BUILD_PY).as_deref(),
+        Ok("ref")
+    );
+    let err = key("stale-label", "v2.0.0-alpha46057", yml, BUILD_PY).unwrap_err();
+    assert!(
+        err.contains("does not build DuckDB v2.0.0-alpha46057"),
+        "{err}"
+    );
+}
+
 #[test]
 fn an_unreadable_build_yml_is_refused() {
     let err = key("unreadable", "v1.5.6", "jobs: {}\n", BUILD_PY).unwrap_err();
