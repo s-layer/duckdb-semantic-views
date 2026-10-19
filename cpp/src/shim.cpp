@@ -28,46 +28,22 @@
 #include "parser_extension_compat.hpp"
 #include "shim.hpp"
 #include <chrono>
-#include <condition_variable>
 #include <cstdint>
 #include <cstring>
 #include <memory>
-#include <mutex>
-#include <system_error>
-#include <thread>
 
 // Destructors here release things while a DuckDB exception unwinds a bind:
-// SvBindCancellationScope joins its watcher thread, the probe Connection
-// closes, owned buffers are freed. MSVC emits those unwinding calls only
-// under /EHsc (`_CPPUNWIND`), which the cc crate does not pass on its own
-// (build.rs does). Without it every bind that threw left its watcher thread
-// waiting on a condition variable in the dead frame, and the process crashed
-// with an access violation once that stack was reused (windows_amd64, from
-// the watcher's introduction in #248 until the flag).
+// SvCallerScope restores the thread's previous caller, owned buffers are
+// freed. MSVC emits those unwinding calls only under /EHsc (`_CPPUNWIND`),
+// which the cc crate does not pass on its own (build.rs does). Without it a
+// bind that threw would leave this thread pointing at a dead caller context.
+// (A watcher thread the binds used to start crashed windows_amd64 this way
+// from its introduction in #248 until the flag.)
 #if defined(_MSC_VER) && !defined(_CPPUNWIND)
 #error "shim.cpp must be compiled with C++ exception unwinding (/EHsc)"
 #endif
 
 using namespace duckdb;
-
-// ---------------------------------------------------------------------------
-// BORROW-contract bridge guard (Phase 65.1 Plan 10, WR-06, D-12)
-// ---------------------------------------------------------------------------
-// The `reinterpret_cast<duckdb_connection>(Connection*)` pattern used at ~20
-// bind/exec callback sites in this file (e.g. shim.cpp:993, 1285, 1311, …)
-// depends on `duckdb_connection` being layout-compatible with a single
-// pointer. This compile-time guard catches DuckDB ABI drift that would
-// change the size of `duckdb_connection` (e.g. wrapping it in a struct with
-// extra fields). The complementary runtime probe in `sv_register_parser_hooks`
-// catches representation drift the size check would miss (e.g. an indirection
-// through `internal_ptr`).
-//
-// See cpp/src/shim.cpp BORROW contract docs and
-// .planning/phases/65-overridecontext-connection-teardown/65-REVIEW.md WR-06.
-static_assert(sizeof(duckdb_connection) == sizeof(void*),
-    "duckdb_connection must be pointer-sized — bridge contract broken; "
-    "see cpp/src/shim.cpp BORROW contract docs and 65-REVIEW.md WR-06 / "
-    "Phase 65.1 D-12");
 
 // ---------------------------------------------------------------------------
 // sv_compiled_duckdb_version -- the DuckDB release this binary was built from
@@ -198,18 +174,10 @@ extern "C" {
         char **out_ptr, size_t *out_len,
         char *error_buf, size_t error_buf_len);
 
-    // Phase 65 Plan 05 (Task 1 / Wave 0 bridge spike) — Rust dispatcher for
-    // `list_semantic_views()`. The C++ bind callback opens a per-call
-    // `Connection probe(*context.db)` and bridges by casting the stack
-    // `Connection *` to `duckdb_connection` (cast confirmed by
-    // duckdb.cpp:266432-266447 where `duckdb_connect` is literally
-    // `reinterpret_cast<duckdb_connection>(new Connection(...))`, so the
-    // C-API handle is a borrowed pointer to a C++ `Connection`).
-    //
-    // The bridge is a BORROW, not a transfer: the Rust dispatcher does NOT
-    // call `duckdb_disconnect` (which would `delete` the stack Connection
-    // and segfault). When the C++ bind scope ends, the `probe` local's
-    // destructor runs and `~Connection()` does the correct teardown.
+    // Rust dispatcher for `list_semantic_views()`. The C++ bind callback runs
+    // it inside an `SvCallerScope`, and it reads the catalog in the caller's
+    // transaction through `sv_caller_definitions` (TECH-DEBT #19); no
+    // connection crosses the boundary.
     //
     // The dispatcher serializes the result rows into a length-prefixed
     // binary buffer (`u32 row_count; for each row: for each of 6 cols: u32
@@ -224,16 +192,14 @@ extern "C" {
     //   1 — catalog read error; error_buf populated.
     //   2 — internal error (panic across FFI); error_buf populated.
     uint8_t sv_list_semantic_views_bind_rust(
-        duckdb_connection conn,
         char **out_ptr, size_t *out_len,
         char *error_buf, size_t error_buf_len);
 
     // Phase 65 Plan 05 Task 2 (Wave 1) — Rust dispatcher for the migrated
     // `list_terse_semantic_views()` table function. 5-column subset of
-    // list_semantic_views (no `comment`). Same bridge mechanism and borrow
-    // contract as the Wave 0 spike.
+    // list_semantic_views (no `comment`). Runs in the caller's scope like
+    // list_semantic_views.
     uint8_t sv_list_terse_semantic_views_bind_rust(
-        duckdb_connection conn,
         char **out_ptr, size_t *out_len,
         char *error_buf, size_t error_buf_len);
 
@@ -242,66 +208,54 @@ extern "C" {
     // matches the matching legacy duckdb-rs VTab. See per-dispatcher Rust
     // doc-headers for the exact column order.
     uint8_t sv_show_semantic_dimensions_all_bind_rust(
-        duckdb_connection conn,
         char **out_ptr, size_t *out_len,
         char *error_buf, size_t error_buf_len);
     uint8_t sv_show_semantic_metrics_all_bind_rust(
-        duckdb_connection conn,
         char **out_ptr, size_t *out_len,
         char *error_buf, size_t error_buf_len);
     uint8_t sv_show_semantic_facts_all_bind_rust(
-        duckdb_connection conn,
         char **out_ptr, size_t *out_len,
         char *error_buf, size_t error_buf_len);
     uint8_t sv_show_semantic_materializations_all_bind_rust(
-        duckdb_connection conn,
         char **out_ptr, size_t *out_len,
         char *error_buf, size_t error_buf_len);
 
     // Phase 65 Plan 05 Task 3 (Wave 2) — Rust dispatchers for the migrated
     // single-arg (view name) and two-arg (view name + metric name) TFs.
-    // All take a per-call borrowed duckdb_connection plus name (ptr, len)
-    // tuples. The single-view show_columns / describe / show_semantic_*
+    // All take name (ptr, len) tuples and the caller's search path. The single-view show_columns / describe / show_semantic_*
     // variants emit VARCHAR rows; show_semantic_dimensions_for_metric
     // emits VARCHAR+BOOL rows (3 VARCHAR + 1 trailing BOOL per row).
     uint8_t sv_show_columns_in_semantic_view_bind_rust(
-        duckdb_connection conn,
         const uint8_t *name_ptr, size_t name_len,
         const uint8_t *sp_ptr, size_t sp_len,
         char **out_ptr, size_t *out_len,
         char *error_buf, size_t error_buf_len);
     uint8_t sv_describe_semantic_view_bind_rust(
-        duckdb_connection conn,
         const uint8_t *name_ptr, size_t name_len,
         const uint8_t *sp_ptr, size_t sp_len,
         char **out_ptr, size_t *out_len,
         char *error_buf, size_t error_buf_len);
     uint8_t sv_show_semantic_dimensions_bind_rust(
-        duckdb_connection conn,
         const uint8_t *name_ptr, size_t name_len,
         const uint8_t *sp_ptr, size_t sp_len,
         char **out_ptr, size_t *out_len,
         char *error_buf, size_t error_buf_len);
     uint8_t sv_show_semantic_metrics_bind_rust(
-        duckdb_connection conn,
         const uint8_t *name_ptr, size_t name_len,
         const uint8_t *sp_ptr, size_t sp_len,
         char **out_ptr, size_t *out_len,
         char *error_buf, size_t error_buf_len);
     uint8_t sv_show_semantic_facts_bind_rust(
-        duckdb_connection conn,
         const uint8_t *name_ptr, size_t name_len,
         const uint8_t *sp_ptr, size_t sp_len,
         char **out_ptr, size_t *out_len,
         char *error_buf, size_t error_buf_len);
     uint8_t sv_show_semantic_materializations_bind_rust(
-        duckdb_connection conn,
         const uint8_t *name_ptr, size_t name_len,
         const uint8_t *sp_ptr, size_t sp_len,
         char **out_ptr, size_t *out_len,
         char *error_buf, size_t error_buf_len);
     uint8_t sv_show_semantic_dimensions_for_metric_bind_rust(
-        duckdb_connection conn,
         const uint8_t *view_name_ptr, size_t view_name_len,
         const uint8_t *metric_name_ptr, size_t metric_name_len,
         const uint8_t *sp_ptr, size_t sp_len,
@@ -310,9 +264,8 @@ extern "C" {
 
     // Phase 65 Plan 05 Task 4 (Wave 3) — Rust dispatchers for the migrated
     // scalar functions (get_ddl, read_yaml_from_semantic_view). Per-row
-    // dispatch: each invocation takes the borrowed per-call duckdb_connection
-    // (opened from the C++ exec callback via Connection probe(*state.GetContext().db))
-    // plus the input string args, and returns a heap-owned UTF-8 buffer for
+    // dispatch: each invocation runs inside the exec callback's `SvCallerScope`,
+    // takes the input string args, and returns a heap-owned UTF-8 buffer for
     // the C++ side to copy into the result Vector via StringVector::AddString.
     //
     // Same wire convention as the bind dispatchers: rc=0 on success with
@@ -322,7 +275,6 @@ extern "C" {
     // `qualify` is the optional third GET_DDL argument (0 = bare name, non-zero
     // = schema-qualified). The two-argument arity passes 0.
     uint8_t sv_get_ddl_exec_rust(
-        duckdb_connection conn,
         const uint8_t *type_ptr, size_t type_len,
         const uint8_t *name_ptr, size_t name_len,
         const uint8_t *sp_ptr, size_t sp_len,
@@ -330,7 +282,6 @@ extern "C" {
         char **out_ptr, size_t *out_len,
         char *error_buf, size_t error_buf_len);
     uint8_t sv_read_yaml_from_semantic_view_exec_rust(
-        duckdb_connection conn,
         const uint8_t *name_ptr, size_t name_len,
         const uint8_t *sp_ptr, size_t sp_len,
         char **out_ptr, size_t *out_len,
@@ -338,15 +289,14 @@ extern "C" {
 
     // Phase 65 Plan 05 Task 5 (Wave 5) — Rust dispatcher for the migrated
     // `explain_semantic_view(view_name, dimensions := [...], metrics := [...],
-    // facts := [...])` table function. Same per-call Connection BORROW
-    // contract as the 14 Batch-1 migrations. The three optional named
+    // facts := [...])` table function, run in the caller's scope like the
+    // metadata binds. The three optional named
     // LIST(VARCHAR) parameters are flattened on the C++ side into the
     // standard length-prefixed wire format (`u32 count; for each entry:
     // u32 len + bytes`) and passed as (ptr, len) pairs. A null pointer
     // with len=0 means the named parameter was not supplied (treated as
     // an empty list).
     uint8_t sv_explain_semantic_view_bind_rust(
-        duckdb_connection conn,
         const uint8_t *name_ptr, size_t name_len,
         const uint8_t *sp_ptr, size_t sp_len,
         const uint8_t *dims_ptr, size_t dims_len,
@@ -358,13 +308,12 @@ extern "C" {
         char *error_buf, size_t error_buf_len);
 
     // Rust dispatcher for `semantic_view(view_name, dimensions := [...],
-    // metrics := [...], ...)`. Same per-call BORROW contract as the other
+    // metrics := [...], ...)`, run in the caller's scope like the other
     // read-side dispatchers. Reads the definition, expands the request and
     // returns the SQL to plan, UTF-8: one SELECT, with its columns named and
     // ordered as the request asks. `sv_semantic_view_bind_replace` parses it
     // into the subquery DuckDB binds in the call's place.
     uint8_t sv_semantic_view_bind_rust(
-        duckdb_connection conn,
         const uint8_t *name_ptr, size_t name_len,
         const uint8_t *sp_ptr, size_t sp_len,
         const uint8_t *dims_ptr, size_t dims_len,
@@ -1200,8 +1149,8 @@ static bool sv_register_table_function_core(
 // registration pattern proven by `65-READ-PATH-SPIKE.md`. Bind callbacks
 // registered via this path receive a native `ClientContext &` (not the
 // duckdb-rs `BindInfo` wrapper which marshals `ClientContext` away), so
-// they can open per-call `Connection(*context.db)` for catalog reads and
-// YAML parsing without needing a long-lived extension-owned connection.
+// they can read the catalog in the caller's transaction (`sv_caller_*`) and
+// parse YAML without needing a long-lived extension-owned connection.
 //
 // Plan 04 consumes this to register `__sv_compute_create_from_yaml`. Plan 05
 // will consume it (and add a scalar sibling) to migrate the 17 read-side
@@ -1649,9 +1598,9 @@ static void sv_create_from_yaml_function(
 // duckdb-rs `register_table_function_with_extra_info` (which marshals
 // `ClientContext &` away — Plan 01 Spike A6) onto the C++ Catalog API path
 // via `sv_register_table_function` (Plan 04). See `65-05-SPIKE-SUMMARY.md` for
-// the bridge design; the per-call `Connection probe` borrow contract is
-// documented on the FFI dispatcher declarations above and applied by the
-// shared bind helpers (`sv_run_varchar_bind` et al.) below.
+// the bridge design. The shared bind helpers below (`sv_run_varchar_bind` et
+// al.) run each dispatcher in an `SvCallerScope`, so it reads in the caller's
+// transaction (TECH-DEBT #19).
 //
 // Wire format from the Rust dispatcher (AR-3 self-describing): a flat binary
 // buffer beginning with a schema header of column type tags, then:
@@ -1948,44 +1897,38 @@ static void sv_emit_varchar_bool_rows(
 }
 
 // ---------------------------------------------------------------------------
-// Cancellation of the bind dispatchers (PR #248 review, TECH-DEBT #51)
+// The caller of a read dispatcher (TECH-DEBT #19, #51)
 // ---------------------------------------------------------------------------
 //
-// Every read-side bind below runs its Rust dispatcher on a fresh
-// `Connection(*context.db)`, which carries its OWN `ClientContext` and
-// therefore its own interrupt flag. `duckdb_interrupt()` (ADBC's cancel, the
-// CLI's Ctrl-C, framework timeouts) sets the flag on the CALLER's context only.
-// Since SHOW / DESCRIBE started probing every member's type at bind time
-// (one `LIMIT 0` statement per member kind per view, with per-member
-// fallbacks), a cancelled cross-view SHOW kept probing view after view, and a
-// probe whose source binds slowly ran to completion — the INTERRUPT surfaced
-// only afterwards. A bind has no executor task loop to poll between (a
-// `LIMIT 0` probe is planned to an empty result — its cost is all bind and
-// optimisation), so the flag is carried across as follows:
+// Every read-side bind below, and the two read scalars, runs its Rust
+// dispatcher with `sv_bind_caller` naming the caller's `ClientContext`. The
+// dispatcher reads the catalog, types members and plans EXPLAIN through the
+// `sv_caller_*` functions further down, which work in that context and its
+// transaction: a read sees what the statement around it sees, the
+// transaction's own uncommitted CREATE / DROP / RENAME / ALTER TABLE and the
+// session's temporary tables included. (Until TECH-DEBT #19 each read ran on a
+// fresh `Connection(*context.db)`, which saw committed state only.)
+//
+// Cancellation follows from the same choice. A bind has no executor task loop
+// to poll between, but the binds and plans `sv_caller_*` run are the caller's
+// own, so DuckDB's interrupt checks inside them see the caller's flag, as they
+// do in any other bind. Between them:
 //
 //   1. `sv_bind_caller_interrupted()` exposes the caller's flag to Rust, which
-//      consults it before every probe and stops typing (`member_types`), so a
-//      cross-view listing ends at the next probe.
-//   2. A watcher thread forwards the caller's flag to the probe connection for
-//      as long as the dispatcher runs. It re-forwards on every poll because each
-//      statement on `probe` clears its own flag when it starts. The engine polls
-//      that flag inside the work a slow probe actually does — glob expansion
-//      (`LazyMultiFileList`), between optimiser passes, in the executor — so a
-//      probe already running stops too, and its INTERRUPT error is classified as
-//      a cancellation on the Rust side rather than as an untypable member.
-//   3. Once the dispatcher returns, a cancelled caller wins: a bare
+//      consults it before every member-type probe and stops typing
+//      (`member_types`), so a cancelled cross-view SHOW ends at the next probe.
+//   2. Once the dispatcher returns, a cancelled caller wins: a bare
 //      `InterruptException` is thrown, never the `"<fn> failed: ..."` wrapper,
 //      so the error is an INTERRUPT with the "Interrupted!" message: ADBC
 //      maps a failure to ADBC_STATUS_CANCELLED only on an exact match against
-//      `InterruptException::INTERRUPT_MESSAGE`. Thrown from a
-//      bind, the binder appends the call's query location, exactly as it does
-//      when one of DuckDB's own table functions (`read_csv` over a glob) is
-//      interrupted while binding.
+//      `InterruptException::INTERRUPT_MESSAGE`. Thrown from a bind, the binder
+//      appends the call's query location, exactly as it does when one of
+//      DuckDB's own table functions (`read_csv` over a glob) is interrupted
+//      while binding.
 //
-// The scope is per bind call and per thread; it saves and restores any outer
-// scope so a bind nested inside a probe (a source that is itself a semantic
-// view function) keeps its own caller. Cost: one short-lived thread per bind.
-// If the thread cannot be started, (1) and (3) still hold.
+// The scope is per call and per thread; it saves and restores any outer scope
+// so a bind nested inside a probe (a source that is itself a semantic view
+// function) keeps its own caller.
 static thread_local ClientContext *sv_bind_caller = nullptr;
 
 extern "C" bool sv_bind_caller_interrupted() {
@@ -1993,57 +1936,27 @@ extern "C" bool sv_bind_caller_interrupted() {
            sv_compat::is_cancelled(*sv_bind_caller, std::memory_order_relaxed);
 }
 
-class SvBindCancellationScope {
+class SvCallerScope {
 public:
-    SvBindCancellationScope(ClientContext &outer, Connection &probe)
-        : outer_(outer), probe_(probe), prev_(sv_bind_caller) {
-        sv_bind_caller = &outer_;
-        try {
-            watcher_ = std::thread([this] { Watch(); });
-        } catch (const std::system_error &) {
-            // No watcher: a running probe is not interrupted, but the Rust
-            // side still stops before the next one and the throw below holds.
-        }
+    explicit SvCallerScope(ClientContext &caller) : caller_(caller), prev_(sv_bind_caller) {
+        sv_bind_caller = &caller_;
     }
 
-    ~SvBindCancellationScope() {
-        if (watcher_.joinable()) {
-            {
-                std::lock_guard<std::mutex> lock(mutex_);
-                stop_ = true;
-            }
-            wake_.notify_one();
-            watcher_.join();
-        }
+    ~SvCallerScope() {
         sv_bind_caller = prev_;
     }
 
-    SvBindCancellationScope(const SvBindCancellationScope &) = delete;
-    SvBindCancellationScope &operator=(const SvBindCancellationScope &) = delete;
+    SvCallerScope(const SvCallerScope &) = delete;
+    SvCallerScope &operator=(const SvCallerScope &) = delete;
 
     // A cancelled caller is authoritative however the dispatcher ended.
     void ThrowIfCancelled() const {
-        sv_compat::throw_if_cancelled(outer_, std::memory_order_relaxed);
+        sv_compat::throw_if_cancelled(caller_, std::memory_order_relaxed);
     }
 
 private:
-    void Watch() {
-        std::unique_lock<std::mutex> lock(mutex_);
-        while (!stop_) {
-            if (sv_compat::is_cancelled(outer_, std::memory_order_relaxed)) {
-                probe_.Interrupt();
-            }
-            wake_.wait_for(lock, std::chrono::milliseconds(10));
-        }
-    }
-
-    ClientContext &outer_;
-    Connection &probe_;
+    ClientContext &caller_;
     ClientContext *prev_;
-    std::thread watcher_;
-    std::mutex mutex_;
-    std::condition_variable wake_;
-    bool stop_ = false;
 };
 
 // Common idiom for the bind callback: open Connection, run Rust dispatcher
@@ -2061,16 +1974,13 @@ static void sv_run_varchar_bind(ClientContext &context,
                                 const char *fn_name,
                                 DispatcherFn &&dispatcher) {
     bd.expected_cols = expected_cols;
-    Connection probe(*context.db);
-    SvBindCancellationScope cancellation(context, probe);
-    duckdb_connection borrowed = reinterpret_cast<duckdb_connection>(&probe);
+    SvCallerScope caller(context);
     SvOwnedBuffer payload;
     char error_buf[1024];
     std::memset(error_buf, 0, sizeof(error_buf));
-    uint8_t rc = dispatcher(borrowed,
-                            &payload.ptr, &payload.len,
+    uint8_t rc = dispatcher(&payload.ptr, &payload.len,
                             error_buf, sizeof(error_buf));
-    cancellation.ThrowIfCancelled();
+    caller.ThrowIfCancelled();
     if (rc != 0) {
         throw BinderException(std::string(fn_name) + " failed: " + error_buf);
     }
@@ -2127,7 +2037,7 @@ static std::vector<uint8_t> sv_search_path_payload(ClientContext &context,
 
 // Variant for TFs with one VARCHAR argument (the view name). Extracts the
 // name from input.inputs[0] and forwards it as (ptr, len) to the dispatcher
-// alongside the borrowed connection handle.
+// with the caller's search path.
 template <typename DispatcherFn>
 static void sv_run_varchar_bind_with_name(ClientContext &context,
                                           TableFunctionBindInput &input,
@@ -2146,18 +2056,15 @@ static void sv_run_varchar_bind_with_name(ClientContext &context,
     }
     std::string name = input.inputs[0].GetValue<std::string>();
     std::vector<uint8_t> sp = sv_search_path_payload(context, input);
-    Connection probe(*context.db);
-    SvBindCancellationScope cancellation(context, probe);
-    duckdb_connection borrowed = reinterpret_cast<duckdb_connection>(&probe);
+    SvCallerScope caller(context);
     SvOwnedBuffer payload;
     char error_buf[1024];
     std::memset(error_buf, 0, sizeof(error_buf));
-    uint8_t rc = dispatcher(borrowed,
-                            reinterpret_cast<const uint8_t *>(name.data()), name.size(),
+    uint8_t rc = dispatcher(reinterpret_cast<const uint8_t *>(name.data()), name.size(),
                             sp.empty() ? nullptr : sp.data(), sp.size(),
                             &payload.ptr, &payload.len,
                             error_buf, sizeof(error_buf));
-    cancellation.ThrowIfCancelled();
+    caller.ThrowIfCancelled();
     if (rc != 0) {
         throw BinderException(std::string(fn_name) + " failed: " + error_buf);
     }
@@ -2186,19 +2093,16 @@ static void sv_run_varchar_bool_bind_with_two_names(
     std::string name1 = input.inputs[0].GetValue<std::string>();
     std::string name2 = input.inputs[1].GetValue<std::string>();
     std::vector<uint8_t> sp = sv_search_path_payload(context, input);
-    Connection probe(*context.db);
-    SvBindCancellationScope cancellation(context, probe);
-    duckdb_connection borrowed = reinterpret_cast<duckdb_connection>(&probe);
+    SvCallerScope caller(context);
     SvOwnedBuffer payload;
     char error_buf[1024];
     std::memset(error_buf, 0, sizeof(error_buf));
-    uint8_t rc = dispatcher(borrowed,
-                            reinterpret_cast<const uint8_t *>(name1.data()), name1.size(),
+    uint8_t rc = dispatcher(reinterpret_cast<const uint8_t *>(name1.data()), name1.size(),
                             reinterpret_cast<const uint8_t *>(name2.data()), name2.size(),
                             sp.empty() ? nullptr : sp.data(), sp.size(),
                             &payload.ptr, &payload.len,
                             error_buf, sizeof(error_buf));
-    cancellation.ThrowIfCancelled();
+    caller.ThrowIfCancelled();
     if (rc != 0) {
         throw BinderException(std::string(fn_name) + " failed: " + error_buf);
     }
@@ -2233,10 +2137,9 @@ static unique_ptr<FunctionData> sv_list_semantic_views_bind(
     }
     sv_run_varchar_bind(
         context, *bd, /*expected_cols*/ 6, "list_semantic_views",
-        [](duckdb_connection borrowed, char **out_ptr, size_t *out_len,
-           char *error_buf, size_t error_buf_len) {
+        [](char **out_ptr, size_t *out_len, char *error_buf, size_t error_buf_len) {
             return sv_list_semantic_views_bind_rust(
-                borrowed, out_ptr, out_len, error_buf, error_buf_len);
+                out_ptr, out_len, error_buf, error_buf_len);
         });
     return std::move(bd);
 }
@@ -2280,10 +2183,9 @@ static unique_ptr<FunctionData> sv_list_terse_semantic_views_bind(
     }
     sv_run_varchar_bind(
         context, *bd, /*expected_cols*/ 5, "list_terse_semantic_views",
-        [](duckdb_connection borrowed, char **out_ptr, size_t *out_len,
-           char *error_buf, size_t error_buf_len) {
+        [](char **out_ptr, size_t *out_len, char *error_buf, size_t error_buf_len) {
             return sv_list_terse_semantic_views_bind_rust(
-                borrowed, out_ptr, out_len, error_buf, error_buf_len);
+                out_ptr, out_len, error_buf, error_buf_len);
         });
     return std::move(bd);
 }
@@ -2324,10 +2226,9 @@ static unique_ptr<FunctionData> sv_show_semantic_dimensions_all_bind(
     }
     sv_run_varchar_bind(
         context, *bd, /*expected_cols*/ 8, "show_semantic_dimensions_all",
-        [](duckdb_connection borrowed, char **out_ptr, size_t *out_len,
-           char *error_buf, size_t error_buf_len) {
+        [](char **out_ptr, size_t *out_len, char *error_buf, size_t error_buf_len) {
             return sv_show_semantic_dimensions_all_bind_rust(
-                borrowed, out_ptr, out_len, error_buf, error_buf_len);
+                out_ptr, out_len, error_buf, error_buf_len);
         });
     return std::move(bd);
 }
@@ -2365,10 +2266,9 @@ static unique_ptr<FunctionData> sv_show_semantic_metrics_all_bind(
     }
     sv_run_varchar_bind(
         context, *bd, 8, "show_semantic_metrics_all",
-        [](duckdb_connection borrowed, char **out_ptr, size_t *out_len,
-           char *error_buf, size_t error_buf_len) {
+        [](char **out_ptr, size_t *out_len, char *error_buf, size_t error_buf_len) {
             return sv_show_semantic_metrics_all_bind_rust(
-                borrowed, out_ptr, out_len, error_buf, error_buf_len);
+                out_ptr, out_len, error_buf, error_buf_len);
         });
     return std::move(bd);
 }
@@ -2406,10 +2306,9 @@ static unique_ptr<FunctionData> sv_show_semantic_facts_all_bind(
     }
     sv_run_varchar_bind(
         context, *bd, 8, "show_semantic_facts_all",
-        [](duckdb_connection borrowed, char **out_ptr, size_t *out_len,
-           char *error_buf, size_t error_buf_len) {
+        [](char **out_ptr, size_t *out_len, char *error_buf, size_t error_buf_len) {
             return sv_show_semantic_facts_all_bind_rust(
-                borrowed, out_ptr, out_len, error_buf, error_buf_len);
+                out_ptr, out_len, error_buf, error_buf_len);
         });
     return std::move(bd);
 }
@@ -2448,10 +2347,9 @@ static unique_ptr<FunctionData> sv_show_semantic_materializations_all_bind(
     }
     sv_run_varchar_bind(
         context, *bd, 7, "show_semantic_materializations_all",
-        [](duckdb_connection borrowed, char **out_ptr, size_t *out_len,
-           char *error_buf, size_t error_buf_len) {
+        [](char **out_ptr, size_t *out_len, char *error_buf, size_t error_buf_len) {
             return sv_show_semantic_materializations_all_bind_rust(
-                borrowed, out_ptr, out_len, error_buf, error_buf_len);
+                out_ptr, out_len, error_buf, error_buf_len);
         });
     return std::move(bd);
 }
@@ -2494,12 +2392,11 @@ static unique_ptr<FunctionData> sv_show_columns_in_semantic_view_bind(
     }
     sv_run_varchar_bind_with_name(
         context, input, *bd, 8, "show_columns_in_semantic_view",
-        [](duckdb_connection borrowed,
-           const uint8_t *np, size_t nl,
+        [](const uint8_t *np, size_t nl,
            const uint8_t *sp, size_t spl,
            char **op, size_t *ol, char *eb, size_t ebl) {
             return sv_show_columns_in_semantic_view_bind_rust(
-                borrowed, np, nl, sp, spl, op, ol, eb, ebl);
+                np, nl, sp, spl, op, ol, eb, ebl);
         });
     return std::move(bd);
 }
@@ -2519,12 +2416,11 @@ static unique_ptr<FunctionData> sv_describe_semantic_view_bind(
     }
     sv_run_varchar_bind_with_name(
         context, input, *bd, 5, "describe_semantic_view",
-        [](duckdb_connection borrowed,
-           const uint8_t *np, size_t nl,
+        [](const uint8_t *np, size_t nl,
            const uint8_t *sp, size_t spl,
            char **op, size_t *ol, char *eb, size_t ebl) {
             return sv_describe_semantic_view_bind_rust(
-                borrowed, np, nl, sp, spl, op, ol, eb, ebl);
+                np, nl, sp, spl, op, ol, eb, ebl);
         });
     return std::move(bd);
 }
@@ -2545,12 +2441,11 @@ static unique_ptr<FunctionData> sv_show_semantic_dimensions_bind(
     }
     sv_run_varchar_bind_with_name(
         context, input, *bd, 8, "show_semantic_dimensions",
-        [](duckdb_connection borrowed,
-           const uint8_t *np, size_t nl,
+        [](const uint8_t *np, size_t nl,
            const uint8_t *sp, size_t spl,
            char **op, size_t *ol, char *eb, size_t ebl) {
             return sv_show_semantic_dimensions_bind_rust(
-                borrowed, np, nl, sp, spl, op, ol, eb, ebl);
+                np, nl, sp, spl, op, ol, eb, ebl);
         });
     return std::move(bd);
 }
@@ -2571,12 +2466,11 @@ static unique_ptr<FunctionData> sv_show_semantic_metrics_bind(
     }
     sv_run_varchar_bind_with_name(
         context, input, *bd, 8, "show_semantic_metrics",
-        [](duckdb_connection borrowed,
-           const uint8_t *np, size_t nl,
+        [](const uint8_t *np, size_t nl,
            const uint8_t *sp, size_t spl,
            char **op, size_t *ol, char *eb, size_t ebl) {
             return sv_show_semantic_metrics_bind_rust(
-                borrowed, np, nl, sp, spl, op, ol, eb, ebl);
+                np, nl, sp, spl, op, ol, eb, ebl);
         });
     return std::move(bd);
 }
@@ -2597,12 +2491,11 @@ static unique_ptr<FunctionData> sv_show_semantic_facts_bind(
     }
     sv_run_varchar_bind_with_name(
         context, input, *bd, 8, "show_semantic_facts",
-        [](duckdb_connection borrowed,
-           const uint8_t *np, size_t nl,
+        [](const uint8_t *np, size_t nl,
            const uint8_t *sp, size_t spl,
            char **op, size_t *ol, char *eb, size_t ebl) {
             return sv_show_semantic_facts_bind_rust(
-                borrowed, np, nl, sp, spl, op, ol, eb, ebl);
+                np, nl, sp, spl, op, ol, eb, ebl);
         });
     return std::move(bd);
 }
@@ -2623,12 +2516,11 @@ static unique_ptr<FunctionData> sv_show_semantic_materializations_bind(
     }
     sv_run_varchar_bind_with_name(
         context, input, *bd, 7, "show_semantic_materializations",
-        [](duckdb_connection borrowed,
-           const uint8_t *np, size_t nl,
+        [](const uint8_t *np, size_t nl,
            const uint8_t *sp, size_t spl,
            char **op, size_t *ol, char *eb, size_t ebl) {
             return sv_show_semantic_materializations_bind_rust(
-                borrowed, np, nl, sp, spl, op, ol, eb, ebl);
+                np, nl, sp, spl, op, ol, eb, ebl);
         });
     return std::move(bd);
 }
@@ -2652,13 +2544,12 @@ static unique_ptr<FunctionData> sv_show_semantic_dimensions_for_metric_bind(
     sv_run_varchar_bool_bind_with_two_names(
         context, input, *bd, /*expected_varchar_cols*/ 3,
         "show_semantic_dimensions_for_metric",
-        [](duckdb_connection borrowed,
-           const uint8_t *vn, size_t vnl,
+        [](const uint8_t *vn, size_t vnl,
            const uint8_t *mn, size_t mnl,
            const uint8_t *sp, size_t spl,
            char **op, size_t *ol, char *eb, size_t ebl) {
             return sv_show_semantic_dimensions_for_metric_bind_rust(
-                borrowed, vn, vnl, mn, mnl, sp, spl, op, ol, eb, ebl);
+                vn, vnl, mn, mnl, sp, spl, op, ol, eb, ebl);
         });
     return std::move(bd);
 }
@@ -2743,22 +2634,10 @@ extern "C" {
 // Migrate the two read-side scalars (`get_ddl`, `read_yaml_from_semantic_view`)
 // from duckdb-rs `register_scalar_function_with_state` to the C++ Catalog
 // API path established by `sv_register_scalar_function` (Wave 1 prep). Each
-// exec callback opens a per-call `Connection probe(*state.GetContext().db)`
-// (the scalar analog of the bind-side `Connection(*context.db)` used by the
-// 15 TF migrations) and bridges to a Rust dispatcher that performs the
-// lookup + render on the borrowed connection. The borrow contract (Rust
-// MUST NOT call `duckdb_disconnect`) is identical to the TF dispatchers —
-// see `src/ddl/read_ffi.rs` module docs.
-//
-// Per-chunk Connection construction (one `Connection probe` per exec call,
-// reused across every row in the chunk) keeps the dispatcher shape uniform
-// with the TF migrations: each call into the C++ exec callback gets a
-// fresh stack-owned Connection bound to the caller's Database, and every
-// row in the chunk borrows that same handle through the reinterpret_cast
-// bridge. Scalar usage in practice is one or two rows
-// (`SELECT GET_DDL(...)`), so amortising the Connection ctor across the
-// chunk is essentially free even at chunk size 1 — and the ctor itself is
-// sub-millisecond per the READ-PATH-SPIKE evidence.
+// exec callback names the executing query's `ClientContext` as the caller
+// (`SvCallerScope`) and calls a Rust dispatcher per row that performs the
+// lookup + render, reading the catalog in that query's transaction
+// (TECH-DEBT #19), as the table-function binds do.
 
 // Common helper: copy a Rust-owned UTF-8 buffer into the result Vector at
 // `row_idx` via StringVector::AddString (which allocates inside the Vector's
@@ -2820,8 +2699,7 @@ static void sv_get_ddl_exec(DataChunk &args, ExpressionState &state,
 
     auto &result_validity = sv_compat::validity_mut(result);
 
-    Connection probe(*state.GetContext().db);
-    duckdb_connection borrowed = reinterpret_cast<duckdb_connection>(&probe);
+    SvCallerScope caller(state.GetContext());
     // Read once per chunk: the path cannot change while a statement runs.
     const std::vector<uint8_t> sp = sv_caller_search_path(state.GetContext());
 
@@ -2842,7 +2720,6 @@ static void sv_get_ddl_exec(DataChunk &args, ExpressionState &state,
             result, i, "get_ddl",
             [&](char **op, size_t *ol, char *eb, size_t ebl) {
                 return sv_get_ddl_exec_rust(
-                    borrowed,
                     reinterpret_cast<const uint8_t *>(t.GetData()), t.GetSize(),
                     reinterpret_cast<const uint8_t *>(n.GetData()), n.GetSize(),
                     sp.empty() ? nullptr : sp.data(), sp.size(),
@@ -2865,8 +2742,7 @@ static void sv_read_yaml_from_semantic_view_exec(DataChunk &args,
     auto &name_validity = FlatVector::Validity(name_vec);
     auto &result_validity = sv_compat::validity_mut(result);
 
-    Connection probe(*state.GetContext().db);
-    duckdb_connection borrowed = reinterpret_cast<duckdb_connection>(&probe);
+    SvCallerScope caller(state.GetContext());
     const std::vector<uint8_t> sp = sv_caller_search_path(state.GetContext());
 
     for (idx_t i = 0; i < args.size(); ++i) {
@@ -2879,7 +2755,6 @@ static void sv_read_yaml_from_semantic_view_exec(DataChunk &args,
             result, i, "read_yaml_from_semantic_view",
             [&](char **op, size_t *ol, char *eb, size_t ebl) {
                 return sv_read_yaml_from_semantic_view_exec_rust(
-                    borrowed,
                     reinterpret_cast<const uint8_t *>(n.GetData()), n.GetSize(),
                     sp.empty() ? nullptr : sp.data(), sp.size(),
                     op, ol, eb, ebl);
@@ -2944,9 +2819,9 @@ extern "C" {
 // metrics := [...], facts := [...])` off duckdb-rs's
 // `register_table_function_with_extra_info` (which marshals
 // `ClientContext &` away) to the C++ Catalog API path. The bind callback
-// opens a per-call `Connection probe(*context.db)` and bridges to the
-// Rust dispatcher `sv_explain_semantic_view_bind_rust` which runs the
-// catalog lookup + expand + EXPLAIN on the per-call connection. Output is
+// runs the Rust dispatcher `sv_explain_semantic_view_bind_rust` in an
+// `SvCallerScope`; it reads the definition, expands the request and plans
+// it in the caller's transaction (`sv_caller_explain`). Output is
 // one VARCHAR row per explain-output line — reuses the Wave 1/2
 // `SvVarcharBindData` shape + `sv_emit_varchar_rows` exec.
 //
@@ -3041,18 +2916,15 @@ static unique_ptr<FunctionData> sv_explain_semantic_view_bind(
     }
     std::vector<uint8_t> sp_buf = sv_search_path_payload(context, input);
 
-    Connection probe(*context.db);
-    // The EXPLAIN of the expanded query binds the view's tables on `probe`, so
-    // a cancelled caller is forwarded and raised bare, as in semantic_view().
-    SvBindCancellationScope cancellation(context, probe);
-    duckdb_connection borrowed = reinterpret_cast<duckdb_connection>(&probe);
+    // The EXPLAIN of the expanded query plans the view's tables in the caller's
+    // context, so a cancelled caller is raised bare, as in semantic_view().
+    SvCallerScope caller(context);
 
     SvOwnedBuffer payload;
     char error_buf[1024];
     std::memset(error_buf, 0, sizeof(error_buf));
 
     uint8_t rc = sv_explain_semantic_view_bind_rust(
-        borrowed,
         reinterpret_cast<const uint8_t *>(view_name.data()), view_name.size(),
         sp_buf.empty()      ? nullptr : sp_buf.data(),      sp_buf.size(),
         dims_buf.empty()    ? nullptr : dims_buf.data(),    dims_buf.size(),
@@ -3063,7 +2935,7 @@ static unique_ptr<FunctionData> sv_explain_semantic_view_bind(
         order_buf.empty()   ? nullptr : order_buf.data(),   order_buf.size(),
         &payload.ptr, &payload.len,
         error_buf, sizeof(error_buf));
-    cancellation.ThrowIfCancelled();
+    caller.ThrowIfCancelled();
     if (rc != 0) {
         throw BinderException(std::string("explain_semantic_view: ") + error_buf);
     }
@@ -3126,13 +2998,10 @@ extern "C" {
 //     HUGEINT), and the table alias and column aliases apply as to any table;
 //   - it may refer to a column of an enclosing query (`LATERAL`).
 //
-// The bind still opens a per-call `Connection probe(*context.db)` for one
-// thing: `sv_semantic_view_bind_rust` reads the definition from the catalog
-// table on it (TECH-DEBT #19). That connection runs no part of the query.
+// `sv_semantic_view_bind_rust` reads the definition in the caller's
+// transaction too (`sv_caller_definitions`, TECH-DEBT #19), so a view created,
+// dropped or renamed earlier in the transaction is seen that way.
 //
-// Borrow contract: identical to the other read-side binds. The Rust dispatcher
-// MUST NOT call `duckdb_disconnect` on the borrowed handle — teardown is the
-// C++ scope's responsibility.
 // Point every expression and table reference in `node` at `location`. The
 // expansion is parsed from SQL the user never wrote, so the positions the
 // parser gave it are offsets into that text; left alone, an error in it (a
@@ -3412,6 +3281,210 @@ struct SvTablePinner {
     }
 };
 
+// ---------------------------------------------------------------------------
+// Reads in the caller's transaction (TECH-DEBT #19)
+// ---------------------------------------------------------------------------
+//
+// The three functions a read dispatcher reads through. Each works in the
+// `ClientContext` an `SvCallerScope` named on this thread, and in its
+// transaction, so it sees what the statement around it sees. None of them runs
+// a statement: `context.Query` from inside the caller's own bind or execution
+// would wait on the context lock that statement holds.
+//
+//   * `sv_caller_definitions` scans `semantic_layer._definitions` in the
+//     database new connections start in (the managed catalog CREATE writes to,
+//     whatever the caller has `USE`-d) through the storage layer, with the
+//     caller's transaction, so its uncommitted inserts and deletes count.
+//   * `sv_caller_describe` binds a member-typing probe and reports its output
+//     columns' names and types, as `DESCRIBE` would.
+//   * `sv_caller_explain` plans a query to the physical plan `EXPLAIN` shows.
+//
+// The probe and explain SQL are pinned to the view's stamped database and
+// schema with `SvTablePinner`, like semantic_view()'s expansion, so they bind
+// the objects semantic_view() would.
+//
+// Results come back in malloc'd buffers the Rust side copies and releases with
+// `sv_caller_free`. rc 0: the payload; 1: failed, the buffer holds the error;
+// 2: the caller was interrupted, ditto.
+
+static void sv_caller_put_u32(string &out, uint32_t v) {
+    char b[4] = {char(v & 0xff), char((v >> 8) & 0xff), char((v >> 16) & 0xff), char((v >> 24) & 0xff)};
+    out.append(b, 4);
+}
+
+static void sv_caller_put_str(string &out, const string &s) {
+    if (s.size() > UINT32_MAX) {
+        throw InvalidInputException("value too large for the read bridge (%llu bytes)", s.size());
+    }
+    sv_caller_put_u32(out, static_cast<uint32_t>(s.size()));
+    out += s;
+}
+
+// A nullable cell: u8 1 for NULL, else u8 0 and the string.
+static void sv_caller_put_value(string &out, const Value &value) {
+    if (value.IsNull()) {
+        out.push_back(1);
+        return;
+    }
+    out.push_back(0);
+    sv_caller_put_str(out, value.GetValue<string>());
+}
+
+template <typename Body>
+static uint8_t sv_caller_run(char **out_ptr, size_t *out_len, Body &&body) {
+    *out_ptr = nullptr;
+    *out_len = 0;
+    string out;
+    uint8_t rc = 0;
+    try {
+        if (!sv_bind_caller) {
+            throw InternalException("semantic_views: a catalog read ran outside a caller scope");
+        }
+        body(*sv_bind_caller, out);
+    } catch (std::exception &ex) {
+        ErrorData error(ex);
+        rc = error.Type() == ExceptionType::INTERRUPT ? 2 : 1;
+        out = error.Message();
+    } catch (...) {
+        rc = 1;
+        out = "unknown error";
+    }
+    // At least one byte, so an empty payload is not a failed allocation.
+    auto buffer = static_cast<char *>(malloc(out.empty() ? 1 : out.size()));
+    if (!buffer) {
+        return 1;
+    }
+    std::memcpy(buffer, out.data(), out.size());
+    *out_ptr = buffer;
+    *out_len = out.size();
+    return rc;
+}
+
+// Parse `sql` (one SELECT, built-in grammar: it is generated SQL) and pin its
+// names to the view's stamped database and schema.
+static unique_ptr<SelectStatement> sv_caller_parse_pinned(ClientContext &context, const string &database,
+                                                          const string &schema, const string &sql) {
+    Parser parser = sv_compat::builtin_parser();
+    parser.ParseQuery(sql);
+    if (parser.statements.size() != 1 || parser.statements[0]->type != StatementType::SELECT_STATEMENT) {
+        throw InvalidInputException("semantic_views: expected one SELECT statement: %s", sql);
+    }
+    auto select = unique_ptr_cast<SQLStatement, SelectStatement>(std::move(parser.statements[0]));
+    SvTablePinner pinner {context, nullptr, Identifier(database), Identifier(schema), {}};
+    pinner.Node(*select->node);
+    return select;
+}
+
+extern "C" {
+    // Payload: u8 present (whether the catalog table exists); the database
+    // name; u32 row count; per row the nullable cells schema_name, name,
+    // definition.
+    uint8_t sv_caller_definitions(char **out_ptr, size_t *out_len) {
+        return sv_caller_run(out_ptr, out_len, [](ClientContext &context, string &out) {
+            auto database = DatabaseManager::Get(context).GetDefaultDatabase();
+            optional_ptr<CatalogEntry> entry;
+            if (!database.empty()) {
+                EntryLookupInfo lookup(CatalogType::TABLE_ENTRY,
+                                       QualifiedName(database, Identifier("semantic_layer"),
+                                                     Identifier("_definitions")));
+                entry = Catalog::GetEntry(context, lookup, OnEntryNotFound::RETURN_NULL);
+            }
+            const bool present = entry && entry->type == CatalogType::TABLE_ENTRY;
+            out.push_back(present ? 1 : 0);
+            sv_caller_put_str(out, database.GetIdentifierName());
+            if (!present) {
+                return;
+            }
+            auto &table = entry->Cast<TableCatalogEntry>();
+            if (!table.IsDuckTable()) {
+                throw InvalidInputException(
+                    "semantic_views: semantic_layer._definitions in database \"%s\" is not a DuckDB table",
+                    database.GetIdentifierName());
+            }
+            static const char *const COLUMNS[] = {"schema_name", "name", "definition"};
+            vector<StorageIndex> column_ids;
+            vector<LogicalType> types;
+            for (auto column : COLUMNS) {
+                Identifier name {string(column)};
+                if (!table.ColumnExists(name)) {
+                    throw InvalidInputException("semantic_views: semantic_layer._definitions has no column \"%s\"",
+                                                column);
+                }
+                auto &definition = table.GetColumn(name);
+                column_ids.emplace_back(definition.StorageOid());
+                types.push_back(definition.Type());
+            }
+            auto &storage = table.GetStorage();
+            auto &transaction = DuckTransaction::Get(context, table.ParentCatalog());
+            TableScanState state;
+            storage.InitializeScan(context, transaction, state, column_ids);
+            DataChunk chunk;
+            chunk.Initialize(context, types);
+            string rows;
+            uint32_t count = 0;
+            while (true) {
+                chunk.Reset();
+                storage.Scan(transaction, chunk, state);
+                if (chunk.size() == 0) {
+                    break;
+                }
+                for (idx_t row = 0; row < chunk.size(); ++row) {
+                    for (idx_t column = 0; column < chunk.ColumnCount(); ++column) {
+                        sv_caller_put_value(rows, chunk.GetValue(column, row));
+                    }
+                    ++count;
+                }
+            }
+            sv_caller_put_u32(out, count);
+            out += rows;
+        });
+    }
+
+    // Payload: u32 column count; per column its name and its type as
+    // `DESCRIBE` spells it.
+    uint8_t sv_caller_describe(const uint8_t *database_ptr, size_t database_len,
+                               const uint8_t *schema_ptr, size_t schema_len,
+                               const uint8_t *sql_ptr, size_t sql_len,
+                               char **out_ptr, size_t *out_len) {
+        return sv_caller_run(out_ptr, out_len, [&](ClientContext &context, string &out) {
+            auto select = sv_caller_parse_pinned(
+                context, string(reinterpret_cast<const char *>(database_ptr), database_len),
+                string(reinterpret_cast<const char *>(schema_ptr), schema_len),
+                string(reinterpret_cast<const char *>(sql_ptr), sql_len));
+            auto binder = Binder::CreateBinder(context);
+            auto bound = binder->Bind(static_cast<SQLStatement &>(*select));
+            sv_caller_put_u32(out, static_cast<uint32_t>(bound.types.size()));
+            for (idx_t i = 0; i < bound.types.size(); ++i) {
+                sv_caller_put_str(out, bound.names[i].GetIdentifierName());
+                sv_caller_put_str(out, bound.types[i].ToString());
+            }
+        });
+    }
+
+    // Payload: the physical plan as `EXPLAIN` renders it.
+    uint8_t sv_caller_explain(const uint8_t *database_ptr, size_t database_len,
+                              const uint8_t *schema_ptr, size_t schema_len,
+                              const uint8_t *sql_ptr, size_t sql_len,
+                              char **out_ptr, size_t *out_len) {
+        return sv_caller_run(out_ptr, out_len, [&](ClientContext &context, string &out) {
+            auto select = sv_caller_parse_pinned(
+                context, string(reinterpret_cast<const char *>(database_ptr), database_len),
+                string(reinterpret_cast<const char *>(schema_ptr), schema_len),
+                string(reinterpret_cast<const char *>(sql_ptr), sql_len));
+            Planner planner(context);
+            planner.CreatePlan(std::move(select));
+            planner.Optimize();
+            PhysicalPlanGenerator generator(context);
+            auto plan = generator.Plan(std::move(planner.plan));
+            out = plan->Root().ToString(context);
+        });
+    }
+
+    void sv_caller_free(char *ptr) {
+        free(ptr);
+    }
+}
+
 static unique_ptr<TableRef> sv_semantic_view_bind_replace(
     ClientContext &context,
     TableFunctionBindInput &input) {
@@ -3450,11 +3523,9 @@ static unique_ptr<TableRef> sv_semantic_view_bind_replace(
     }
     std::vector<uint8_t> sp_buf = sv_search_path_payload(context, input);
 
-    Connection probe(*context.db);
-    // The catalog read runs on `probe`; a cancelled caller (interrupt or
-    // deadline) is forwarded and raised bare, as in the metadata binds.
-    SvBindCancellationScope cancellation(context, probe);
-    duckdb_connection borrowed = reinterpret_cast<duckdb_connection>(&probe);
+    // The catalog read runs in the caller's transaction; a cancelled caller
+    // (interrupt or deadline) is raised bare, as in the metadata binds.
+    SvCallerScope caller(context);
 
     // Expand the request into one SELECT whose parse positions are the call's.
     // With `fence`, the predicate is one that names only where_clause's
@@ -3464,7 +3535,6 @@ static unique_ptr<TableRef> sv_semantic_view_bind_replace(
         char error_buf[1024];
         std::memset(error_buf, 0, sizeof(error_buf));
         uint8_t rc = sv_semantic_view_bind_rust(
-            borrowed,
             reinterpret_cast<const uint8_t *>(view_name.data()), view_name.size(),
             sp_buf.empty()      ? nullptr : sp_buf.data(),      sp_buf.size(),
             dims_buf.empty()    ? nullptr : dims_buf.data(),    dims_buf.size(),
@@ -3477,7 +3547,7 @@ static unique_ptr<TableRef> sv_semantic_view_bind_replace(
             fence ? 1 : 0,
             &payload.ptr, &payload.len,
             error_buf, sizeof(error_buf));
-        cancellation.ThrowIfCancelled();
+        caller.ThrowIfCancelled();
         if (rc != 0) {
             throw BinderException(std::string("semantic_view: ") + error_buf);
         }
@@ -3999,12 +4069,10 @@ static void sv_register_grammar(DatabaseInstance &db) {
 // dynamic_cast marker used by sv_parser_override / sv_parse_stub to confirm
 // the parser_info is ours.
 //
-// Phase 65.1 Plan 10 (WR-06 D-12/D-13): the signature now carries the
-// trailing `(char *error_buf, size_t error_buf_len)` pair — matching the
-// 17 read-side dispatchers — so registration failures and BORROW-contract
-// probe failures surface through the ABI-stable channel into the Rust
-// caller's diagnostic. A runtime probe right after the wrapper unwrap
-// catches representation drift the file-scope `static_assert` cannot.
+// Phase 65.1 Plan 10 (WR-06 D-12/D-13): the signature carries the trailing
+// `(char *error_buf, size_t error_buf_len)` pair, matching the read-side
+// dispatchers, so registration failures surface through the ABI-stable
+// channel into the Rust caller's diagnostic.
 extern "C" {
     bool sv_register_parser_hooks(
         duckdb_database db_handle,
@@ -4016,52 +4084,10 @@ extern "C" {
                 db_handle->internal_ptr);
             auto &db = *wrapper->database->instance;
 
-            // Phase 65.1 Plan 10 (WR-06 D-12 runtime probe). The file-scope
-            // `static_assert(sizeof(duckdb_connection) == sizeof(void*))`
-            // catches size drift; this probe catches representation drift
-            // that an equal-size change would miss (e.g. wrapping the
-            // pointer in a struct with the same layout but different
-            // semantics). Failure refuses the LOAD entirely so no
-            // semantic_views state survives a broken bridge — better than
-            // discovering the breakage on the first user query.
-            //
-            // The `Connection probe` is stack-allocated; its dtor runs at
-            // scope exit. The bridged `handle` becomes invalid but is not
-            // touched after the SELECT 1 round-trip.
-            {
-                Connection probe(db);
-                auto handle = reinterpret_cast<duckdb_connection>(&probe);
-                duckdb_result r;
-                auto rc = duckdb_query(handle, "SELECT 1", &r);
-                if (rc != DuckDBSuccess) {
-                    // Phase 65.1 IN-01: surface the underlying DuckDB error
-                    // text and clarify that the probe failure can stem from
-                    // either ABI drift (the original BORROW-contract concern)
-                    // OR a transient DB error at LOAD time (shutdown in
-                    // progress, OOM, etc.). The diagnostic must list both
-                    // possible causes so an operator hitting a non-bridge
-                    // failure isn't misled into chasing an ABI regression.
-                    const char *err_text = duckdb_result_error(&r);
-                    if (error_buf != nullptr && error_buf_len > 0) {
-                        snprintf(error_buf, error_buf_len,
-                            "bridge contract probe failed (duckdb_query "
-                            "SELECT 1 returned %d): %s. Possible causes: "
-                            "duckdb_connection ABI drift OR transient DB "
-                            "error at LOAD time; refusing to load "
-                            "semantic_views extension.",
-                            (int)rc, err_text ? err_text : "(no detail)");
-                    }
-                    duckdb_destroy_result(&r);
-                    return false;
-                }
-                duckdb_destroy_result(&r);
-            }
-
             // Phase 65 Plan 04 (Task 2 Step B): register the
             // `__sv_compute_create_from_yaml` helper TF via the C++ Catalog
             // API so its bind callback receives a native `ClientContext &`
-            // and can open per-call `Connection(*context.db)` to read the
-            // YAML file. The outer parser_override INSERT in
+            // to read the YAML file through. The outer parser_override INSERT in
             // src/parse.rs::rewrite_yaml_file_create wraps the helper TF's
             // `new_def` row with json_merge_patch + json_object to add
             // now()/current_database()/current_schema() on the caller's

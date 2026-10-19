@@ -354,10 +354,9 @@ is always the type a query returns for that member:
   The same goes for a metric that cannot be queried on its own because it would
   aggregate across a fan-out (see :ref:`howto-fan-traps`): its ``data_type`` is
   empty, and querying it reports the fan trap.
-- **Over a temporary table** the members are not typed yet: ``data_type`` is empty,
-  though querying them works in the session that has the table. The command reads
-  committed state on a connection of its own, which cannot see your session's
-  temporary tables or your open transaction's changes.
+- **Over a temporary table, or a table changed in your open transaction,** members
+  are typed as ``semantic_view()`` reads them there: the command runs in your
+  session and transaction.
 - **PRIVATE members** are typed too, though they cannot be queried directly.
 - **Role-played members** -- on a table that several relationships point at -- are
   typed too, although querying one needs a metric whose ``USING`` names the role. The
@@ -526,7 +525,7 @@ DuckDB Semantic Views runs these statements inside the caller's transaction, the
 
 Some DuckDB-specific details to know before you build on it:
 
-- ``DESCRIBE SEMANTIC VIEW`` and the ``SHOW SEMANTIC ...`` family read **committed** catalog state. A ``CREATE`` issued earlier in the same uncommitted transaction is not yet visible to introspection in that transaction; commit first, then describe.
+- Reads inside an open transaction, ``DESCRIBE SEMANTIC VIEW`` and the ``SHOW SEMANTIC ...`` family included, see that transaction's uncommitted ``CREATE``, ``ALTER`` and ``DROP``. Other connections see them once you commit.
 - ``CREATE SEMANTIC VIEW IF NOT EXISTS`` cannot fully absorb a race between two connections both running it against the same database at the same moment -- one will succeed and the other will see a constraint or commit-conflict error. On a single connection, ``IF NOT EXISTS`` is reliable.
 - The non-``IF EXISTS`` ``DROP`` and ``ALTER`` forms raise ``semantic view '<name>' does not exist`` when the view is absent at check time, instead of silently no-opping. The existence check and the write are atomic only inside an explicit transaction; under autocommit a drop committed by another writer in the window between them is not detected. Wrap the DDL in ``BEGIN ... COMMIT`` when you need the check to be reliable under concurrency.
 

@@ -1,5 +1,5 @@
 .. meta::
-   :description: How transactional DDL works in DuckDB Semantic Views, and the small set of caveats around read visibility, concurrent CREATE, and DDL across multiple connections
+   :description: How transactional DDL works in DuckDB Semantic Views, what reads inside an open transaction see, and the small set of caveats around concurrent CREATE and DDL across multiple connections
 
 .. _explanation-transactional-ddl:
 
@@ -46,26 +46,29 @@ This applies to every ``CREATE`` body variant: the ``AS`` keyword body, inline `
 
 .. _explanation-txn-ddl-write-visibility:
 
-Reads Inside an Open Transaction See Committed State
-=====================================================
+Reads Inside an Open Transaction See Your Changes
+==================================================
 
-The introspection commands -- :ref:`DESCRIBE SEMANTIC VIEW <ref-describe-semantic-view>`, :ref:`SHOW SEMANTIC VIEWS <ref-show-semantic-views>` (and the other ``SHOW SEMANTIC *`` variants), :ref:`READ_YAML_FROM_SEMANTIC_VIEW <ref-read-yaml>`, :ref:`GET_DDL <ref-get-ddl>` -- always read what has been **committed**. They do not see the uncommitted changes from your own open transaction.
+.. versionchanged:: 0.16.0
 
-So this sequence:
+   Earlier releases read every semantic view's definition as last committed,
+   so a view created, dropped or renamed in an open transaction did not show
+   up that way until you committed.
+
+Everything that reads a semantic view runs in your transaction: :ref:`semantic_view() <ref-semantic-view-function>`, ``explain_semantic_view()``, :ref:`DESCRIBE SEMANTIC VIEW <ref-describe-semantic-view>`, :ref:`SHOW SEMANTIC VIEWS <ref-show-semantic-views>` and the other ``SHOW SEMANTIC *`` commands, :ref:`READ_YAML_FROM_SEMANTIC_VIEW <ref-read-yaml>` and :ref:`GET_DDL <ref-get-ddl>`. They see your own uncommitted changes, as a query of an ordinary table does:
 
 .. code-block:: sql
 
    BEGIN;
    CREATE SEMANTIC VIEW v AS TABLES (o AS orders) DIMENSIONS (o.r AS o.region);
-   SHOW SEMANTIC VIEWS;   -- v is NOT in the result yet
-   COMMIT;
-   SHOW SEMANTIC VIEWS;   -- now v is listed
+   SHOW SEMANTIC VIEWS;   -- v is listed
+   SELECT * FROM semantic_view('v', dimensions := ['r']);   -- and can be queried
+   ROLLBACK;
+   SHOW SEMANTIC VIEWS;   -- v is gone
 
-is expected. The same applies to in-flight ``DROP`` (the row keeps appearing until commit) and ``ALTER ... RENAME TO`` (the row appears under its old name until commit). If you need ``SHOW`` or ``DESCRIBE`` to reflect a change, commit first.
+An in-flight ``DROP`` hides the view, and an in-flight ``ALTER ... RENAME TO`` shows it under its new name, in your transaction only. Other connections see none of it until you commit.
 
-The data is different. When you query a semantic view with :ref:`semantic_view() <ref-semantic-view-function>`, DuckDB runs the query in your transaction, so rows you have inserted into ``orders`` inside an open transaction are included. What the query reads committed is the semantic view's *definition*: a semantic view you create in an open transaction can't be queried until you commit.
-
-In short: commit before introspecting.
+The member types that ``SHOW`` and ``DESCRIBE`` report, and the plan ``explain_semantic_view()`` shows, come from your transaction too. A source table you alter in an open transaction, or a temporary table of your session, is typed and planned the way ``semantic_view()`` reads it.
 
 
 .. _explanation-txn-ddl-create-race:
@@ -300,10 +303,10 @@ Summary
 For most users, the everyday-visible behavior is:
 
 - ``BEGIN ... ROLLBACK`` rolls back ``CREATE``, ``DROP``, and ``ALTER SEMANTIC VIEW``.
+- Queries, ``SHOW`` and ``DESCRIBE`` inside an open transaction see its uncommitted semantic-view changes.
 
 The other items on this page only matter in specific situations:
 
-- Introspection inside an open transaction shows committed state -- commit before ``SHOW`` / ``DESCRIBE`` if you need to see your own pending changes.
 - Concurrent ``CREATE IF NOT EXISTS`` from two connections can produce a constraint or commit-conflict error on one of them; catch it and treat as success.
 - Semantic views are single-catalog: run their DDL from the database you loaded the extension into, not from a ``USE``-d attached database.
 - Setting ``allow_parser_override_extension`` back to ``'DEFAULT'`` drops the error pointer and the original tabs and blank lines of ``CREATE`` expressions until you set it to ``'FALLBACK'`` again.

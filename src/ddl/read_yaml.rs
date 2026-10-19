@@ -35,18 +35,16 @@ fn resolve_view_ref(input: &str) -> crate::ident::ViewRef {
 // ---------------------------------------------------------------------------
 // FFI dispatcher for the migrated `read_yaml_from_semantic_view(name)`
 // scalar. Invoked once per row by the C++ exec callback
-// `sv_read_yaml_from_semantic_view_exec` in cpp/src/shim.cpp. Same per-call
-// borrowed Connection contract as `sv_get_ddl_exec_rust` and the read-path
-// bind dispatchers (see `src/ddl/read_ffi.rs` module docs).
+// `sv_read_yaml_from_semantic_view_exec` in cpp/src/shim.cpp, in the scope of
+// the executing query, like `sv_get_ddl_exec_rust` and the read-path bind
+// dispatchers (see `src/ddl/read_ffi.rs` module docs).
 
 /// # Safety
 ///
-/// `conn` is a borrowed handle (do NOT disconnect). `name_ptr` must point
-/// to `name_len` UTF-8 bytes (not NUL-terminated).
+/// `name_ptr` must point to `name_len` UTF-8 bytes (not NUL-terminated).
 #[cfg(feature = "extension")]
 #[no_mangle]
 pub unsafe extern "C" fn sv_read_yaml_from_semantic_view_exec_rust(
-    conn: libduckdb_sys::duckdb_connection,
     name_ptr: *const u8,
     name_len: usize,
     sp_ptr: *const u8,
@@ -57,13 +55,12 @@ pub unsafe extern "C" fn sv_read_yaml_from_semantic_view_exec_rust(
     error_buf_len: usize,
 ) -> u8 {
     crate::ddl::read_ffi::run_dispatcher(
-        conn,
         out_ptr,
         out_len,
         error_buf,
         error_buf_len,
         "sv_read_yaml_from_semantic_view_exec_rust",
-        |borrowed| unsafe { read_yaml_export(borrowed, name_ptr, name_len, sp_ptr, sp_len) },
+        || unsafe { read_yaml_export(name_ptr, name_len, sp_ptr, sp_len) },
     )
 }
 
@@ -75,22 +72,20 @@ pub unsafe extern "C" fn sv_read_yaml_from_semantic_view_exec_rust(
 /// `name_ptr` must be null or point to `name_len` readable bytes.
 #[cfg(feature = "extension")]
 unsafe fn read_yaml_export(
-    borrowed: &crate::ddl::read_ffi::BorrowedConnection,
     name_ptr: *const u8,
     name_len: usize,
     sp_ptr: *const u8,
     sp_len: usize,
 ) -> Result<Vec<u8>, String> {
-    use crate::ddl::read_ffi::{probe_catalog_table_present, read_str_arg};
+    use crate::ddl::read_ffi::read_str_arg;
 
     let raw_name = read_str_arg(name_ptr, name_len, "view name")?;
     let view = resolve_view_ref(&raw_name);
     let bare_name = view.name.clone();
     let search_path = unsafe { crate::ddl::read_ffi::read_search_path(sp_ptr, sp_len) }?;
 
-    // FF-9: a probe-query failure is distinct from "no views" (propagated).
-    let present = probe_catalog_table_present(borrowed)?;
-    let reader = CatalogReader::new(borrowed, present);
+    // FF-9: a catalog-read failure is distinct from "no views" (propagated).
+    let reader = CatalogReader::for_caller()?;
     let json = reader
         .lookup(&view, &search_path)?
         .ok_or_else(|| crate::catalog::view_not_found_msg(&view.to_string()))?;

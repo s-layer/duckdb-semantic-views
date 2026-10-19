@@ -9,15 +9,14 @@ use crate::query::member_types::MemberTypes;
 // ---------------------------------------------------------------------------
 // FFI dispatcher for the migrated describe_semantic_view(view_name) TF.
 // 5-column VARCHAR (object_kind, object_name, parent_entity, property,
-// property_value). Same bridge + borrow contract as Wave 0 spike.
+// property_value). Runs in the caller's scope like list_semantic_views.
 
 /// # Safety
 ///
-/// `conn` is a borrowed handle; `name_ptr` must point to `name_len` UTF-8 bytes.
+/// `name_ptr` must point to `name_len` UTF-8 bytes.
 #[cfg(feature = "extension")]
 #[no_mangle]
 pub unsafe extern "C" fn sv_describe_semantic_view_bind_rust(
-    conn: libduckdb_sys::duckdb_connection,
     name_ptr: *const u8,
     name_len: usize,
     sp_ptr: *const u8,
@@ -28,13 +27,12 @@ pub unsafe extern "C" fn sv_describe_semantic_view_bind_rust(
     error_buf_len: usize,
 ) -> u8 {
     crate::ddl::read_ffi::run_dispatcher(
-        conn,
         out_ptr,
         out_len,
         error_buf,
         error_buf_len,
         "sv_describe_semantic_view_bind_rust",
-        |borrowed| unsafe { describe_view_rows(borrowed, name_ptr, name_len, sp_ptr, sp_len) },
+        || unsafe { describe_view_rows(name_ptr, name_len, sp_ptr, sp_len) },
     )
 }
 
@@ -46,13 +44,12 @@ pub unsafe extern "C" fn sv_describe_semantic_view_bind_rust(
 /// `name_ptr` must be null or point to `name_len` readable bytes.
 #[cfg(feature = "extension")]
 unsafe fn describe_view_rows(
-    borrowed: &crate::ddl::read_ffi::BorrowedConnection,
     name_ptr: *const u8,
     name_len: usize,
     sp_ptr: *const u8,
     sp_len: usize,
 ) -> Result<Vec<u8>, String> {
-    use crate::ddl::read_ffi::{probe_catalog_table_present, read_str_arg, serialize_varchar_rows};
+    use crate::ddl::read_ffi::{read_str_arg, serialize_varchar_rows};
 
     let raw_name = read_str_arg(name_ptr, name_len, "view name")?;
     // FF-4: normalize so quoted-identifier inputs resolve like `semantic_view()`.
@@ -60,9 +57,8 @@ unsafe fn describe_view_rows(
         .map_err(|e| format!("Invalid view name '{raw_name}': {e}"))?;
     let name = view.name.clone();
     let search_path = unsafe { crate::ddl::read_ffi::read_search_path(sp_ptr, sp_len) }?;
-    // FF-9: a probe-query failure is distinct from "no views" (propagated).
-    let present = probe_catalog_table_present(borrowed)?;
-    let reader = CatalogReader::new(borrowed, present);
+    // FF-9: a catalog-read failure is distinct from "no views" (propagated).
+    let reader = CatalogReader::for_caller()?;
     let json = reader
         .lookup(&view, &search_path)?
         .ok_or_else(|| crate::catalog::view_not_found_msg(&view.to_string()))?;
@@ -70,9 +66,8 @@ unsafe fn describe_view_rows(
     let alias_map = def.alias_to_table_map();
     let base_table = def.base_table().to_string();
     // TECH-DEBT #51: DATA_TYPE rows report each member's type as probed now,
-    // on this bind's connection (see `query::member_types`).
+    // in the caller's context (see `query::member_types`).
     let types = crate::ddl::read_ffi::member_types_for_bind(
-        borrowed,
         &name,
         &def,
         crate::query::member_types::Wanted::ALL,

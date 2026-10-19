@@ -29,8 +29,7 @@
 use crate::catalog::CatalogReader;
 use crate::ddl::describe::format_json_array;
 use crate::ddl::read_ffi::{
-    member_types_for_bind, probe_catalog_table_present, read_str_arg, run_dispatcher,
-    serialize_varchar_rows, BorrowedConnection,
+    member_types_for_bind, read_str_arg, run_dispatcher, serialize_varchar_rows,
 };
 use crate::model::SemanticViewDefinition;
 use crate::query::member_types::{MemberTypes, Wanted};
@@ -59,11 +58,10 @@ impl EntityKind {
 /// ends the whole listing rather than moving on to the next view.
 fn probe_types(
     kind: EntityKind,
-    borrowed: &BorrowedConnection,
     view_name: &str,
     def: &SemanticViewDefinition,
 ) -> Result<MemberTypes, String> {
-    member_types_for_bind(borrowed, view_name, def, kind.wanted())
+    member_types_for_bind(view_name, def, kind.wanted())
 }
 
 /// A single 8-column row of `SHOW SEMANTIC {DIMENSIONS,METRICS,FACTS}` output.
@@ -175,9 +173,8 @@ fn collect_entities(
 
 /// Cross-view `_all` body: collect `kind` rows over every stored view, sorted
 /// by `(semantic_view_name, name)`.
-fn show_entities_all(kind: EntityKind, borrowed: &BorrowedConnection) -> Result<Vec<u8>, String> {
-    let present = unsafe { probe_catalog_table_present(borrowed) }?;
-    let reader = CatalogReader::new(borrowed, present);
+fn show_entities_all(kind: EntityKind) -> Result<Vec<u8>, String> {
+    let reader = CatalogReader::for_caller()?;
     let entries = reader.list_all()?;
     let mut rows: Vec<Vec<String>> = Vec::new();
     for (name, json) in &entries {
@@ -187,7 +184,7 @@ fn show_entities_all(kind: EntityKind, borrowed: &BorrowedConnection) -> Result<
         let Ok(def) = SemanticViewDefinition::from_json(name, json) else {
             continue;
         };
-        let types = probe_types(kind, borrowed, name, &def)?;
+        let types = probe_types(kind, name, &def)?;
         for r in collect_entities(kind, name, &def, &types) {
             rows.push(r.into_cells());
         }
@@ -200,7 +197,6 @@ fn show_entities_all(kind: EntityKind, borrowed: &BorrowedConnection) -> Result<
 /// A missing view is the canonical "does not exist" error.
 fn show_entities_one(
     kind: EntityKind,
-    borrowed: &BorrowedConnection,
     view_name: &str,
     search_path: &[String],
 ) -> Result<Vec<u8>, String> {
@@ -210,8 +206,7 @@ fn show_entities_one(
     let view = crate::ident::parse_view_ref(view_name)
         .map_err(|e| format!("Invalid view name '{view_name}': {e}"))?;
     let view_name = view.name.clone();
-    let present = unsafe { probe_catalog_table_present(borrowed) }?;
-    let reader = CatalogReader::new(borrowed, present);
+    let reader = CatalogReader::for_caller()?;
     let Some(json) = reader.lookup(&view, search_path)? else {
         return Err(crate::catalog::view_not_found_msg(&view.to_string()));
     };
@@ -219,7 +214,7 @@ fn show_entities_one(
     // for this specific view, so a corrupt definition must surface loudly
     // instead of silently returning zero rows.
     let def = SemanticViewDefinition::from_json(&view_name, &json)?;
-    let types = probe_types(kind, borrowed, &view_name, &def)?;
+    let types = probe_types(kind, &view_name, &def)?;
     let mut internal = collect_entities(kind, &view_name, &def, &types);
     internal.sort_by(|a, b| a.name.cmp(&b.name));
     let rows: Vec<Vec<String>> = internal.into_iter().map(EntityRow::into_cells).collect();
@@ -235,34 +230,29 @@ fn show_entities_one(
 macro_rules! entity_dispatchers {
     ($kind:expr, $all_sym:ident, $one_sym:ident) => {
         /// # Safety
-        /// `conn` is a borrowed handle (see `read_ffi` borrow contract). The
-        /// caller releases the returned buffer via `sv_free_buffer`.
+        /// The caller releases the returned buffer via `sv_free_buffer`.
         #[no_mangle]
         pub unsafe extern "C" fn $all_sym(
-            conn: libduckdb_sys::duckdb_connection,
             out_ptr: *mut *mut u8,
             out_len: *mut usize,
             error_buf: *mut u8,
             error_buf_len: usize,
         ) -> u8 {
             run_dispatcher(
-                conn,
                 out_ptr,
                 out_len,
                 error_buf,
                 error_buf_len,
                 stringify!($all_sym),
-                |borrowed| show_entities_all($kind, borrowed),
+                || show_entities_all($kind),
             )
         }
 
         /// # Safety
-        /// `conn` is a borrowed handle; `name_ptr` must point to `name_len`
-        /// UTF-8 bytes. The caller releases the returned buffer via
+        /// `name_ptr` must point to `name_len` UTF-8 bytes. The caller releases the returned buffer via
         /// `sv_free_buffer`.
         #[no_mangle]
         pub unsafe extern "C" fn $one_sym(
-            conn: libduckdb_sys::duckdb_connection,
             name_ptr: *const u8,
             name_len: usize,
             sp_ptr: *const u8,
@@ -273,17 +263,16 @@ macro_rules! entity_dispatchers {
             error_buf_len: usize,
         ) -> u8 {
             run_dispatcher(
-                conn,
                 out_ptr,
                 out_len,
                 error_buf,
                 error_buf_len,
                 stringify!($one_sym),
-                |borrowed| {
+                || {
                     let view_name = unsafe { read_str_arg(name_ptr, name_len, "view name") }?;
                     let search_path =
                         unsafe { crate::ddl::read_ffi::read_search_path(sp_ptr, sp_len) }?;
-                    show_entities_one($kind, borrowed, &view_name, &search_path)
+                    show_entities_one($kind, &view_name, &search_path)
                 },
             )
         }

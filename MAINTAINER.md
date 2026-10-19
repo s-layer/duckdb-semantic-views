@@ -111,13 +111,13 @@ src/
 │   │                          #   also `window_cte_anchor`, which picks the grain window.rs anchors __sv_agg at
 │   └── tests_*.rs             #   behaviour-named extracted test modules
 ├── catalog/                   # Reads/writes of semantic_layer._definitions
-│   ├── mod.rs                 #   CatalogReader (fresh-per-call connection) + RAII PreparedStmt/QueryResult guards
+│   ├── mod.rs                 #   CatalogReader (the catalog rows as the caller's transaction sees them)
 │   └── writes.rs              #   write-side race guards
 ├── ddl/                       # DDL execution + read-side table functions (only compiled under --features extension)
 │   ├── define.rs              #   CREATE-time enrichment (PK lookup, type inference)
 │   ├── describe.rs get_ddl.rs list.rs
 │   ├── show_columns.rs show_entities.rs show_dims_for_metric.rs show_materializations.rs
-│   ├── read_ffi.rs read_yaml.rs alter_helpers_ffi.rs   #   FFI seam types (BorrowedConnection, dispatchers)
+│   ├── read_ffi.rs read_yaml.rs alter_helpers_ffi.rs   #   FFI seam (dispatcher scaffold, caller-context reads)
 │   └── mod.rs
 └── query/                     # Query interface
     ├── table_function.rs      #   semantic_view() — reads the definition, expands it and hands the SQL to the
@@ -185,7 +185,8 @@ The same DDL, declined by the override (DuckDB 2.0 builds)
    └── C++ Parser::ParseQuery of the lowered SQL; DuckDB runs the statement(s) as above.
 
 semantic_view('shop', dimensions := [...], metrics := [...])
-   └── bind_replace table function. Bind reads the definition via catalog::CatalogReader,
+   └── bind_replace table function. Bind reads the definition via catalog::CatalogReader
+       (CatalogReader::for_caller, in the caller's transaction; see Catalog Persistence),
        expand/ generates SQL, and DuckDB plans it as a subquery of the caller's query.
        TABLES entries arrive qualified with the stamp, or as temp.main for one CREATE found
        temporary (SemanticViewDefinition::temp_tables). The shim (SvTablePinner) first
@@ -233,14 +234,12 @@ The `ddl/` module and the FFI entrypoints in `query/` (`table_function.rs`, `exp
 
 Definitions live in `semantic_layer._definitions` (a regular DuckDB table that participates in normal transactional semantics), keyed by `(schema_name, name)` — semantic views are scoped to a schema, so two schemas may each hold a view of the same name. `schema_name` is a column rather than a field inside the JSON `definition` so the key can enforce that; the JSON keeps a matching copy for the SHOW / DESCRIBE listings, written from the same expression and kept in lockstep (see `catalog::writes::create_target_schema_expr`). A catalog in the pre-scoping single-column shape is rebuilt in place on the next `LOAD` by `migrate_definitions_to_schema_scoped` — a rebuild rather than an `ALTER`, because DuckDB cannot retrofit a primary key.
 
-Two separate connections coexist per extension load:
+Writes and reads both happen in the caller's transaction:
 
-- **Caller's connection.** Where DDL writes execute. `parser_override` produces `INSERT / UPDATE / DELETE ... RETURNING ...` SQL, DuckDB plans it on this connection, and the writes participate in whatever transaction the caller has open.
-- **Catalog connection (`catalog_conn`).** Created at extension load time and held for read-side table functions (`describe_*`, `show_*`, `list_*`, `read_yaml_*`, `get_ddl`) and CREATE-time enrichment (PK lookup, type inference). Reads see committed state — never the caller's in-flight transaction.
+- **Writes.** `parser_override` (or the grammar bridge) produces `INSERT / UPDATE / DELETE ... RETURNING ...` SQL, and DuckDB runs it on the caller's connection, in whatever transaction the caller has open.
+- **Reads** (`semantic_view()`, `explain_semantic_view()`, `describe_*`, `show_*`, `list_*`, `read_yaml_*`, `get_ddl`). The C++ bind or scalar callback names the caller's `ClientContext` for the call (`SvCallerScope`), and the Rust dispatcher reads through `read_ffi::caller_definitions` / `caller_describe` / `caller_explain`, backed by the shim's `sv_caller_*`: a storage-layer scan of `_definitions` with the caller's `DuckTransaction` (its uncommitted rows and deletes included), and binds / plans with the caller's context for member typing and `explain_semantic_view`. None of them runs a statement: `ClientContext::Query` from inside the caller's own bind would self-deadlock on its `context_lock` (TECH-DEBT #19). Reads look the table up in the database new connections start in, whatever the caller has `USE`-d (#26).
 
-The split exists because read-side table function bind hooks do not (currently) expose the executing connection through libduckdb-sys, so DESCRIBE / SHOW use `catalog_conn` even when called from inside an open transaction. Documented limitation; see TECH-DEBT item 19.
-
-The in-memory `CatalogState` HashMap mirror was removed in v0.8.0 (Phase 58); Phase 61 added internal `PreparedStmt` / `QueryResult` RAII guards in `catalog` (`src/catalog/mod.rs`) so error paths no longer juggle manual `duckdb_destroy_*` calls.
+The in-memory `CatalogState` HashMap mirror was removed in v0.8.0 (Phase 58).
 
 ## Building
 
@@ -316,9 +315,10 @@ static MSVC runtime (`/MT`), so `.cargo/config.toml` links the extension with
 environment replaces that config's flags rather than adding to them, so `build.rs`
 refuses an MSVC build without `crt-static` instead of failing at the link.
 The shim is also compiled with `/EHsc`, which the `cc` crate does not add on its own:
-without it MSVC skips the destructors of a frame a C++ exception unwinds through, and a
-bind that threw left its cancellation watcher thread running against a dead stack frame
-(the windows_amd64 access violations from #248 on). `shim.cpp` refuses to compile without it.
+without it MSVC skips the destructors of a frame a C++ exception unwinds through, so a
+bind that threw would leave its thread pointing at a dead caller context (a cancellation
+watcher thread the binds used to start caused the windows_amd64 access violations from
+#248 on). `shim.cpp` refuses to compile without it.
 
 Builds are cached under `.engine/<id>/` (the static libraries, plus the extracted source
 for the pinned release's headers), keyed on the pin or on the tree's label and commit, so
@@ -374,7 +374,7 @@ Fix: `rustup update stable`
 | `just test-examples` | Every `examples/*.py` | Builds the extension, then `scripts/run_examples.py` runs each example under `uv run --script` (so each gets its own PEP 723 dependencies — `transactional_ddl.py` gets `adbc-driver-manager`/`pyarrow`) from the repo root, and fails on any non-zero exit. Every file prints `PASS`/`FAIL`/`SKIPPED`/`XFAIL`/`XPASS`; nothing is skipped silently. Two explicit allow-lists in the script: `NEEDS_DOWNLOADED_EXTENSION` (examples that download a DuckDB extension at run time, none at present; such a file runs normally, `SKIPPED` only under `SV_OFFLINE_EXTENSIONS=1`, which is refused when `CI` is set) and `EXPECTED_FAILURES` (must fail with its recorded error and cite TECH-DEBT; a different error is a `FAIL`, a pass is a loud `XPASS` warning so the entry gets deleted). Pass file names to run a subset. Part of `test-integration`. |
 | `just test-sqllogictest-guards` | The sqllogictest wrapper itself | Drives the real `make test_debug` with a one-file `TEST_LIST` per scenario and asserts each silent-skip case — missing extension, renamed extension, zero statements executed, unparseable file, `halt`, a query failing with an "HTTP" / "Unable to connect" error (which the runner's `ignore_error_messages` counts as a pass), and an expected-error block that matched an INTERNAL error — now exits non-zero with its own reason, and that a normal file, an expected-error block on an ordinary error, and a `require windows` platform skip still exit 0. The offline scenarios drive the wrapper directly: under `SV_OFFLINE_EXTENSIONS=1` only a file passed as `--offline-excused` may hit a network error, reported as `SKIPPED` (`make` passes none; it leaves `OFFLINE_EXTENSION_TESTS` out of the list instead); any other file still fails, and the variable is refused when `CI` is set (`test/integration/test_sqllogictest_guards.py`). Part of `test-integration`. |
 | `just test-multi-statement-error` | Multi-statement DDL (TECH-DEBT #85) | Semantic-view DDL inside a multi-statement `execute()` string runs through the grammar productions, an error in it shows a caret on its own line, and a later query on another connection never borrows the recorded query's text or caret. Part of `test-integration`. |
-| `just test-interrupt` | Query cancellation (TECH-DEBT #42) | Builds the extension and fires `con.interrupt()` from a second thread mid-query; asserts `semantic_view()` aborts early (not just eventually) and reports a bare `Interrupted!`, then the same for the SHOW / DESCRIBE member-type probes (single-view, DIMENSIONS FOR METRIC and cross-view) over a source whose bind expands thousands of globs. Every check runs a second time under DuckDB 2.0's `SET max_execution_time` deadline, which must surface as the engine's bare "Query exceeded maximum execution time". DuckDB checks the deadline only once execution starts, so for `semantic_view()`'s own bind, which DuckDB runs as part of the caller's query, the deadline case is held to a plain query of the same source (documented under the reference's Time Limits). Part of `test-integration`. |
+| `just test-interrupt` | Query cancellation (TECH-DEBT #42) | Builds the extension and fires `con.interrupt()` from a second thread mid-query; asserts `semantic_view()` aborts early (not just eventually) and reports a bare `Interrupted!`, then the same for the SHOW / DESCRIBE member-type probes (single-view, DIMENSIONS FOR METRIC and cross-view) over a source whose bind expands thousands of globs. Every check runs a second time under DuckDB 2.0's `SET max_execution_time` deadline, which must surface as the engine's bare "Query exceeded maximum execution time". DuckDB checks the deadline only once execution starts, so where the slow part is a bind DuckDB runs in the caller's context (`semantic_view()`'s own bind, a member-type probe, `explain_semantic_view()`'s plan), the deadline case is held to a plain query of the same source (documented under the reference's Time Limits). Part of `test-integration`. |
 | `just test-load-version-guard` | The load-time DuckDB version check | Builds the extension and `LOAD`s it, in a child process, into a DuckDB other than `.duckdb-version` (DuckDB 1.5.6, the last 1.5 release, whose C API is the one we declare; pinned in the `test-load-version-guard` recipe via `uv run --with`). Asserts the load fails with the check's message from `src/load_guard.rs` rather than loading or crashing; without the check a v1.5.6 build segfaulted a 2.0 host. When the build moves to a new DuckDB, repin the recipe to a different release. Part of `test-integration`. |
 | `just test-engine-pins` | The wheel pin against the engine pin | Runs under the wheel `.duckdb-pypi-version` names and checks it is that release, that its engine reports `.duckdb-version`, and, while BuildAll / BuildQuick pin the engine by commit, that it was built from that commit. The engine is built from this wheel's sdist under `.duckdb-version`'s label, and nothing in the source could contradict a wrong pair. No build needed. Part of `test-integration`. |
 | `just test-legacy-schema-spelling` | Legacy-catalog migration (TECH-DEBT #44) | Builds a real pre-scoping database file (`_definitions` keyed on `name` alone), opens it through a real `LOAD`, and asserts the migration records the **catalog's** spelling of a schema rather than the row's — then that `CREATE OR REPLACE` replaces the migrated row instead of duplicating it. Part of `test-integration`. |

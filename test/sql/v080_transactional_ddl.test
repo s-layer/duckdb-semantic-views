@@ -449,11 +449,9 @@ CREATE SEMANTIC VIEW IF NOT EXISTS v080_yaml_commit FROM YAML FILE '__TEST_DIR__
 
 # ------------------------------------------------------------------
 # Same-transaction duplicate CREATE produces the friendly "already exists"
-# error, not a raw PK constraint violation. The parse-time existence check
-# only sees committed rows; an in-flight CREATE within the same transaction
-# slips past it, so emit_native_create_sql guards the INSERT with a
-# CASE+error() that runs on the caller's connection (and therefore sees
-# the in-flight row).
+# error, not a raw PK constraint violation: emit_native_create_sql guards
+# the INSERT with a CASE+error() that runs in the caller's transaction (and
+# therefore sees the in-flight row).
 # ------------------------------------------------------------------
 
 statement ok
@@ -572,11 +570,11 @@ WHERE d.name = 'v081_d3' AND MD5(d.definition) = m.md5
 1
 
 # D4: inside an open BEGIN with an in-flight CREATE, list_semantic_views
-# (which reads via catalog_conn — committed state only) must agree with a
-# direct read of `_definitions` on the user's connection. Pre-v0.8.1 the
-# direct count was 1 (in-flight row) and list_semantic_views was 0 (catalog
-# connection sees committed state); that's the documented limitation. After
-# COMMIT, both should agree at 1.
+# must agree with a direct read of `_definitions` on the user's connection.
+# Until TECH-DEBT #19 was resolved the direct count was 1 (in-flight row) and
+# list_semantic_views was 0 (it read on a connection of its own, which saw
+# committed state). Reads now run in the caller's transaction, so both see
+# the in-flight row, and after COMMIT both still agree at 1.
 statement ok
 BEGIN
 
@@ -586,14 +584,13 @@ CREATE SEMANTIC VIEW v081_d4 AS
   DIMENSIONS (o.region AS o.region)
   METRICS (o.t AS SUM(o.amount))
 
-# In-flight: caller's connection sees its own write (1 row); the catalog
-# connection (used by list_semantic_views) does not yet (0 rows).
+# In-flight: the caller's own write is seen by both reads.
 query II
 SELECT
   (SELECT count(*) FROM semantic_layer._definitions WHERE name = 'v081_d4'),
   (SELECT count(*) FROM list_semantic_views() WHERE name = 'v081_d4')
 ----
-1	0
+1	1
 
 statement ok
 COMMIT

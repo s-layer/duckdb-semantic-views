@@ -334,8 +334,7 @@ pub(crate) fn current_database_guard_select(db: &SqlLit, display: &SqlLit) -> St
 ///
 /// Semantic views are single-catalog: `semantic_layer._definitions` is created
 /// only in the database the extension was loaded into (the primary), and every
-/// read runs on a fresh per-call connection that resolves against that primary
-/// catalog. A write issued while the caller is `USE`-d into a different (e.g.
+/// read looks it up in that primary catalog, whatever the caller has `USE`-d. A write issued while the caller is `USE`-d into a different (e.g.
 /// attached) database resolves `semantic_layer._definitions` against that other
 /// catalog. In the common case that catalog has no `semantic_layer` schema, so
 /// the write would otherwise fail with a cryptic

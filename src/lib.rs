@@ -102,8 +102,8 @@ pub mod test_helpers {
     /// function — the extension's read side no longer materializes typed values
     /// in Rust (that path was retired in Phase 65: production now hands zero-copy
     /// vector references to DuckDB and streams results C++-side, with
-    /// `query::table_function::read_varchar_from_vector` the only remaining
-    /// per-value Rust reader, used for VARCHAR-only paths like EXPLAIN).
+    /// `query::raw_sql::read_varchar_from_vector` the only remaining per-value
+    /// Rust reader, used by the member-type probe's tests).
     ///
     /// What it *does* mirror is the binary layout contract the extension depends
     /// on: it decodes `duckdb_data_chunk` vectors directly (validity mask +

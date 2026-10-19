@@ -39,7 +39,7 @@ Statement Variants
 
 .. note::
 
-   ``SHOW SEMANTIC VIEWS`` reads committed catalog state. A ``CREATE`` / ``DROP`` / ``ALTER`` issued in the same uncommitted transaction will not appear (or will continue to appear under its old name) until commit. See :ref:`explanation-txn-ddl-write-visibility`.
+   ``SHOW SEMANTIC VIEWS`` runs in your transaction, so a view created, dropped or renamed earlier in it is listed that way before you commit. See :ref:`explanation-txn-ddl-write-visibility`.
 
 
 .. _ref-show-filtering:

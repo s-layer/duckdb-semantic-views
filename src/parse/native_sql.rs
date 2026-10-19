@@ -111,11 +111,8 @@ fn current_database_guard(view: &ViewRef) -> String {
 //       → passed through as `SELECT * FROM <existing_read_side_table_function>(...)`
 //         (or the same SQL with WHERE/LIMIT clauses appended). DuckDB re-parses
 //         and executes on the caller's connection. The read-side table functions
-//         themselves query via a fresh per-call `Connection(*context.db)` opened
-//         in each C++ bind callback (committed state; the `catalog_conn` static
-//         was retired in Phase 65). Making DESCRIBE/SHOW transactional w.r.t. the
-//         caller's snapshot is blocked by a DuckDB liveness constraint — see
-//         TECH-DEBT #19 for the full analysis.
+//         themselves read the catalog in the caller's transaction too, through
+//         the storage layer rather than a statement (TECH-DEBT #19).
 //
 //   * Anything else (`validate_and_rewrite` returns None)
 //       → `Ok(None)`; the C++ shim returns DISPLAY_ORIGINAL_ERROR and DuckDB's

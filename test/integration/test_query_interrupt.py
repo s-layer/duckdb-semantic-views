@@ -31,15 +31,14 @@ Two properties are asserted, because the pre-fix build satisfies one of them:
      cancelled query as ADBC_STATUS_INTERNAL.
 
 DuckDB 2.0 adds a second way to cancel a query: `SET max_execution_time`, a
-per-query deadline the engine enforces apart from the interrupt flag. It is the
-caller's setting, so the probe connections never had it, and `semantic_view()`
-and the metadata binds below ran to completion past it. Every check here runs
-once per cancellation (CANCELLATIONS), and a deadline must surface as the
-engine's own "Query exceeded maximum execution time", bare, the same way.
+per-query deadline the engine enforces apart from the interrupt flag. Every check
+here runs once per cancellation (CANCELLATIONS), and a deadline must surface as
+the engine's own "Query exceeded maximum execution time", bare, the same way.
 DuckDB checks the deadline only once execution starts, so where the slow part
-is DuckDB's own bind of the source (a `semantic_view()` call over a source that
-is slow to bind), the deadline run is held to a plain query of that source
-instead: it must stop no later than DuckDB stops the plain query.
+is a bind DuckDB runs in the caller's context over a source that is slow to
+bind (`semantic_view()`'s own bind, a SHOW / DESCRIBE member-type probe,
+`explain_semantic_view()`'s plan), the deadline run is held to a plain query of
+that source instead: it must stop no later than DuckDB stops the plain query.
 
 A plain-SQL control runs first through the identical harness. It aborts early on
 *every* build (DuckDB's own executor polls the flag correctly), so if the control
@@ -53,13 +52,14 @@ what is being timed is the inner aggregate, not result materialisation.
 
 The same holds for the metadata commands. Since TECH-DEBT #51, SHOW SEMANTIC
 DIMENSIONS / METRICS / FACTS, SHOW COLUMNS, SHOW SEMANTIC DIMENSIONS FOR METRIC
-and DESCRIBE SEMANTIC VIEW probe each view's member types at bind time, on the
-bind's own `Connection(*context.db)`. Pre-fix, a cancel neither reached a probe
-already running nor stopped the remaining ones, so a cross-view SHOW typed
-every view and only then reported INTERRUPT. The second half of this file
-asserts the same two properties for those binds, against a source whose BIND
-is slow: a `read_csv` over a list of globs, each of which scans the directory
-(and polls the probe connection's interrupt flag) when expanded.
+and DESCRIBE SEMANTIC VIEW type each view's members at bind time by binding a
+probe query (since TECH-DEBT #19, in the caller's own context). Before #248, a
+cancel neither reached a probe already running nor stopped the remaining ones,
+so a cross-view SHOW typed every view and only then reported INTERRUPT. The
+second half of this file asserts the same two properties for those binds,
+against a source whose BIND is slow: a `read_csv` over a list of globs, each of
+which scans the directory (and polls the caller's interrupt flag) when
+expanded.
 
 Usage:
     uv run test/integration/test_query_interrupt.py
@@ -220,8 +220,8 @@ def run_interrupted(con, sql, fire_at=FIRE_AT_S):
 
 # DuckDB 2.0's per-query deadline (`SET max_execution_time`, in milliseconds)
 # stops a query the same way an interrupt does, from inside the engine, with
-# its own message. The caller's deadline is the caller's ClientContext state,
-# so it has to be carried to the probe connections exactly like the flag.
+# its own message. The shim checks the caller's deadline next to its interrupt
+# flag between member-type probes and when a read bind returns.
 DEADLINE_MESSAGE = "Query exceeded maximum execution time"
 
 
@@ -334,6 +334,12 @@ def _run_metadata_probe_tests(con, csv_dir) -> bool:
     # One statement per bind helper the probes run under: the single-name SHOW,
     # DESCRIBE, and the two-name DIMENSIONS FOR METRIC (a separate C++ helper),
     # plus SHOW COLUMNS, which the docstring lists as probing too.
+    #
+    # Each probe is a bind in the caller's context, so under a deadline it is
+    # held to the plain query of the source it binds, like semantic_view()
+    # below: DuckDB does not stop a slow bind at the deadline. The typing stops
+    # between probes once the deadline has passed.
+    probe_twin = "SELECT s.x FROM mp_src s"
     single = [
         ("SHOW SEMANTIC DIMENSIONS IN <view>", one_sql),
         ("DESCRIBE SEMANTIC VIEW <view>", "DESCRIBE SEMANTIC VIEW mp_one"),
@@ -344,7 +350,7 @@ def _run_metadata_probe_tests(con, csv_dir) -> bool:
         ),
     ]
     for label, sql in single:
-        ok &= check_interrupted_statement(con, label, sql)
+        ok &= check_interrupted_statement(con, label, sql, deadline_twin=probe_twin)
 
     # semantic_view() has no probe of its own: its bind hands DuckDB the
     # expanded query, and DuckDB binds the slow source as part of the caller's
@@ -373,13 +379,12 @@ def _run_metadata_probe_tests(con, csv_dir) -> bool:
             "SELECT * FROM semantic_view('mp_dec', metrics := ['dtotal'])",
             "SELECT sum(s.x::DECIMAL(18, 2)) AS dtotal FROM mp_src s",
         ),
-        # explain_semantic_view() runs EXPLAIN of the expanded query on its
-        # probe, which binds the slow source the same way, and the probe
-        # carries the deadline.
+        # explain_semantic_view() plans the expanded query in the caller's
+        # context, which binds the slow source the same way.
         (
             "explain_semantic_view(<view>) bind",
             "SELECT * FROM explain_semantic_view('mp_one', metrics := ['total'])",
-            None,
+            "SELECT sum(s.x) AS total FROM mp_src s",
         ),
     ]
     for label, sql, twin in binds:
@@ -497,7 +502,7 @@ def check_generous_deadline(con) -> bool:
     A deadline that has not passed must not cancel anything.
 
     Every other deadline check expects a failure, and an instant one passes
-    them. If the forwarded deadline were read on the wrong clock or epoch, any
+    them. If the shim read the deadline on the wrong clock or epoch, any
     limit at all would cancel every probing bind at once; this control would
     then fail where the others pass.
     """

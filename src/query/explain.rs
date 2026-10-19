@@ -1,5 +1,3 @@
-use libduckdb_sys as ffi;
-
 use crate::catalog::CatalogReader;
 use crate::expand::find_routing_materialization_name;
 use crate::expand::{expand, QueryRequest};
@@ -10,7 +8,6 @@ use super::error::QueryError;
 use super::items::{aliases_for, OutputColumns, RequestItems};
 use crate::expand::wildcard::{expand_wildcards, WildcardItemType};
 
-use super::table_function::{execute_sql_raw, read_varchar_from_vector};
 use super::wire::parse_varchar_list;
 
 // ---------------------------------------------------------------------------
@@ -21,12 +18,11 @@ use super::wire::parse_varchar_list;
 // dimensions := [...], metrics := [...], facts := [...])` table function.
 //
 // The C++ bind callback (`sv_explain_semantic_view_bind` in
-// `cpp/src/shim.cpp`) opens a per-call `Connection probe(*context.db)`,
-// pulls the positional view-name from `input.inputs[0]` and the optional
+// `cpp/src/shim.cpp`) pulls the positional view-name from `input.inputs[0]` and the optional
 // LIST(VARCHAR) named parameters from `input.named_parameters`, serialises
 // the three string lists into the standard length-prefixed wire format,
-// and invokes this dispatcher. Same `reinterpret_cast` bridge mechanism +
-// BORROW contract as the 14 migrations in Batch 1 of Plan 05.
+// and invokes this dispatcher in the caller's scope, so the definition is read
+// and the plan made in the caller's transaction (TECH-DEBT #19).
 //
 // Wire format for the three list arguments (`dims_buf`, `metrics_buf`,
 // `facts_buf`), each independently encoded as:
@@ -52,14 +48,13 @@ use super::wire::parse_varchar_list;
 
 /// # Safety
 ///
-/// `conn` is a borrowed handle (do NOT disconnect). The three `*_buf` /
+/// The three `*_buf` /
 /// `*_len` pairs encode LIST(VARCHAR) arguments using the wire format
 /// documented above. `name_ptr` must point to `name_len` UTF-8 bytes.
 #[cfg(feature = "extension")]
 #[no_mangle]
 #[allow(clippy::too_many_arguments)]
 pub unsafe extern "C" fn sv_explain_semantic_view_bind_rust(
-    conn: libduckdb_sys::duckdb_connection,
     name_ptr: *const u8,
     name_len: usize,
     sp_ptr: *const u8,
@@ -79,19 +74,17 @@ pub unsafe extern "C" fn sv_explain_semantic_view_bind_rust(
     error_buf: *mut u8,
     error_buf_len: usize,
 ) -> u8 {
-    // R-6/C-3: the catch_unwind guard, borrowed-connection null check, buffer
-    // publish, error-string write, and panic arm now live in the shared
+    // R-6/C-3: the catch_unwind guard, buffer publish, error-string write, and
+    // panic arm now live in the shared
     // `run_dispatcher` scaffold (ST-2); the body returns `Result<Vec<u8>, String>`.
     crate::ddl::read_ffi::run_dispatcher(
-        conn,
         out_ptr,
         out_len,
         error_buf,
         error_buf_len,
         "sv_explain_semantic_view_bind_rust",
-        |borrowed| unsafe {
+        || unsafe {
             explain_semantic_view_bind_body(
-                borrowed,
                 name_ptr,
                 name_len,
                 sp_ptr,
@@ -120,12 +113,10 @@ pub unsafe extern "C" fn sv_explain_semantic_view_bind_rust(
 /// Each `*_ptr` is either null or points to its paired `*_len` readable bytes.
 /// A null pointer is only meaningful with `*_len == 0` (an empty list / absent
 /// name); the decoders reject `(null, len > 0)` as FFI shape drift rather than
-/// dereferencing it. The borrowed connection must outlive the call (see the
-/// module borrow contract).
+/// dereferencing it.
 #[cfg(feature = "extension")]
 #[allow(clippy::too_many_arguments, clippy::too_many_lines)]
 unsafe fn explain_semantic_view_bind_body(
-    borrowed: &crate::ddl::read_ffi::BorrowedConnection,
     name_ptr: *const u8,
     name_len: usize,
     sp_ptr: *const u8,
@@ -141,7 +132,7 @@ unsafe fn explain_semantic_view_bind_body(
     order_ptr: *const u8,
     order_len: usize,
 ) -> Result<Vec<u8>, String> {
-    use crate::ddl::read_ffi::{probe_catalog_table_present, read_str_arg, serialize_varchar_rows};
+    use crate::ddl::read_ffi::{read_str_arg, serialize_varchar_rows};
 
     let view_name_raw = read_str_arg(name_ptr, name_len, "view name")?;
     let view = crate::ident::parse_view_ref(&view_name_raw)
@@ -181,8 +172,7 @@ unsafe fn explain_semantic_view_bind_body(
 
     // FF-9: surface a probe-query failure as an error distinct from "no
     // views" instead of silently folding it into absence.
-    let present = probe_catalog_table_present(borrowed)?;
-    let reader = CatalogReader::new(borrowed, present);
+    let reader = CatalogReader::for_caller()?;
     let json_str = match reader.lookup(&view, &search_path) {
         Ok(Some(j)) => j,
         Ok(None) => {
@@ -310,7 +300,7 @@ unsafe fn explain_semantic_view_bind_body(
     }
     lines.push(String::new());
     lines.push("-- DuckDB Plan:".to_string());
-    let explain_lines = collect_explain_lines(borrowed, &expanded_sql);
+    let explain_lines = collect_explain_lines(&def, &expanded_sql);
     lines.extend(explain_lines);
 
     // Serialise as 1-column VARCHAR rows.
@@ -322,55 +312,23 @@ unsafe fn explain_semantic_view_bind_body(
 // EXPLAIN plan extraction
 // ---------------------------------------------------------------------------
 
-/// Execute `EXPLAIN {sql}` and return the plan as lines of text.
+/// Plan `sql` as `EXPLAIN` would and return the plan as lines of text: the
+/// `physical_plan` key, then the rendered tree.
 ///
-/// If the EXPLAIN fails (e.g., referenced tables do not exist), returns
-/// a single fallback line with the error message.
+/// The plan is made in the caller's context and transaction (TECH-DEBT #19),
+/// with the expansion's names resolved as in a view stored where `def` was
+/// created, so it shows the plan `semantic_view()` gets: a table created or
+/// altered earlier in the transaction, or a temporary one, is planned as it is
+/// there.
 ///
-/// # Safety
-///
-/// The underlying `duckdb_connection` accessed via `borrowed.as_raw()` must
-/// be valid for the lifetime of the borrow.
-#[allow(clippy::cast_possible_truncation)]
-unsafe fn collect_explain_lines(
-    borrowed: &crate::ddl::read_ffi::BorrowedConnection,
-    sql: &str,
-) -> Vec<String> {
-    let explain_sql = format!("EXPLAIN {sql}");
-    let mut lines = Vec::new();
-
-    match execute_sql_raw(borrowed.as_raw(), &explain_sql) {
-        Ok(mut result) => {
-            let col_count = ffi::duckdb_column_count(&raw mut result) as usize;
-            let chunk_count = ffi::duckdb_result_chunk_count(result) as usize;
-
-            for chunk_idx in 0..chunk_count {
-                let chunk = ffi::duckdb_result_get_chunk(result, chunk_idx as ffi::idx_t);
-                if chunk.is_null() {
-                    continue;
-                }
-                let row_count = ffi::duckdb_data_chunk_get_size(chunk) as usize;
-
-                for row_idx in 0..row_count {
-                    for col_idx in 0..col_count {
-                        let s = read_varchar_from_vector(chunk, col_idx, row_idx);
-                        if !s.is_empty() {
-                            for plan_line in s.lines() {
-                                lines.push(plan_line.to_string());
-                            }
-                        }
-                    }
-                }
-
-                ffi::duckdb_destroy_data_chunk(&mut { chunk });
-            }
-
-            ffi::duckdb_destroy_result(&raw mut result);
-        }
-        Err(err) => {
-            lines.push(format!("-- (not available -- {err})"));
-        }
+/// If planning fails (e.g., referenced tables do not exist), returns a single
+/// fallback line with the error message.
+fn collect_explain_lines(def: &SemanticViewDefinition, sql: &str) -> Vec<String> {
+    let (database, schema) = crate::expand::body_qualifier(def);
+    match crate::ddl::read_ffi::caller_explain(database, schema, sql) {
+        Ok(plan) => std::iter::once("physical_plan".to_string())
+            .chain(plan.lines().map(ToString::to_string))
+            .collect(),
+        Err(err) => vec![format!("-- (not available -- {err})")],
     }
-
-    lines
 }

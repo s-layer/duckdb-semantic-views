@@ -114,7 +114,7 @@ CREATE SEMANTIC VIEW rt_new AS
   METRICS (o.total AS sum(o.amount));
 
 query I
-SELECT get_ddl('SEMANTIC_VIEW', 'rt_new') LIKE 'CREATE SEMANTIC VIEW rt_new%';
+SELECT get_ddl('SEMANTIC_VIEW', 'rt_new') LIKE 'CREATE OR REPLACE SEMANTIC VIEW rt_new AS%';
 ----
 true
 

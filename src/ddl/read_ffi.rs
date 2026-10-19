@@ -46,113 +46,286 @@
 //! BOOLEAN (1 = TRUE, 0 = FALSE). C++ side parses with `sv_read_u8` after the
 //! string reads.
 //!
-//! # Borrow contract (critical)
+//! # Reads run in the caller's transaction (TECH-DEBT #19)
 //!
-//! Every dispatcher in this module receives a `duckdb_connection` BORROWED
-//! from a stack `Connection probe(*context.db)` constructed by the C++ bind
-//! callback. The Rust side MUST NOT call `duckdb_disconnect` on the handle
-//! — that would `delete` a stack object (UB). The C++ bind scope's
-//! `~Connection()` handles teardown.
+//! Every dispatcher here runs inside a C++ bind or scalar callback that named
+//! its caller's `ClientContext` for the duration of the call (`SvCallerScope`
+//! in `cpp/src/shim.cpp`). The dispatcher reads the catalog, types members and
+//! plans `EXPLAIN` through [`caller_definitions`], [`caller_describe`] and
+//! [`caller_explain`], which work in that context and its transaction, so a
+//! read sees what the statement around it sees: the transaction's own
+//! uncommitted CREATE / DROP / RENAME / ALTER TABLE, and the session's
+//! temporary tables. No connection crosses the boundary.
 
 #![cfg(feature = "extension")]
 
 use crate::ffi_util::wire_len;
-use libduckdb_sys as ffi;
-use std::ffi::{CStr, CString};
-
-/// Borrowed `duckdb_connection` handle. The bridge contract: this handle is
-/// owned by a stack `Connection probe(*context.db)` constructed in a C++
-/// bind/exec callback. The Rust side MUST NOT call `duckdb_disconnect` —
-/// doing so would `delete` a stack object (UB).
-///
-/// This newtype enforces the contract at compile time (Phase 65.1 D-10 /
-/// WR-05): `ffi::duckdb_disconnect` accepts `*mut ffi::duckdb_connection`,
-/// not `*mut BorrowedConnection`, so the call simply does not type-check.
-/// Even though `BorrowedConnection` is `#[repr(transparent)]` wrapping
-/// `duckdb_connection`, Rust newtype distinctness blocks the coercion at
-/// the type level. Defence in depth alongside the AST-walk guard at
-/// `tests/no_long_lived_conn.rs`.
-///
-/// Construct via the unsafe [`BorrowedConnection::new`] constructor at the
-/// FFI boundary; access the raw handle via [`BorrowedConnection::as_raw`]
-/// only for further FFI calls (`duckdb_query`, `duckdb_prepare`, ...).
-///
-/// # Negative compile coverage
-///
-/// The following snippet must fail to compile because `duckdb_disconnect`
-/// takes `*mut duckdb_connection`, and `&mut BorrowedConnection` cannot be
-/// coerced to that type — exactly the regression this newtype guards
-/// against. The doctest uses a mutable binding so the failure is the
-/// intended type mismatch, NOT an immutable-binding error.
-///
-/// ```compile_fail
-/// use semantic_views::ddl::read_ffi::BorrowedConnection;
-/// let mut b: BorrowedConnection = unsafe { std::mem::zeroed() };
-/// // duckdb_disconnect takes *mut duckdb_connection. &mut BorrowedConnection
-/// // is NOT *mut duckdb_connection, even though BorrowedConnection is
-/// // #[repr(transparent)] wrapping duckdb_connection.
-/// unsafe { libduckdb_sys::duckdb_disconnect(&mut b) };
-/// ```
-#[repr(transparent)]
-pub struct BorrowedConnection(ffi::duckdb_connection);
-
-impl BorrowedConnection {
-    /// Wrap a raw FFI handle as a borrowed connection.
-    ///
-    /// # Safety
-    ///
-    /// The caller must guarantee that `conn` outlives this `BorrowedConnection`
-    /// and that no other code path will call `duckdb_disconnect(conn)` while
-    /// this borrow is live. Typical usage: construct immediately on entry to
-    /// an `extern "C"` dispatcher from the raw `conn` parameter passed by the
-    /// C++ bind/exec callback.
-    #[must_use]
-    pub unsafe fn new(conn: ffi::duckdb_connection) -> Self {
-        Self(conn)
-    }
-
-    /// Access the underlying raw handle for further FFI calls
-    /// (`duckdb_query`, `duckdb_prepare`, etc.). The caller MUST NOT pass
-    /// the returned handle to `duckdb_disconnect`.
-    #[must_use]
-    pub fn as_raw(&self) -> ffi::duckdb_connection {
-        self.0
-    }
-
-    /// Whether the wrapped handle is null. Cheaper than constructing a
-    /// `CatalogReader` just to discover the bind callback handed us a
-    /// null connection.
-    #[must_use]
-    pub fn is_null(&self) -> bool {
-        self.0.is_null()
-    }
-}
-// Deliberately NO Drop, NO Clone, NO Copy, NO trait impls that could lead
-// to disconnect — the type-level guard depends on the call surface staying
-// minimal. Do not add `query()` / `prepare()` convenience methods here;
-// they would encourage passing BorrowedConnection around without
-// unwrapping intent at each FFI boundary.
 
 extern "C" {
     /// Defined in `cpp/src/shim.cpp`: the interrupt flag of the `ClientContext`
-    /// whose table-function bind is running on this thread (`false` outside one).
+    /// whose read is running on this thread (`false` outside one).
     fn sv_bind_caller_interrupted() -> bool;
+
+    fn sv_caller_definitions(out_ptr: *mut *mut u8, out_len: *mut usize) -> u8;
+    fn sv_caller_describe(
+        database_ptr: *const u8,
+        database_len: usize,
+        schema_ptr: *const u8,
+        schema_len: usize,
+        sql_ptr: *const u8,
+        sql_len: usize,
+        out_ptr: *mut *mut u8,
+        out_len: *mut usize,
+    ) -> u8;
+    fn sv_caller_explain(
+        database_ptr: *const u8,
+        database_len: usize,
+        schema_ptr: *const u8,
+        schema_len: usize,
+        sql_ptr: *const u8,
+        sql_len: usize,
+        out_ptr: *mut *mut u8,
+        out_len: *mut usize,
+    ) -> u8;
+    fn sv_caller_free(ptr: *mut u8);
 }
 
-/// Whether the caller of the table function now binding has been cancelled.
+/// Whether the caller of the read now running has been cancelled.
 ///
-/// A bind dispatcher runs on a fresh `Connection(*context.db)` with its own
-/// interrupt flag, which `duckdb_interrupt` on the caller never sets; this reads
-/// the caller's flag instead, so long-running bind work (the member-type probes)
-/// can stop between statements.
+/// The binds the caller-context reads run are the caller's own, so `DuckDB`'s
+/// interrupt checks inside them see its flag; this reads the same flag between
+/// them, so long-running bind work (the member-type probes) stops at the next
+/// one.
 #[must_use]
 pub fn bind_caller_interrupted() -> bool {
     // SAFETY: a plain flag read; no arguments, callable from any thread.
     unsafe { sv_bind_caller_interrupted() }
 }
 
-/// Type `wanted`'s members of `def` for a SHOW / DESCRIBE bind on this bind's
-/// connection (TECH-DEBT #51). A member that cannot be typed is simply absent;
+/// How a caller-context read failed.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CallerError {
+    /// The read failed; the message is `DuckDB`'s.
+    Failed(String),
+    /// The caller was cancelled while the read ran.
+    Interrupted(String),
+}
+
+impl std::fmt::Display for CallerError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Failed(m) | Self::Interrupted(m) => f.write_str(m),
+        }
+    }
+}
+
+/// Run one `sv_caller_*` call and take ownership of its buffer.
+fn caller_call(call: impl FnOnce(*mut *mut u8, *mut usize) -> u8) -> Result<Vec<u8>, CallerError> {
+    let mut ptr: *mut u8 = std::ptr::null_mut();
+    let mut len: usize = 0;
+    let rc = call(&raw mut ptr, &raw mut len);
+    let bytes = if ptr.is_null() {
+        None
+    } else {
+        // SAFETY: on return the C++ side hands over a malloc'd buffer of `len`
+        // bytes, released below with its own `free`.
+        let copy = unsafe { std::slice::from_raw_parts(ptr, len) }.to_vec();
+        unsafe { sv_caller_free(ptr) };
+        Some(copy)
+    };
+    let message = |bytes: Option<Vec<u8>>| {
+        bytes.map_or_else(
+            || "out of memory reading the catalog".to_string(),
+            |b| String::from_utf8_lossy(&b).into_owned(),
+        )
+    };
+    match (rc, bytes) {
+        (0, Some(bytes)) => Ok(bytes),
+        (2, bytes) => Err(CallerError::Interrupted(message(bytes))),
+        (_, bytes) => Err(CallerError::Failed(message(bytes))),
+    }
+}
+
+/// A little-endian reader over a `sv_caller_*` payload.
+struct Payload<'a> {
+    bytes: &'a [u8],
+    at: usize,
+}
+
+impl<'a> Payload<'a> {
+    fn take(&mut self, n: usize) -> Result<&'a [u8], String> {
+        let end = self
+            .at
+            .checked_add(n)
+            .filter(|&end| end <= self.bytes.len())
+            .ok_or_else(|| "truncated catalog payload".to_string())?;
+        let out = &self.bytes[self.at..end];
+        self.at = end;
+        Ok(out)
+    }
+
+    fn u8(&mut self) -> Result<u8, String> {
+        Ok(self.take(1)?[0])
+    }
+
+    fn u32(&mut self) -> Result<u32, String> {
+        let b = self.take(4)?;
+        Ok(u32::from_le_bytes([b[0], b[1], b[2], b[3]]))
+    }
+
+    fn string(&mut self) -> Result<String, String> {
+        let len = self.u32()? as usize;
+        let b = self.take(len)?;
+        String::from_utf8(b.to_vec()).map_err(|_| "catalog payload is not valid UTF-8".to_string())
+    }
+
+    fn nullable(&mut self) -> Result<Option<String>, String> {
+        if self.u8()? == 1 {
+            Ok(None)
+        } else {
+            self.string().map(Some)
+        }
+    }
+
+    fn finish(&self) -> Result<(), String> {
+        if self.at == self.bytes.len() {
+            Ok(())
+        } else {
+            Err("trailing bytes in catalog payload".to_string())
+        }
+    }
+}
+
+/// `semantic_layer._definitions` as the caller's transaction sees it.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct CallerDefinitions {
+    /// Whether the catalog table exists (it may not on a read-only database
+    /// that never had one).
+    pub present: bool,
+    /// The database the table was looked for in: the managed catalog.
+    pub database: String,
+    /// `(schema_name, name, definition)` per row, in storage order.
+    pub rows: Vec<(Option<String>, Option<String>, Option<String>)>,
+}
+
+/// Read every row of `semantic_layer._definitions` in the caller's
+/// transaction, its own uncommitted changes included.
+///
+/// # Errors
+///
+/// The scan's error, or a malformed payload.
+pub fn caller_definitions() -> Result<CallerDefinitions, String> {
+    // SAFETY: the out-pointers are live locals of `caller_call`.
+    let bytes =
+        caller_call(|p, l| unsafe { sv_caller_definitions(p, l) }).map_err(|e| e.to_string())?;
+    let mut payload = Payload {
+        bytes: &bytes,
+        at: 0,
+    };
+    let present = payload.u8()? == 1;
+    let database = payload.string()?;
+    let mut rows = Vec::new();
+    if present {
+        let count = payload.u32()?;
+        for _ in 0..count {
+            rows.push((
+                payload.nullable()?,
+                payload.nullable()?,
+                payload.nullable()?,
+            ));
+        }
+    }
+    payload.finish()?;
+    Ok(CallerDefinitions {
+        present,
+        database,
+        rows,
+    })
+}
+
+type CallerSqlFn = unsafe extern "C" fn(
+    *const u8,
+    usize,
+    *const u8,
+    usize,
+    *const u8,
+    usize,
+    *mut *mut u8,
+    *mut usize,
+) -> u8;
+
+fn caller_sql(
+    f: CallerSqlFn,
+    database: Option<&str>,
+    schema: Option<&str>,
+    sql: &str,
+) -> Result<Vec<u8>, CallerError> {
+    let database = database.unwrap_or("");
+    let schema = schema.unwrap_or("");
+    caller_call(|p, l| {
+        // SAFETY: each (ptr, len) pair is a live borrowed `str`; the C++ side
+        // copies them before returning.
+        unsafe {
+            f(
+                database.as_ptr(),
+                database.len(),
+                schema.as_ptr(),
+                schema.len(),
+                sql.as_ptr(),
+                sql.len(),
+                p,
+                l,
+            )
+        }
+    })
+}
+
+/// The output columns of `sql`, bound in the caller's context with its names
+/// resolved as in a view stored in `database`.`schema`: `(name, type)` with the
+/// type as `DESCRIBE` spells it.
+///
+/// # Errors
+///
+/// The bind's error, or the caller's cancellation.
+pub fn caller_describe(
+    database: Option<&str>,
+    schema: Option<&str>,
+    sql: &str,
+) -> Result<Vec<(String, String)>, CallerError> {
+    let bytes = caller_sql(sv_caller_describe, database, schema, sql)?;
+    let malformed = CallerError::Failed;
+    let mut payload = Payload {
+        bytes: &bytes,
+        at: 0,
+    };
+    let count = payload.u32().map_err(malformed)?;
+    let mut out = Vec::new();
+    for _ in 0..count {
+        let name = payload.string().map_err(malformed)?;
+        let data_type = payload.string().map_err(malformed)?;
+        out.push((name, data_type));
+    }
+    payload.finish().map_err(malformed)?;
+    Ok(out)
+}
+
+/// The physical plan `EXPLAIN` shows for `sql`, planned in the caller's context
+/// with its names resolved as in a view stored in `database`.`schema`.
+///
+/// # Errors
+///
+/// The planner's error, or the caller's cancellation.
+pub fn caller_explain(
+    database: Option<&str>,
+    schema: Option<&str>,
+    sql: &str,
+) -> Result<String, CallerError> {
+    let bytes = caller_sql(sv_caller_explain, database, schema, sql)?;
+    Ok(String::from_utf8_lossy(&bytes).into_owned())
+}
+
+/// Type `wanted`'s members of `def` for a SHOW / DESCRIBE bind, in the caller's
+/// context (TECH-DEBT #19, #51). A member that cannot be typed is simply absent;
 /// the only error is the caller's cancellation, which stops probing at once.
 ///
 /// # Errors
@@ -160,67 +333,26 @@ pub fn bind_caller_interrupted() -> bool {
 /// `Interrupted!` when the bind's caller was cancelled mid-probe. The C++ bind
 /// helpers raise that as a bare `InterruptException`.
 pub fn member_types_for_bind(
-    borrowed: &BorrowedConnection,
     view_name: &str,
     def: &crate::model::SemanticViewDefinition,
     wanted: crate::query::member_types::Wanted,
 ) -> Result<crate::query::member_types::MemberTypes, String> {
-    // SAFETY: `borrowed` is the live per-call connection of this bind.
-    Ok(unsafe {
-        crate::query::member_types::infer_member_types_on(
-            borrowed.as_raw(),
-            view_name,
-            def,
-            wanted,
-            &bind_caller_interrupted,
-        )
-    }?)
-}
-
-/// Probe whether `semantic_layer._definitions` exists on the given borrowed
-/// connection.
-///
-/// Returns:
-/// * `Ok(true)` — the catalog table is present.
-/// * `Ok(false)` — the probe query succeeded but the table is absent (0 rows).
-///   This is the Phase 63 read-only short-circuit path: an attached read-only
-///   DB whose `_definitions` table was never bootstrapped returns 0 rows here,
-///   which callers treat as "no views", not an error. Mirrors the read-only
-///   short-circuit logic at `src/lib.rs` and the inline probe in
-///   `src/ddl/list.rs`.
-/// * `Err(msg)` — the probe query itself failed to execute (FF-9). Previously
-///   any such failure was silently folded into `false` ("no views"), masking
-///   catalog corruption or a broken connection as an empty result. Callers now
-///   surface it as an error distinct from genuine absence.
-///
-/// # Safety
-///
-/// `borrowed` must wrap a valid `duckdb_connection`. The handle is borrowed
-/// and must outlive this call — the typical caller is a bind dispatcher
-/// running inside a C++ bind callback that owns a stack `Connection
-/// probe(*context.db)`.
-pub unsafe fn probe_catalog_table_present(borrowed: &BorrowedConnection) -> Result<bool, String> {
-    let conn = borrowed.as_raw();
-    let sql = CString::new(
-        "SELECT 1 FROM information_schema.tables \
-         WHERE table_schema = 'semantic_layer' AND table_name = '_definitions' LIMIT 1",
-    )
-    .map_err(|_| "catalog probe SQL contains an interior null byte".to_string())?;
-    let mut result: ffi::duckdb_result = std::mem::zeroed();
-    let rc = ffi::duckdb_query(conn, sql.as_ptr(), &raw mut result);
-    let out = if rc == ffi::DuckDBSuccess {
-        Ok(ffi::duckdb_row_count(&raw mut result) > 0)
-    } else {
-        let err_ptr = ffi::duckdb_result_error(&raw mut result);
-        let msg = if err_ptr.is_null() {
-            "catalog presence probe failed".to_string()
-        } else {
-            CStr::from_ptr(err_ptr).to_string_lossy().into_owned()
-        };
-        Err(msg)
-    };
-    ffi::duckdb_destroy_result(&raw mut result);
-    out
+    use crate::query::member_types::{ProbeError, ProbedColumn};
+    let (database, schema) = crate::expand::body_qualifier(def);
+    Ok(crate::query::member_types::infer_member_types(
+        view_name,
+        def,
+        wanted,
+        &bind_caller_interrupted,
+        &mut |sql| match caller_describe(database, schema, sql) {
+            Ok(cols) => Ok(cols
+                .into_iter()
+                .map(|(name, data_type)| ProbedColumn { name, data_type })
+                .collect()),
+            Err(CallerError::Interrupted(_)) => Err(ProbeError::Interrupted),
+            Err(CallerError::Failed(m)) => Err(ProbeError::Failed(m)),
+        },
+    )?)
 }
 
 /// Write a NUL-terminated error message into the C-side `error_buf`,
@@ -369,8 +501,7 @@ pub unsafe fn publish_owned_buffer(buf: Vec<u8>, out_ptr: *mut *mut u8, out_len:
 /// Shared scaffold for the read-side bind/exec dispatchers (ST-2).
 ///
 /// Owns the boilerplate every dispatcher repeated verbatim: the
-/// `catch_unwind` guard, the borrowed-connection null check, publishing the
-/// success buffer, writing the error string, and the panic arm. The caller's
+/// `catch_unwind` guard, publishing the success buffer, writing the error string, and the panic arm. The caller's
 /// `body` does only the interesting work — parse args, read the catalog,
 /// assemble + serialize rows — and returns the serialized wire buffer on
 /// success or an error message.
@@ -381,13 +512,11 @@ pub unsafe fn publish_owned_buffer(buf: Vec<u8>, out_ptr: *mut *mut u8, out_len:
 ///
 /// # Safety
 ///
-/// `conn` is a borrowed handle (see module-level borrow contract); it must
-/// outlive the call and must not be disconnected. `out_ptr`/`out_len` are the
+/// `out_ptr`/`out_len` are the
 /// C++ out-parameters for the published buffer; `error_buf`/`error_buf_len`
 /// the C++ diagnostic slot. `panic_label` names the dispatcher for the panic
 /// message.
 pub unsafe fn run_dispatcher<F>(
-    conn: ffi::duckdb_connection,
     out_ptr: *mut *mut u8,
     out_len: *mut usize,
     error_buf: *mut u8,
@@ -396,26 +525,19 @@ pub unsafe fn run_dispatcher<F>(
     body: F,
 ) -> u8
 where
-    F: FnOnce(&BorrowedConnection) -> Result<Vec<u8>, String>,
+    F: FnOnce() -> Result<Vec<u8>, String>,
 {
     // AssertUnwindSafe mirrors the per-dispatcher wrapper this replaces: the
     // captured raw pointers are not `UnwindSafe`, but the catch_unwind here is
     // purely to convert a panic into rc=2 — no state is observed after unwind.
-    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        let borrowed = BorrowedConnection::new(conn);
-        if borrowed.is_null() {
-            write_err(error_buf, error_buf_len, "duckdb_connection is null");
-            return 1_u8;
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| match body() {
+        Ok(buf) => {
+            publish_owned_buffer(buf, out_ptr, out_len);
+            0_u8
         }
-        match body(&borrowed) {
-            Ok(buf) => {
-                publish_owned_buffer(buf, out_ptr, out_len);
-                0_u8
-            }
-            Err(msg) => {
-                write_err(error_buf, error_buf_len, &msg);
-                1_u8
-            }
+        Err(msg) => {
+            write_err(error_buf, error_buf_len, &msg);
+            1_u8
         }
     }));
     if let Ok(rc) = result {

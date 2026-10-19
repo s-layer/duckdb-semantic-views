@@ -104,8 +104,15 @@
 #include "duckdb/parser/tableref/pivotref.hpp"
 #include "duckdb/parser/tableref/subqueryref.hpp"
 #include "duckdb/parser/tableref/table_function_ref.hpp"
+#include "duckdb/catalog/catalog_entry/table_catalog_entry.hpp"
+#include "duckdb/execution/physical_plan_generator.hpp"
+#include "duckdb/main/database_manager.hpp"
 #include "duckdb/planner/binder.hpp"
 #include "duckdb/planner/extension_callback.hpp"
+#include "duckdb/planner/planner.hpp"
+#include "duckdb/storage/data_table.hpp"
+#include "duckdb/storage/table/scan_state.hpp"
+#include "duckdb/transaction/duck_transaction.hpp"
 
 #else // v1.5 amalgamation
 

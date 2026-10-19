@@ -103,7 +103,7 @@ WHERE explain_output LIKE '%not available%';
 
 query I
 SELECT count(*) > 0 FROM explain_semantic_view('cq_tmp', metrics := ['total'])
-WHERE explain_output LIKE '%Table: temp.main.cq_scratch%';
+WHERE explain_output LIKE '%Table: "temp".main.cq_scratch%';
 ----
 true
 

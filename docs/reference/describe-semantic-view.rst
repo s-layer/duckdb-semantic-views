@@ -32,7 +32,7 @@ Parameters
 
 .. note::
 
-   ``DESCRIBE SEMANTIC VIEW`` reads committed catalog state. A ``CREATE`` / ``ALTER`` / ``DROP`` issued in the same uncommitted transaction is not yet reflected here -- commit first, then describe. See :ref:`explanation-txn-ddl-write-visibility`.
+   ``DESCRIBE SEMANTIC VIEW`` runs in your transaction, so a ``CREATE`` / ``ALTER`` / ``DROP`` issued earlier in it is reflected here before you commit. See :ref:`explanation-txn-ddl-write-visibility`.
 
 
 .. _ref-describe-output:
