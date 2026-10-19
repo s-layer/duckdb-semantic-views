@@ -520,7 +520,11 @@ release:
     TMP=$(mktemp -d)
     gh api repos/duckdb/community-extensions/contents/.github/workflows/build.yml --jq '.content' | base64 -d > "$TMP/build.yml"
     gh api repos/duckdb/community-extensions/contents/scripts/build.py --jq '.content' | base64 -d > "$TMP/build.py"
-    KEY=$(python3 scripts/registry_target.py key "$(cat .duckdb-version)" "$TMP/build.yml" "$TMP/build.py")
+    PIN=$(cat .duckdb-version)
+    # The commit the pin's tag points at, for a registry default named by commit.
+    PIN_COMMIT=$(git ls-remote --tags https://github.com/duckdb/duckdb \
+      | awk -v t="refs/tags/$PIN" '$2==t{c=$1} $2==t"^{}"{p=$1} END{print (p?p:c)}')
+    KEY=$(python3 scripts/registry_target.py key "$PIN" "$TMP/build.yml" "$TMP/build.py" "$PIN_COMMIT")
     rm -rf "$TMP"
     echo "Releasing v$VERSION (repo.$KEY: $SHA)"
     # --- Update description.yml in this repo ---

@@ -12,15 +12,19 @@ reads a release-named key instead of `ref` when the descriptor has one, e.g.
 
 When that default is a commit, its build job's `duckdb_tag` default names the release
 it is built as (`v2.0.0-alpha46057` for `b15358c…`), and a pin naming that release is
-the default too. So a release pinned to the registry's default goes in `ref`, and a
-release pinned to one of those older versions goes in that version's key. Any other
+the default too, as is a release whose tag points at that commit (the registry may
+name a release by commit with no label). So a release pinned to the registry's default
+goes in `ref`, and a release pinned to one of those older versions goes in that
+version's key. Any other
 pin is not built by the registry at all, and publishing it would only produce a failing
 registry build.
 
 Usage:
-    registry_target.py key <our-pin> <build.yml> <build.py>
+    registry_target.py key <our-pin> <build.yml> <build.py> [<pin-commit>]
         Print the descriptor key (`ref`, or e.g. `variegata`). Exit 1, with the reason
-        on stderr, when the registry does not build <our-pin>.
+        on stderr, when the registry does not build <our-pin>. <pin-commit> is the
+        DuckDB commit our pin's tag points at; when the registry's default is that
+        commit, the pin is its default build. Empty or absent, it is not consulted.
     registry_target.py set <description.yml> <key> <sha>
         Point `repo.<key>` at <sha>, adding the key after `ref:` if it is missing.
     registry_target.py release-sha <version> [<branch>]
@@ -58,6 +62,7 @@ JOB_TAG = re.compile(r"^\s*duckdb_tag:[ \t]*(?:\$\{\{.*\|\|\s*)?['\"]?([^'\"\s}]
 # A top-level key under `jobs:` (or under `on:`), which starts the next block.
 BLOCK = re.compile(r"^  [A-Za-z0-9_-]+:[ \t]*$", re.M)
 RELEASE_TAG = re.compile(r"^v\d+\.\d+\.\d+")
+HEX = re.compile(r"^[0-9a-f]{7,40}$")
 # One `== '<version>'` branch of build.py and the descriptor key it reads.
 VERSION_BRANCH = re.compile(
     r"os\.environ\['DUCKDB_VERSION'\]\s*==\s*'([^']+)'\s*:\s*"
@@ -89,12 +94,18 @@ def default_label(build_yml: str, default: str) -> str | None:
     return None
 
 
-def descriptor_key(pin: str, build_yml: str, build_py: str) -> str:
+def same_commit(a: str, b: str) -> bool:
+    """Return whether two commit ids, either of which may be abbreviated, name one commit."""
+    a, b = a.lower(), b.lower()
+    return bool(HEX.match(a) and HEX.match(b)) and (a.startswith(b) or b.startswith(a))
+
+
+def descriptor_key(pin: str, build_yml: str, build_py: str, pin_commit: str = "") -> str:
     default = registry_default(build_yml)
     if default is None:
         raise SystemExit("could not find the registry's default DuckDB in build.yml")
     label = default_label(build_yml, default)
-    if pin in (default, label):
+    if pin in (default, label) or same_commit(pin_commit, default):
         return "ref"
     keys = {version: key for version, key in VERSION_BRANCH.findall(build_py)}
     if pin in keys:
@@ -195,13 +206,14 @@ def check_unpushed(version: str, branch: str) -> None:
 
 
 def main(argv: list[str]) -> None:
-    if len(argv) == 5 and argv[1] == "key":
+    if len(argv) in (5, 6) and argv[1] == "key":
         pin = argv[2].strip()
         with open(argv[3]) as f:
             build_yml = f.read()
         with open(argv[4]) as f:
             build_py = f.read()
-        print(descriptor_key(pin, build_yml, build_py))
+        pin_commit = argv[5].strip() if len(argv) == 6 else ""
+        print(descriptor_key(pin, build_yml, build_py, pin_commit))
     elif len(argv) == 5 and argv[1] == "set":
         path, key, sha = argv[2], argv[3], argv[4]
         with open(path) as f:
