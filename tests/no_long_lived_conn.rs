@@ -14,9 +14,9 @@
 //! `.planning/phases/65-overridecontext-connection-teardown/65-01-SPIKES.md`
 //! for the lldb evidence).
 //!
-//! The new architecture opens connections per-call from inside bind /
-//! exec callbacks (`Connection probe(*context.db)` on the C++ side,
-//! reinterpret_cast bridged to Rust). Re-introducing a long-lived
+//! Reads now open no connection at all: they run in the caller's own
+//! `ClientContext` and transaction (the `sv_caller_*` entry points,
+//! TECH-DEBT #19). Re-introducing a long-lived
 //! `duckdb_connection` in `init_extension` would silently re-create the
 //! LIFE-01 hang. This test fails CI if anyone does so.
 //!
@@ -49,9 +49,8 @@
 //!   helper at `src/lib.rs:226-277` legitimately calls `duckdb_connect`
 //!   from inside `RawDb::open_in_memory()`; that's NOT a long-lived
 //!   handle in `init_extension` and is scoped to test fixtures.
-//! - C++ side `Connection probe(*context.db)` constructions inside
-//!   bind / exec callbacks. Those ARE the correct per-call shape and
-//!   live in `cpp/src/shim.cpp`.
+//! - C++ code in `cpp/src/shim.cpp`. It opens no connection today; a
+//!   `Connection` constructed there would be caught in review, not here.
 //! - The other long-lived-handle candidates (`duckdb_open`,
 //!   `duckdb_open_ext`). Those would create a whole new DB, not just
 //!   a connection — much more obvious in code review than a stray
@@ -115,9 +114,8 @@ fn init_extension_has_no_duckdb_connect_call() {
          Phase 65 (v0.10.0) retired long-lived extension-owned \
          duckdb_connection handles (H1 catalog_conn + H2 query_conn) to \
          resolve the in-process RW→RO reopen hang (LIFE-01). If a new \
-         connection is genuinely needed, open it via a per-call \
-         Connection(*context.db) inside a bind / exec callback on the \
-         C++ side instead. See \
+         read needs the catalog, use the caller's context through the \
+         sv_caller_* entry points (TECH-DEBT #19) instead. See \
          .planning/phases/65-overridecontext-connection-teardown/ for \
          the full record.",
         f.found_call_sites
@@ -129,15 +127,13 @@ fn init_extension_has_no_duckdb_connect_call() {
 // `duckdb_disconnect` calls anywhere in `src/`.
 // ---------------------------------------------------------------------------
 //
-// The BorrowedConnection newtype (Phase 65.1 D-10, src/ddl/read_ffi.rs) is
-// the primary type-level guard: `ffi::duckdb_disconnect` accepts
-// `*mut duckdb_connection`, and `&mut BorrowedConnection` cannot coerce to
-// that type, so the call fails to type-check. This walker is the second
-// layer: it scans every `.rs` file under `src/` for any call expression
-// whose terminal path segment is `duckdb_disconnect`, and fails the test
-// if any are found. The combination of (a) newtype at the type system and
-// (b) AST guard at the syntax layer makes accidental reintroduction
-// essentially impossible without conscious circumvention.
+// No connection crosses the FFI boundary any more (TECH-DEBT #19 removed the
+// `BorrowedConnection` newtype that once guarded borrowed handles at the type
+// level), so Rust code in this crate has no handle it could disconnect other
+// than one it opened itself. This walker scans every `.rs` file under `src/`
+// for any call expression whose terminal path segment is
+// `duckdb_disconnect`, and fails the test if any are found outside the
+// allow-list.
 //
 // Same known limitation as the `Finder` above: this walker matches the
 // terminal path segment literally and does NOT resolve `use … as` aliases.
@@ -148,10 +144,7 @@ fn init_extension_has_no_duckdb_connect_call() {
 /// the `RawDb` test fixture in `src/lib.rs::test_helpers`, which OWNS its
 /// `duckdb_database` + `duckdb_connection` pair (via `duckdb_open` +
 /// `duckdb_connect` in `open_in_memory`) and releases them in `Drop`. That
-/// is the canonical OWN-and-release pattern — NOT a BORROW. The
-/// BorrowedConnection guard concerns the borrow case (handles received via
-/// FFI from `Connection probe(*context.db)` on the C++ side); test fixtures
-/// that allocate their own handle are out of its scope.
+/// is the canonical OWN-and-release pattern — NOT a BORROW.
 ///
 /// Every entry here is a deliberate exception. Adding to this list during
 /// code review should require explicit justification ("this site owns the
@@ -164,9 +157,8 @@ const ALLOWED_DISCONNECT_SITES: &[(&str, &str)] = &[
 ];
 
 /// Walks all of `src/` looking for any call expression whose last path
-/// segment is the identifier `duckdb_disconnect`. The BorrowedConnection
-/// newtype prevents these at the type level; this AST guard is defence in
-/// depth and produces a clear diagnostic on regression. Allowed sites are
+/// segment is the identifier `duckdb_disconnect`, with a clear diagnostic
+/// on regression. Allowed sites are
 /// filtered via `ALLOWED_DISCONNECT_SITES` above.
 struct DisconnectFinder {
     /// (source_file_path, full_call_path) for every match found.
@@ -213,8 +205,7 @@ fn no_duckdb_disconnect_anywhere_in_src() {
         let file = match syn::parse_str::<syn::File>(&src) {
             Ok(f) => f,
             // Skip unparseable files — should not happen in src/, but a
-            // hard panic here would mask the real signal. The
-            // type-level BorrowedConnection guard still covers them.
+            // hard panic here would mask the real signal.
             Err(_) => continue,
         };
         finder.current_file = entry.path().display().to_string();
@@ -243,13 +234,9 @@ fn no_duckdb_disconnect_anywhere_in_src() {
     assert!(
         finder.found_call_sites.is_empty(),
         "duckdb_disconnect call sites found in src/: {:#?}. \
-         The BorrowedConnection newtype (Phase 65.1 D-10, \
-         src/ddl/read_ffi.rs) makes `ffi::duckdb_disconnect(&mut borrowed)` \
-         fail to type-check by design — a raw `ffi::duckdb_connection` \
-         should never be disconnected by Rust code in this crate. The \
-         per-call `Connection probe(*context.db)` constructed on the C++ \
-         side owns its handle and tears itself down via ~Connection() at \
-         scope exit. See \
+         A raw `ffi::duckdb_connection` should never be disconnected by \
+         Rust code in this crate: reads run in the caller's context and \
+         no connection crosses the FFI boundary (TECH-DEBT #19). See \
          .planning/phases/65.1-phase-65-code-review-remediation/65.1-CONTEXT.md \
          (D-10 + D-11) for the full record.",
         finder.found_call_sites

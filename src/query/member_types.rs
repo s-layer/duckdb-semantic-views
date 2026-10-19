@@ -842,8 +842,9 @@ mod tests {
 
     // ---- Cancellation (PR #248 review) --------------------------------------
     //
-    // SHOW / DESCRIBE probe on the bind's own connection, whose interrupt flag
-    // nothing sets when the *caller* is cancelled. Typing must therefore stop
+    // A probe's own interrupt checks may not see the caller's cancellation
+    // (under `cargo test` it runs on a connection of its own, whose flag
+    // nothing sets when the *caller* is cancelled). Typing must therefore stop
     // on the caller's word, and a probe the engine itself reports as
     // interrupted must stop it too — never be filed as "type unknown" and
     // followed by every remaining fallback probe.

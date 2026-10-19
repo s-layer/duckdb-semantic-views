@@ -14,9 +14,8 @@
 //! Read-elimination architecture (Phase 65 D-11): the YAML read no longer
 //! goes through any long-lived extension-owned connection (the `catalog_conn`
 //! static and the `OverrideContext` that once held it were both retired —
-//! see AR-7). The per-call Connection opened inside the bind closes at
-//! end-of-bind scope, so nothing outlives the user's `close()`. This is the
-//! load-bearing primitive that let H1 `catalog_conn` be retired in Plan 06.
+//! see AR-7). The bind reads the file through `DuckDB`'s `FileSystem` API and
+//! opens no connection, so nothing outlives the user's `close()`.
 //!
 //! FFI safety conventions (match `src/parse.rs::sv_parser_override_rust`):
 //!   * Every entry point wraps its body in `std::panic::catch_unwind(

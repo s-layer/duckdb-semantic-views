@@ -2,8 +2,8 @@
 #
 # Semantic views are single-catalog: the semantic_layer._definitions table is
 # created only in the database the extension was LOADed into (the primary), and
-# every read runs on a fresh per-call connection that resolves against that
-# primary catalog. Issuing semantic-view DDL while USE-d into a *different*
+# every read looks views up in that primary catalog (in the caller's own
+# transaction, TECH-DEBT #19), whatever database is USE-d. Issuing semantic-view DDL while USE-d into a *different*
 # (e.g. ATTACHed) database used to fail with a cryptic "schema semantic_layer
 # does not exist" (CREATE) or silently write a row the primary-pinned reads
 # never see. A single-catalog guard now raises an actionable error instead.

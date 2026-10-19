@@ -520,6 +520,17 @@ mod reader {
         definition: Option<String>,
     }
 
+    /// `lower()` as `DuckDB` computes it: one codepoint at a time, each to its
+    /// simple lowercase mapping. `str::to_lowercase` differs: it maps a
+    /// word-final `Σ` to `ς`, and `İ` to two codepoints.
+    fn lower_codepoints(s: &str) -> String {
+        // Of the full mappings, only `İ`'s has more than one codepoint, and
+        // its first is the simple mapping.
+        s.chars()
+            .map(|c| c.to_lowercase().next().unwrap_or(c))
+            .collect()
+    }
+
     /// `ORDER BY` on a nullable VARCHAR as `DuckDB` sorts it by default:
     /// byte-wise, NULLs last.
     fn nulls_last(value: Option<&String>) -> (bool, Option<&String>) {
@@ -561,8 +572,26 @@ mod reader {
         /// a missing table reads as an empty catalog (FF-9).
         #[cfg(feature = "extension")]
         pub fn for_caller() -> Result<Self, String> {
-            let defs = crate::ddl::read_ffi::caller_definitions()?;
+            let defs = crate::ddl::read_ffi::caller_definitions(None)?;
             Ok(Self::from_rows(defs.present, defs.database, defs.rows))
+        }
+
+        /// [`CatalogReader::lookup`] over the caller's catalog, reading only
+        /// the rows named `view.name` (the lookup matches the name byte for
+        /// byte, so it would discard the others). For a scalar that looks
+        /// up one view per row, which would otherwise copy the whole
+        /// catalog each time.
+        ///
+        /// # Errors
+        ///
+        /// As [`CatalogReader::for_caller`] and [`CatalogReader::lookup`].
+        #[cfg(feature = "extension")]
+        pub fn lookup_in_caller(
+            view: &ViewRef,
+            search_path: &[String],
+        ) -> Result<Option<String>, String> {
+            let defs = crate::ddl::read_ffi::caller_definitions(Some(&view.name))?;
+            Self::from_rows(defs.present, defs.database, defs.rows).lookup(view, search_path)
         }
 
         /// A reader over the given `(schema_name, name, definition)` rows.
@@ -643,7 +672,7 @@ mod reader {
             // Folded on both sides: DuckDB matches identifiers
             // case-insensitively and a row may carry a different case than
             // the caller writes.
-            let wanted_schema = view.schema.as_deref().map(str::to_lowercase);
+            let wanted_schema = view.schema.as_deref().map(lower_codepoints);
             let mut matches: Vec<&CatalogRow> = self
                 .rows
                 .iter()
@@ -653,7 +682,7 @@ mod reader {
                     Some(wanted) => row
                         .schema_name
                         .as_deref()
-                        .is_some_and(|s| s.to_lowercase() == *wanted),
+                        .is_some_and(|s| lower_codepoints(s) == *wanted),
                 })
                 .collect();
             matches.sort_by(|a, b| {
@@ -2269,6 +2298,32 @@ mod tests {
         assert!(err.contains("schema name contains null byte"), "{err}");
     }
 
+    #[test]
+    fn a_schema_folds_one_codepoint_at_a_time() {
+        // As DuckDB's lower() does: a word-final Σ is σ, not ς, and İ is i.
+        let reader = CatalogReader::from_rows(
+            true,
+            "memory",
+            vec![
+                (
+                    Some("ΣΑΣ".into()),
+                    Some("v".into()),
+                    Some("{\"a\":1}".into()),
+                ),
+                (Some("İ".into()), Some("w".into()), Some("{\"b\":2}".into())),
+            ],
+        );
+        let view = |schema: &str, name: &str| crate::ident::ViewRef {
+            database: None,
+            schema: Some(schema.to_string()),
+            name: name.to_string(),
+        };
+        let found = reader.lookup(&view("σασ", "v"), &[]).unwrap();
+        assert_eq!(found.as_deref(), Some("{\"a\":1}"));
+        let found = reader.lookup(&view("i", "w"), &[]).unwrap();
+        assert_eq!(found.as_deref(), Some("{\"b\":2}"));
+    }
+
     /// The reader answers over the rows the caller's transaction sees what the
     /// SQL it replaced (TECH-DEBT #19) answered over the table: compared here
     /// against those queries run on a real table holding the same rows,
@@ -2290,7 +2345,7 @@ mod tests {
         fn rows() -> impl Strategy<Value = Vec<Row>> {
             proptest::collection::vec(
                 (
-                    opt(&["main", "Main", "s", "S", "é", "É"]),
+                    opt(&["main", "Main", "s", "S", "é", "É", "ΣΑΣ", "İ"]),
                     opt(&["v", "V", "w", ""]),
                     opt(&["{\"a\":1}", "{\"b\":2}", ""]),
                 ),
@@ -2357,7 +2412,7 @@ mod tests {
             fn lookup_and_listings_match(
                 rows in rows(),
                 name in proptest::sample::select(&["v", "V", "w", "x", ""][..]),
-                schema in opt(&["main", "MAIN", "s", "é", "É", "t"]),
+                schema in opt(&["main", "MAIN", "s", "é", "É", "t", "σασ", "ΣΑΣ", "i", "İ"]),
                 search_path in proptest::collection::vec(
                     proptest::sample::select(&["main", "s", "S", "é"][..]).prop_map(String::from),
                     0..3,
