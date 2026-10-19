@@ -331,6 +331,28 @@ fn outer_column(k: i64) -> String {
     }
 }
 
+/// `sql` with each `__sv_param(<n>)` replaced by `values[n - 1]` as a BIGINT
+/// constant. Panics on a slot with no value, as the bind refuses one.
+fn bind_params(sql: &str, values: &[i64]) -> String {
+    const MARK: &str = "__sv_param(";
+    let mut out = String::with_capacity(sql.len());
+    let mut rest = sql;
+    while let Some(at) = rest.find(MARK) {
+        out.push_str(&rest[..at]);
+        let after = &rest[at + MARK.len()..];
+        let digits = after.bytes().take_while(u8::is_ascii_digit).count();
+        let slot: usize = after[..digits].parse().expect("a slot number");
+        out.push('(');
+        out.push_str(&values[slot - 1].to_string());
+        out.push_str("::BIGINT)");
+        rest = after[digits..]
+            .strip_prefix(')')
+            .expect("a closing bracket");
+    }
+    out.push_str(rest);
+    out
+}
+
 /// `sql` as the right side of a `LATERAL` join to the one-row enclosing query
 /// [`Pred::OuterCmp`] refers to, keeping `sql`'s columns and their names.
 fn under_outer_row(sql: &str) -> String {
@@ -736,10 +758,16 @@ proptest! {
         };
 
         let conn = make_db(&case.schema);
-        // The values of `params`, bound as a prepared statement's: the bind of
-        // `semantic_view()` puts each in place of its `$n` as a constant.
+        // The values of `params`, put in place of the predicate's parameters
+        // as the bind of `semantic_view()` puts them: each `__sv_param(<n>)`
+        // becomes a constant of the value's own type (BIGINT here). This
+        // checks the expansion's renaming and numbering against the oracle's
+        // literals; the C++ walk that does it in the extension
+        // (`sv_bind_params`) is covered by `semantic_view_parameters.test`,
+        // since a `cargo test` binary cannot load the extension.
         let param_values = case.where_pred.as_ref().map(Pred::params).unwrap_or_default();
-        let params = || duckdb::params_from_iter(param_values.iter());
+        let expanded = bind_params(&expanded, &param_values);
+        let params = || duckdb::params_from_iter(std::iter::empty::<i64>());
 
         // The column layout `SEMANTIC_VIEW(...)` asks for (clause order and
         // aliases), applied as `semantic_view()` applies it: by name over the

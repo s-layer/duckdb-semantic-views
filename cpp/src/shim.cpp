@@ -1989,34 +1989,53 @@ static vector<Value> sv_read_params(TableFunctionBindInput &input, const char *f
     return StructValue::GetChildren(it->second);
 }
 
-// Put each value of `params` in place of the `$<n>` that refers to it in the
-// parsed expansion, as a constant of the value's own type: a value is never
-// SQL text. The Rust side lets only `$1`, `$2`, ... through where_clause and
-// checks each has a value (`expand::check_params_supplied`), so any other
-// parameter here is a bug.
+// Put each value of `params` in place of the predicate's parameter that
+// refers to it in the parsed expansion, as a constant of the value's own type:
+// a value is never SQL text. The Rust side lets only `$1`, `$2`, ... through
+// where_clause, checks each has a value (`expand::check_params_supplied`) and
+// writes each as a `__sv_param(<n>)` call (`expand::where_clause::
+// PARAM_FUNCTION`). A parameter left in the expansion comes from a stored
+// member expression (TECH-DEBT #95): it has no value to take, and must not be
+// given one of the predicate's or left to bind to one of the caller's
+// statement, so it is refused.
 static void sv_bind_params(QueryNode &node, const vector<Value> &values) {
     std::function<void(unique_ptr<ParsedExpression> &)> visit = [&](unique_ptr<ParsedExpression> &expr) {
         if (!expr) {
             return;
         }
         if (expr->GetExpressionClass() == ExpressionClass::PARAMETER) {
-            auto name = expr->Cast<ParameterExpression>().Identifier().GetIdentifierName();
-            idx_t slot = 0;
-            for (char c : name) {
-                if (c < '0' || c > '9' || slot > values.size()) {
-                    slot = 0;
-                    break;
+            throw BinderException(expr->GetQueryLocation(),
+                                  "semantic_views: a member of this semantic view holds the prepared "
+                                  "statement parameter $%s, which has no value in a query; re-create "
+                                  "the view without it",
+                                  expr->Cast<ParameterExpression>().Identifier().GetIdentifierName());
+        }
+        if (expr->GetExpressionClass() == ExpressionClass::FUNCTION) {
+            auto &call = expr->Cast<FunctionExpression>();
+            if (call.GetQualifiedName().Path().size() == 1 &&
+                call.GetQualifiedName().Name().GetIdentifierName() == "__sv_param") {
+                int64_t slot = 0;
+                idx_t arguments = 0;
+                for (auto &argument : call.Children()) {
+                    if (++arguments == 1 && argument.GetExpressionClass() == ExpressionClass::CONSTANT &&
+                        !argument.Cast<ConstantExpression>().GetLiteral().TryGetInt64(slot)) {
+                        slot = 0;
+                    }
                 }
-                slot = slot * 10 + idx_t(c - '0');
+                if (arguments != 1) {
+                    slot = 0;
+                }
+                if (slot < 1 || idx_t(slot) > values.size()) {
+                    throw BinderException("semantic_views: where_clause refers to $%lld, but params has %llu values",
+                                          static_cast<long long>(slot),
+                                          static_cast<unsigned long long>(values.size()));
+                }
+                auto constant = ConstantExpression::FromValue(values[idx_t(slot) - 1]);
+                constant->SetQueryLocation(expr->GetQueryLocation());
+                constant->SetAlias(expr->GetAlias());
+                expr = std::move(constant);
+                return;
             }
-            if (name.empty() || slot < 1 || slot > values.size()) {
-                throw InternalException("semantic_views: no params value for $%s", name);
-            }
-            auto constant = ConstantExpression::FromValue(values[slot - 1]);
-            constant->SetQueryLocation(expr->GetQueryLocation());
-            constant->SetAlias(expr->GetAlias());
-            expr = std::move(constant);
-            return;
         }
         if (expr->GetExpressionClass() == ExpressionClass::SUBQUERY) {
             auto &subquery = expr->Cast<SubqueryExpression>().SubqueryMutable();
@@ -2029,7 +2048,7 @@ static void sv_bind_params(QueryNode &node, const vector<Value> &values) {
     ParsedExpressionIterator::EnumerateQueryNodeChildren(node, visit);
 }
 
-// Common idiom for the bind callback: open Connection, run Rust dispatcher
+// Common idiom for the bind callback: run the Rust dispatcher
 // for the zero-arg case, parse payload into bd. Used by all 5 zero-arg
 // migrated TFs (Task 2 / Wave 1) and reused by Task 3 / Wave 2 with extra
 // VARCHAR args supplied to the dispatcher.

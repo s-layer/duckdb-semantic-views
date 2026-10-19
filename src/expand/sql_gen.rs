@@ -501,9 +501,18 @@ pub fn expand(
     // they are uncorrelated (`where_clause::hoist_subqueries`). What is left in
     // the predicate is resolved as before: a `(SELECT * FROM __sv_sqN)` is
     // still a subquery to the member scan.
-    if let Some(raw) = req.where_clause.as_deref() {
-        super::where_clause::refuse_outside_one_predicate(view_name, raw)?;
-    }
+    let renamed;
+    let req = match req.where_clause.as_deref() {
+        Some(raw) => {
+            super::where_clause::refuse_outside_one_predicate(view_name, raw)?;
+            renamed = QueryRequest {
+                where_clause: Some(super::where_clause::rename_params(raw)),
+                ..req.clone()
+            };
+            &renamed
+        }
+        None => req,
+    };
     let Some(hoisted) = req
         .where_clause
         .as_deref()

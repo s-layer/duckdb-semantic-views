@@ -366,6 +366,15 @@ pub(super) fn refuse_outside_one_predicate(view_name: &str, raw: &str) -> Result
     Ok(())
 }
 
+/// What a predicate's `$<n>` becomes in the expansion: `__sv_param(<n>)`, a
+/// call rather than a parameter. The bind puts the values of `params` in
+/// place of these calls only, and refuses any parameter left in the
+/// expansion, which can only come from a stored member expression
+/// (TECH-DEBT #95), rather than give it one of the predicate's values or let
+/// it bind to one of the caller's statement. (A call, because `DuckDB` will not
+/// parse named and positional parameters in one statement.)
+pub(crate) const PARAM_FUNCTION: &str = "__sv_param";
+
 /// The value of `params` a predicate's `$<n>` refers to, counted from 1, or
 /// `None` for any other parameter.
 fn param_slot(parameter: &str) -> Option<usize> {
@@ -376,8 +385,57 @@ fn param_slot(parameter: &str) -> Option<usize> {
     digits.parse().ok().filter(|n| *n >= 1)
 }
 
+/// The predicate with each `$<n>` written `__sv_param(<n>)`
+/// ([`PARAM_FUNCTION`]), so that the bind can tell the predicate's parameters
+/// from any a member expression spliced beside them holds.
+pub(super) fn rename_params(raw: &str) -> String {
+    // Comments are blanked to find the parameters, so none inside a comment
+    // is renamed; blanking keeps offsets, so they index `raw` too.
+    let blanked = crate::util::blank_sql_comments(raw);
+    let mut out = String::with_capacity(raw.len());
+    let mut at = 0;
+    for (start, parameter) in crate::expr_tokens::find_parameters(blanked.as_ref()) {
+        let Some(slot) = param_slot(parameter) else {
+            continue;
+        };
+        out.push_str(&raw[at..start]);
+        out.push_str(PARAM_FUNCTION);
+        out.push('(');
+        out.push_str(&slot.to_string());
+        out.push(')');
+        at = start + parameter.len();
+    }
+    out.push_str(&raw[at..]);
+    out
+}
+
+/// `sql` as the predicate wrote it: each `__sv_param(<n>)` shown as `$<n>`
+/// again, for display (`explain_semantic_view`'s expanded SQL).
+#[cfg_attr(not(feature = "extension"), allow(dead_code))]
+pub(crate) fn show_params(sql: &str) -> String {
+    let call = format!("{PARAM_FUNCTION}(");
+    let mut out = String::with_capacity(sql.len());
+    let mut rest = sql;
+    while let Some(at) = rest.find(&call) {
+        let after = &rest[at + call.len()..];
+        let digits = after.bytes().take_while(u8::is_ascii_digit).count();
+        if digits > 0 && after[digits..].starts_with(')') {
+            out.push_str(&rest[..at]);
+            out.push('$');
+            out.push_str(&after[..digits]);
+            rest = &after[digits + 1..];
+        } else {
+            out.push_str(&rest[..at + call.len()]);
+            rest = after;
+        }
+    }
+    out.push_str(rest);
+    out
+}
+
 /// Check that every `$<n>` in the predicate has a value among the `supplied`
 /// values of `params`.
+#[cfg_attr(not(feature = "extension"), allow(dead_code))]
 pub(crate) fn check_params_supplied(
     view_name: &str,
     raw: &str,
@@ -1029,6 +1087,23 @@ mod tests {
             matches!(got, Err(ExpandError::WhereClauseNotOnePredicate { .. })),
             "{got:?}"
         );
+    }
+
+    /// The predicate's parameters reach the expansion renamed, so the bind
+    /// can tell them from one a member expression holds; a literal or a
+    /// comment that looks like one is left alone.
+    #[test]
+    fn the_predicates_parameters_are_renamed() {
+        assert_eq!(
+            rename_params("region = $2 OR region = '$1' /* $1 */ OR k > $10"),
+            "region = __sv_param(2) OR region = '$1' /* $1 */ OR k > __sv_param(10)"
+        );
+        let sql = expand_with("region = $1 AND region IN (SELECT r FROM t WHERE k = $2)").unwrap();
+        assert!(sql.contains("= __sv_param(1)"), "{sql}");
+        assert!(sql.contains("k = __sv_param(2)"), "{sql}");
+        assert!(!sql.contains("$1") && !sql.contains("$2"), "{sql}");
+        let raw = "region = $2 OR k > $10 OR f(__sv_param(x))";
+        assert_eq!(show_params(&rename_params(raw)), raw);
     }
 
     #[test]

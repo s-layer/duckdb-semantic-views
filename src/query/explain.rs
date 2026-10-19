@@ -305,7 +305,9 @@ unsafe fn explain_semantic_view_bind_body(
     }
     lines.push(String::new());
     lines.push("-- Expanded SQL:".to_string());
-    for sql_line in expanded_sql.lines() {
+    // The predicate's parameters as written (`$1`, ...), not as the bind
+    // finds them (`expand::where_clause::PARAM_FUNCTION`).
+    for sql_line in crate::expand::show_params(&expanded_sql).lines() {
         lines.push(sql_line.to_string());
     }
     lines.push(String::new());

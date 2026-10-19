@@ -92,6 +92,6 @@ pub(crate) use facts::collect_derived_metric_source_tables;
 pub(crate) use materialization::find_routing_materialization_name;
 // The shim's isolated bind of `semantic_view()` (`query::table_function`).
 #[cfg(feature = "extension")]
-pub(crate) use where_clause::{check_params_supplied, where_fence};
+pub(crate) use where_clause::{check_params_supplied, show_params, where_fence};
 // Read-side member-type probe (TECH-DEBT #51, `query::member_types`).
 pub(crate) use window::window_required_dimensions;
