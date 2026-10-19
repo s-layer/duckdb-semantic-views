@@ -10,9 +10,12 @@ reads a release-named key instead of `ref` when the descriptor has one, e.g.
         if 'variegata' in desc['repo']:
             extension_ref = desc['repo']['variegata']
 
-So a release pinned to the registry's default goes in `ref`, and a release pinned to
-one of those older versions goes in that version's key. Any other pin is not built by
-the registry at all, and publishing it would only produce a failing registry build.
+When that default is a commit, its build job's `duckdb_tag` default names the release
+it is built as (`v2.0.0-alpha46057` for `b15358c…`), and a pin naming that release is
+the default too. So a release pinned to the registry's default goes in `ref`, and a
+release pinned to one of those older versions goes in that version's key. Any other
+pin is not built by the registry at all, and publishing it would only produce a failing
+registry build.
 
 Usage:
     registry_target.py key <our-pin> <build.yml> <build.py>
@@ -45,6 +48,10 @@ import sys
 # `DUCKDB_VERSION: v1.5.6` (the layout through v1.5.6).
 LATEST_STABLE = re.compile(r"^\s*DUCKDB_LATEST_STABLE:\s*['\"]?([^'\"\s]+)", re.M)
 VERSION_DEFAULT = re.compile(r"^\s*DUCKDB_VERSION:\s*(?:\$\{\{.*\|\|\s*)?['\"]?([^'\"\s}]+)", re.M)
+# The build job's `duckdb_tag: ${{ inputs.duckdb_tag || 'v2.0.0-alpha46057' }}`: the
+# release label a default *commit* is built under (extension-ci-tools tags its clone
+# with it), so a pin naming that label is the registry's default build.
+DEFAULT_TAG = re.compile(r"^\s*duckdb_tag:\s*\$\{\{.*\|\|\s*['\"]([^'\"\s}]+)", re.M)
 # One `== '<version>'` branch of build.py and the descriptor key it reads.
 VERSION_BRANCH = re.compile(
     r"os\.environ\['DUCKDB_VERSION'\]\s*==\s*'([^']+)'\s*:\s*"
@@ -61,14 +68,17 @@ def descriptor_key(pin: str, build_yml: str, build_py: str) -> str:
     default = registry_default(build_yml)
     if default is None:
         raise SystemExit("could not find the registry's default DuckDB in build.yml")
-    if default == pin:
+    tag = DEFAULT_TAG.search(build_yml)
+    label = tag.group(1) if tag else None
+    if pin in (default, label):
         return "ref"
     keys = {version: key for version, key in VERSION_BRANCH.findall(build_py)}
     if pin in keys:
         return keys[pin]
     supported = ", ".join(sorted(keys)) or "none"
     raise SystemExit(
-        f"the registry does not build DuckDB {pin}: its default is {default} and the "
+        f"the registry does not build DuckDB {pin}: its default is {default}"
+        f"{f' (built as {label})' if label and label != default else ''} and the "
         f"older releases it builds are {supported}. Align .duckdb-version with one of "
         "those (or wait for the registry) before publishing."
     )

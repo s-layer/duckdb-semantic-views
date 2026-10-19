@@ -823,9 +823,11 @@ Key fields:
 >
 > The registry-pin gate and the descriptor update use `scripts/registry_target.py`, guarded by
 > `tests/registry_target_script.rs`. The registry builds its default DuckDB (`DUCKDB_LATEST_STABLE`
-> in its `build.yml`, a DuckDB 2.0 commit since October 2026) from `repo.ref`, and each older line it
+> in its `build.yml`, a DuckDB 2.0 commit since October 2026, built as the release its build job's
+> `duckdb_tag` default names, e.g. `v2.0.0-alpha46057`) from `repo.ref`, and each older line it
 > still builds from a release-named key that its `scripts/build.py` reads instead (`variegata` for
-> v1.5.6, `andium` for v1.4.5). The gate maps `.duckdb-version` to that key and refuses a pin the
+> v1.5.6, `andium` for v1.4.5). The gate maps `.duckdb-version` to that key (a pin equal to the
+> default's commit or to its `duckdb_tag` label is the default) and refuses a pin the
 > registry does not build; the release SHA is then written under that key, leaving `ref` as it was.
 > `just release` uses the same script, so a manual release writes the same key.
 >
