@@ -132,6 +132,13 @@ test-sql: build test-sql-prebuilt
 test-sql-prebuilt: _ensure-test-deps
     make test_debug
 
+# Run the SQL logic tests with every statement the grammar productions cover
+# (src/grammar/) parsed by the grammar instead of the parser override. Both
+# implementations coexist during Phase 3 of the DuckDB 2.0 epic; this holds the
+# grammar to the same tests, the DDL corpus included.
+test-sql-grammar: build _ensure-test-deps
+    SV_ROUTE_TO_GRAMMAR=1 make test_debug
+
 # Download jaffle-shop data and create DuckLake/Iceberg catalog for integration tests.
 # Idempotent — safe to run multiple times. Data files are gitignored.
 # Uses uv to run the script with its declared dependencies (PEP 723).
@@ -353,7 +360,7 @@ test-integration: test-engine-pins test-legacy-schema-spelling test-vtab-crash t
 # Run all tests: Rust unit tests + SQL logic tests + DuckLake integration + all Python integration suites
 # Note: test-iceberg requires `just setup-ducklake` first. test-ducklake-ci uses synthetic data.
 # _ensure-test-deps runs early to catch pip version mismatches before slow builds.
-test-all: _ensure-test-deps test-rust test-sql test-ducklake-ci test-integration
+test-all: _ensure-test-deps test-rust test-sql test-sql-grammar test-ducklake-ci test-integration
 
 # Check that fuzz targets compile (requires nightly)
 check-fuzz:

@@ -198,7 +198,7 @@ The default renders a bare name, so replaying it recreates the view in whatever 
        o.revenue AS SUM(o.amount)
    )
 
-Replayed from any session, that statement puts ``sales`` back in ``analytics``. To dump every view at once, run ``GET_DDL`` over :ref:`list_semantic_views() <ref-functions-subqueries>`, the table function behind :ref:`SHOW SEMANTIC VIEWS <ref-show-semantic-views>`. The function is used here because a ``SHOW`` statement cannot be a ``FROM`` source. Build each lookup name with both parts quoted so a schema or view name containing whitespace or a dot survives the round trip:
+Replayed from any session, that statement puts ``sales`` back in ``analytics``. To dump every view at once, run ``GET_DDL`` over :ref:`list_semantic_views() <ref-functions-subqueries>`, the table function behind :ref:`SHOW SEMANTIC VIEWS <ref-show-semantic-views>`. ``(SHOW SEMANTIC VIEWS)`` works as the ``FROM`` source as well. Build each lookup name with both parts quoted so a schema or view name containing whitespace or a dot survives the round trip:
 
 .. code-block:: sql
 

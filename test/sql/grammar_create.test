@@ -1,0 +1,155 @@
+# CREATE SEMANTIC VIEW through the grammar production.
+#
+# With parser overrides off, CREATE reaches DuckDB's own grammar, where the
+# extension adds it as an alternative of `Statement`. The production plans the
+# statement as the parser override does, so every form and every error is the
+# override's.
+
+require semantic_views
+
+statement ok
+CREATE TABLE gc_t (id INTEGER, region VARCHAR, amount INTEGER);
+
+statement ok
+INSERT INTO gc_t VALUES (1, 'n', 10), (2, 's', 20), (3, 'n', 5);
+
+statement ok
+SET allow_parser_override_extension = 'DEFAULT';
+
+# --- the forms -----------------------------------------------------------------
+
+statement ok
+CREATE SEMANTIC VIEW gc_a AS TABLES (t AS gc_t PRIMARY KEY (id)) DIMENSIONS (t.region AS region) METRICS (t.total AS SUM(amount));
+
+query TI rowsort
+SELECT * FROM semantic_view('gc_a', dimensions := ['region'], metrics := ['total']);
+----
+n	15
+s	20
+
+statement error
+CREATE SEMANTIC VIEW gc_a AS TABLES (t AS gc_t PRIMARY KEY (id)) DIMENSIONS (t.region AS region);
+----
+already exists
+
+statement ok
+CREATE SEMANTIC VIEW IF NOT EXISTS gc_a AS TABLES (t AS gc_t PRIMARY KEY (id)) DIMENSIONS (t.region AS region);
+
+statement ok
+CREATE OR REPLACE SEMANTIC VIEW gc_a COMMENT = 'replaced' AS TABLES (t AS gc_t PRIMARY KEY (id)) DIMENSIONS (t.region AS region);
+
+query T
+SELECT comment FROM (SHOW SEMANTIC VIEWS) WHERE name = 'gc_a';
+----
+replaced
+
+# A comment and line breaks inside the statement.
+statement ok
+CREATE SEMANTIC VIEW gc_b AS -- the body
+TABLES (t AS gc_t PRIMARY KEY (id))
+/* no metrics */ DIMENSIONS (t.region AS region);
+
+query I
+SELECT count(*) FROM (SHOW SEMANTIC VIEWS) WHERE name = 'gc_b';
+----
+1
+
+statement ok
+CREATE SEMANTIC VIEW gc_y FROM YAML $$
+base_table: gc_t
+tables:
+  - alias: t
+    table: gc_t
+    pk_columns:
+      - id
+dimensions:
+  - name: region
+    expr: t.region
+    source_table: t
+metrics: []
+$$;
+
+query T rowsort
+SELECT region FROM semantic_view('gc_y', dimensions := ['region']);
+----
+n
+s
+
+# --- errors are the override's --------------------------------------------------
+
+statement error
+CREATE SEMANTIC VIEW gc_e AS TABLES gc_t;
+----
+Expected '(' after clause keyword 'TABLES'
+
+statement error
+CREATE SEMANTIC VIEW gc_e AS TABLES (t AS gc_t PRIMARY KEY (id)) DIMENSIONS (t.region AS region) DIMENSIONS (t.id AS id);
+----
+Duplicate clause keyword 'DIMENSIONS'
+
+# --- DuckDB's own statements are not shadowed -----------------------------------
+
+# The productions are prepended choices; a statement they do not match falls to
+# DuckDB's own alternative, even on a table named `semantic`.
+statement ok
+CREATE TABLE semantic (view INTEGER);
+
+query TT
+SELECT column_name, column_type FROM (DESCRIBE semantic);
+----
+view	INTEGER
+
+query TT
+SELECT column_name, column_type FROM (SHOW semantic);
+----
+view	INTEGER
+
+statement ok
+CREATE OR REPLACE VIEW semantic_v AS SELECT 1 AS one;
+
+statement ok
+ALTER TABLE semantic RENAME TO semantic2;
+
+statement ok
+DROP VIEW semantic_v;
+
+statement ok
+DROP TABLE semantic2;
+
+# --- inside a multi-statement string (TECH-DEBT #85) ---------------------------
+
+# Back to the override as the extension loads it. It declines a string holding
+# several statements, and DuckDB's grammar splits it and runs each one.
+statement ok
+SET allow_parser_override_extension = 'FALLBACK';
+
+statement ok
+SELECT 1; CREATE SEMANTIC VIEW gc_m AS TABLES (t AS gc_t PRIMARY KEY (id)) DIMENSIONS (t.region AS region); SELECT 2;
+
+query T rowsort
+SELECT region FROM semantic_view('gc_m', dimensions := ['region']);
+----
+n
+s
+
+# The override saw the query, so the production plans its source text: a tab
+# inside an expression is stored as written (TECH-DEBT #100).
+statement ok
+SELECT 1; CREATE SEMANTIC VIEW gc_w AS TABLES (t AS gc_t PRIMARY KEY (id)) DIMENSIONS (t.r AS upper(	t.region));
+
+query T
+SELECT contains(GET_DDL('SEMANTIC_VIEW', 'gc_w'), 'upper(' || chr(9) || 't.region)');
+----
+true
+
+# And an error shows the caret, on the statement's own line.
+statement error
+SELECT 1;
+CREATE SEMANTIC VIEW gc_e AS TABLES gc_t;
+----
+LINE 2:
+
+query I
+SELECT count(*) FROM (SHOW SEMANTIC VIEWS) WHERE name LIKE 'gc_%';
+----
+5

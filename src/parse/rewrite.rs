@@ -17,6 +17,7 @@ use super::{
     skip_leading_whitespace, validate_create_body, DdlKind,
 };
 
+use super::show_clauses::ShowClauses;
 // Only the emitted-SQL unit tests name this type directly; production code
 // passes it through as `clauses.in_schema.as_ref()`.
 #[cfg(test)]
@@ -27,6 +28,29 @@ use super::show_clauses::ScopeName;
 // production live in the `ffi` submodule.
 #[cfg(test)]
 use crate::ffi_util::write_error_to_buffer;
+
+/// The DROP / ALTER / DESCRIBE messages the grammar route (`crate::grammar`)
+/// reports too, kept in one place so the two routes cannot drift apart.
+pub(crate) mod messages {
+    pub(crate) const INVALID_VIEW_NAME: &str = "Invalid view name";
+    pub(crate) const INVALID_RENAME_TARGET: &str = "Invalid new view name in RENAME TO";
+    pub(crate) const EXPECTED_COMMENT_STRING: &str =
+        "Expected single-quoted string after SET COMMENT =";
+    pub(crate) const UNSUPPORTED_ALTER: &str =
+        "Unsupported ALTER operation. Supported: RENAME TO, SET COMMENT, UNSET COMMENT.";
+
+    pub(crate) fn unexpected_after_view_name(rest: &str) -> String {
+        format!("Unexpected tokens after view name: '{rest}'")
+    }
+
+    pub(crate) fn unexpected_after_rename_target(rest: &str) -> String {
+        format!("Unexpected tokens after new view name in RENAME TO: '{rest}'")
+    }
+}
+use messages::{
+    unexpected_after_rename_target, unexpected_after_view_name, EXPECTED_COMMENT_STRING,
+    INVALID_RENAME_TARGET, INVALID_VIEW_NAME, UNSUPPORTED_ALTER,
+};
 
 // ---------------------------------------------------------------------------
 // Parsing helpers
@@ -77,7 +101,7 @@ fn extract_raw_name_only(
     let rest = after_prefix[name_end..].trim();
     if !rest.is_empty() {
         return Err(ParseError {
-            message: format!("Unexpected tokens after view name: '{rest}'"),
+            message: unexpected_after_view_name(rest),
             position: Some(base + byte_offset_within(trimmed, rest)),
         });
     }
@@ -92,7 +116,7 @@ fn extract_raw_name_only(
 fn extract_name_only(trimmed: &str, prefix_len: usize, base: usize) -> Result<ViewRef, ParseError> {
     let raw = extract_raw_name_only(trimmed, prefix_len, base)?;
     parse_view_ref(&raw).map_err(|e| ParseError {
-        message: format!("Invalid view name: {e}"),
+        message: format!("{INVALID_VIEW_NAME}: {e}"),
         // Point the caret at the name token itself, not the end of the prefix:
         // with whitespace after the prefix the two differ. Matches the other
         // helpers in this PR (extract_raw_name_only, rewrite_alter) which all
@@ -195,7 +219,7 @@ fn rewrite_alter(
     }
     let raw_view_name = &after_prefix[..name_end];
     let view_name = parse_view_ref(raw_view_name).map_err(|e| ParseError {
-        message: format!("Invalid view name: {e}"),
+        message: format!("{INVALID_VIEW_NAME}: {e}"),
         position: Some(abs(after_prefix)),
     })?;
     let rest = after_prefix[name_end..].trim();
@@ -227,14 +251,12 @@ fn rewrite_alter(
         let trailing = after_op[new_name_end..].trim();
         if !trailing.is_empty() {
             return Err(ParseError {
-                message: format!(
-                    "Unexpected tokens after new view name in RENAME TO: '{trailing}'"
-                ),
+                message: unexpected_after_rename_target(trailing),
                 position: Some(abs(trailing)),
             });
         }
         let new_name = parse_view_ref(new_name_raw).map_err(|e| ParseError {
-            message: format!("Invalid new view name in RENAME TO: {e}"),
+            message: format!("{INVALID_RENAME_TARGET}: {e}"),
             position: Some(abs(after_op)),
         })?;
         Ok(RewriteAction::AlterRename {
@@ -253,7 +275,7 @@ fn rewrite_alter(
         let after_eq = after_set_comment[1..].trim_start();
         if !after_eq.starts_with('\'') {
             return Err(ParseError {
-                message: "Expected single-quoted string after SET COMMENT =".to_string(),
+                message: EXPECTED_COMMENT_STRING.to_string(),
                 position: Some(abs(after_eq)),
             });
         }
@@ -289,9 +311,7 @@ fn rewrite_alter(
         })
     } else {
         Err(ParseError {
-            message:
-                "Unsupported ALTER operation. Supported: RENAME TO, SET COMMENT, UNSET COMMENT."
-                    .to_string(),
+            message: UNSUPPORTED_ALTER.to_string(),
             position: Some(abs(rest)),
         })
     }
@@ -348,10 +368,8 @@ fn plan_ddl(query: &str) -> Result<RewriteAction, ParseError> {
         // SQL text on the read side.
         DdlKind::Describe | DdlKind::ShowColumns => {
             let name = extract_raw_name_only(trimmed, plen, trim_base)?;
-            let safe_name = SqlLit::escape(&name);
-            let fn_name = read_function_name(kind);
-            Ok(RewriteAction::Passthrough(format!(
-                "SELECT * FROM {fn_name}('{safe_name}')"
+            Ok(RewriteAction::Passthrough(lower_name_only_read(
+                kind, &name,
             )))
         }
         // SHOW SEMANTIC VIEWS/DIMENSIONS/METRICS/FACTS: optional LIKE/IN/FOR METRIC/STARTS WITH/LIMIT
@@ -364,53 +382,77 @@ fn plan_ddl(query: &str) -> Result<RewriteAction, ParseError> {
             let after_prefix = trimmed[plen..].trim();
             let after_prefix_base = trim_base + byte_offset_within(trimmed, after_prefix);
             let clauses = parse_show_filter_clauses(after_prefix, kind, after_prefix_base)?;
-
-            // Validate FOR METRIC requires IN
-            if clauses.for_metric.is_some() && clauses.in_view.is_none() {
-                return Err(ParseError {
-                    message: "FOR METRIC requires IN view_name".to_string(),
-                    position: Some(after_prefix_base),
-                });
-            }
-
-            // Build base SELECT
-            let base = if let Some(view_name) = clauses.in_view {
-                let safe_name = SqlLit::escape(view_name);
-                if let Some(metric_name) = clauses.for_metric {
-                    let safe_metric = SqlLit::escape(metric_name);
-                    format!(
-                        "SELECT * FROM show_semantic_dimensions_for_metric('{safe_name}', '{safe_metric}')"
-                    )
-                } else {
-                    let fn_name = read_function_name(kind);
-                    format!("SELECT * FROM {fn_name}('{safe_name}')")
-                }
-            } else {
-                let all_fn = match kind {
-                    DdlKind::Show => "list_semantic_views",
-                    DdlKind::ShowTerse => "list_terse_semantic_views",
-                    DdlKind::ShowDimensions => "show_semantic_dimensions_all",
-                    DdlKind::ShowMetrics => "show_semantic_metrics_all",
-                    DdlKind::ShowFacts => "show_semantic_facts_all",
-                    DdlKind::ShowMaterializations => "show_semantic_materializations_all",
-                    _ => unreachable!(),
-                };
-                format!("SELECT * FROM {all_fn}()")
-            };
-
-            // Append filter suffix
-            let suffix = build_filter_suffix(
-                clauses.like_pattern.as_deref(),
-                clauses.starts_with.as_deref(),
-                clauses.limit,
-                clauses.in_schema.as_ref(),
-                clauses.in_database.as_ref(),
-            );
-            Ok(RewriteAction::Passthrough(format!("{base}{suffix}")))
+            Ok(RewriteAction::Passthrough(lower_show(
+                kind,
+                &clauses,
+                after_prefix_base,
+            )?))
         }
         // ALTER: sub-operation dispatch (RENAME TO, SET COMMENT, UNSET COMMENT)
         DdlKind::Alter | DdlKind::AlterIfExists => rewrite_alter(trimmed, plen, kind, trim_base),
     }
+}
+
+/// Lower a name-only read statement (DESCRIBE, SHOW COLUMNS) to its read table
+/// function. The name is passed raw: the table function folds and resolves it
+/// at the catalog-read boundary (FF-4).
+pub(crate) fn lower_name_only_read(kind: DdlKind, raw_name: &str) -> String {
+    let safe_name = SqlLit::escape(raw_name);
+    let fn_name = read_function_name(kind);
+    format!("SELECT * FROM {fn_name}('{safe_name}')")
+}
+
+/// Lower a `SHOW SEMANTIC ...` statement, already split into its clauses, to a
+/// query over the read table functions. Shared by the parser override and the
+/// grammar production, so both emit the same SQL. `position` is where the
+/// clauses start, for the one error found here.
+pub(crate) fn lower_show(
+    kind: DdlKind,
+    clauses: &ShowClauses<'_>,
+    position: usize,
+) -> Result<String, ParseError> {
+    // Validate FOR METRIC requires IN
+    if clauses.for_metric.is_some() && clauses.in_view.is_none() {
+        return Err(ParseError {
+            message: "FOR METRIC requires IN view_name".to_string(),
+            position: Some(position),
+        });
+    }
+
+    // Build base SELECT
+    let base = if let Some(view_name) = clauses.in_view {
+        let safe_name = SqlLit::escape(view_name);
+        if let Some(metric_name) = clauses.for_metric {
+            let safe_metric = SqlLit::escape(metric_name);
+            format!(
+                "SELECT * FROM show_semantic_dimensions_for_metric('{safe_name}', '{safe_metric}')"
+            )
+        } else {
+            let fn_name = read_function_name(kind);
+            format!("SELECT * FROM {fn_name}('{safe_name}')")
+        }
+    } else {
+        let all_fn = match kind {
+            DdlKind::Show => "list_semantic_views",
+            DdlKind::ShowTerse => "list_terse_semantic_views",
+            DdlKind::ShowDimensions => "show_semantic_dimensions_all",
+            DdlKind::ShowMetrics => "show_semantic_metrics_all",
+            DdlKind::ShowFacts => "show_semantic_facts_all",
+            DdlKind::ShowMaterializations => "show_semantic_materializations_all",
+            _ => unreachable!(),
+        };
+        format!("SELECT * FROM {all_fn}()")
+    };
+
+    // Append filter suffix
+    let suffix = build_filter_suffix(
+        clauses.like_pattern.as_deref(),
+        clauses.starts_with.as_deref(),
+        clauses.limit,
+        clauses.in_schema.as_ref(),
+        clauses.in_database.as_ref(),
+    );
+    Ok(format!("{base}{suffix}"))
 }
 
 // ---------------------------------------------------------------------------
@@ -1003,6 +1045,16 @@ mod tests {
                 name: vref("it's_a_view"),
                 if_exists: false,
             }
+        );
+        // The same raw name is accepted at CREATE (TECH-DEBT #98: DuckDB's
+        // tokenizer, and so the grammar, refuses it; corpus row S-014).
+        let created = plan(
+            "CREATE SEMANTIC VIEW it's_a_view AS TABLES (o AS orders PRIMARY KEY (id)) \
+             DIMENSIONS (o.region AS o.region)",
+        );
+        assert!(
+            matches!(&created, RewriteAction::Create { name, .. } if *name == vref("it's_a_view")),
+            "got {created:?}"
         );
     }
 
@@ -2726,7 +2778,7 @@ $$"#;
 
     #[test]
     fn test_yaml_rewrite_create_or_replace() {
-        let yaml_text = "$$\nbase_table: t\ntables: []\ndimensions: []\nmetrics: []\n$$";
+        let yaml_text = "$$\nbase_table: t\ntables:\n  - alias: t\n    table: t\n    pk_columns: [id]\ndimensions:\n  - name: d\n    expr: t.d\n    source_table: t\nmetrics: []\n$$";
         let action =
             rewrite_ddl_yaml_body(DdlKind::CreateOrReplace, &vref("v"), yaml_text, None).unwrap();
         assert!(matches!(
@@ -2740,7 +2792,7 @@ $$"#;
 
     #[test]
     fn test_yaml_rewrite_create_if_not_exists() {
-        let yaml_text = "$$\nbase_table: t\ntables: []\ndimensions: []\nmetrics: []\n$$";
+        let yaml_text = "$$\nbase_table: t\ntables:\n  - alias: t\n    table: t\n    pk_columns: [id]\ndimensions:\n  - name: d\n    expr: t.d\n    source_table: t\nmetrics: []\n$$";
         let result =
             rewrite_ddl_yaml_body(DdlKind::CreateIfNotExists, &vref("v"), yaml_text, None).unwrap();
         assert!(matches!(
@@ -2755,7 +2807,7 @@ $$"#;
     #[test]
     fn test_yaml_rewrite_trailing_content_rejected() {
         let yaml_text =
-            "$$\nbase_table: t\ntables: []\ndimensions: []\nmetrics: []\n$$ extra stuff";
+            "$$\nbase_table: t\ntables:\n  - alias: t\n    table: t\n    pk_columns: [id]\ndimensions:\n  - name: d\n    expr: t.d\n    source_table: t\nmetrics: []\n$$ extra stuff";
         let err = rewrite_ddl_yaml_body(DdlKind::Create, &vref("v"), yaml_text, None).unwrap_err();
         assert!(err
             .message
@@ -2773,7 +2825,7 @@ $$"#;
     #[test]
     fn test_yaml_rewrite_comment_override() {
         let yaml_text =
-            "$$\nbase_table: t\ntables: []\ndimensions: []\nmetrics: []\ncomment: yaml comment\n$$";
+            "$$\nbase_table: t\ntables:\n  - alias: t\n    table: t\n    pk_columns: [id]\ndimensions:\n  - name: d\n    expr: t.d\n    source_table: t\nmetrics: []\ncomment: yaml comment\n$$";
         let result = rewrite_ddl_yaml_body(
             DdlKind::Create,
             &vref("v"),
@@ -2812,7 +2864,7 @@ $$"#;
 
     #[test]
     fn test_yaml_rewrite_tagged_dollar_quote() {
-        let yaml_text = "$yaml$\nbase_table: t\ntables: []\ndimensions: []\nmetrics: []\n$yaml$";
+        let yaml_text = "$yaml$\nbase_table: t\ntables:\n  - alias: t\n    table: t\n    pk_columns: [id]\ndimensions:\n  - name: d\n    expr: t.d\n    source_table: t\nmetrics: []\n$yaml$";
         let result = rewrite_ddl_yaml_body(DdlKind::Create, &vref("v"), yaml_text, None).unwrap();
         assert!(matches!(result, RewriteAction::Create { .. }));
     }
@@ -2825,8 +2877,14 @@ $$"#;
     fn test_from_yaml_detection_via_rewrite_ddl() {
         let query = r#"CREATE SEMANTIC VIEW yaml_test FROM YAML $$
 base_table: t
-tables: []
-dimensions: []
+tables:
+  - alias: t
+    table: t
+    pk_columns: [id]
+dimensions:
+  - name: d
+    expr: t.d
+    source_table: t
 metrics: []
 $$"#;
         let RewriteAction::Create { name, mode, .. } = plan(query) else {
@@ -2838,13 +2896,13 @@ $$"#;
 
     #[test]
     fn test_from_yaml_case_insensitive() {
-        let query = "CREATE SEMANTIC VIEW v from yaml $$\nbase_table: t\ntables: []\ndimensions: []\nmetrics: []\n$$";
+        let query = "CREATE SEMANTIC VIEW v from yaml $$\nbase_table: t\ntables:\n  - alias: t\n    table: t\n    pk_columns: [id]\ndimensions:\n  - name: d\n    expr: t.d\n    source_table: t\nmetrics: []\n$$";
         assert!(matches!(plan(query), RewriteAction::Create { .. }));
     }
 
     #[test]
     fn test_from_yaml_mixed_case() {
-        let query = "CREATE SEMANTIC VIEW v From Yaml $$\nbase_table: t\ntables: []\ndimensions: []\nmetrics: []\n$$";
+        let query = "CREATE SEMANTIC VIEW v From Yaml $$\nbase_table: t\ntables:\n  - alias: t\n    table: t\n    pk_columns: [id]\ndimensions:\n  - name: d\n    expr: t.d\n    source_table: t\nmetrics: []\n$$";
         assert!(matches!(plan(query), RewriteAction::Create { .. }));
     }
 
@@ -2855,16 +2913,16 @@ $$"#;
         // `FROM\tYAML`, and `FROM /* fmt */ YAML` (comments blank to a run
         // of spaces) all fell through to the generic error. Fixed PA-10
         // class; this site was missed by the Phase 25.1 sweep.
-        let two_spaces = "CREATE SEMANTIC VIEW v FROM  YAML $$\nbase_table: t\ntables: []\ndimensions: []\nmetrics: []\n$$";
+        let two_spaces = "CREATE SEMANTIC VIEW v FROM  YAML $$\nbase_table: t\ntables:\n  - alias: t\n    table: t\n    pk_columns: [id]\ndimensions:\n  - name: d\n    expr: t.d\n    source_table: t\nmetrics: []\n$$";
         assert!(matches!(plan(two_spaces), RewriteAction::Create { .. }));
 
-        let tab = "CREATE SEMANTIC VIEW v FROM\tYAML $$\nbase_table: t\ntables: []\ndimensions: []\nmetrics: []\n$$";
+        let tab = "CREATE SEMANTIC VIEW v FROM\tYAML $$\nbase_table: t\ntables:\n  - alias: t\n    table: t\n    pk_columns: [id]\ndimensions:\n  - name: d\n    expr: t.d\n    source_table: t\nmetrics: []\n$$";
         assert!(matches!(plan(tab), RewriteAction::Create { .. }));
 
-        let comment = "CREATE SEMANTIC VIEW v FROM /* fmt */ YAML $$\nbase_table: t\ntables: []\ndimensions: []\nmetrics: []\n$$";
+        let comment = "CREATE SEMANTIC VIEW v FROM /* fmt */ YAML $$\nbase_table: t\ntables:\n  - alias: t\n    table: t\n    pk_columns: [id]\ndimensions:\n  - name: d\n    expr: t.d\n    source_table: t\nmetrics: []\n$$";
         assert!(matches!(plan(comment), RewriteAction::Create { .. }));
 
-        let newline = "CREATE SEMANTIC VIEW v FROM\nYAML $$\nbase_table: t\ntables: []\ndimensions: []\nmetrics: []\n$$";
+        let newline = "CREATE SEMANTIC VIEW v FROM\nYAML $$\nbase_table: t\ntables:\n  - alias: t\n    table: t\n    pk_columns: [id]\ndimensions:\n  - name: d\n    expr: t.d\n    source_table: t\nmetrics: []\n$$";
         assert!(matches!(plan(newline), RewriteAction::Create { .. }));
     }
 
@@ -2881,7 +2939,7 @@ $$"#;
 
     #[test]
     fn test_create_or_replace_from_yaml() {
-        let query = "CREATE OR REPLACE SEMANTIC VIEW v FROM YAML $$\nbase_table: t\ntables: []\ndimensions: []\nmetrics: []\n$$";
+        let query = "CREATE OR REPLACE SEMANTIC VIEW v FROM YAML $$\nbase_table: t\ntables:\n  - alias: t\n    table: t\n    pk_columns: [id]\ndimensions:\n  - name: d\n    expr: t.d\n    source_table: t\nmetrics: []\n$$";
         assert!(matches!(
             plan(query),
             RewriteAction::Create {
@@ -2893,7 +2951,7 @@ $$"#;
 
     #[test]
     fn test_create_if_not_exists_from_yaml() {
-        let query = "CREATE SEMANTIC VIEW IF NOT EXISTS v FROM YAML $$\nbase_table: t\ntables: []\ndimensions: []\nmetrics: []\n$$";
+        let query = "CREATE SEMANTIC VIEW IF NOT EXISTS v FROM YAML $$\nbase_table: t\ntables:\n  - alias: t\n    table: t\n    pk_columns: [id]\ndimensions:\n  - name: d\n    expr: t.d\n    source_table: t\nmetrics: []\n$$";
         assert!(matches!(
             plan(query),
             RewriteAction::Create {
@@ -2905,7 +2963,7 @@ $$"#;
 
     #[test]
     fn test_comment_with_from_yaml() {
-        let query = "CREATE SEMANTIC VIEW v COMMENT = 'my comment' FROM YAML $$\nbase_table: t\ntables: []\ndimensions: []\nmetrics: []\n$$";
+        let query = "CREATE SEMANTIC VIEW v COMMENT = 'my comment' FROM YAML $$\nbase_table: t\ntables:\n  - alias: t\n    table: t\n    pk_columns: [id]\ndimensions:\n  - name: d\n    expr: t.d\n    source_table: t\nmetrics: []\n$$";
         let RewriteAction::Create { def, .. } = plan(query) else {
             panic!("expected RewriteAction::Create");
         };
@@ -3125,7 +3183,7 @@ $$"#;
     #[test]
     fn test_validate_and_rewrite_yaml_inline_still_works() {
         // Regression: FROM YAML $$...$$ still works after FILE branch is added
-        let query = "CREATE SEMANTIC VIEW v FROM YAML $$\nbase_table: t\ntables: []\ndimensions: []\nmetrics: []\n$$";
+        let query = "CREATE SEMANTIC VIEW v FROM YAML $$\nbase_table: t\ntables:\n  - alias: t\n    table: t\n    pk_columns: [id]\ndimensions:\n  - name: d\n    expr: t.d\n    source_table: t\nmetrics: []\n$$";
         assert!(matches!(plan(query), RewriteAction::Create { .. }));
     }
 

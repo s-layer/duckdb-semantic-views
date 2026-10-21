@@ -1,0 +1,305 @@
+# DROP and ALTER SEMANTIC VIEW through the grammar productions.
+#
+# With parser overrides off, these statements reach DuckDB's own grammar,
+# where the extension adds them as alternatives of `Statement`. They lower to
+# the same guarded native DML the parser override emits, run as several
+# statements, so they keep its transactional behaviour.
+
+require semantic_views
+
+statement ok
+CREATE TABLE gw_t (id INTEGER, region VARCHAR);
+
+statement ok
+CREATE SEMANTIC VIEW gw_a AS TABLES (t AS gw_t PRIMARY KEY (id)) DIMENSIONS (t.region AS region);
+
+statement ok
+CREATE SCHEMA gw_s;
+
+statement ok
+CREATE SEMANTIC VIEW gw_s.gw_b AS TABLES (t AS gw_t PRIMARY KEY (id)) DIMENSIONS (t.region AS region);
+
+statement ok
+SET allow_parser_override_extension = 'DEFAULT';
+
+# --- ALTER ---------------------------------------------------------------------
+
+statement ok
+ALTER SEMANTIC VIEW gw_a SET COMMENT = 'it''s a view';
+
+query T
+SELECT comment FROM (SHOW SEMANTIC VIEWS) WHERE name = 'gw_a';
+----
+it's a view
+
+statement ok
+ALTER SEMANTIC VIEW IF EXISTS gw_a UNSET COMMENT;
+
+query T
+SELECT comment FROM (SHOW SEMANTIC VIEWS) WHERE name = 'gw_a';
+----
+(empty)
+
+statement ok
+ALTER SEMANTIC VIEW GW_A RENAME TO gw_a2;
+
+query T
+SELECT name FROM (SHOW SEMANTIC VIEWS) WHERE name LIKE 'gw_a%';
+----
+gw_a2
+
+# A qualified source name finds the view in its schema.
+statement ok
+ALTER SEMANTIC VIEW gw_s.gw_b RENAME TO gw_b2;
+
+query TT
+SELECT schema_name, name FROM (SHOW SEMANTIC VIEWS) WHERE name LIKE 'gw_b%';
+----
+gw_s	gw_b2
+
+statement error
+ALTER SEMANTIC VIEW gw_nope RENAME TO gw_x;
+----
+does not exist
+
+statement ok
+ALTER SEMANTIC VIEW IF EXISTS gw_nope RENAME TO gw_x;
+
+# --- DROP ----------------------------------------------------------------------
+
+# Inside a transaction the DROP is native DML, so a ROLLBACK undoes it.
+statement ok
+BEGIN;
+
+statement ok
+DROP SEMANTIC VIEW gw_a2;
+
+statement ok
+ROLLBACK;
+
+query I
+SELECT count(*) FROM (SHOW SEMANTIC VIEWS) WHERE name = 'gw_a2';
+----
+1
+
+statement ok
+DROP SEMANTIC VIEW gw_a2;
+
+statement ok
+DROP SEMANTIC VIEW gw_s.gw_b2;
+
+query I
+SELECT count(*) FROM (SHOW SEMANTIC VIEWS) WHERE name LIKE 'gw_%';
+----
+0
+
+statement error
+DROP SEMANTIC VIEW gw_a2;
+----
+does not exist
+
+statement ok
+DROP SEMANTIC VIEW IF EXISTS gw_a2;
+
+# --- malformed statements still get the extension's own message ----------------
+
+statement error
+ALTER SEMANTIC VIEW gw_a2 TRUNCATE;
+----
+Unsupported ALTER operation
+
+statement error
+ALTER SEMANTIC VIEW gw_a2 RENAME TO;
+----
+Missing new name after RENAME TO
+
+# A comment is a plain '...' literal, as for the parser override: DuckDB's
+# string literal also takes $$...$$ and E'...', which the grammar refuses.
+statement error
+ALTER SEMANTIC VIEW gw_a2 SET COMMENT = $$x$$;
+----
+Expected single-quoted string after SET COMMENT =
+
+statement error
+ALTER SEMANTIC VIEW gw_a2 SET COMMENT = E'x';
+----
+Expected single-quoted string after SET COMMENT =
+
+statement error
+ALTER SEMANTIC VIEW gw_a2 SET COMMENT = $t$x$t$;
+----
+Expected single-quoted string after SET COMMENT =
+
+# A view name is one run of text, as for the parser override: whitespace or a
+# comment inside a dotted name ends it, and the rest is reported.
+statement ok
+CREATE SEMANTIC VIEW gw_s.gw_c AS TABLES (t AS gw_t PRIMARY KEY (id)) DIMENSIONS (t.region AS region);
+
+statement error
+DROP SEMANTIC VIEW gw_s . gw_c;
+----
+Unexpected tokens after view name: '. gw_c'
+
+statement error
+DROP SEMANTIC VIEW IF EXISTS gw_s .gw_c;
+----
+Unexpected tokens after view name: '.gw_c'
+
+statement error
+DROP SEMANTIC VIEW gw_s. gw_c;
+----
+Unexpected tokens after view name: 'gw_c'
+
+statement error
+DROP SEMANTIC VIEW gw_s/**/.gw_c;
+----
+Unexpected tokens after view name: '.gw_c'
+
+statement error
+ALTER SEMANTIC VIEW gw_s . gw_c RENAME TO gw_d;
+----
+Unsupported ALTER operation. Supported: RENAME TO, SET COMMENT, UNSET COMMENT.
+
+statement error
+ALTER SEMANTIC VIEW gw_s.gw_c RENAME TO gw_s . gw_d;
+----
+Unexpected tokens after new view name in RENAME TO: '. gw_d'
+
+query T
+SELECT name FROM (SHOW SEMANTIC VIEWS) WHERE name IN ('gw_c', 'gw_d');
+----
+gw_c
+
+statement ok
+DROP SEMANTIC VIEW gw_s.gw_c;
+
+# --- inside a multi-statement string (TECH-DEBT #85) ---------------------------
+
+# Back to the override as the extension loads it. It declines a string holding
+# several statements, and DuckDB's grammar splits it and runs each one, ours
+# included.
+statement ok
+SET allow_parser_override_extension = 'FALLBACK';
+
+statement ok
+CREATE SEMANTIC VIEW gw_m AS TABLES (t AS gw_t PRIMARY KEY (id)) DIMENSIONS (t.region AS region);
+
+statement ok
+SELECT 1; ALTER SEMANTIC VIEW gw_m SET COMMENT = 'multi';
+
+query T
+SELECT comment FROM (SHOW SEMANTIC VIEWS) WHERE name = 'gw_m';
+----
+multi
+
+statement ok
+ALTER SEMANTIC VIEW gw_m RENAME TO gw_m2; DROP SEMANTIC VIEW gw_m2; SELECT 2;
+
+query I
+SELECT count(*) FROM (SHOW SEMANTIC VIEWS) WHERE name LIKE 'gw_m%';
+----
+0
+
+# Each statement is checked on its own text: the reported rest of a spaced
+# name stops at the end of its statement.
+statement ok
+CREATE SEMANTIC VIEW gw_s.gw_e AS TABLES (t AS gw_t PRIMARY KEY (id)) DIMENSIONS (t.region AS region);
+
+statement error
+DROP SEMANTIC VIEW gw_s . gw_e; SELECT 3;
+----
+Unexpected tokens after view name: '. gw_e'
+
+# Alone, with the override on, the statement gets the same message: the
+# override refuses it and declines, and the grammar takes it.
+statement error
+DROP SEMANTIC VIEW gw_s . gw_e;
+----
+Unexpected tokens after view name: '. gw_e'
+
+statement error
+ALTER SEMANTIC VIEW gw_s.gw_e SET COMMENT = E'x';
+----
+Expected single-quoted string after SET COMMENT =
+
+statement error
+SELECT 1; ALTER SEMANTIC VIEW gw_s.gw_e SET COMMENT = $$x$$; SELECT 2;
+----
+Expected single-quoted string after SET COMMENT =
+
+statement ok
+DROP SEMANTIC VIEW gw_s.gw_e;
+
+# --- wrapped in EXPLAIN or PREPARE ------------------------------------------------
+# A write statement lowers to several statements, which neither EXPLAIN nor
+# PREPARE takes: each is refused at parse, and the database stays usable. The
+# read statements are single queries, so both work on them.
+
+statement ok
+CREATE SEMANTIC VIEW gw_x AS TABLES (t AS gw_t PRIMARY KEY (id)) DIMENSIONS (t.region AS region);
+
+statement error
+EXPLAIN DROP SEMANTIC VIEW gw_x;
+----
+syntax error at or near "SEMANTIC"
+
+statement error
+EXPLAIN CREATE SEMANTIC VIEW gw_y AS TABLES (t AS gw_t PRIMARY KEY (id)) DIMENSIONS (t.region AS region);
+----
+syntax error at or near "SEMANTIC"
+
+statement error
+PREPARE gw_p1 AS ALTER SEMANTIC VIEW gw_x RENAME TO gw_z;
+----
+MULTI_STATEMENT is not a preparable statement
+
+statement error
+PREPARE gw_p2 AS DROP SEMANTIC VIEW gw_x;
+----
+MULTI_STATEMENT is not a preparable statement
+
+statement error
+PREPARE gw_p3 AS CREATE SEMANTIC VIEW gw_y AS TABLES (t AS gw_t PRIMARY KEY (id)) DIMENSIONS (t.region AS region);
+----
+MULTI_STATEMENT is not a preparable statement
+
+query T
+SELECT name FROM (SHOW SEMANTIC VIEWS) WHERE name IN ('gw_x', 'gw_y', 'gw_z');
+----
+gw_x
+
+statement ok
+PREPARE gw_p4 AS SHOW SEMANTIC DIMENSIONS IN gw_x;
+
+query TTTTTTTT
+EXECUTE gw_p4;
+----
+memory	main	gw_x	gw_t	region	VARCHAR	[]	(empty)
+
+statement ok
+EXPLAIN DESCRIBE SEMANTIC VIEW gw_x;
+
+# --- inside a transaction that has failed --------------------------------------
+# A semantic-view statement after a failed statement gets DuckDB's own
+# "transaction is aborted" error, whichever parser runs it.
+
+statement ok
+BEGIN;
+
+statement error
+SELECT * FROM gw_no_such_table;
+----
+gw_no_such_table
+
+statement error
+DROP SEMANTIC VIEW gw_x;
+----
+Current transaction is aborted
+
+statement ok
+ROLLBACK;
+
+query T
+SELECT name FROM (SHOW SEMANTIC VIEWS) WHERE name = 'gw_x';
+----
+gw_x

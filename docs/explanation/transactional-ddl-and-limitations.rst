@@ -235,36 +235,31 @@ None of this arises if you do not ``ATTACH`` a second database, or if the sessio
 
 .. _explanation-txn-ddl-one-statement:
 
-One Statement per Call
-======================
+Several Statements in One Call
+==============================
 
-.. versionchanged:: 0.14.0
+.. versionchanged:: 0.16.0
 
-   The error below is new. This case used to fail with a ``parser_override is
-   not active`` message that pointed at a setting that was not the problem.
+   Semantic-view DDL can share a query string with other statements. Earlier
+   releases refused such a string with ``semantic-view DDL must be sent as its
+   own statement, one statement per call``.
 
-Send each semantic-view statement to DuckDB on its own. A query string that holds several statements -- for example one Python ``execute()`` call with a ``CREATE TABLE``, an ``INSERT`` and a ``CREATE SEMANTIC VIEW`` separated by semicolons -- is not supported when any of them is semantic-view DDL. It fails with this error, whatever the position of the semantic-view statement in the string:
-
-.. code-block:: text
-
-   Parser Error: semantic_views: semantic-view DDL must be sent as its own statement, one statement per call. This query string also contains other statements; send each statement in a separate call (a single trailing ';' is fine).
-
-DuckDB 2.0 runs a string's statements one at a time and parses each one just before it runs. So the statements ahead of the semantic-view DDL have already run when the error comes, and their effects stay: in the example above, the table exists and holds its rows, but the view is not created. Nothing after the DDL runs. The exception is a string that opens its own transaction with ``BEGIN``: the error aborts that transaction, so the statements ahead of the DDL are rolled back with it, and the connection needs a ``ROLLBACK`` before it runs anything else.
-
-Split the string into one call per statement (a single trailing semicolon is fine):
+A query string can hold semantic-view statements alongside other SQL, separated by semicolons. DuckDB splits the string and runs each statement in order, so one Python ``execute()`` call can set up a table and a view on it:
 
 .. code-block:: python
 
-   con.execute("CREATE TABLE orders (id INTEGER, region VARCHAR, amount DOUBLE)")
-   con.execute("INSERT INTO orders VALUES (1, 'US', 100), (2, 'EU', 200)")
    con.execute("""
+       CREATE TABLE orders (id INTEGER, region VARCHAR, amount DOUBLE);
+       INSERT INTO orders VALUES (1, 'US', 100), (2, 'EU', 200);
        CREATE SEMANTIC VIEW sales AS
        TABLES (o AS orders PRIMARY KEY (id))
        DIMENSIONS (o.region AS o.region)
        METRICS (o.revenue AS SUM(o.amount));
    """)
 
-Strings of ordinary SQL statements are unaffected.
+DuckDB 2.0 runs a string's statements one at a time and parses each one just before it runs. So when one statement fails, whether on a syntax error or while it runs, the statements before it have already run and their effects stay, and nothing after it runs. The exception is a string that opens its own transaction with ``BEGIN``: the error aborts that transaction, so the statements before it are rolled back with it, and the connection needs a ``ROLLBACK`` before it runs anything else.
+
+One name still needs its own call: a view named with a reserved word such as ``select``, written without quotes. DuckDB does not accept an unquoted reserved word as a name, so in a multi-statement string a ``DROP``, ``ALTER``, ``DESCRIBE`` or ``SHOW`` naming such a view fails with :ref:`one statement per call <ref-err-one-statement>`. (``CREATE`` still accepts the name there.) Quote the name (``DROP SEMANTIC VIEW "select"; ...``) and it works there too.
 
 
 .. _explanation-txn-ddl-peg:
@@ -279,21 +274,22 @@ The Parser Override Setting
    ``disable_peg_parser()`` reset the setting described below as a side effect.
    That can no longer happen.
 
-``CREATE SEMANTIC VIEW`` and the other semantic-view statements are not part of DuckDB's own grammar. The extension handles them through DuckDB's parser-override hook, which DuckDB consults only while the ``allow_parser_override_extension`` setting is ``'FALLBACK'``. The extension sets it to ``'FALLBACK'`` when it loads and leaves it in place.
+``CREATE SEMANTIC VIEW`` and the other semantic-view statements are not part of DuckDB's built-in grammar. The extension adds them to it, and also handles a statement sent on its own through DuckDB's parser-override hook, which DuckDB consults only while the ``allow_parser_override_extension`` setting is ``'FALLBACK'``. The extension sets it to ``'FALLBACK'`` when it loads and leaves it in place.
 
-If a session sets ``allow_parser_override_extension`` back to ``'DEFAULT'``, semantic-view DDL on that connection stops working and fails with:
+If a session sets ``allow_parser_override_extension`` back to ``'DEFAULT'``, semantic-view statements on that connection keep working through the grammar, with two differences:
 
-.. code-block:: text
+- An error in a semantic-view statement shows no ``LINE 1: ... ^`` pointer in the Python client. The message is the same.
+- ``CREATE SEMANTIC VIEW`` stores each expression with its tabs turned into spaces and each run of blank lines into one line break, so ``GET_DDL`` and ``DESCRIBE`` show that spelling. The view behaves the same.
 
-   Parser Error: semantic_views: parser_override is not active for this connection (allow_parser_override_extension is 'DEFAULT' or 'STRICT'). Re-enable with: SET allow_parser_override_extension='FALLBACK';
+A ``DROP``, ``ALTER``, ``DESCRIBE`` or ``SHOW`` naming a view with an unquoted reserved word, such as ``DESCRIBE SEMANTIC VIEW select``, fails there with :ref:`parser_override is not active <ref-err-one-statement>`. Quote the name.
 
-Restore the setting with one statement:
+To restore the default, run:
 
 .. code-block:: sql
 
    SET allow_parser_override_extension = 'FALLBACK';
 
-Sessions that never change the setting are unaffected. (Semantic-view DDL inside a multi-statement query string fails with a different message; see :ref:`explanation-txn-ddl-one-statement`.)
+Sessions that never change the setting are unaffected.
 
 
 .. _explanation-txn-ddl-summary:
@@ -310,8 +306,7 @@ The other items on this page only matter in specific situations:
 - Introspection inside an open transaction shows committed state -- commit before ``SHOW`` / ``DESCRIBE`` if you need to see your own pending changes.
 - Concurrent ``CREATE IF NOT EXISTS`` from two connections can produce a constraint or commit-conflict error on one of them; catch it and treat as success.
 - Semantic views are single-catalog: run their DDL from the database you loaded the extension into, not from a ``USE``-d attached database.
-- Send semantic-view DDL one statement per call, not inside a multi-statement string.
-- Setting ``allow_parser_override_extension`` back to ``'DEFAULT'`` turns semantic-view DDL off until you set it to ``'FALLBACK'`` again.
+- Setting ``allow_parser_override_extension`` back to ``'DEFAULT'`` drops the error pointer and the original tabs and blank lines of ``CREATE`` expressions until you set it to ``'FALLBACK'`` again.
 
 See also:
 

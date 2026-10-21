@@ -259,9 +259,20 @@ The scalar functions (``get_ddl`` and ``read_yaml_from_semantic_view``) have no 
 
 .. _ref-functions-subqueries:
 
-Statements Are Not Subqueries
-=============================
+Statements as Subqueries
+========================
 
-``SHOW SEMANTIC ...`` and ``DESCRIBE SEMANTIC VIEW`` can't be used as a subquery or in a ``WITH`` clause. Unlike DuckDB's own ``SHOW`` and ``DESCRIBE``, ``SELECT ... FROM (SHOW SEMANTIC VIEWS)`` and ``SELECT ... FROM (DESCRIBE SEMANTIC VIEW sales)`` are parser errors. Run the statement on its own and read the rows it returns.
+.. versionchanged:: 0.16.0
 
-The one documented exception is the :ref:`GET_DDL <ref-get-ddl-examples>` recipe that dumps the DDL of every view in one query. It reads the view list from ``list_semantic_views()``, the table function behind ``SHOW SEMANTIC VIEWS``, because that recipe needs the listing as a ``FROM`` source.
+   ``SHOW SEMANTIC ...`` and ``DESCRIBE SEMANTIC VIEW`` can be used as
+   subqueries. Earlier releases refused them there with a parser error.
+
+``SHOW SEMANTIC ...``, ``SHOW COLUMNS IN SEMANTIC VIEW`` and ``DESCRIBE SEMANTIC VIEW`` are queries, like DuckDB's own ``SHOW`` and ``DESCRIBE``, so you can use them wherever DuckDB accepts a query: in ``FROM``, in a ``WITH`` clause or in a view body. That lets you filter, join and aggregate what they return:
+
+.. code-block:: sql
+
+   SELECT DISTINCT object_name FROM (DESCRIBE SEMANTIC VIEW sales) WHERE object_kind = 'METRIC';
+
+``CREATE``, ``DROP`` and ``ALTER SEMANTIC VIEW`` are statements, not queries, so they can't appear inside one.
+
+The table function behind ``SHOW SEMANTIC VIEWS`` is ``list_semantic_views()``, which the :ref:`GET_DDL <ref-get-ddl-examples>` recipe for dumping every view reads from.

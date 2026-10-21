@@ -7,7 +7,7 @@ at B-103). Rows marked `[syntax]` are `statement error` with an empty `----` blo
 (no message pinned); rows marked `[text]` pin text the grammar might plausibly change;
 `PRE-EXISTING` comments mark today's behaviour that looks wrong.
 
-Totals: 104 accept rows, 25 rejects that pin their message (`[text]`), 55 syntax rejects
+Totals: 102 accept rows, 27 rejects that pin their message (`[text]`), 55 syntax rejects
 (empty `----` block).
 
 | source::test_fn | corpus row id(s) | note |
@@ -51,9 +51,10 @@ Totals: 104 accept rows, 25 rejects that pin their message (`[text]`), 55 syntax
 | body_parser/mod.rs::find_clause_bounds_rejects_missing_tables | B-045 |  |
 | body_parser/mod.rs::find_clause_bounds_rejects_duplicate_dimensions | B-046 |  |
 | body_parser/mod.rs::find_clause_bounds_rejects_duplicate_tables | B-047 |  |
-| body_parser/mod.rs::empty_dimensions_and_metrics_both_present_is_ok | B-049, B-050 |  |
-| body_parser/mod.rs::empty_tables_clause_parses_to_zero_tables | B-054, B-055, B-056 |  |
-| body_parser/mod.rs::empty_metrics_only_still_requires_tables_and_d_or_m_by_presence | B-052, B-053 |  |
+| body_parser/mod.rs::empty_dimensions_and_metrics_are_rejected | B-049, B-050 |  |
+| body_parser/mod.rs::an_empty_tables_clause_is_rejected | B-054, B-055, B-056 |  |
+| body_parser/mod.rs::an_empty_metrics_clause_alone_is_rejected | B-052 |  |
+| body_parser/mod.rs::neither_dimensions_nor_metrics_present_is_still_rejected | B-053 |  |
 | body_parser/mod.rs::empty_materializations_clause_parses | B-057 |  |
 | body_parser/mod.rs::block_comment_between_clauses_is_inert | B-058 |  |
 | body_parser/mod.rs::block_comment_inside_clause_parens_is_inert | B-059 |  |

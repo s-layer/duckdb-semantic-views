@@ -150,7 +150,15 @@ pub(crate) fn rewrite_to_native_sql(query: &str) -> Result<Option<String>, Parse
     let Some(action) = plan_rewrite(query)? else {
         return Ok(None);
     };
+    lower_action(action).map(Some)
+}
 
+/// Lower one planned statement to the SQL `DuckDB` runs in its place: the read
+/// SQL for DESCRIBE / SHOW, or the guarded native DML for a write. Shared by
+/// the parser override ([`rewrite_to_native_sql`]) and the grammar productions
+/// (`crate::grammar`), so both paths run the same statements.
+#[cfg(feature = "extension")]
+pub(crate) fn lower_action(action: RewriteAction) -> Result<String, ParseError> {
     // Every `<database>.` prefix the statement writes must name the current
     // database — collected before the match consumes `action`. Read-side DDL
     // contributes none.
@@ -162,10 +170,10 @@ pub(crate) fn rewrite_to_native_sql(query: &str) -> Result<Option<String>, Parse
 
     // Read-side DDL is passed through unchanged; write DDL gets the FF-3
     // single-catalog guard prepended below.
-    let emitted: Option<String> = match action {
+    let emitted: String = match action {
         // Read-side DDL (DESCRIBE / SHOW / SHOW COLUMNS): DuckDB runs the
         // read-side table function on the caller's connection unchanged.
-        RewriteAction::Passthrough(sql) => return Ok(Some(sql)),
+        RewriteAction::Passthrough(sql) => return Ok(sql),
         // CREATE from an in-memory definition — hand the definition straight to
         // the shared emission path. AR-2: no JSON serialize → re-parse →
         // deserialize round-trip; the `SemanticViewDefinition` flows structurally.
@@ -216,12 +224,10 @@ pub(crate) fn rewrite_to_native_sql(query: &str) -> Result<Option<String>, Parse
     // it, such a write either fails with a cryptic "schema semantic_layer does
     // not exist" (CREATE) or writes a row the primary-pinned reads never see.
     // The guard is a no-op on the normal single-catalog path.
-    Ok(emitted.map(|dml| {
-        format!(
-            "{}; {database_guards}{dml}",
-            crate::catalog::writes::managed_catalog_guard_select()
-        )
-    }))
+    Ok(format!(
+        "{}; {database_guards}{emitted}",
+        crate::catalog::writes::managed_catalog_guard_select()
+    ))
 }
 
 /// Shared CREATE-emission helper for the in-memory-definition path
@@ -247,7 +253,7 @@ fn emit_native_create_sql(
     def: crate::model::SemanticViewDefinition,
     or_replace: bool,
     if_not_exists: bool,
-) -> Result<Option<String>, ParseError> {
+) -> Result<String, ParseError> {
     // Defensive validation — `view` arrives already normalised (every part
     // case-folded) from validate_create_body via the `RewriteAction::Create` it
     // produced. Only the NAME slot is re-checked, and re-quoted first so the
@@ -356,7 +362,7 @@ fn emit_native_create_sql(
              RETURNING name AS view_name"
         )
     };
-    Ok(Some(sql))
+    Ok(sql)
 }
 
 /// Read the FROM YAML FILE sentinel produced by `rewrite_ddl_yaml_file_body`
@@ -382,7 +388,7 @@ fn emit_native_create_from_yaml_file(
     comment: &str,
     or_replace: bool,
     if_not_exists: bool,
-) -> Result<Option<String>, ParseError> {
+) -> Result<String, ParseError> {
     // Phase 65.1 Plan 07 (IN-04 D-24): `kind` is not threaded into the helper
     // TF — the outer INSERT shape (OR IGNORE / OR REPLACE / plain) already
     // encodes the ON CONFLICT behaviour, chosen from `or_replace`/`if_not_exists`.
@@ -468,7 +474,7 @@ fn emit_native_create_from_yaml_file(
              RETURNING name AS view_name"
         )
     };
-    Ok(Some(sql))
+    Ok(sql)
 }
 
 // SQL-string escaping is handled by the `SqlLit` newtype (`crate::sql_lit`),
@@ -484,7 +490,7 @@ fn emit_native_create_from_yaml_file(
 // same `?`-chained match in `rewrite_to_native_sql`; diverging one signature
 // would fragment that dispatch.
 #[allow(clippy::unnecessary_wraps)]
-fn rewrite_drop(view: &ViewRef, if_exists: bool) -> Result<Option<String>, ParseError> {
+fn rewrite_drop(view: &ViewRef, if_exists: bool) -> Result<String, ParseError> {
     // Which schema's `v` this DROP means: the qualifier if one was written,
     // otherwise the one schema holding a view of that name (erroring when
     // several do, rather than dropping an arbitrary one).
@@ -508,11 +514,11 @@ fn rewrite_drop(view: &ViewRef, if_exists: bool) -> Result<Option<String>, Parse
         // contract for missing-row-but-table-present is preserved by
         // the DELETE's 0-row effect.
         let table_guard = definitions_table_guard_select(&display);
-        return Ok(Some(format!(
+        return Ok(format!(
             "{table_guard}; \
              DELETE FROM {DEFINITIONS_TABLE} WHERE {row} \
              RETURNING name AS view_name"
-        )));
+        ));
     }
 
     // Plain DROP: pure-SQL existence guard + DELETE on the caller's
@@ -533,12 +539,12 @@ fn rewrite_drop(view: &ViewRef, if_exists: bool) -> Result<Option<String>, Parse
     // First statement errors → second and third never bind.
     let table_guard = definitions_table_guard_select(&display);
     let guard = existence_guard_select(&row, &display);
-    Ok(Some(format!(
+    Ok(format!(
         "{table_guard}; \
          {guard}; \
          DELETE FROM {DEFINITIONS_TABLE} WHERE {row} \
          RETURNING name AS view_name"
-    )))
+    ))
 }
 
 ///
@@ -553,7 +559,7 @@ fn rewrite_alter_rename(
     old: &ViewRef,
     new: &ViewRef,
     if_exists: bool,
-) -> Result<Option<String>, ParseError> {
+) -> Result<String, ParseError> {
     let (old_escaped, old_target) = escaped_parts(old);
     let (new_escaped, new_target) = escaped_parts(new);
     let (old_escaped, new_escaped) = (&old_escaped, &new_escaped);
@@ -595,7 +601,7 @@ fn rewrite_alter_rename(
         // RO DB.
         let table_guard = definitions_table_guard_select(&old_display);
         let collision_guard = rename_collision_guard_select(&dest_row, &new_display);
-        return Ok(Some(format!(
+        return Ok(format!(
             "{table_guard}; \
              {collision_guard}; \
              UPDATE {DEFINITIONS_TABLE} \
@@ -604,7 +610,7 @@ fn rewrite_alter_rename(
                     definition = {moved_definition} \
               WHERE {source_row} \
              RETURNING '{old_escaped}'::VARCHAR AS old_name, name AS new_name"
-        )));
+        ));
     }
 
     // Plain ALTER RENAME: pure-SQL existence guard (source must exist) +
@@ -622,7 +628,7 @@ fn rewrite_alter_rename(
     let table_guard = definitions_table_guard_select(&old_display);
     let exist_guard = existence_guard_select(&source_row, &old_display);
     let collision_guard = rename_collision_guard_select(&dest_row, &new_display);
-    Ok(Some(format!(
+    Ok(format!(
         "{table_guard}; \
          {exist_guard}; \
          {collision_guard}; \
@@ -632,7 +638,7 @@ fn rewrite_alter_rename(
                 definition = {moved_definition} \
           WHERE {source_row} \
          RETURNING '{old_escaped}'::VARCHAR AS old_name, name AS new_name"
-    )))
+    ))
 }
 
 #[cfg(feature = "extension")]
@@ -640,7 +646,7 @@ fn rewrite_alter_comment(
     view: &ViewRef,
     new_comment_raw: Option<&str>,
     if_exists: bool,
-) -> Result<Option<String>, ParseError> {
+) -> Result<String, ParseError> {
     let (name_escaped, target) = escaped_parts(view);
     let display = SqlLit::escape(&view.to_string());
     let schema_expr = resolved_schema_expr(&target, &name_escaped, &suggested_name(view));
@@ -701,13 +707,13 @@ fn rewrite_alter_comment(
         // canonical wording; on missing-row-but-table-present the
         // UPDATE's 0-row effect preserves the silent IF EXISTS contract.
         let table_guard = definitions_table_guard_select(&display);
-        return Ok(Some(format!(
+        return Ok(format!(
             "{table_guard}; \
              UPDATE {DEFINITIONS_TABLE} \
                 SET definition = json_merge_patch(definition::JSON, '{patch_json_for_sql}'::JSON)::VARCHAR \
               WHERE {row} \
              RETURNING name, '{status_label}'::VARCHAR AS status"
-        )));
+        ));
     }
 
     // Plain ALTER: pure-SQL existence guard + UPDATE on the caller's
@@ -724,12 +730,12 @@ fn rewrite_alter_comment(
     // `semantic_layer._definitions` on a never-bootstrapped RO DB.
     let table_guard = definitions_table_guard_select(&display);
     let guard = existence_guard_select(&row, &display);
-    Ok(Some(format!(
+    Ok(format!(
         "{table_guard}; \
          {guard}; \
          UPDATE {DEFINITIONS_TABLE} \
             SET definition = json_merge_patch(definition::JSON, '{patch_json_for_sql}'::JSON)::VARCHAR \
           WHERE {row} \
          RETURNING name, '{status_label}'::VARCHAR AS status"
-    )))
+    ))
 }

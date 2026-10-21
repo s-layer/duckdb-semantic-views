@@ -1041,12 +1041,13 @@ fn validate_yaml_materializations(def: &SemanticViewDefinition) -> Result<(), St
 /// target's parse-fail escape, which is the point: the escape had been
 /// classifying exactly this finding as uninteresting input.
 fn validate_yaml_structure(def: &SemanticViewDefinition) -> Result<(), String> {
-    // An empty `tables` is the legacy stored format. `render_create_ddl`
-    // declines to render it at all ("Legacy definition format; please
-    // re-create..."), so the clause requirements bite only for the definitions
-    // it does render — scoping the check this way keeps legacy YAML importable.
+    // TECH-DEBT #94 (Snowflake parity): a view needs at least one table, as
+    // `TABLES ()` is refused in the DDL. This also refuses the legacy stored
+    // format (an empty `tables`), which `render_create_ddl` declines to render.
     if def.tables.is_empty() {
-        return Ok(());
+        return Err(
+            "definition has no tables; a semantic view needs at least one table".to_string(),
+        );
     }
     if def.dimensions.is_empty() && def.metrics.is_empty() {
         return Err(
@@ -1216,6 +1217,24 @@ mod tests {
     // same boundary by hand, two of them in the opposite direction — slots this
     // validator refused that the DDL grammar accepts and that round-trip
     // unchanged.
+
+    /// TECH-DEBT #94 (Snowflake parity): a view needs at least one table,
+    /// so an empty `tables` is rejected at CREATE like `TABLES ()`, even with
+    /// members (corpus row S-358).
+    #[test]
+    fn yaml_with_no_tables_is_rejected() {
+        let e = yaml_err("base_table: t\ntables: []\ndimensions: []\nmetrics: []\n");
+        assert!(e.contains("at least one table"), "got: {e}");
+    }
+
+    #[test]
+    fn yaml_with_no_tables_is_rejected_even_with_members() {
+        let e = yaml_err(
+            "base_table: t\ntables: []\n\
+             dimensions:\n  - name: region\n    expr: t.region\n    source_table: t\nmetrics: []\n",
+        );
+        assert!(e.contains("at least one table"), "got: {e}");
+    }
 
     #[test]
     fn yaml_with_neither_dimensions_nor_metrics_is_rejected() {
@@ -3198,7 +3217,7 @@ comment: Revenue analytics view
         #[test]
         fn size_cap_accepts_exactly_1mb() {
             // Build a valid YAML string padded to exactly 1MB
-            let prefix = "base_table: t\ndimensions: []\nmetrics: []\n# ";
+            let prefix = "base_table: t\ntables:\n  - alias: t\n    table: t\ndimensions:\n  - name: d\n    expr: t.d\n    source_table: t\nmetrics: []\n# ";
             let pad_len = SemanticViewDefinition::YAML_SIZE_CAP - prefix.len();
             let padded = format!("{prefix}{}", "x".repeat(pad_len));
             assert_eq!(padded.len(), SemanticViewDefinition::YAML_SIZE_CAP);

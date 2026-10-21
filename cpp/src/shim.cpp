@@ -135,6 +135,19 @@ extern "C" {
         char *error_buf, size_t error_buf_len,
         uint32_t *position_out);
 
+    // Grammar bridge (src/grammar/ffi.rs). The changes to register, as text
+    // released with sv_free_buffer: 0 = ok, 1 = failed.
+    uint8_t sv_grammar_changes_rust(char **out_ptr, size_t *out_len);
+    // Lower one matched statement rule (its serialised parse subtree) to SQL:
+    // 0 = ok (SQL in *sql_out_*, release with sv_free_buffer), 1 = invalid
+    // statement (message in error_out, byte offset in *position_out or
+    // UINT32_MAX), 2 = bridge failure (message in error_out).
+    uint8_t sv_grammar_transform_rust(
+        const uint8_t *tree_ptr, size_t tree_len,
+        char **sql_out_ptr, size_t *sql_out_len,
+        char *error_out, size_t error_out_len,
+        uint32_t *position_out);
+
     // The extension is about to run / has finished running queries of its
     // own on this thread; while any are running, the parser hooks keep the
     // record of the user's query as it is (OVERRIDE_MULTI_STATEMENT in
@@ -669,10 +682,20 @@ static ParserExtensionParseResult sv_parse_statement(const string &query) {
 // was recorded) the text is rebuilt from the tokens instead: one space between
 // tokens, none around `.` or inside brackets, no comments. A position in that
 // text is not one in the query, so no caret is shown then.
-static bool sv_skip_trivia(const std::string &q, idx_t &pos) {
+// `newline`, when given, is set if the skipped trivia held a line break, as
+// DuckDB's tokenizer reports on the token after it (preceded_by_newline).
+static bool sv_skip_trivia(const std::string &q, idx_t &pos, bool *newline = nullptr) {
+    auto note_newlines = [&](idx_t from, idx_t to) {
+        for (idx_t i = from; newline != nullptr && i < to; i++) {
+            if (StringUtil::CharacterIsNewline(q[i])) {
+                *newline = true;
+            }
+        }
+    };
     while (pos < q.size()) {
         char c = q[pos];
         if (StringUtil::CharacterIsSpace(c)) {
+            note_newlines(pos, pos + 1);
             pos++;
         } else if (c == '-' && pos + 1 < q.size() && q[pos + 1] == '-') {
             while (pos < q.size() && q[pos] != '\n') {
@@ -683,6 +706,7 @@ static bool sv_skip_trivia(const std::string &q, idx_t &pos) {
             if (close == std::string::npos) {
                 return false;
             }
+            note_newlines(pos, close);
             pos = close + 2;
         } else {
             break;
@@ -3695,6 +3719,416 @@ extern "C" {
     }
 }
 
+#ifdef SV_DUCKDB_2
+// ---------------------------------------------------------------------------
+// Grammar productions (DuckDB 2.0 PEG parser)
+// ---------------------------------------------------------------------------
+// The parser override above sees a whole statement's text, so it can only
+// rewrite statements that *start* with our syntax. A grammar extension adds
+// rules to DuckDB's own PEG grammar instead, so our syntax can sit anywhere
+// the grammar allows: `SELECT ... FROM (SHOW SEMANTIC VIEWS)`, a CTE, a view
+// body (TECH-DEBT #77).
+//
+// The rules and their transforms live in Rust (src/grammar/). This side only
+// bridges: it registers the rules Rust lists, and when a statement rule
+// matches it serialises the matched subtree with the statement's tokens
+// (wire format in src/grammar/tree.rs), has Rust lower it to SQL, and parses
+// that SQL with the builtin parser. The override still runs first and owns
+// every statement that starts with our syntax; with overrides off
+// (allow_parser_override_extension = 'DEFAULT') every statement comes here.
+
+static const char *SV_GRAMMAR_NAME = "semantic_views";
+
+static void sv_wire_u32(string &out, uint32_t v) {
+    char b[4] = {char(v & 0xff), char((v >> 8) & 0xff), char((v >> 16) & 0xff), char((v >> 24) & 0xff)};
+    out.append(b, 4);
+}
+
+static void sv_wire_str(string &out, const string &s) {
+    sv_wire_u32(out, static_cast<uint32_t>(s.size()));
+    out += s;
+}
+
+static void sv_wire_node(string &out, ParseResult &pr) {
+    out.push_back(static_cast<char>(pr.type));
+    sv_wire_str(out, pr.Name());
+    sv_wire_u32(out, pr.offset.IsValid() ? static_cast<uint32_t>(pr.offset.GetIndex()) : UINT32_MAX);
+    sv_wire_u32(out, pr.length.IsValid() ? static_cast<uint32_t>(pr.length.GetIndex()) : UINT32_MAX);
+    string value;
+    vector<reference<ParseResult>> children;
+    switch (pr.type) {
+    case ParseResultType::LIST:
+        for (auto &c : pr.Cast<ListParseResult>().GetChildren()) {
+            children.push_back(c);
+        }
+        break;
+    case ParseResultType::REPEAT:
+        for (auto &c : pr.Cast<RepeatParseResult>().GetChildren()) {
+            children.push_back(c);
+        }
+        break;
+    case ParseResultType::OPTIONAL: {
+        auto &opt = pr.Cast<OptionalParseResult>();
+        if (opt.HasResult()) {
+            children.push_back(opt.GetResult());
+        }
+        break;
+    }
+    case ParseResultType::CHOICE:
+        children.push_back(pr.Cast<ChoiceParseResult>().GetResult());
+        break;
+    case ParseResultType::IDENTIFIER:
+        value = pr.Cast<IdentifierParseResult>().identifier.GetIdentifierName();
+        break;
+    case ParseResultType::KEYWORD:
+        value = pr.Cast<KeywordParseResult>().keyword;
+        break;
+    case ParseResultType::OPERATOR:
+        value = pr.Cast<OperatorParseResult>().operator_token;
+        break;
+    case ParseResultType::NUMBER:
+        value = pr.Cast<NumberParseResult>().number;
+        break;
+    case ParseResultType::STRING:
+        value = pr.Cast<StringLiteralParseResult>().result;
+        break;
+    case ParseResultType::TOKEN:
+        value = pr.Cast<TokenParseResult>().text;
+        break;
+    default:
+        break;
+    }
+    sv_wire_str(out, value);
+    sv_wire_u32(out, static_cast<uint32_t>(children.size()));
+    for (auto &c : children) {
+        sv_wire_node(out, c.get());
+    }
+}
+
+// Whether the query the parser override recorded on this thread
+// (sv_override_query) is the one being parsed: every token is that query's
+// text at the token's offset, and everything else in it (before the first
+// token, between tokens, after the last) is whitespace or comments. The
+// iterator holds the whole query's tokens, so together that is the query, up
+// to the trivia the tokenizer drops. Each gap must also hold a line break
+// exactly when the tokenizer says this query's gap did (preceded_by_newline),
+// so a record never lends its line structure to an error's caret or to the
+// stored body. A transform gets only the tokens, so the record is how it
+// learns the source text: sv_grammar_span_has_source below checks the
+// statement's own span the same way, and this whole-query check guards the
+// caret, which quotes the query around the statement. With the override on,
+// the override saw this query and declined it just before the grammar ran.
+// With it off nothing was recorded, and an earlier query on this thread is
+// left over: matching tokens alone would take its text where the offsets line
+// up, so a body with spaces where the earlier one had `+o.b` would store the
+// earlier body. What still passes is a gap of the same length with the same
+// line breaks, such as a tab for a space (TECH-DEBT #100).
+static bool sv_grammar_has_source(TokenIterator &tokens) {
+    const std::string &query = sv_override_query;
+    if (query.empty()) {
+        return false;
+    }
+    idx_t pos = 0;
+    bool first = true;
+    for (idx_t i = 0; i < tokens.Size(); i++) {
+        auto &tok = tokens.GetToken(i);
+        if (tok.text.empty()) {
+            continue;
+        }
+        bool newline = false;
+        if (!sv_skip_trivia(query, pos, &newline) || pos != tok.offset ||
+            query.compare(tok.offset, tok.text.size(), tok.text) != 0) {
+            return false;
+        }
+        // The tokenizer leaves the flag unset on the first token.
+        if (!first && newline != tok.preceded_by_newline) {
+            return false;
+        }
+        first = false;
+        pos = tok.offset + tok.text.size();
+    }
+    return sv_skip_trivia(query, pos) && pos == query.size();
+}
+
+// The matched statement's own part of the query: its byte span [start, end)
+// and the tokens wholly inside it, [first, last). The iterator holds the whole
+// query's tokens, so a transform that got all of them, and the record with
+// them, would cost every statement of a K-statement string the length of the
+// whole string (TECH-DEBT #85). Without a span the statement is the query.
+struct SvGrammarSpan {
+    idx_t start = 0;
+    idx_t end = 0;
+    idx_t first = 0;
+    idx_t last = 0;
+};
+
+static SvGrammarSpan sv_grammar_span(TokenIterator &tokens, ParseResult &pr) {
+    SvGrammarSpan span;
+    span.last = tokens.Size();
+    if (!pr.offset.IsValid() || !pr.length.IsValid()) {
+        span.end = tokens.Size() == 0 ? 0 : tokens.GetToken(tokens.Size() - 1).offset +
+                                                tokens.GetToken(tokens.Size() - 1).text.size();
+        return span;
+    }
+    span.start = pr.offset.GetIndex();
+    span.end = span.start + pr.length.GetIndex();
+    // The tokens are in query order: binary-search the first one at or after
+    // `start`, then take them while they end inside the span.
+    idx_t lo = 0, hi = tokens.Size();
+    while (lo < hi) {
+        idx_t mid = lo + (hi - lo) / 2;
+        if (tokens.GetToken(mid).offset < span.start) {
+            lo = mid + 1;
+        } else {
+            hi = mid;
+        }
+    }
+    span.first = lo;
+    span.last = lo;
+    while (span.last < tokens.Size()) {
+        auto &tok = tokens.GetToken(span.last);
+        if (tok.offset + tok.text.size() > span.end) {
+            break;
+        }
+        span.last++;
+    }
+    return span;
+}
+
+// Whether the record holds this statement: what sv_grammar_has_source checks
+// for the whole query, for the statement's span alone. Each token is the
+// record's text at its offset, the gaps between them are whitespace or
+// comments holding a line break exactly where this query's do, and so is
+// whatever lies between the last token and the end of the span. The gap
+// before the first token is outside the span and is not checked.
+static bool sv_grammar_span_has_source(TokenIterator &tokens, const SvGrammarSpan &span) {
+    const std::string &query = sv_override_query;
+    if (query.empty() || span.end > query.size() || span.start > span.end) {
+        return false;
+    }
+    idx_t pos = span.start;
+    bool first = true;
+    for (idx_t i = span.first; i < span.last; i++) {
+        auto &tok = tokens.GetToken(i);
+        if (tok.text.empty()) {
+            continue;
+        }
+        bool newline = false;
+        if (!sv_skip_trivia(query, pos, &newline) || pos != tok.offset ||
+            query.compare(tok.offset, tok.text.size(), tok.text) != 0) {
+            return false;
+        }
+        if (!first && newline != tok.preceded_by_newline) {
+            return false;
+        }
+        first = false;
+        pos = tok.offset + tok.text.size();
+    }
+    return pos >= span.end || (sv_skip_trivia(query, pos) && pos >= span.end);
+}
+
+// The statement's tree, its own tokens, and its part of the record when the
+// record holds it.
+static string sv_grammar_serialise(PEGTransformer &transformer, ParseResult &pr, const SvGrammarSpan &span,
+                                   bool has_source) {
+    string out;
+    sv_wire_node(out, pr);
+    auto &tokens = transformer.token_iterator;
+    sv_wire_u32(out, static_cast<uint32_t>(span.last - span.first));
+    for (idx_t i = span.first; i < span.last; i++) {
+        auto &tok = tokens.GetToken(i);
+        sv_wire_u32(out, static_cast<uint32_t>(tok.offset));
+        sv_wire_u32(out, static_cast<uint32_t>(tok.length));
+        out.push_back(tok.preceded_by_newline ? 1 : 0);
+        sv_wire_str(out, tok.text);
+    }
+    sv_wire_u32(out, static_cast<uint32_t>(span.start));
+    sv_wire_str(out, has_source ? sv_override_query.substr(span.start, span.end - span.start) : string());
+    return out;
+}
+
+// Have Rust lower a matched statement rule to SQL, and parse the SQL. With the
+// source text, an error's caret is rendered into its message, as the parse stub
+// renders it, since 2.0 shows a parser error's location only on the
+// ClientContext path (TECH-DEBT #99). The caret quotes the whole query, so it
+// needs the record to be the whole query, which is checked only then: an error
+// ends the parse, so the check runs at most once per query.
+static vector<unique_ptr<SQLStatement>> sv_grammar_lower(PEGTransformer &transformer, ParseResult &pr) {
+    auto span = sv_grammar_span(transformer.token_iterator, pr);
+    bool has_source = sv_grammar_span_has_source(transformer.token_iterator, span);
+    auto wire = sv_grammar_serialise(transformer, pr, span, has_source);
+    SvOwnedBuffer sql_buf;
+    char error_buf[1024];
+    memset(error_buf, 0, sizeof(error_buf));
+    uint32_t position = UINT32_MAX;
+    uint8_t rc = sv_grammar_transform_rust(reinterpret_cast<const uint8_t *>(wire.data()), wire.size(),
+                                           &sql_buf.ptr, &sql_buf.len, error_buf, sizeof(error_buf), &position);
+    if (rc == 1) {
+        if (position != UINT32_MAX && has_source && sv_grammar_has_source(transformer.token_iterator)) {
+            throw ParserException("%s", QueryErrorContext::Format(sv_override_query, string(error_buf), position));
+        }
+        if (position != UINT32_MAX) {
+            throw ParserException(QueryLocation(position, 0), "%s", string(error_buf));
+        }
+        throw ParserException("%s", string(error_buf));
+    }
+    if (rc != 0) {
+        throw InternalException("semantic_views grammar bridge: %s", string(error_buf));
+    }
+    Parser parser = sv_compat::builtin_parser();
+    parser.ParseQuery(sql_buf.to_string());
+    return std::move(parser.statements);
+}
+
+static arena_ptr<TransformResultValue> sv_grammar_finalize_query(PEGTransformer &transformer, ParseResult &pr) {
+    auto statements = sv_grammar_lower(transformer, pr);
+    if (statements.size() != 1 || statements[0]->type != StatementType::SELECT_STATEMENT) {
+        throw InternalException("semantic_views grammar: rule %s did not lower to one query", pr.Name());
+    }
+    auto node = std::move(statements[0]->Cast<SelectStatement>().node);
+    return transformer.MakeResult<unique_ptr<QueryNode>>(std::move(node));
+}
+
+static arena_ptr<TransformProcess> sv_grammar_start_query(PEGTransformer &transformer, ParseResult &pr) {
+    return transformer.MakeProcess<FinalizeTransformProcess>(transformer, pr, sv_grammar_finalize_query);
+}
+
+// The variable a guard's value goes into (sv_grammar_finalize_statement).
+static const char *SV_GRAMMAR_GUARD_VARIABLE = "__semantic_views_guard";
+
+// A write statement lowers to several statements (the guards, then the DML).
+// They go back as one MultiStatement, which the client unpacks and runs in
+// order, as it does for a PIVOT's generated statements. DuckDB 2.0.0 serves
+// such a statement's result from its one row-returning statement, which must
+// come last, so each guard `SELECT CASE ... error(...) ... END` before the DML
+// runs as `SET VARIABLE` of its value, which returns nothing and raises the
+// guard's error the same way (PIVOT stages its values the same way). A RESET
+// then drops the variable before the DML, whose RETURNING row is the result.
+static arena_ptr<TransformResultValue> sv_grammar_finalize_statement(PEGTransformer &transformer,
+                                                                     ParseResult &pr) {
+    auto statements = sv_grammar_lower(transformer, pr);
+    if (statements.empty()) {
+        throw InternalException("semantic_views grammar: rule %s lowered to no statement", pr.Name());
+    }
+    if (statements.size() == 1) {
+        return transformer.MakeResult<unique_ptr<SQLStatement>>(std::move(statements[0]));
+    }
+    auto multi = make_uniq<MultiStatement>();
+    bool staged_guard = false;
+    for (idx_t i = 0; i + 1 < statements.size(); i++) {
+        auto &statement = statements[i];
+        if (statement->type != StatementType::SELECT_STATEMENT) {
+            multi->statements.push_back(std::move(statement));
+            continue;
+        }
+        auto guard = make_uniq<SubqueryExpression>();
+        guard->GetSubqueryTypeMutable() = SubqueryType::SCALAR;
+        guard->SubqueryMutable() = unique_ptr_cast<SQLStatement, SelectStatement>(std::move(statement));
+        multi->statements.push_back(
+            make_uniq<SetVariableStatement>(SV_GRAMMAR_GUARD_VARIABLE, std::move(guard), SetScope::VARIABLE));
+        staged_guard = true;
+    }
+    if (staged_guard) {
+        multi->statements.push_back(make_uniq<ResetVariableStatement>(SV_GRAMMAR_GUARD_VARIABLE, SetScope::VARIABLE));
+    }
+    multi->statements.push_back(std::move(statements.back()));
+    return transformer.MakeResult<unique_ptr<SQLStatement>>(std::move(multi));
+}
+
+static arena_ptr<TransformProcess> sv_grammar_start_statement(PEGTransformer &transformer, ParseResult &pr) {
+    return transformer.MakeProcess<FinalizeTransformProcess>(transformer, pr, sv_grammar_finalize_statement);
+}
+
+class SemanticViewsGrammar final : public GrammarExtension {
+public:
+    explicit SemanticViewsGrammar(vector<GrammarChange> changes_p)
+        : GrammarExtension(SV_GRAMMAR_NAME, "CREATE / ALTER / DROP / SHOW / DESCRIBE SEMANTIC VIEW syntax"),
+          changes(std::move(changes_p)) {
+    }
+    vector<GrammarChange> GetChanges() const override {
+        return changes;
+    }
+
+private:
+    vector<GrammarChange> changes;
+};
+
+// The grammar changes Rust lists (src/grammar/mod.rs, `changes`), one per line.
+static vector<GrammarChange> sv_grammar_changes() {
+    SvOwnedBuffer buf;
+    if (sv_grammar_changes_rust(&buf.ptr, &buf.len) != 0) {
+        throw InternalException("semantic_views grammar: listing the grammar rules failed");
+    }
+    vector<GrammarChange> changes;
+    for (auto &line : StringUtil::Split(buf.to_string(), '\n')) {
+        if (line.empty()) {
+            continue;
+        }
+        auto fields = StringUtil::Split(line, '\t');
+        if (fields.size() >= 2 && fields[0] == "RULE") {
+            auto shape = line.substr(line.rfind('\t') + 1);
+            if (shape == "query") {
+                changes.push_back(GrammarChange::AddRule(fields[1], sv_grammar_start_query));
+            } else if (shape == "statement") {
+                changes.push_back(GrammarChange::AddRule(fields[1], sv_grammar_start_statement));
+            } else if (shape.empty()) {
+                changes.push_back(GrammarChange::AddRule(fields[1]));
+            } else {
+                throw InternalException("semantic_views grammar: unknown rule shape '%s'", shape);
+            }
+        } else if (fields.size() == 3 && fields[0] == "PREPEND") {
+            changes.push_back(GrammarChange::PrependChoice(fields[1], fields[2]));
+        } else if (fields.size() == 2 && fields[0] == "ANY_TOKEN") {
+            // DuckDB's own matcher for a token it does not interpret (the
+            // passthrough dialect's): any one token short of the statement's end.
+            changes.push_back(GrammarChange::AddTerminalRuleOverride(
+                fields[1], [](const PEGKeywordHelper &) -> unique_ptr<Matcher> {
+                    return make_uniq<PassthroughTokenMatcher>();
+                }));
+        } else {
+            throw InternalException("semantic_views grammar: malformed change '%s'", line);
+        }
+    }
+    return changes;
+}
+
+// Turn the grammar on for one connection. `active_grammar_extensions` is a
+// per-connection setting, so a LOAD reaches the connections that exist now
+// (sv_grammar_activate_all) and an ExtensionCallback reaches the ones opened
+// later.
+static void sv_grammar_activate(ClientContext &context) {
+    auto &config = ClientConfig::GetConfig(context);
+    vector<Value> names;
+    for (auto &existing : config.active_grammar_extensions) {
+        if (StringUtil::CIEquals(existing, SV_GRAMMAR_NAME)) {
+            return;
+        }
+        names.emplace_back(existing);
+    }
+    names.emplace_back(SV_GRAMMAR_NAME);
+    ActiveGrammarExtensionsSetting::SetLocal(context, Value::LIST(LogicalType::VARCHAR, std::move(names)));
+}
+
+class SemanticViewsGrammarActivation final : public ExtensionCallback {
+public:
+    void OnConnectionOpened(ClientContext &context) override {
+        sv_grammar_activate(context);
+    }
+};
+
+// Register the grammar once per database and activate it on every connection.
+static void sv_register_grammar(DatabaseInstance &db) {
+    auto &config = DBConfig::GetConfig(db);
+    if (!config.GetCallbackManager().FindGrammarExtension(SV_GRAMMAR_NAME)) {
+        GrammarExtension::Register(db, make_shared_ptr<SemanticViewsGrammar>(sv_grammar_changes()));
+        ExtensionCallback::Register(config, make_shared_ptr<SemanticViewsGrammarActivation>());
+    }
+    for (auto &context : db.GetConnectionManager().GetConnectionList()) {
+        sv_grammar_activate(*context);
+    }
+}
+#endif
+
 // ---------------------------------------------------------------------------
 // sv_register_parser_hooks -- called from Rust after C API init
 // ---------------------------------------------------------------------------
@@ -3910,6 +4344,10 @@ extern "C" {
                 // `LINE 1: ... ^` for every CREATE/DROP/ALTER validation error.
                 config.SetOption("allow_parser_override_extension", Value("FALLBACK"));
             }
+
+#ifdef SV_DUCKDB_2
+            sv_register_grammar(db);
+#endif
 
             return true;
         } catch (const std::exception &e) {

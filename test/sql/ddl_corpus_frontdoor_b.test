@@ -424,11 +424,9 @@ DIMENSIONS (
 
 # --- Statement framing: one DDL statement per call (ffi.rs, TECH-DEBT #85) ---
 
-# F-061: ffi.rs::ddl_after_another_statement_says_one_statement_per_call — a DDL after another statement in one query string is refused, and the view is not created. DuckDB 2.0.0 runs a string's earlier statements before it parses the later ones, so the CREATE TABLE ahead of the DDL has already run (the 2.0 alpha parsed the whole string first, and nothing ran). A grammar is expected to accept this shape; flip the row to an accept then.
-statement error
+# F-061: ffi.rs::ddl_after_another_statement_says_one_statement_per_call — a DDL after another statement in one query string runs, with the statement before it (the parser override declines the string, and DuckDB's grammar splits it and runs the CREATE production). The override refused this shape as a whole until CREATE moved onto the grammar.
+statement ok
 CREATE TABLE dcf_ms (id INTEGER); CREATE SEMANTIC VIEW dcf_ms_v AS TABLES (t AS dcf_orders PRIMARY KEY (id)) DIMENSIONS (t.region AS region);
-----
-one statement per call
 
 query I
 SELECT count(*) FROM duckdb_tables() WHERE table_name = 'dcf_ms';
@@ -438,18 +436,25 @@ SELECT count(*) FROM duckdb_tables() WHERE table_name = 'dcf_ms';
 query I
 SELECT count(*) FROM list_semantic_views() WHERE name = 'dcf_ms_v';
 ----
-0
+1
+
+statement ok
+DROP SEMANTIC VIEW dcf_ms_v;
+
+statement ok
+DROP TABLE dcf_ms;
 
 # F-062: ffi.rs::ddl_before_another_statement_says_one_statement_per_call — the same with the DDL first and another statement after it
-statement error
+statement ok
 CREATE SEMANTIC VIEW dcf_ms_v AS TABLES (t AS dcf_orders PRIMARY KEY (id)) DIMENSIONS (t.region AS region); SELECT 1;
-----
-one statement per call
 
 query I
 SELECT count(*) FROM list_semantic_views() WHERE name = 'dcf_ms_v';
 ----
-0
+1
+
+statement ok
+DROP SEMANTIC VIEW dcf_ms_v;
 
 # Control for F-061 / F-062: the DDL alone (single trailing ';') is accepted.
 statement ok
@@ -471,30 +476,29 @@ CREATE SEMANTIC VIEW dcf_ms_v AS TABLES (t AS dcf_orders PRIMARY KEY (id)) DIMEN
 statement ok con2
 SET SESSION allow_parser_override_extension = 'DEFAULT';
 
-# F-063: ffi.rs::valid_ddl_without_a_declined_query_reports_override_inactive — with the override off, a valid DDL is refused with the actionable "not active" hint; the same DDL on the default connection (override on) is accepted
-statement error con2
+# F-063: ffi.rs::valid_ddl_without_a_declined_query_reports_override_inactive — with the override off, a valid DDL runs through the CREATE grammar production (it was refused with the "not active" hint until CREATE moved onto the grammar); the same DDL on the default connection (override on) is accepted too
+statement ok con2
 CREATE SEMANTIC VIEW dcf_off AS TABLES (t AS dcf_orders PRIMARY KEY (id)) DIMENSIONS (t.region AS region);
-----
-parser_override is not active
-
-query I
-SELECT count(*) FROM list_semantic_views() WHERE name = 'dcf_off';
-----
-0
-
-statement ok
-CREATE SEMANTIC VIEW dcf_off AS TABLES (t AS dcf_orders PRIMARY KEY (id)) DIMENSIONS (t.region AS region);
-
-# F-064: ffi.rs::record_is_consumed_when_read (first half) — a DROP after a plain SELECT in one query string is refused with the one-statement message and drops nothing
-statement error
-SELECT 1; DROP SEMANTIC VIEW dcf_off;
-----
-one statement per call
 
 query I
 SELECT count(*) FROM list_semantic_views() WHERE name = 'dcf_off';
 ----
 1
+
+statement ok
+CREATE OR REPLACE SEMANTIC VIEW dcf_off AS TABLES (t AS dcf_orders PRIMARY KEY (id)) DIMENSIONS (t.region AS region);
+
+# F-064: ffi.rs::record_is_consumed_when_read (first half) — a CREATE after a plain SELECT in one query string runs through the grammar, as a DROP or ALTER there does (`grammar_write_statements.test`, `grammar_create.test`)
+statement ok
+SELECT 1; CREATE SEMANTIC VIEW dcf_off2 AS TABLES (t AS dcf_orders PRIMARY KEY (id)) DIMENSIONS (t.region AS region);
+
+query I
+SELECT count(*) FROM list_semantic_views() WHERE name IN ('dcf_off', 'dcf_off2');
+----
+2
+
+statement ok
+DROP SEMANTIC VIEW dcf_off2;
 
 # F-065: ffi.rs::record_is_consumed_by_a_statement_that_is_not_ours (first half) — a not-ours typo earlier in the string (`SELEC 1`, far from every DDL prefix) ends the query with DuckDB's own syntax error, before the DDL is reached [syntax]
 statement error

@@ -15,7 +15,8 @@ Demonstrates v0.14.0 features:
     returns its own number; a metric that cannot name a role is rejected.
   - Relationship names match the way DuckDB matches identifiers.
   - CREATE rejects duplicate relationship names and unconnected tables.
-  - Semantic-view DDL in a multi-statement string says what is wrong.
+  - Semantic-view DDL in a multi-statement string runs (since v0.16.0; v0.14.0
+    refused it).
 """
 
 import duckdb
@@ -175,11 +176,18 @@ expect_error(
 )
 
 # ============================================================
-# Section 5: One statement per call
+# Section 5: DDL together with other statements
+#
+# v0.14.0 refused semantic-view DDL in a multi-statement string with a message
+# saying so. Since v0.16.0 DuckDB's own grammar parses it, and every statement
+# runs.
 # ============================================================
 
-expect_error(
-    "semantic-view DDL sent together with another statement",
+con.execute(
     "SELECT 1; CREATE SEMANTIC VIEW one_stmt AS TABLES (o AS orders PRIMARY KEY (id)) "
-    "METRICS (o.n AS COUNT(*))",
+    "METRICS (o.n AS COUNT(*))"
+)
+show(
+    "semantic-view DDL sent together with another statement",
+    "SELECT * FROM semantic_view('one_stmt', metrics := ['n'])",
 )

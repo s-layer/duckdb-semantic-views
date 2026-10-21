@@ -142,18 +142,23 @@ statement error
 DROP SEMANTIC VIEW
 ----
 
-# S-014: rewrite.rs::test_rewrite_name_with_single_quote — an unquoted name containing `'` is captured raw, created and dropped intact [text]
-# PRE-EXISTING (TECH-DEBT #98): `it's_a_view` is not a legal unquoted DuckDB identifier (DuckDB's own tokenizer reads `'s_a_view ...` as a string literal), yet both CREATE and DROP accept it as a view name.
+# S-014: rewrite.rs::test_rewrite_name_with_single_quote — an unquoted name containing `'` is not a legal DuckDB identifier (DuckDB's own tokenizer reads `'s_a_view ...` as a string literal), and the grammar's CREATE and DROP refuse it as DuckDB does [text]
+# PRE-EXISTING (TECH-DEBT #98): the parser override's CREATE and DROP still accept it as a view name, which `test_rewrite_name_with_single_quote` pins. No row here can run that CREATE on the override, since `test-sql-grammar` routes every CREATE to the grammar.
 statement ok
+SET allow_parser_override_extension = 'DEFAULT';
+
+statement error
 CREATE SEMANTIC VIEW it's_a_view AS TABLES (o AS dcs_orders PRIMARY KEY (id)) DIMENSIONS (o.region AS o.region) METRICS (o.total AS SUM(o.amount));
-
-query TTT nosort
-SELECT * FROM dcs_views();
 ----
-main	it's_a_view	(empty)
+unterminated string literal
+
+statement error
+DROP SEMANTIC VIEW it's_a_view;
+----
+unterminated string literal
 
 statement ok
-DROP SEMANTIC VIEW it's_a_view;
+SET allow_parser_override_extension = 'FALLBACK';
 
 query TTT nosort
 SELECT * FROM dcs_views();

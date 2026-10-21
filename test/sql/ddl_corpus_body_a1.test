@@ -793,60 +793,36 @@ DIMENSIONS (
 
 # --- empty clause bodies ---
 
-# PRE-EXISTING (TECH-DEBT #94): the view stores no DIMENSIONS/METRICS, so GET_DDL renders a body with neither clause, which CREATE then rejects ('At least one of DIMENSIONS or METRICS'): GET_DDL does not round-trip (see the replay row below)
-# B-049: body_parser/mod.rs::empty_dimensions_and_metrics_both_present_is_ok, body_parser/mod.rs::split_empty_body — DIMENSIONS () and METRICS () both present but empty: accepted, zero members
-statement ok
-CREATE SEMANTIC VIEW dcb_empty_dm AS TABLES (o AS dcb_orders PRIMARY KEY (id)) DIMENSIONS () METRICS ();
-
-query T nosort
-SELECT * FROM dcb_ddl('dcb_empty_dm');
-----
-CREATE OR REPLACE SEMANTIC VIEW dcb_empty_dm AS
-TABLES (
-    o AS dcb_orders PRIMARY KEY (id)
-)
-
-# PRE-EXISTING (TECH-DEBT #94): GET_DDL of a view created with empty DIMENSIONS () METRICS () is not re-creatable (round-trip break)
-# B-050: body_parser/mod.rs::empty_dimensions_and_metrics_both_present_is_ok — replaying the GET_DDL text of B-049 verbatim is rejected [text]
+# B-049: body_parser/mod.rs::empty_dimensions_and_metrics_are_rejected, body_parser/mod.rs::split_empty_body — DIMENSIONS () and METRICS () both present but empty: rejected, a view needs at least one dimension or metric (TECH-DEBT #94) [text]
 statement error
-CREATE OR REPLACE SEMANTIC VIEW dcb_empty_dm AS
-TABLES (
-    o AS dcb_orders PRIMARY KEY (id)
-);
+CREATE SEMANTIC VIEW dcb_empty_dm AS TABLES (o AS dcb_orders PRIMARY KEY (id)) DIMENSIONS () METRICS ();
 ----
-At least one of 'DIMENSIONS' or 'METRICS' is required
+A semantic view needs at least one dimension or metric.
 
-# the failed replay left the stored view untouched
-query T nosort
-SELECT count(*) FROM dcb_ddl('dcb_empty_dm');
+# B-050: body_parser/mod.rs::empty_dimensions_and_metrics_are_rejected — the rejected CREATE stored nothing
+query I nosort
+SELECT count(*) FROM list_semantic_views() WHERE name = 'dcb_empty_dm';
 ----
-4
+0
 
 # B-051: body_parser/mod.rs::split_leading_and_interior_empty_entries_rejected — a clause body of a lone comma is rejected (near miss of B-049) [syntax]
 statement error
 CREATE SEMANTIC VIEW dcb_split_lone AS TABLES (o AS dcb_orders PRIMARY KEY (id)) DIMENSIONS (,) METRICS ();
 ----
 
-# PRE-EXISTING (TECH-DEBT #94): same round-trip break as the DIMENSIONS () METRICS () row above: GET_DDL renders TABLES only
-# B-052: body_parser/mod.rs::empty_metrics_only_still_requires_tables_and_d_or_m_by_presence — METRICS () alone satisfies the D-or-M presence rule
-statement ok
+# B-052: body_parser/mod.rs::an_empty_metrics_clause_alone_is_rejected — METRICS () alone is rejected like no D or M clause (TECH-DEBT #94) [text]
+statement error
 CREATE SEMANTIC VIEW dcb_empty_m AS TABLES (o AS dcb_orders PRIMARY KEY (id)) METRICS ();
-
-query T nosort
-SELECT * FROM dcb_ddl('dcb_empty_m');
 ----
-CREATE OR REPLACE SEMANTIC VIEW dcb_empty_m AS
-TABLES (
-    o AS dcb_orders PRIMARY KEY (id)
-)
+A semantic view needs at least one dimension or metric.
 
-# B-053: body_parser/mod.rs::empty_metrics_only_still_requires_tables_and_d_or_m_by_presence — neither DIMENSIONS nor METRICS present is rejected (near miss of B-052) [text]
+# B-053: body_parser/mod.rs::neither_dimensions_nor_metrics_present_is_still_rejected — neither DIMENSIONS nor METRICS present is rejected (near miss of B-052) [text]
 statement error
 CREATE SEMANTIC VIEW dcb_empty_none AS TABLES (o AS dcb_orders PRIMARY KEY (id));
 ----
 At least one of 'DIMENSIONS' or 'METRICS' is required
 
-# B-054: body_parser/mod.rs::empty_tables_clause_parses_to_zero_tables — control: one table + one dimension on it
+# B-054: body_parser/mod.rs::an_empty_tables_clause_is_rejected — control: one table + one dimension on it
 statement ok
 CREATE SEMANTIC VIEW dcb_one_table AS TABLES (o AS dcb_orders) DIMENSIONS (o.a AS o.a);
 
@@ -861,33 +837,36 @@ DIMENSIONS (
     o.a AS o.a
 )
 
-# B-055: body_parser/mod.rs::empty_tables_clause_parses_to_zero_tables — TABLES () parses to zero tables; the dimension's alias then fails validation (near miss of B-054)
+# B-055: body_parser/mod.rs::an_empty_tables_clause_is_rejected — TABLES () is rejected before the dimension's alias is checked (near miss of B-054, TECH-DEBT #94) [text]
 statement error
 CREATE SEMANTIC VIEW dcb_zero_tables AS TABLES () DIMENSIONS (o.a AS o.a);
 ----
-unknown source table 'o'
+A semantic view needs at least one table in TABLES.
 
-# PRE-EXISTING (TECH-DEBT #94): a view with zero tables and zero members is accepted (the Rust test says downstream expansion rejects zero-table views; nothing at CREATE does), and GET_DDL on it fails ('Legacy definition format'), so the stored definition cannot be rendered
-# B-056: body_parser/mod.rs::empty_tables_clause_parses_to_zero_tables — TABLES () with no members referencing a table is accepted at CREATE (zero tables)
-statement ok
+# B-056: body_parser/mod.rs::an_empty_tables_clause_is_rejected — TABLES () with no members is rejected at CREATE (TECH-DEBT #94) [text]
+statement error
 CREATE SEMANTIC VIEW dcb_zero_tables_ok AS TABLES () DIMENSIONS ();
-
-# stored, with nothing to describe
-query T nosort
-SELECT name FROM list_semantic_views() WHERE name = 'dcb_zero_tables_ok';
 ----
-dcb_zero_tables_ok
+A semantic view needs at least one table in TABLES.
 
-query T nosort
-SELECT count(*) FROM describe_semantic_view('dcb_zero_tables_ok');
+query I nosort
+SELECT count(*) FROM list_semantic_views() WHERE name IN ('dcb_empty_m', 'dcb_zero_tables', 'dcb_zero_tables_ok');
 ----
 0
 
-# PRE-EXISTING (TECH-DEBT #94): the stored zero-table definition cannot be rendered
+# A view stored before CREATE refused empty views can still have no tables.
+# GET_DDL refuses to render it (render_ddl.rs's legacy-format error); the row
+# is written directly, as CREATE no longer makes one.
+statement ok
+INSERT INTO semantic_layer._definitions (schema_name, name, definition) VALUES ('main', 'dcb_legacy_empty', '{"tables":[],"dimensions":[],"metrics":[]}');
+
 statement error
-SELECT get_ddl('SEMANTIC_VIEW', 'dcb_zero_tables_ok');
+SELECT GET_DDL('SEMANTIC_VIEW', 'dcb_legacy_empty');
 ----
-Legacy definition format
+Legacy definition format; please re-create using CREATE OR REPLACE SEMANTIC VIEW
+
+statement ok
+DELETE FROM semantic_layer._definitions WHERE name = 'dcb_legacy_empty';
 
 # B-057: body_parser/mod.rs::empty_materializations_clause_parses — MATERIALIZATIONS () parses to zero materializations
 statement ok

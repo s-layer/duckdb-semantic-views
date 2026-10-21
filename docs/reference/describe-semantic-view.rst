@@ -390,7 +390,7 @@ The materialization rows come last, after the tables, dimensions, and metrics.
 
 .. note::
 
-   ``DESCRIBE SEMANTIC VIEW`` can't be used as a subquery or in a ``WITH`` clause. Unlike DuckDB's own ``DESCRIBE``, ``SELECT ... FROM (DESCRIBE SEMANTIC VIEW order_metrics)`` is a parser error. Run the statement on its own. See :ref:`ref-functions-subqueries`.
+   Since 0.16.0, ``DESCRIBE SEMANTIC VIEW`` can be used as a subquery or in a ``WITH`` clause, like DuckDB's own ``DESCRIBE``: ``SELECT * FROM (DESCRIBE SEMANTIC VIEW order_metrics) WHERE object_kind = 'METRIC'``. See :ref:`ref-functions-subqueries`.
 
 **Error: view does not exist:**
 

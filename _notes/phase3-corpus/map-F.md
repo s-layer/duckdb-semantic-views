@@ -92,9 +92,9 @@ also carry an accepted control), 19 syntax-reject rows. 99 source tests/properti
 | ffi.rs::valid_ddl_without_a_declined_query_reports_override_inactive | F-063 | override turned off per session on connection `con2` |
 | ffi.rs::ddl_after_another_statement_says_one_statement_per_call | F-061 | a grammar is expected to accept this shape; flip the row then |
 | ffi.rs::ddl_before_another_statement_says_one_statement_per_call | F-062 | as F-061 |
-| ffi.rs::looks_multi_statement_ignores_trailing_semicolons | F-012, F-013 | F-013 is PRE-EXISTING (`; ;` tail) |
+| ffi.rs::looks_multi_statement_ignores_trailing_semicolons | F-012, F-013, F-013b | F-013 (DROP/ALTER `; ;` tail) runs through the grammar; F-013b (CREATE) runs through the grammar too since the Phase 3 grammar PR |
 | ffi.rs::unrelated_or_single_declined_query_keeps_override_inactive | N/A | the record's lifetime across statements is not observable: the runner's own settings query before each statement overwrites it (see "harness limits") |
-| ffi.rs::record_is_consumed_when_read | F-064 | partial: the multi-statement refusal is ported; the consumption is not observable (as above) |
+| ffi.rs::record_is_consumed_when_read | F-064 | partial: the multi-statement refusal is ported (with a CREATE, since a DROP there now runs through the grammar); the consumption is not observable (as above) |
 | ffi.rs::record_is_consumed_by_a_statement_that_is_not_ours | F-065 | partial: `SELEC 1; <DDL>` ends with DuckDB's syntax error; the consumption is not observable (as above) |
 | ffi.rs::statement_must_match_a_whole_recorded_statement | N/A | not observable (as above). A related PRE-EXISTING mis-diagnosis was reproduced outside the runner; it is the fourth bullet of TECH-DEBT #98 |
 | ffi.rs::strings_without_semantic_are_not_kept | N/A | not observable (as above); the buffer-capacity half is internal |

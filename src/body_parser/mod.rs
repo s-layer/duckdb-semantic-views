@@ -173,6 +173,28 @@ pub fn parse_keyword_body(text: &str, base_offset: usize) -> Result<KeywordBody,
         }
     }
 
+    // TECH-DEBT #94 (Snowflake parity): the clause scanner requires the
+    // clauses to be present; a view also needs something in them. `TABLES ()`
+    // and an empty DIMENSIONS / METRICS pair are refused here, at the keyword.
+    if tables.is_empty() {
+        return Err(ParseError {
+            message: "A semantic view needs at least one table in TABLES.".to_string(),
+            position: bounds
+                .iter()
+                .find(|b| b.keyword == "tables")
+                .map(|b| b.keyword_offset),
+        });
+    }
+    if dimensions_raw.is_empty() && metrics_raw.is_empty() {
+        return Err(ParseError {
+            message: "A semantic view needs at least one dimension or metric.".to_string(),
+            position: bounds
+                .iter()
+                .find(|b| matches!(b.keyword, "dimensions" | "metrics"))
+                .map(|b| b.keyword_offset),
+        });
+    }
+
     // Map parsed clause entries onto the Fact / Dimension / Metric model types.
     let facts = facts_raw
         .into_iter()
@@ -892,42 +914,68 @@ mod tests {
 
     // -----------------------------------------------------------------------
     // T-3 (code-review 2026-07-11): pin the behaviour of empty clause bodies.
-    // TABLES () satisfies the presence check but yields zero tables — the
-    // "at least one of DIMENSIONS/METRICS" and downstream validation decide
-    // the outcome. These tests document what actually happens so a future
-    // refactor can't silently change it.
+    // The clause scanner checks that TABLES and one of DIMENSIONS / METRICS
+    // are present; `parse_keyword_body` then rejects them empty (TECH-DEBT
+    // #94), at the keyword.
     // -----------------------------------------------------------------------
 
+    /// TECH-DEBT #94 (Snowflake parity): a view needs at least one
+    /// dimension or metric. Both clauses present but empty is rejected, at
+    /// the first of them, like neither clause present.
     #[test]
-    fn empty_dimensions_and_metrics_both_present_is_ok() {
-        // Both clauses present but empty: the "at least one of D/M" rule is
-        // about clause PRESENCE, so this parses to an empty-dims/empty-mets
-        // body (a dimensionless, metricless view — degenerate but legal at
-        // the parse layer).
+    fn empty_dimensions_and_metrics_are_rejected() {
         let body = "AS TABLES (o AS orders PRIMARY KEY (id)) DIMENSIONS () METRICS ()";
-        let kb = parse_keyword_body(body, 0).unwrap();
-        assert_eq!(kb.tables.len(), 1);
-        assert!(kb.dimensions.is_empty());
-        assert!(kb.metrics.is_empty());
+        let err = parse_keyword_body(body, 0).unwrap_err();
+        assert!(
+            err.message
+                .contains("needs at least one dimension or metric"),
+            "got: {}",
+            err.message
+        );
+        assert_eq!(err.position, body.find("DIMENSIONS"));
     }
 
     #[test]
-    fn empty_tables_clause_parses_to_zero_tables() {
-        // TABLES () satisfies the presence check; downstream expansion is
-        // what rejects a zero-table view, not the clause scanner.
-        let body = "AS TABLES () DIMENSIONS (o.a AS o.a)";
-        let kb = parse_keyword_body(body, 0).unwrap();
-        assert!(kb.tables.is_empty());
-        assert_eq!(kb.dimensions.len(), 1);
-    }
-
-    #[test]
-    fn empty_metrics_only_still_requires_tables_and_d_or_m_by_presence() {
-        // METRICS () alone (no DIMENSIONS) satisfies the presence rule.
+    fn an_empty_metrics_clause_alone_is_rejected() {
         let body = "AS TABLES (o AS orders PRIMARY KEY (id)) METRICS ()";
-        let kb = parse_keyword_body(body, 0).unwrap();
-        assert!(kb.metrics.is_empty());
-        // Neither DIMENSIONS nor METRICS present at all is the actual error.
+        let err = parse_keyword_body(body, 0).unwrap_err();
+        assert!(
+            err.message
+                .contains("needs at least one dimension or metric"),
+            "got: {}",
+            err.message
+        );
+        assert_eq!(err.position, body.find("METRICS"));
+    }
+
+    /// Facts alone are not enough: they are not queryable on their own.
+    #[test]
+    fn facts_with_empty_dimensions_are_rejected() {
+        let body = "AS TABLES (o AS orders PRIMARY KEY (id)) FACTS (o.f AS o.amount) DIMENSIONS ()";
+        let err = parse_keyword_body(body, 0).unwrap_err();
+        assert!(
+            err.message
+                .contains("needs at least one dimension or metric"),
+            "got: {}",
+            err.message
+        );
+    }
+
+    /// TECH-DEBT #94: a view needs at least one table.
+    #[test]
+    fn an_empty_tables_clause_is_rejected() {
+        let body = "AS TABLES () DIMENSIONS (o.a AS o.a)";
+        let err = parse_keyword_body(body, 0).unwrap_err();
+        assert!(
+            err.message.contains("needs at least one table"),
+            "got: {}",
+            err.message
+        );
+        assert_eq!(err.position, body.find("TABLES"));
+    }
+
+    #[test]
+    fn neither_dimensions_nor_metrics_present_is_still_rejected() {
         let body_none = "AS TABLES (o AS orders PRIMARY KEY (id))";
         let err = parse_keyword_body(body_none, 0).unwrap_err();
         assert!(

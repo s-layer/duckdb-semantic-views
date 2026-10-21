@@ -9,6 +9,32 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **`SHOW` and `DESCRIBE` statements work as subqueries.** `DESCRIBE SEMANTIC VIEW`,
+  `SHOW [TERSE] SEMANTIC VIEWS`, `SHOW SEMANTIC DIMENSIONS / METRICS / FACTS /
+  MATERIALIZATIONS` (with `FOR METRIC` too) and `SHOW COLUMNS IN SEMANTIC VIEW` can now be
+  used wherever DuckDB accepts a query: in `FROM`, in a CTE or in a view body, so you can
+  filter, join and aggregate their output, as in
+  `SELECT * FROM (DESCRIBE SEMANTIC VIEW v) WHERE object_kind = 'METRIC'`.
+
+- **Semantic-view DDL can share a query string with other statements.** One `execute()`
+  call can now hold, say, `CREATE TABLE …; INSERT …; CREATE SEMANTIC VIEW …`: DuckDB
+  splits the string and runs each statement in order. Before, any `CREATE`, `DROP` or
+  `ALTER SEMANTIC VIEW` in such a string was refused with "semantic-view DDL must be sent
+  as its own statement, one statement per call". The one exception is a `DROP`, `ALTER`,
+  `DESCRIBE` or `SHOW` that names a view with an unquoted reserved word (`select`), which
+  still has to be sent on its own; quote the name to lift that.
+
+- **Semantic-view DDL runs with `allow_parser_override_extension` set to `DEFAULT`.**
+  Before, every `CREATE`, `DROP`, `ALTER`, `SHOW` and `DESCRIBE` failed there with
+  "parser_override is not active". Two differences remain with that setting: in the
+  Python client a syntax error in the DDL shows no `LINE 1: … ^` caret, and `GET_DDL`
+  shows a tab inside an expression as a space and a run of blank lines as one line
+  break. The query a view expands to is the same. A `DROP`, `ALTER`, `DESCRIBE` or `SHOW`
+  that names a view with an unquoted reserved word (`select`) still fails there with
+  "parser_override is not active"; quote the name to run it.
+
 ### Changed
 
 - **`GET_DDL` and `READ_YAML_FROM_SEMANTIC_VIEW` follow `search_path`.** An unqualified
@@ -19,9 +45,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   parser hook (with `allow_parser_override_extension` set to `DEFAULT`, or from DuckDB's
   Python relational API) follow the path too, instead of requiring a unique match.
 
-### Fixed
-
-- **The docs now say what runs when a multi-statement string is refused.** On DuckDB 2.0, the statements ahead of semantic-view DDL in one query string have already run when the "one statement per call" error is raised, and their effects stay. The "One Statement per Call" section of the transactions and limitations page says so.
+- **CREATE rejects an empty view.** A view with no tables (`TABLES ()`, or a YAML
+  definition with `tables: []` or no `tables`), or whose `DIMENSIONS` and `METRICS`
+  clauses are all empty (`DIMENSIONS () METRICS ()`, a lone `METRICS ()`), is now refused at
+  `CREATE SEMANTIC VIEW`, as Snowflake does. Before, such a view was created but could not
+  be queried, and `GET_DDL` either failed on it or returned DDL that `CREATE` refused. A
+  YAML export of a view stored in the legacy format, which lists no tables, can no longer be
+  imported either; re-create that view with `CREATE OR REPLACE SEMANTIC VIEW`.
 
 ## [0.15.0] - 2026-10-21
 

@@ -46,9 +46,8 @@ Install the Extension
          con.execute("LOAD semantic_views")
 
       To run the SQL in this tutorial from Python, pass it to ``con.execute()``
-      or ``con.sql()``. Give each semantic-view statement its own call: a string
-      that combines a ``CREATE SEMANTIC VIEW`` with other statements is
-      rejected (see :ref:`explanation-txn-ddl-one-statement`).
+      or ``con.sql()``. One call can hold several statements separated by
+      semicolons (see :ref:`explanation-txn-ddl-one-statement`).
 
 .. important::
 

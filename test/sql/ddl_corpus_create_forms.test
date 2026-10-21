@@ -931,26 +931,36 @@ query TTT nosort
 SELECT * FROM dcs_views() WHERE name IN ('bad_view', 'y_empty_body', 'y_trail', 'y_inner', 'y_nodollar', 'y_open', 'y_body', 'y_tag1', 'y_tag2');
 ----
 
-# S-358: rewrite.rs::test_yaml_rewrite_create_or_replace, test_yaml_rewrite_create_if_not_exists — the Rust tests' YAML body declares no tables, dimensions or metrics, and is accepted
-# PRE-EXISTING (TECH-DEBT #94): an empty YAML definition (`tables: []`, `dimensions: []`, `metrics: []`) creates a view. Its AS-body equivalent, `DIMENSIONS () METRICS ()` (B-049), is accepted too; only a TABLES-only body (S-359 below) is rejected. The stored view has no members; GET_DDL on it fails ("Legacy definition format"), so it is not called here.
-statement ok
+# S-358: model.rs::yaml_with_no_tables_is_rejected — an empty YAML definition (`tables: []`, `dimensions: []`, `metrics: []`) is rejected like `TABLES ()` (TECH-DEBT #94) [text]
+statement error
 CREATE SEMANTIC VIEW y_empty FROM YAML $$
 base_table: t
 tables: []
 dimensions: []
 metrics: []
 $$
+----
+a semantic view needs at least one table
+
+# model.rs::yaml_with_neither_dimensions_nor_metrics_is_rejected — with a table but no members it is still rejected [text]
+statement error
+CREATE SEMANTIC VIEW y_empty FROM YAML $$
+base_table: dcs_orders
+tables:
+  - alias: o
+    table: dcs_orders
+    pk_columns: [id]
+dimensions: []
+metrics: []
+$$
+----
+at least one of the two is required
 
 query TTT nosort
 SELECT * FROM dcs_views() WHERE name = 'y_empty';
 ----
-main	y_empty	(empty)
 
-query TTTTT nosort
-DESCRIBE SEMANTIC VIEW y_empty;
-----
-
-# S-359: rewrite.rs::test_yaml_rewrite_create_or_replace — a near miss of S-358 in AS-body form (TABLES only, no DIMENSIONS or METRICS) is rejected, as TECH-DEBT #94's decision wants for every empty view [text]
+# S-359: rewrite.rs::test_yaml_rewrite_create_or_replace — S-358 in AS-body form (TABLES only, no DIMENSIONS or METRICS) is rejected [text]
 statement error
 CREATE SEMANTIC VIEW as_empty AS TABLES (o AS dcs_orders PRIMARY KEY (id))
 ----

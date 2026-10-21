@@ -108,6 +108,30 @@ No DIMENSIONS or METRICS
 **Fix:** Add at least one ``DIMENSIONS`` or ``METRICS`` clause.
 
 
+No tables in TABLES
+-------------------
+
+.. code-block:: text
+
+   A semantic view needs at least one table in TABLES.
+
+**Cause:** The ``TABLES`` clause is empty: ``TABLES ()``.
+
+**Fix:** List the view's tables in ``TABLES``, for example ``TABLES (o AS orders PRIMARY KEY (id))``.
+
+
+No dimension or metric
+----------------------
+
+.. code-block:: text
+
+   A semantic view needs at least one dimension or metric.
+
+**Cause:** The ``DIMENSIONS`` and ``METRICS`` clauses that the body has are all empty, as in ``DIMENSIONS () METRICS ()`` or a lone ``METRICS ()``. Facts alone do not count: a view is queried through its dimensions and metrics.
+
+**Fix:** Declare at least one dimension or metric.
+
+
 Unknown clause keyword
 ----------------------
 
@@ -198,13 +222,14 @@ Malformed quoted identifier
 
 .. _ref-err-one-statement:
 
-Semantic-view DDL in a multi-statement string
----------------------------------------------
+A reserved-word view name outside a statement of its own
+--------------------------------------------------------
 
-.. versionchanged:: 0.14.0
+.. versionchanged:: 0.16.0
 
-   This case used to fail with ``parser_override is not active for this
-   connection``, which pointed at a setting that was not the problem.
+   Semantic-view DDL can now share a query string with other statements, and
+   runs with ``allow_parser_override_extension`` set to ``'DEFAULT'``. These
+   messages remain only for the case below.
 
 .. code-block:: text
 
@@ -212,9 +237,15 @@ Semantic-view DDL in a multi-statement string
    statement per call. This query string also contains other statements; send
    each statement in a separate call (a single trailing ';' is fine).
 
-**Cause:** One query string holds a semantic-view statement and at least one other statement, separated by semicolons. A typical source is a Python ``execute()`` call that runs a whole setup script at once.
+.. code-block:: text
 
-**Fix:** Send each statement in its own call. See :ref:`explanation-txn-ddl-one-statement` for an example.
+   semantic_views: parser_override is not active for this connection
+   (allow_parser_override_extension is 'DEFAULT' or 'STRICT'). Re-enable with:
+   SET allow_parser_override_extension='FALLBACK';
+
+**Cause:** A ``DROP``, ``ALTER``, ``DESCRIBE`` or ``SHOW`` statement names a view with an unquoted reserved word, such as ``select``. DuckDB does not accept an unquoted reserved word as a name, so only the extension's parser hook can read the statement, and it reads only a query string that holds the one statement. The first message appears when the string holds other statements too; the second when ``allow_parser_override_extension`` is ``'DEFAULT'`` or ``'STRICT'``.
+
+**Fix:** Quote the name (``DESCRIBE SEMANTIC VIEW "select"``). See :ref:`explanation-txn-ddl-one-statement`.
 
 
 .. _ref-err-name-uniqueness:

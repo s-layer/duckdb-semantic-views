@@ -36,13 +36,20 @@ pub(crate) use ffi::sv_parser_override_rust;
 
 mod native_sql;
 #[cfg(feature = "extension")]
-pub(crate) use native_sql::rewrite_to_native_sql;
+pub(crate) use native_sql::{lower_action, rewrite_to_native_sql};
 
 mod show_clauses;
 pub(crate) use show_clauses::{build_filter_suffix, parse_show_filter_clauses};
+// The grammar productions use these; they compile with the extension or for tests.
+#[cfg(any(feature = "extension", test))]
+pub(crate) use show_clauses::{show_unexpected_tokens, ScopeName, ShowClauses};
 
 mod rewrite;
 pub(crate) use rewrite::extract_quoted_string;
+#[cfg(any(feature = "extension", test))]
+pub(crate) use rewrite::messages;
+#[cfg(any(feature = "extension", test))]
+pub(crate) use rewrite::{lower_name_only_read, lower_show};
 pub use rewrite::{plan_rewrite, CreateMode, RewriteAction};
 
 /// Not our statement -- return `DISPLAY_ORIGINAL_ERROR`.

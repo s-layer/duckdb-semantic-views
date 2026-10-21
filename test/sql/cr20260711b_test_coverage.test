@@ -33,10 +33,9 @@ METRICS (o.total AS SUM(o.amount))
 Duplicate clause keyword 'DIMENSIONS'
 
 # ========================================
-# T-3: empty clause bodies. TABLES () satisfies the presence check at the
-# parse layer, but a zero-table view has no base table — pin whatever the
-# full pipeline actually does (documented, so a refactor can't drift it).
-# DIMENSIONS () METRICS () both-empty is the degenerate legal-parse case.
+# T-3: empty clause bodies. An empty DIMENSIONS () is legal when METRICS has
+# a member. TABLES () and an all-empty DIMENSIONS/METRICS pair are rejected
+# at CREATE (TECH-DEBT #94, pinned in ddl_corpus_body_a1.test B-049..B-056).
 # ========================================
 
 # Empty DIMENSIONS with a real METRICS clause: grand-total metric works.

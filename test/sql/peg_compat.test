@@ -122,32 +122,35 @@ SELECT * FROM semantic_view('peg_bison_test', dimensions := ['dim_id'], metrics 
 2	20.0
 
 # ============================================================
-# 4. parser_override switched off: DDL fails with the re-arm hint
+# 4. parser_override switched off: DDL runs through the grammar
 # ============================================================
 #
 # On 1.5, `CALL disable_peg_parser()` reset `allow_parser_override_extension`
-# to its default (`default`), which silently bypasses parser_override hooks.
-# 2.0 has no such call, but the setting can still be put back by hand; the
-# extension installs `FALLBACK` on load. Documented in MAINTAINER.md.
+# to its default (`default`), which silently bypasses parser_override hooks,
+# and DDL then failed with a hint to re-arm `FALLBACK`. 2.0 has no such call,
+# but the setting can still be put back by hand; the extension installs
+# `FALLBACK` on load. With the override off, DuckDB's grammar parses the DDL,
+# and the extension's grammar productions run it. Documented in MAINTAINER.md.
 
 statement ok
 SET allow_parser_override_extension='DEFAULT';
 
-# B8 (Phase 62) — with allow_parser_override_extension at DEFAULT and FALLBACK not
-# re-armed,
-# parser_override does NOT fire on this connection; the default parser
-# fails on the unrecognised CREATE SEMANTIC VIEW prefix; DuckDB calls
-# our parse_function which sees a well-formed semantic-view DDL and
-# emits the actionable rc=3 hint with caret.
-statement error
+statement ok
 CREATE SEMANTIC VIEW peg_b8_unprivileged AS
 TABLES (t8 AS peg_test_data PRIMARY KEY (id))
 DIMENSIONS (t8.dim_id AS t8.id)
 METRICS (t8.total_val AS SUM(t8.val))
-----
-SET allow_parser_override_extension='FALLBACK'
 
-# Recovery: re-arm FALLBACK and CREATE succeeds.
+query IR
+SELECT * FROM semantic_view('peg_b8_unprivileged', dimensions := ['dim_id'], metrics := ['total_val']) ORDER BY dim_id;
+----
+1	10.0
+2	20.0
+
+statement ok
+DROP SEMANTIC VIEW peg_b8_unprivileged;
+
+# Back to FALLBACK, and CREATE still runs.
 statement ok
 SET allow_parser_override_extension='FALLBACK';
 

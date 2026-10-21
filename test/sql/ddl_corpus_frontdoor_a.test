@@ -306,25 +306,40 @@ SELECT count(*) FROM list_semantic_views();
 ----
 0
 
-# F-013: ffi.rs::looks_multi_statement_ignores_trailing_semicolons — PRE-EXISTING (TECH-DEBT #98): DuckDB accepts an empty statement between trailing semicolons (`SELECT 1; ;`), and the Rust helper treats `; ;` as "not multi-statement", but a semantic-view DDL ending `; ;` is refused with a misleading "parser_override is not active" message (the override is active) and is not executed
+# F-013: ffi.rs::looks_multi_statement_ignores_trailing_semicolons — DuckDB accepts an empty statement between trailing semicolons (`SELECT 1; ;`), and so does a DROP or ALTER ending `; ;`: the parser override declines it, and DuckDB's grammar parses it with the extension's productions and runs it
 statement ok
 SELECT 1; ;
 
 statement ok
 CREATE SEMANTIC VIEW dcf_semi2 AS TABLES (t AS dcf_orders PRIMARY KEY (id)) DIMENSIONS (t.region AS region);
 
-statement error
-DROP SEMANTIC VIEW dcf_semi2; ;
-----
-parser_override is not active
+statement ok
+ALTER SEMANTIC VIEW dcf_semi2 SET COMMENT = 'semi'; ;
 
 query T
-SELECT name FROM list_semantic_views();
+SELECT comment FROM (SHOW SEMANTIC VIEWS) WHERE name = 'dcf_semi2';
 ----
-dcf_semi2
+semi
 
 statement ok
-DROP SEMANTIC VIEW dcf_semi2;
+DROP SEMANTIC VIEW dcf_semi2; ;
+
+query I
+SELECT count(*) FROM list_semantic_views();
+----
+0
+
+# F-013b: a CREATE ending `; ;` runs too, through the grammar (it was refused with a misleading "parser_override is not active" until CREATE moved onto the grammar)
+statement ok
+CREATE SEMANTIC VIEW dcf_semi3 AS TABLES (t AS dcf_orders PRIMARY KEY (id)) DIMENSIONS (t.region AS region); ;
+
+query I
+SELECT count(*) FROM list_semantic_views();
+----
+1
+
+statement ok
+DROP SEMANTIC VIEW dcf_semi3;
 
 # --- DDL prefix detection: whitespace between the prefix keywords ---
 # (parse_proptest's generator also draws `\r`; the runner strips CR from the
@@ -891,18 +906,10 @@ SELECT name FROM list_semantic_views();
 ----
 dcf_y
 
-# F-036: parse_proptest.rs::test_semicolon_in_name (DROP pair) — the rejected DROP drops nothing [syntax]
+# F-036: parse_proptest.rs::test_semicolon_in_name (DROP pair) — the `;` ends the name, so `injection` is a statement of its own and is rejected. DuckDB 2.0 runs a string's statements one at a time, so the complete `DROP SEMANTIC VIEW dcf_y` ahead of it has already run, as `DROP TABLE t;injection;` drops t in DuckDB itself; the name is not cut into `dcf_y;injection` [syntax]
 statement error
 DROP SEMANTIC VIEW dcf_y;injection;
 ----
-
-query T
-SELECT name FROM list_semantic_views();
-----
-dcf_y
-
-statement ok
-DROP SEMANTIC VIEW dcf_y;
 
 query I
 SELECT count(*) FROM list_semantic_views();

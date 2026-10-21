@@ -158,7 +158,7 @@ If no semantic views are registered, the result set is empty.
 
 .. note::
 
-   ``SHOW SEMANTIC VIEWS`` can't be used as a subquery or in a ``WITH`` clause. Unlike DuckDB's own ``SHOW``, ``SELECT ... FROM (SHOW SEMANTIC VIEWS)`` is a parser error. Run the statement on its own. See :ref:`ref-functions-subqueries`.
+   Since 0.16.0, ``SHOW SEMANTIC VIEWS`` can be used as a subquery or in a ``WITH`` clause, like DuckDB's own ``SHOW``: ``SELECT name FROM (SHOW SEMANTIC VIEWS) WHERE comment <> ''``. See :ref:`ref-functions-subqueries`.
 
 **TERSE variant (no comment column):**
 

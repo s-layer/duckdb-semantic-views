@@ -92,7 +92,8 @@ pub(super) struct ClauseBound<'a> {
 /// - All keywords must be in `CLAUSE_KEYWORDS` (with "did you mean?" suggestion on error)
 /// - No duplicate clauses
 /// - Order must be TABLES -> RELATIONSHIPS? -> DIMENSIONS? -> METRICS?
-/// - TABLES is required; at least one of DIMENSIONS or METRICS is required
+/// - TABLES is required; at least one of DIMENSIONS or METRICS is required (that
+///   they are not empty is checked by `parse_keyword_body`)
 #[allow(clippy::too_many_lines)]
 pub(super) fn find_clause_bounds<'a>(
     text: &'a str,

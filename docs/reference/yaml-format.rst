@@ -165,7 +165,11 @@ A definition with metrics only:
 
 .. note::
 
-   ``tables`` must list at least one table, but the import does not check this yet. A definition that omits ``tables``, or sets it to ``[]``, is accepted by ``CREATE SEMANTIC VIEW ... FROM YAML``, and the mistake only shows up as an error when the view is first queried.
+   ``tables`` must list at least one table. A definition that omits ``tables``, or sets it to ``[]``, is rejected by ``CREATE SEMANTIC VIEW ... FROM YAML``.
+
+   .. versionchanged:: 0.16.0
+
+      Earlier versions accepted such a definition, and the view failed at its first query.
 
 
 .. _ref-yaml-format-toplevel:
@@ -184,7 +188,7 @@ Top-Level Keys
    * - ``tables``
      - list of `Table`_
      - Yes
-     - Physical tables available to the view. Must list at least one table. This is not yet checked at import: a definition without ``tables`` (or with ``tables: []``) is accepted, and the view fails at its first query. See :ref:`ref-yaml-format-minimal`.
+     - Physical tables available to the view. Must list at least one table: a definition without ``tables``, or with ``tables: []``, is rejected. See :ref:`ref-yaml-format-minimal`.
    * - ``dimensions``
      - list of `Dimension`_
      - Yes :sup:`*`

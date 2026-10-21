@@ -17,7 +17,8 @@ in source order. Corpus files (row ids `S-nnn`, numbered across all three):
 
 Rows tagged `[syntax]` are `statement error` with an empty `----` block (no message pinned);
 rows tagged `[text]` pin text that a grammar might plausibly change; `PRE-EXISTING` comments
-mark today's behaviour that looks wrong (S-014, S-358, S-391). The note column repeats the first
+mark behaviour that looked wrong when the corpus was written (S-014 and S-358, since fixed; S-391,
+still open under TECH-DEBT #98). The note column repeats the first
 row's description. 6 of 276 tests are N/A.
 
 | source::test_fn | corpus row id(s) | note |
@@ -184,8 +185,9 @@ row's description. 6 of 276 tests are N/A.
 | rewrite.rs::test_extract_dollar_quoted_inner_dollar | S-352 | the first closing `$$` ends the body, so a later `$$ text$$` is trailing content ([syntax]) |
 | rewrite.rs::test_extract_dollar_quoted_multiline | S-340 | CREATE ... FROM YAML $$ <multi-line YAML> $$ |
 | rewrite.rs::test_yaml_rewrite_basic_create | S-340 | CREATE ... FROM YAML $$ <multi-line YAML> $$ |
-| rewrite.rs::test_yaml_rewrite_create_or_replace | S-343, S-358, S-359 | CREATE OR REPLACE ... FROM YAML replaces ([syntax]) |
-| rewrite.rs::test_yaml_rewrite_create_if_not_exists | S-344, S-358 | CREATE IF NOT EXISTS ... FROM YAML is a no-op on an existing view and creates a missing one |
+| rewrite.rs::test_yaml_rewrite_create_or_replace | S-343, S-359 | CREATE OR REPLACE ... FROM YAML replaces ([syntax]) |
+| rewrite.rs::test_yaml_rewrite_create_if_not_exists | S-344 | CREATE IF NOT EXISTS ... FROM YAML is a no-op on an existing view and creates a missing one |
+| model.rs::yaml_with_no_tables_is_rejected | S-358 | an empty YAML definition (`tables: []`) is rejected like `TABLES ()` (TECH-DEBT #94) |
 | rewrite.rs::test_yaml_rewrite_trailing_content_rejected | S-351 | text after the closing `$$` ([syntax]) |
 | rewrite.rs::test_yaml_rewrite_invalid_yaml | S-349 | malformed YAML content names the view in the error |
 | rewrite.rs::test_yaml_rewrite_comment_override | S-346 | the DDL COMMENT wins over a `comment:` key in the YAML; without one the YAML comment is used |

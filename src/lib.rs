@@ -4,6 +4,10 @@ pub mod errors;
 pub mod expand;
 pub(crate) mod expr_tokens;
 pub mod ffi_util;
+// Only the C++ bridge reaches the grammar, so a build without the extension
+// compiles it just for its unit tests.
+#[cfg(any(feature = "extension", test))]
+pub(crate) mod grammar;
 pub mod graph;
 pub mod ident;
 pub mod load_guard;

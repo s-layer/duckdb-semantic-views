@@ -1,0 +1,353 @@
+# SHOW and DESCRIBE SEMANTIC statements are queries wherever DuckDB accepts one
+# (TECH-DEBT #77).
+#
+# The parser override rewrites a statement only when the statement *starts*
+# with our syntax, so SHOW nested in a subquery, a CTE or a view body failed
+# with a generic syntax error. The grammar extension adds SHOW as a production
+# of DuckDB's own grammar, so the nesting comes from DuckDB.
+
+require semantic_views
+
+statement ok
+CREATE TABLE gq_t (id INTEGER, region VARCHAR);
+
+statement ok
+CREATE SEMANTIC VIEW gq_a AS TABLES (t AS gq_t PRIMARY KEY (id)) DIMENSIONS (t.region AS region);
+
+statement ok
+CREATE SEMANTIC VIEW gq_b AS TABLES (t AS gq_t PRIMARY KEY (id)) DIMENSIONS (t.region AS region);
+
+# --- as a subquery -------------------------------------------------------------
+
+query I
+SELECT count(*) FROM (SHOW SEMANTIC VIEWS);
+----
+2
+
+query T
+SELECT name FROM (SHOW SEMANTIC VIEWS) ORDER BY name;
+----
+gq_a
+gq_b
+
+query I
+SELECT count(*) FROM (show terse semantic views) WHERE name LIKE 'gq_%';
+----
+2
+
+# --- as a CTE ------------------------------------------------------------------
+
+query T
+WITH s AS (SHOW SEMANTIC VIEWS) SELECT name FROM s WHERE name = 'gq_b';
+----
+gq_b
+
+# --- as a view body --------------------------------------------------------------
+# The stored body is the lowered query, so the view keeps working as views are
+# added and dropped.
+
+statement ok
+CREATE VIEW gq_listing AS SELECT name FROM (SHOW SEMANTIC VIEWS);
+
+statement ok
+DROP SEMANTIC VIEW gq_b;
+
+query T
+SELECT name FROM gq_listing;
+----
+gq_a
+
+# --- every SHOW / DESCRIBE form as a subquery ----------------------------------
+
+statement ok
+CREATE TABLE gq_o (id INTEGER, cust_id INTEGER, region VARCHAR, amount INTEGER);
+
+statement ok
+CREATE TABLE gq_c (id INTEGER, name VARCHAR);
+
+statement ok
+CREATE TABLE gq_agg (region VARCHAR, revenue BIGINT);
+
+statement ok
+CREATE SEMANTIC VIEW gq_m AS
+TABLES (o AS gq_o PRIMARY KEY (id), c AS gq_c PRIMARY KEY (id))
+RELATIONSHIPS (o_c AS o(cust_id) REFERENCES c)
+FACTS (o.net AS o.amount)
+DIMENSIONS (o.region AS o.region, c.name AS c.name)
+METRICS (o.revenue AS SUM(o.net), o.orders AS COUNT(*))
+MATERIALIZATIONS (by_region AS (TABLE gq_agg, DIMENSIONS (region), METRICS (revenue)));
+
+# DESCRIBE, filtered and aggregated by object_kind
+query TI
+SELECT object_kind, count(DISTINCT object_name) FROM (DESCRIBE SEMANTIC VIEW gq_m) GROUP BY 1 ORDER BY 1;
+----
+DIMENSION	2
+FACT	1
+MATERIALIZATION	1
+METRIC	2
+RELATIONSHIP	1
+TABLE	2
+
+query T
+SELECT DISTINCT object_name FROM (DESC SEMANTIC VIEW gq_m) WHERE object_kind = 'RELATIONSHIP';
+----
+o_c
+
+query TT
+SELECT name, table_name FROM (SHOW SEMANTIC DIMENSIONS IN gq_m) ORDER BY name;
+----
+name	gq_c
+region	gq_o
+
+query TT
+SELECT name, data_type FROM (SHOW SEMANTIC METRICS IN gq_m) WHERE name = 'orders';
+----
+orders	BIGINT
+
+query T
+SELECT name FROM (SHOW SEMANTIC FACTS IN gq_m);
+----
+net
+
+query TT
+SELECT name, "table" FROM (SHOW SEMANTIC MATERIALIZATIONS IN gq_m);
+----
+by_region	gq_agg
+
+query T
+SELECT name FROM (SHOW SEMANTIC DIMENSIONS IN gq_m FOR METRIC revenue) ORDER BY name;
+----
+name
+region
+
+query TT
+SELECT kind, count(*) FROM (SHOW COLUMNS IN SEMANTIC VIEW gq_m) GROUP BY kind ORDER BY kind;
+----
+DIMENSION	2
+FACT	1
+METRIC	2
+
+# The account-wide form, joined back to the view listing
+query TT
+SELECT v.name, d.name FROM (SHOW SEMANTIC VIEWS) v JOIN (SHOW SEMANTIC DIMENSIONS) d ON d.semantic_view_name = v.name WHERE v.name = 'gq_m' ORDER BY d.name;
+----
+gq_m	name
+gq_m	region
+
+query T
+WITH d AS (SHOW SEMANTIC METRICS IN gq_m) SELECT name FROM d ORDER BY name;
+----
+orders
+revenue
+
+# All the SHOW SEMANTIC VIEWS clauses together
+query T
+SELECT name FROM (SHOW SEMANTIC VIEWS LIKE 'gq%' IN SCHEMA main STARTS WITH 'gq_m' LIMIT 1);
+----
+gq_m
+
+# --- IN <schema>.<view> where the schema is named like a scope keyword ---------
+# ACCOUNT, SCHEMA and DATABASE are not reserved, so each can name a schema.
+# `IN account.v` is that schema's view, as it is for the parser override; the
+# grammar used to take the keyword as the scope and fail on `.v`.
+
+statement ok
+CREATE SCHEMA account;
+
+statement ok
+CREATE SCHEMA schema;
+
+statement ok
+CREATE SCHEMA database;
+
+statement ok
+CREATE SEMANTIC VIEW account.v AS TABLES (t AS gq_t PRIMARY KEY (id)) DIMENSIONS (t.acct_region AS t.region);
+
+statement ok
+CREATE SEMANTIC VIEW schema.v AS TABLES (t AS gq_t PRIMARY KEY (id)) DIMENSIONS (t.sch_region AS t.region);
+
+statement ok
+CREATE SEMANTIC VIEW database.v AS TABLES (t AS gq_t PRIMARY KEY (id)) DIMENSIONS (t.db_region AS t.region);
+
+query T
+SELECT name FROM (SHOW SEMANTIC DIMENSIONS IN account.v);
+----
+acct_region
+
+query T
+SELECT name FROM (SHOW SEMANTIC DIMENSIONS IN schema.v);
+----
+sch_region
+
+query T
+SELECT name FROM (SHOW SEMANTIC DIMENSIONS IN database.v);
+----
+db_region
+
+query T
+SELECT name FROM (SHOW SEMANTIC DIMENSIONS IN memory.account.v);
+----
+acct_region
+
+# The keywords followed by a space are still scopes.
+query T
+SELECT name FROM (SHOW SEMANTIC VIEWS IN SCHEMA account);
+----
+v
+
+query T rowsort
+SELECT schema_name FROM (SHOW SEMANTIC VIEWS IN ACCOUNT) WHERE name = 'v';
+----
+account
+database
+schema
+
+# A scope name spelled like the start of a clause is a name (TECH-DEBT #102).
+query I
+SELECT count(*) FROM (SHOW SEMANTIC VIEWS IN SCHEMA starts);
+----
+0
+
+statement ok
+SHOW SEMANTIC VIEWS IN SCHEMA starts;
+
+statement ok
+DROP SEMANTIC VIEW account.v;
+
+statement ok
+DROP SEMANTIC VIEW schema.v;
+
+statement ok
+DROP SEMANTIC VIEW database.v;
+
+# --- the extension's own errors, raised from inside a subquery -------------------
+
+statement error
+SELECT * FROM (SHOW SEMANTIC METRICS IN gq_m FOR METRIC revenue);
+----
+FOR METRIC is only valid for SHOW SEMANTIC DIMENSIONS, not SHOW SEMANTIC METRICS
+
+statement error
+SELECT * FROM (SHOW SEMANTIC VIEWS LIMIT -1);
+----
+LIMIT must be a non-negative integer, got: '-1'
+
+# A leading '+' is accepted, as the parser override's integer parse accepts it.
+query I
+SELECT count(*) FROM (SHOW SEMANTIC VIEWS LIMIT +1);
+----
+1
+
+statement ok
+SHOW SEMANTIC VIEWS LIMIT +1;
+
+statement error
+SELECT * FROM (SHOW SEMANTIC VIEWS IN gq_m);
+----
+SHOW SEMANTIC VIEWS requires a scope
+
+statement error
+SELECT * FROM (DESCRIBE SEMANTIC VIEW gq_nope);
+----
+semantic view 'gq_nope' does not exist
+
+# A pattern is a plain '...' literal, as for the parser override: DuckDB's
+# string literal also takes $$...$$ and E'...', which the grammar refuses.
+statement error
+SELECT * FROM (SHOW SEMANTIC VIEWS LIKE $$gq%$$);
+----
+Expected single-quoted string
+
+statement error
+SELECT * FROM (SHOW SEMANTIC VIEWS STARTS WITH E'gq');
+----
+Expected single-quoted string
+
+statement error
+SELECT * FROM (SHOW SEMANTIC VIEWS IN SCHEMA STARTS WITH $$gq$$);
+----
+Expected single-quoted string
+
+statement error
+SELECT * FROM (SHOW SEMANTIC VIEWS IN DATABASE STARTS WITH $t$gq$t$);
+----
+Expected single-quoted string
+
+statement error
+SELECT * FROM (SHOW SEMANTIC DIMENSIONS LIKE $$r%$$ IN gq_m);
+----
+Expected single-quoted string
+
+statement error
+SHOW SEMANTIC VIEWS LIKE $$gq%$$;
+----
+Expected single-quoted string
+
+statement error
+SHOW SEMANTIC VIEWS IN SCHEMA main STARTS WITH E'gq';
+----
+Expected single-quoted string
+
+# A name is one run of text, as for the parser override: whitespace or a
+# comment inside a dotted name ends it, and the rest is reported. The rest
+# stops at the end of the SHOW, not of the query around it.
+statement error
+SELECT * FROM (DESCRIBE SEMANTIC VIEW main . gq_m);
+----
+Unexpected tokens after view name: '. gq_m'
+
+statement error
+DESCRIBE SEMANTIC VIEW main . gq_m;
+----
+Unexpected tokens after view name: '. gq_m'
+
+statement error
+SELECT * FROM (SHOW COLUMNS IN SEMANTIC VIEW main .gq_m);
+----
+Unexpected tokens after view name: '.gq_m'
+
+statement error
+SELECT * FROM (SHOW SEMANTIC DIMENSIONS IN main . gq_m);
+----
+Unexpected tokens: '. gq_m'. Usage: SHOW SEMANTIC DIMENSIONS [LIKE '<pattern>']
+
+statement error
+SELECT * FROM (SHOW SEMANTIC METRICS IN memory . main.gq_m LIMIT 1);
+----
+Unexpected tokens: '. main.gq_m LIMIT 1'. Usage: SHOW SEMANTIC METRICS [LIKE '<pattern>']
+
+statement error
+SELECT * FROM (SHOW SEMANTIC DIMENSIONS IN gq_m FOR METRIC o . revenue);
+----
+Unexpected tokens: '. revenue'. Usage: SHOW SEMANTIC DIMENSIONS [LIKE '<pattern>']
+
+statement error
+SELECT * FROM (SHOW SEMANTIC VIEWS IN SCHEMA memory . main);
+----
+Unexpected tokens: '. main'. Usage: SHOW SEMANTIC VIEWS [LIKE '<pattern>']
+
+statement error
+SHOW SEMANTIC VIEWS IN DATABASE memory/**/.main;
+----
+Unexpected tokens: '.main'. Usage: SHOW SEMANTIC VIEWS [LIKE '<pattern>']
+
+# Controls: the same names and patterns, written plainly.
+query T
+SELECT name FROM (SHOW SEMANTIC VIEWS LIKE 'gq_m' IN SCHEMA memory.main STARTS WITH 'gq');
+----
+gq_m
+
+query I
+SELECT count(*) FROM (SHOW SEMANTIC DIMENSIONS IN memory.main.gq_m FOR METRIC revenue);
+----
+2
+
+# --- the top-level statement is unchanged ----------------------------------------
+
+query I
+SELECT count(*) FROM (SHOW SEMANTIC VIEWS) WHERE name = 'gq_a';
+----
+1
+
+statement ok
+SHOW SEMANTIC VIEWS;
