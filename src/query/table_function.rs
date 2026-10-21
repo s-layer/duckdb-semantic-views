@@ -7,7 +7,8 @@ use crate::model::SemanticViewDefinition;
 use crate::util::suggest_closest;
 
 use super::error::QueryError;
-use super::wire::{build_execution_sql, parse_varchar_list, serialize_register_payload};
+use super::items::{aliases_for, Item, OutputColumns, RequestItems};
+use super::wire::{build_projected_execution_sql, parse_varchar_list, serialize_register_payload};
 
 // The raw C-API helpers moved to the always-compiled `raw_sql` module so the
 // read-side member-type probe (TECH-DEBT #51) can share them; re-exported here
@@ -76,6 +77,8 @@ pub unsafe extern "C" fn sv_semantic_view_bind_rust(
     facts_len: usize,
     where_ptr: *const u8,
     where_len: usize,
+    order_ptr: *const u8,
+    order_len: usize,
     out_ptr: *mut *mut u8,
     out_len: *mut usize,
     error_buf: *mut u8,
@@ -107,6 +110,8 @@ pub unsafe extern "C" fn sv_semantic_view_bind_rust(
                 facts_len,
                 where_ptr,
                 where_len,
+                order_ptr,
+                order_len,
             )
         },
     )
@@ -139,6 +144,8 @@ unsafe fn semantic_view_bind_body(
     facts_len: usize,
     where_ptr: *const u8,
     where_len: usize,
+    order_ptr: *const u8,
+    order_len: usize,
 ) -> Result<Vec<u8>, String> {
     use crate::ddl::read_ffi::{probe_catalog_table_present, read_str_arg};
 
@@ -154,6 +161,8 @@ unsafe fn semantic_view_bind_body(
         .map_err(|detail| format!("malformed `metrics` payload: {detail}"))?;
     let facts = parse_varchar_list(facts_ptr, facts_len)
         .map_err(|detail| format!("malformed `facts` payload: {detail}"))?;
+    let column_order = parse_varchar_list(order_ptr, order_len)
+        .map_err(|detail| format!("malformed `column_order` payload: {detail}"))?;
 
     // The `where_clause` named parameter is optional: the shim passes
     // (nullptr, 0) when the caller omitted it. An explicitly empty string is
@@ -195,28 +204,30 @@ unsafe fn semantic_view_bind_body(
 
     let def = SemanticViewDefinition::from_json(&view_name, &json_str)?;
 
-    let dimensions =
-        expand_wildcards(&dimensions, &def, &WildcardItemType::Dimension).map_err(|e| {
+    let invalid = |detail: String| {
+        QueryError::InvalidRequest {
+            view_name: view_name.clone(),
+            detail,
+        }
+        .to_string()
+    };
+    let items =
+        RequestItems::parse(&dimensions, &metrics, &facts, &column_order).map_err(invalid)?;
+    let expand_list = |list: &[Item], kind: &WildcardItemType| {
+        expand_wildcards(&RequestItems::members(list), &def, kind).map_err(|e| {
             QueryError::WildcardExpansion {
                 view_name: view_name.clone(),
                 detail: e,
             }
             .to_string()
-        })?;
-    let metrics = expand_wildcards(&metrics, &def, &WildcardItemType::Metric).map_err(|e| {
-        QueryError::WildcardExpansion {
-            view_name: view_name.clone(),
-            detail: e,
-        }
-        .to_string()
-    })?;
-    let facts = expand_wildcards(&facts, &def, &WildcardItemType::Fact).map_err(|e| {
-        QueryError::WildcardExpansion {
-            view_name: view_name.clone(),
-            detail: e,
-        }
-        .to_string()
-    })?;
+        })
+    };
+    let dimensions = expand_list(&items.dimensions, &WildcardItemType::Dimension)?;
+    let metrics = expand_list(&items.metrics, &WildcardItemType::Metric)?;
+    let facts = expand_list(&items.facts, &WildcardItemType::Fact)?;
+    let dimension_aliases = aliases_for(&items.dimensions, &dimensions).map_err(invalid)?;
+    let metric_aliases = aliases_for(&items.metrics, &metrics).map_err(invalid)?;
+    let fact_aliases = aliases_for(&items.facts, &facts).map_err(invalid)?;
 
     let req = QueryRequest {
         where_clause,
@@ -258,8 +269,16 @@ unsafe fn semantic_view_bind_body(
         (names, type_ids)
     };
 
-    // Build execution SQL with casts where needed (HUGEINT→BIGINT etc).
-    let execution_sql = build_execution_sql(&expanded_sql, &column_names, &column_type_ids);
+    // Lay the columns out as the items ask (aliases, column_order), and build
+    // the execution SQL with casts where needed (HUGEINT→BIGINT etc).
+    let output = OutputColumns::new(
+        &column_names,
+        [&dimension_aliases, &metric_aliases, &fact_aliases],
+        items.order,
+    )
+    .map_err(invalid)?;
+    let (column_names, column_type_ids, execution_sql) =
+        build_projected_execution_sql(&expanded_sql, &column_names, &column_type_ids, &output);
 
     // Serialise schema + execution_sql into a flat binary buffer.
     serialize_register_payload(&column_names, &column_type_ids, &execution_sql)

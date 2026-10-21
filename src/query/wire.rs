@@ -294,6 +294,50 @@ pub fn build_execution_sql(
     )
 }
 
+/// [`build_execution_sql`] for a request whose columns are renamed or
+/// reordered ([`OutputColumns`](super::items::OutputColumns)): the execution
+/// SQL, and the output's column names and type ids in output order.
+///
+/// When `output` is the expansion's own layout the SQL is
+/// [`build_execution_sql`]'s, byte for byte.
+#[must_use]
+pub fn build_projected_execution_sql(
+    expanded_sql: &str,
+    column_names: &[String],
+    column_type_ids: &[u32],
+    output: &super::items::OutputColumns,
+) -> (Vec<String>, Vec<u32>, String) {
+    if output.is_identity(column_names) {
+        return (
+            column_names.to_vec(),
+            column_type_ids.to_vec(),
+            build_execution_sql(expanded_sql, column_names, column_type_ids),
+        );
+    }
+    let mut names = Vec::with_capacity(output.columns.len());
+    let mut type_ids = Vec::with_capacity(output.columns.len());
+    let clauses: Vec<String> = output
+        .columns
+        .iter()
+        .map(|(src, name)| {
+            let tid = column_type_ids[*src];
+            names.push(name.clone());
+            type_ids.push(tid);
+            let source = quote_ident(&column_names[*src]);
+            let target = quote_ident(name);
+            match type_id_to_cast_sql(tid) {
+                Some(cast_type) => format!("{source}::{cast_type} AS {target}"),
+                None => format!("{source} AS {target}"),
+            }
+        })
+        .collect();
+    let sql = format!(
+        "SELECT {} FROM ({expanded_sql}) __sv_inner",
+        clauses.join(", ")
+    );
+    (names, type_ids, sql)
+}
+
 /// Serialize the inferred schema + execution SQL into the flat register wire
 /// format consumed by the C++ `semantic_view` bind:
 ///
@@ -541,6 +585,41 @@ mod tests {
         assert_eq!(
             out,
             "SELECT \"region\"::VARCHAR AS \"region\", \"amt\" FROM (SELECT region, amt FROM t) __sv_inner"
+        );
+    }
+
+    #[test]
+    fn a_projected_identity_is_the_plain_execution_sql() {
+        use super::super::items::{Group, OutputColumns};
+        let names = vec!["region".to_string(), "amt".to_string()];
+        let tids = vec![
+            ffi::DUCKDB_TYPE_DUCKDB_TYPE_VARCHAR,
+            ffi::DUCKDB_TYPE_DUCKDB_TYPE_DECIMAL,
+        ];
+        let out =
+            OutputColumns::new(&names, [&[None], &[None], &[]], Group::DEFAULT_ORDER).unwrap();
+        let (n, t, sql) = build_projected_execution_sql("SELECT 1", &names, &tids, &out);
+        assert_eq!(sql, build_execution_sql("SELECT 1", &names, &tids));
+        assert_eq!((n, t), (names, tids));
+    }
+
+    #[test]
+    fn a_projection_renames_and_reorders_the_columns() {
+        use super::super::items::{Group, OutputColumns};
+        let names = vec!["region".to_string(), "amt".to_string()];
+        let tids = vec![
+            ffi::DUCKDB_TYPE_DUCKDB_TYPE_VARCHAR,
+            ffi::DUCKDB_TYPE_DUCKDB_TYPE_DECIMAL,
+        ];
+        let order = [Group::Metrics, Group::Dimensions, Group::Facts];
+        let out =
+            OutputColumns::new(&names, [&[Some("R".to_string())], &[None], &[]], order).unwrap();
+        let (n, t, sql) = build_projected_execution_sql("SELECT 1", &names, &tids, &out);
+        assert_eq!(n, vec!["amt".to_string(), "R".to_string()]);
+        assert_eq!(t, vec![tids[1], tids[0]]);
+        assert_eq!(
+            sql,
+            "SELECT \"amt\" AS \"amt\", \"region\"::VARCHAR AS \"R\" FROM (SELECT 1) __sv_inner"
         );
     }
 

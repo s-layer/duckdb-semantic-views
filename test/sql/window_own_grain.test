@@ -147,6 +147,19 @@ SELECT * FROM semantic_view('wog_sv', metrics := ['seg_balance'], dimensions := 
 ----
 ENT	200
 
+# A subquery in the predicate is uncorrelated here too, though this path
+# evaluates the predicate inside a CTE of its own: `balance` is a name the
+# subquery has no table for, so it does not reach the customers' column.
+query TT rowsort
+SELECT * FROM semantic_view('wog_sv', metrics := ['seg_balance'], dimensions := ['segment'], where_clause := 'segment IN (SELECT ''ENT'')');
+----
+ENT	300
+
+statement error
+SELECT * FROM semantic_view('wog_sv', metrics := ['seg_balance'], dimensions := ['segment'], where_clause := 'EXISTS (SELECT 1 WHERE balance > 150)');
+----
+Referenced column "balance" was not found
+
 # ============================================================
 # Test 6: the boundary this increment keeps. Two window metrics whose inner
 # aggregates sit at DIFFERENT grains would need those grains joined before the

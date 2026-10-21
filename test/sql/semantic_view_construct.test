@@ -1,0 +1,405 @@
+# The SEMANTIC_VIEW(...) query construct: Snowflake's way of querying a
+# semantic view in FROM. It lowers to semantic_view(), so each case here checks
+# the construct reaches the same rows, and the clauses that semantic_view()
+# spells as named parameters: aliases, the clause order as the column order,
+# and WHERE as where_clause.
+
+require semantic_views
+
+statement ok
+CREATE TABLE svc_customers (id INTEGER, region VARCHAR);
+
+statement ok
+CREATE TABLE svc_orders (id INTEGER, customer_id INTEGER, amount DECIMAL(10,2), ordered_at DATE);
+
+statement ok
+INSERT INTO svc_customers VALUES (1, 'EU'), (2, 'US');
+
+statement ok
+INSERT INTO svc_orders VALUES
+  (10, 1, 100.00, DATE '2024-01-15'),
+  (11, 1,  50.00, DATE '2023-06-01'),
+  (12, 2,  70.00, DATE '2024-03-02');
+
+statement ok
+CREATE SEMANTIC VIEW svc_sv AS
+  TABLES (
+    o AS svc_orders PRIMARY KEY (id),
+    c AS svc_customers PRIMARY KEY (id)
+  )
+  RELATIONSHIPS (
+    order_customer AS o(customer_id) REFERENCES c
+  )
+  FACTS (
+    o.amt AS o.amount,
+    o.odate AS o.ordered_at
+  )
+  DIMENSIONS (
+    c.region AS c.region
+  )
+  METRICS (
+    o.revenue AS sum(o.amount),
+    o.orders AS count(*)
+  );
+
+# The construct and the function return the same rows.
+
+query TT rowsort
+SELECT * FROM SEMANTIC_VIEW(svc_sv DIMENSIONS c.region METRICS o.revenue);
+----
+EU	150.00
+US	70.00
+
+query TT rowsort
+SELECT * FROM semantic_view('svc_sv', dimensions := ['c.region'], metrics := ['o.revenue']);
+----
+EU	150.00
+US	70.00
+
+# Keywords and the construct's name are case-insensitive, and the view name
+# may be qualified.
+
+query TT rowsort
+select * from semantic_view(main.svc_sv dimensions region metrics revenue);
+----
+EU	150.00
+US	70.00
+
+# The clause order is the column order: METRICS first puts the metric first.
+
+query TT rowsort
+SELECT * FROM SEMANTIC_VIEW(svc_sv METRICS revenue DIMENSIONS region);
+----
+150.00	EU
+70.00	US
+
+query TTT rowsort
+SELECT * FROM SEMANTIC_VIEW(svc_sv METRICS revenue, orders DIMENSIONS region);
+----
+150.00	2	EU
+70.00	1	US
+
+# An alias names the output column, with or without AS, quoted or not.
+
+query TT rowsort
+SELECT r, total FROM SEMANTIC_VIEW(svc_sv DIMENSIONS region AS r METRICS revenue total);
+----
+EU	150.00
+US	70.00
+
+query T rowsort
+SELECT "My Region" FROM SEMANTIC_VIEW(svc_sv DIMENSIONS c.region AS "My Region" METRICS revenue);
+----
+EU
+US
+
+query T
+SELECT column_name FROM (DESCRIBE SELECT * FROM SEMANTIC_VIEW(svc_sv DIMENSIONS region AS "R" METRICS revenue AS Total)) ORDER BY column_name;
+----
+R
+Total
+
+# As in DuckDB, a string can be the alias, and AS needs no space before a
+# quoted one.
+
+query T
+SELECT column_name FROM (DESCRIBE SELECT * FROM SEMANTIC_VIEW(svc_sv DIMENSIONS region AS 'R' METRICS revenue)) ORDER BY column_name;
+----
+R
+revenue
+
+query T
+SELECT column_name FROM (DESCRIBE SELECT * FROM SEMANTIC_VIEW(svc_sv DIMENSIONS region AS"R" METRICS revenue)) ORDER BY column_name;
+----
+R
+revenue
+
+# A table alias, with column aliases, names the construct as it names any table.
+
+query TT rowsort
+SELECT s.a, s.b FROM SEMANTIC_VIEW(svc_sv DIMENSIONS region METRICS revenue) AS s(a, b);
+----
+EU	150.00
+US	70.00
+
+query TT rowsort
+SELECT s.region, s.revenue FROM SEMANTIC_VIEW(svc_sv DIMENSIONS region METRICS revenue) s;
+----
+EU	150.00
+US	70.00
+
+# It stands wherever a table can: in a join, a CTE and a subquery.
+
+query TTI rowsort
+SELECT s.region, s.revenue, x.n
+FROM SEMANTIC_VIEW(svc_sv DIMENSIONS region METRICS revenue) s
+JOIN (VALUES ('EU', 1), ('US', 2)) x(region, n) USING (region);
+----
+EU	150.00	1
+US	70.00	2
+
+query T
+WITH t AS (SELECT * FROM SEMANTIC_VIEW(svc_sv METRICS revenue)) SELECT revenue FROM t;
+----
+220.00
+
+query I
+SELECT count(*) FROM (SELECT * FROM SEMANTIC_VIEW(svc_sv DIMENSIONS region METRICS revenue));
+----
+2
+
+# WHERE filters the rows the metrics aggregate, as where_clause does: EU's
+# revenue is recomputed over the 2024 orders, not dropped.
+
+query TT rowsort
+SELECT * FROM SEMANTIC_VIEW(svc_sv DIMENSIONS region METRICS revenue WHERE odate >= DATE '2024-01-01');
+----
+EU	100.00
+US	70.00
+
+# A subquery in WHERE keeps its own names.
+
+query TT rowsort
+SELECT * FROM SEMANTIC_VIEW(svc_sv DIMENSIONS region METRICS revenue
+  WHERE region IN (SELECT region FROM svc_customers WHERE id = 1));
+----
+EU	150.00
+
+# A construct can stand in a subquery of another's WHERE. Its clauses and its
+# table alias are its own: the outer alias is s, and the inner query picks the
+# regions under 100 before the outer one totals them.
+
+query T
+SELECT s.revenue FROM SEMANTIC_VIEW(svc_sv METRICS revenue
+  WHERE region IN (SELECT r FROM SEMANTIC_VIEW(svc_sv DIMENSIONS region AS r METRICS revenue) AS z
+                   WHERE z.revenue < 100)) AS s;
+----
+70.00
+
+# Comments inside the construct are ignored.
+
+query TT rowsort
+SELECT * FROM SEMANTIC_VIEW(svc_sv /* the view */ DIMENSIONS region -- a dimension
+  METRICS revenue);
+----
+EU	150.00
+US	70.00
+
+# A table's wildcard names each of its public dimensions.
+
+query TT rowsort
+SELECT * FROM SEMANTIC_VIEW(svc_sv DIMENSIONS c.* METRICS revenue);
+----
+EU	150.00
+US	70.00
+
+# After a wildcard, an alias still finds its member when the item spells the
+# name in another case or quotes it: names match as DuckDB matches them.
+
+query TT rowsort
+SELECT r, revenue FROM SEMANTIC_VIEW(svc_sv DIMENSIONS c.*, REGION AS r METRICS revenue);
+----
+EU	150.00
+US	70.00
+
+query TT rowsort
+SELECT r, revenue FROM semantic_view('svc_sv', dimensions := ['c.*', '"region" AS r'], metrics := ['revenue']);
+----
+EU	150.00
+US	70.00
+
+statement error
+SELECT * FROM SEMANTIC_VIEW(svc_sv DIMENSIONS c.*, region AS a, REGION AS b METRICS revenue);
+----
+'region' is requested twice with different names
+
+# explain_semantic_view() refuses it too.
+
+statement error
+SELECT * FROM explain_semantic_view('svc_sv', dimensions := ['c.*', 'region AS a', 'REGION AS b'], metrics := ['revenue']);
+----
+'region' is requested twice with different names
+
+# A view over the construct stores the semantic_view() call, so it expands
+# against the semantic view's current definition each time it is queried.
+
+statement ok
+CREATE VIEW svc_by_region AS SELECT * FROM SEMANTIC_VIEW(svc_sv DIMENSIONS region METRICS revenue AS total);
+
+query TT rowsort
+SELECT region, total FROM svc_by_region;
+----
+EU	150.00
+US	70.00
+
+query I
+SELECT count(*) FROM duckdb_views() WHERE view_name = 'svc_by_region' AND contains(sql, 'semantic_view(''svc_sv''');
+----
+1
+
+statement ok
+DROP VIEW svc_by_region;
+
+# PIVOT takes the construct as its source, in both of DuckDB's spellings.
+
+query TT
+SELECT * FROM SEMANTIC_VIEW(svc_sv DIMENSIONS region METRICS revenue) PIVOT (sum(revenue) FOR region IN ('EU', 'US'));
+----
+150.00	70.00
+
+query TT
+PIVOT SEMANTIC_VIEW(svc_sv DIMENSIONS region METRICS revenue) ON region IN ('EU', 'US') USING sum(revenue);
+----
+150.00	70.00
+
+# Without IN, DuckDB 2.0 runs the PIVOT as several statements (it reads the
+# distinct `region` values from the construct first), whose result the runner
+# cannot compare, so it lands in a table that is queried instead.
+statement ok
+CREATE TABLE svc_pivoted AS PIVOT SEMANTIC_VIEW(svc_sv DIMENSIONS region METRICS revenue) ON region USING sum(revenue);
+
+query TT
+SELECT "EU", "US" FROM svc_pivoted;
+----
+150.00	70.00
+
+statement ok
+DROP TABLE svc_pivoted;
+
+# FACTS returns rows unaggregated, and its place among the clauses sets its
+# columns' place too.
+
+query TT rowsort
+SELECT * FROM SEMANTIC_VIEW(svc_sv FACTS amt DIMENSIONS region);
+----
+100.00	EU
+50.00	EU
+70.00	US
+
+# explain_semantic_view() takes aliases and column_order as semantic_view()
+# does.
+
+query I
+SELECT count(*) > 0 FROM explain_semantic_view('svc_sv', dimensions := ['region AS r'], metrics := ['revenue AS total'], column_order := ['metrics']);
+----
+true
+
+# column_order sets the lists' order for semantic_view(), case-insensitively; a
+# list it leaves out follows in the default order.
+
+query TT rowsort
+SELECT * FROM semantic_view('svc_sv', dimensions := ['region'], metrics := ['revenue'], column_order := ['metrics']);
+----
+150.00	EU
+70.00	US
+
+query TT rowsort
+SELECT * FROM semantic_view('svc_sv', dimensions := ['region'], facts := ['amt'], column_order := ['FACTS', 'dimensions']);
+----
+100.00	EU
+50.00	EU
+70.00	US
+
+# Errors.
+
+statement error
+SELECT * FROM semantic_view('svc_sv', dimensions := ['region'], metrics := ['revenue'], column_order := ['metrics', 'rows']);
+----
+column_order entry 'rows' must be one of 'dimensions', 'metrics' or 'facts'
+
+statement error
+SELECT * FROM semantic_view('svc_sv', dimensions := ['region'], metrics := ['revenue'], column_order := ['metrics', 'Metrics']);
+----
+column_order names 'metrics' twice
+
+statement error
+SELECT * FROM explain_semantic_view('svc_sv', dimensions := ['region'], column_order := ['rows']);
+----
+column_order entry 'rows' must be one of 'dimensions', 'metrics' or 'facts'
+
+statement error
+SELECT * FROM SEMANTIC_VIEW(svc_sv METRICS revenue METRICS orders);
+----
+METRICS given twice in SEMANTIC_VIEW(...)
+
+statement error
+SELECT * FROM SEMANTIC_VIEW(svc_sv DIMENSIONS METRICS revenue);
+----
+DIMENSIONS needs at least one item
+
+statement error
+SELECT * FROM SEMANTIC_VIEW(svc_sv DIMENSIONS region, METRICS revenue);
+----
+expected an item after ',' in DIMENSIONS
+
+statement error
+SELECT * FROM SEMANTIC_VIEW(svc_sv METRICS revenue WHERE region = 'EU', odate > DATE '2024-01-01');
+----
+WHERE takes one predicate; combine conditions with AND
+
+statement error
+PREPARE svc_p AS SELECT * FROM SEMANTIC_VIEW(svc_sv METRICS revenue WHERE region = ?);
+----
+TECH-DEBT #105
+
+statement error
+SELECT * FROM SEMANTIC_VIEW(svc_sv DIMENSIONS region METRICS revenue AS region);
+----
+two columns of the query are named
+
+statement error
+SELECT * FROM SEMANTIC_VIEW(svc_sv DIMENSIONS c.* AS x METRICS revenue);
+----
+gives a wildcard an alias
+
+statement error
+SELECT * FROM SEMANTIC_VIEW(svc_sv DIMENSIONS upper(region) METRICS revenue);
+----
+expressions in a query item are not supported yet (TECH-DEBT #76)
+
+# A query a materialization answers is renamed and reordered too. The
+# materialization's totals differ from the base rows', so the values show the
+# query was routed to it.
+
+statement ok
+CREATE TABLE svc_region_agg (region VARCHAR, revenue DECIMAL(10,2));
+
+statement ok
+INSERT INTO svc_region_agg VALUES ('EU', 1.00), ('US', 2.00);
+
+statement ok
+CREATE SEMANTIC VIEW svc_mat AS
+  TABLES (o AS svc_orders PRIMARY KEY (id), c AS svc_customers PRIMARY KEY (id))
+  RELATIONSHIPS (order_customer AS o(customer_id) REFERENCES c)
+  DIMENSIONS (c.region AS c.region)
+  METRICS (o.revenue AS sum(o.amount))
+  MATERIALIZATIONS (by_region AS (TABLE svc_region_agg, DIMENSIONS (region), METRICS (revenue)));
+
+query TT rowsort
+SELECT * FROM SEMANTIC_VIEW(svc_mat METRICS revenue AS total DIMENSIONS region AS r);
+----
+1.00	EU
+2.00	US
+
+query T
+SELECT column_name FROM (DESCRIBE SELECT * FROM SEMANTIC_VIEW(svc_mat METRICS revenue AS total DIMENSIONS region AS r));
+----
+total
+r
+
+statement ok
+DROP SEMANTIC VIEW svc_mat;
+
+statement ok
+DROP TABLE svc_region_agg;
+
+# Cleanup
+
+statement ok
+DROP SEMANTIC VIEW svc_sv;
+
+statement ok
+DROP TABLE svc_orders;
+
+statement ok
+DROP TABLE svc_customers;

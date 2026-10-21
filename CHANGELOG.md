@@ -35,6 +35,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   that names a view with an unquoted reserved word (`select`) still fails there with
   "parser_override is not active"; quote the name to run it.
 
+- **The `SEMANTIC_VIEW(...)` query construct.** You can query a semantic view the way
+  Snowflake does, in `FROM`:
+  `SELECT * FROM SEMANTIC_VIEW(sales DIMENSIONS c.region AS r METRICS o.revenue WHERE o.year = 2024)`.
+  It stands wherever a table can: in joins, CTEs, subqueries, `PIVOT` and view bodies, with
+  a table alias and column aliases. Clauses can come in any order, and the order you write
+  them in is the order of the columns. `WHERE` filters the rows the metrics aggregate, as
+  `where_clause` does. A view over the construct expands against the semantic view's
+  current definition each time it is queried. Items are member names or `<table>.*`
+  wildcards for now; expressions are not supported yet. A prepared statement's `?`
+  parameter inside the construct is refused with an error.
+
+- **Output names and column order for `semantic_view()`.** A `dimensions`, `metrics` or
+  `facts` item can name its output column with `AS`, as in `'o.region AS r'`, and the new
+  `column_order` parameter (for example `['metrics', 'dimensions']`) sets which list's
+  columns come first. Two columns with the same name are an error.
+
 ### Changed
 
 - **`GET_DDL` and `READ_YAML_FROM_SEMANTIC_VIEW` follow `search_path`.** An unqualified
@@ -52,6 +68,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   be queried, and `GET_DDL` either failed on it or returned DDL that `CREATE` refused. A
   YAML export of a view stored in the legacy format, which lists no tables, can no longer be
   imported either; re-create that view with `CREATE OR REPLACE SEMANTIC VIEW`.
+
+- **A member named with the word `as` has to be quoted in a `semantic_view()` list item.**
+  Since an item can now give its column an alias with `AS`, a member whose name contains
+  the word `as` on its own (`Sales as of`) has to be quoted there (`'"Sales as of"'`).
+  Names with spaces otherwise work unquoted as before.
+
+- **A member name inside a `where_clause` subquery is the subquery's own.** Before, a
+  member could be named inside a subquery to correlate it with the outer query, as in
+  `EXISTS (SELECT 1 FROM t WHERE t.k = region)`. Now `region` there refers to the
+  subquery's own tables, as in Snowflake, where the `WHERE` clause takes uncorrelated
+  subqueries. A subquery sees none of the semantic view's tables, so a name its own tables
+  lack is DuckDB's `Referenced column ... not found` error. Write a condition on the member
+  outside the subquery.
+
+### Fixed
+
+- **A subquery in `where_clause` keeps its own names.** A name inside a subquery, such as
+  `amt` in `amt IN (SELECT amt FROM targets)`, was replaced with the member of that name, so
+  the subquery compared each row with itself and filtered nothing, or failed to parse. Names
+  inside a subquery now refer to the subquery's own tables, as in Snowflake, where the
+  `WHERE` clause takes uncorrelated subqueries.
 
 ## [0.15.0] - 2026-10-21
 

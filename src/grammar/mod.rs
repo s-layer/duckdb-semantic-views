@@ -8,6 +8,9 @@
 //! [`tree`]), calls [`transform`] through `sv_grammar_transform_rust`, and
 //! parses the SQL that comes back with the builtin parser.
 //!
+//! The `SEMANTIC_VIEW(...)` query construct ([`query`]) is a table reference
+//! rather than a statement, and only the grammar has it.
+//!
 //! The parser override still runs first and still owns every statement that
 //! starts with our syntax. The grammar takes what the override cannot reach,
 //! such as SHOW inside a subquery, and everything when overrides are off
@@ -16,6 +19,7 @@
 //! Phase 3).
 
 mod create;
+mod query;
 mod show;
 pub(crate) mod tree;
 mod write;
@@ -38,6 +42,11 @@ pub(crate) enum Shape {
     /// A statement (a `SQLStatement`, several as one `MultiStatement`): an
     /// alternative of `Statement`, so it stands only at the top level.
     Statement,
+    /// A table reference (a `TableRef`): an alternative of `InnerTableRef`, so
+    /// it parses wherever a table can, joins and `LATERAL` included. Whether a
+    /// reference to an outer column then binds is up to what the production
+    /// lowers to: for `SEMANTIC_VIEW(...)` it does not yet (TECH-DEBT #107).
+    TableRef,
 }
 
 impl Shape {
@@ -45,6 +54,7 @@ impl Shape {
         match self {
             Self::Query => "query",
             Self::Statement => "statement",
+            Self::TableRef => "tableref",
         }
     }
 
@@ -53,6 +63,7 @@ impl Shape {
         match self {
             Self::Query => "DescribeStatement",
             Self::Statement => "Statement",
+            Self::TableRef => "InnerTableRef",
         }
     }
 }
@@ -76,11 +87,17 @@ pub(crate) fn changes() -> String {
                 .chain(create::STATEMENTS)
                 .map(|rule| (*rule, Shape::Statement)),
         )
+        .chain(
+            query::TABLE_REFS
+                .iter()
+                .map(|rule| (*rule, Shape::TableRef)),
+        )
         .collect();
     let definitions = show::RULES
         .lines()
         .chain(write::RULES.lines())
-        .chain(create::RULES.lines());
+        .chain(create::RULES.lines())
+        .chain(query::RULES.lines());
     for definition in definitions.map(str::trim).filter(|l| !l.is_empty()) {
         let name = definition.split_whitespace().next().unwrap_or_default();
         let shape = statements
@@ -113,6 +130,9 @@ pub(crate) fn transform(tree: &Tree) -> Result<RewriteAction, ParseError> {
     }
     if is(create::STATEMENTS) {
         return create::transform(tree);
+    }
+    if is(query::TABLE_REFS) {
+        return query::transform(tree).map(RewriteAction::Passthrough);
     }
     Err(ParseError {
         message: format!("semantic_views grammar: no transform for rule '{rule}'"),
@@ -314,6 +334,15 @@ mod tests {
                 "{rule} is not defined as a statement rule"
             );
             assert!(text.contains(&format!("PREPEND\tStatement\t{rule}\n")));
+        }
+        for rule in super::query::TABLE_REFS {
+            assert!(
+                text.lines().any(
+                    |l| l.starts_with(&format!("RULE\t{rule} <-")) && l.ends_with("\ttableref")
+                ),
+                "{rule} is not defined as a table-reference rule"
+            );
+            assert!(text.contains(&format!("PREPEND\tInnerTableRef\t{rule}\n")));
         }
     }
 

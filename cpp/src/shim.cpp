@@ -366,6 +366,7 @@ extern "C" {
         const uint8_t *metrics_ptr, size_t metrics_len,
         const uint8_t *facts_ptr, size_t facts_len,
         const uint8_t *where_ptr, size_t where_len,
+        const uint8_t *order_ptr, size_t order_len,
         char **out_ptr, size_t *out_len,
         char *error_buf, size_t error_buf_len);
 
@@ -396,6 +397,7 @@ extern "C" {
         const uint8_t *metrics_ptr, size_t metrics_len,
         const uint8_t *facts_ptr, size_t facts_len,
         const uint8_t *where_ptr, size_t where_len,
+        const uint8_t *order_ptr, size_t order_len,
         char **out_ptr, size_t *out_len,
         char *error_buf, size_t error_buf_len);
 }
@@ -889,7 +891,10 @@ static const std::vector<SvFunctionDoc> &sv_function_docs() {
          "Queries a semantic view: returns the requested dimensions, metrics "
          "and/or facts, generating the joins and GROUP BY from the view "
          "definition. Pass at least one of dimensions, metrics or facts; "
-         "where_clause filters rows before aggregation.",
+         "an item may name its column ('region AS r'). where_clause filters "
+         "rows before aggregation, and column_order (e.g. ['metrics', "
+         "'dimensions']) sets the order of the columns. The SEMANTIC_VIEW(...) "
+         "construct is the same query written as SQL.",
          {"SELECT * FROM semantic_view('sales', dimensions := ['region'], "
           "metrics := ['revenue']);"},
          {"semantic_views", "query"}},
@@ -1102,6 +1107,12 @@ static std::vector<std::pair<std::string, LogicalType>> sv_semantic_named_params
         // DuckDB's parser reserves that keyword in named-parameter position:
         // `where := '…'` is a syntax error before the binder ever sees it.
         {"where_clause", LogicalType::VARCHAR},
+        // The order the item lists' columns come out in, e.g. ['metrics',
+        // 'dimensions']: Snowflake's SEMANTIC_VIEW(...) sets column order by
+        // the order its clauses are written in, and the construct lowers to
+        // this function. Lists left out follow in the default order
+        // (dimensions, metrics, facts).
+        {"column_order", list_varchar},
         // An explicit schema resolution order. Without it the bind reads the
         // caller's search path off its ClientContext (`sv_caller_search_path`).
         // Kept, reserved, because views stored by earlier releases carry the
@@ -3068,6 +3079,11 @@ static unique_ptr<FunctionData> sv_explain_semantic_view_bind(
     if (it_f != input.named_parameters.end() && !it_f->second.IsNull()) {
         facts_buf = sv_serialise_string_list(it_f->second, "facts");
     }
+    std::vector<uint8_t> order_buf;
+    auto it_o = input.named_parameters.find("column_order");
+    if (it_o != input.named_parameters.end() && !it_o->second.IsNull()) {
+        order_buf = sv_serialise_string_list(it_o->second, "column_order");
+    }
 
     // Scalar VARCHAR, not a list — passed to Rust as a plain UTF-8 ptr/len.
     // Absent or NULL yields (nullptr, 0), which the Rust side reads as "no
@@ -3099,6 +3115,7 @@ static unique_ptr<FunctionData> sv_explain_semantic_view_bind(
         facts_buf.empty()   ? nullptr : facts_buf.data(),   facts_buf.size(),
         where_clause.empty() ? nullptr : reinterpret_cast<const uint8_t *>(where_clause.data()),
         where_clause.size(),
+        order_buf.empty()   ? nullptr : order_buf.data(),   order_buf.size(),
         &payload.ptr, &payload.len,
         error_buf, sizeof(error_buf));
     cancellation.ThrowIfCancelled();
@@ -3511,6 +3528,11 @@ static unique_ptr<FunctionData> sv_semantic_view_bind(
     if (it_f != input.named_parameters.end() && !it_f->second.IsNull()) {
         facts_buf = sv_serialise_string_list(it_f->second, "facts");
     }
+    std::vector<uint8_t> order_buf;
+    auto it_o = input.named_parameters.find("column_order");
+    if (it_o != input.named_parameters.end() && !it_o->second.IsNull()) {
+        order_buf = sv_serialise_string_list(it_o->second, "column_order");
+    }
 
     // Scalar VARCHAR, not a list — passed to Rust as a plain UTF-8 ptr/len.
     // Absent or NULL yields (nullptr, 0), which the Rust side reads as "no
@@ -3543,6 +3565,7 @@ static unique_ptr<FunctionData> sv_semantic_view_bind(
         facts_buf.empty()   ? nullptr : facts_buf.data(),   facts_buf.size(),
         where_clause.empty() ? nullptr : reinterpret_cast<const uint8_t *>(where_clause.data()),
         where_clause.size(),
+        order_buf.empty()   ? nullptr : order_buf.data(),   order_buf.size(),
         &payload.ptr, &payload.len,
         error_buf, sizeof(error_buf));
     cancellation.ThrowIfCancelled();
@@ -3993,6 +4016,26 @@ static arena_ptr<TransformProcess> sv_grammar_start_query(PEGTransformer &transf
     return transformer.MakeProcess<FinalizeTransformProcess>(transformer, pr, sv_grammar_finalize_query);
 }
 
+// A table reference (`SEMANTIC_VIEW(...)`) lowers to `SELECT * FROM <ref>`,
+// whose FROM is the table reference, alias included.
+static arena_ptr<TransformResultValue> sv_grammar_finalize_tableref(PEGTransformer &transformer,
+                                                                    ParseResult &pr) {
+    auto statements = sv_grammar_lower(transformer, pr);
+    if (statements.size() != 1 || statements[0]->type != StatementType::SELECT_STATEMENT) {
+        throw InternalException("semantic_views grammar: rule %s did not lower to one query", pr.Name());
+    }
+    auto &node = statements[0]->Cast<SelectStatement>().node;
+    if (!node || node->type != QueryNodeType::SELECT_NODE || !node->Cast<SelectNode>().from_table) {
+        throw InternalException("semantic_views grammar: rule %s did not lower to a table reference", pr.Name());
+    }
+    auto table = std::move(node->Cast<SelectNode>().from_table);
+    return transformer.MakeResult<unique_ptr<TableRef>>(std::move(table));
+}
+
+static arena_ptr<TransformProcess> sv_grammar_start_tableref(PEGTransformer &transformer, ParseResult &pr) {
+    return transformer.MakeProcess<FinalizeTransformProcess>(transformer, pr, sv_grammar_finalize_tableref);
+}
+
 // The variable a guard's value goes into (sv_grammar_finalize_statement).
 static const char *SV_GRAMMAR_GUARD_VARIABLE = "__semantic_views_guard";
 
@@ -4042,7 +4085,8 @@ static arena_ptr<TransformProcess> sv_grammar_start_statement(PEGTransformer &tr
 class SemanticViewsGrammar final : public GrammarExtension {
 public:
     explicit SemanticViewsGrammar(vector<GrammarChange> changes_p)
-        : GrammarExtension(SV_GRAMMAR_NAME, "CREATE / ALTER / DROP / SHOW / DESCRIBE SEMANTIC VIEW syntax"),
+        : GrammarExtension(SV_GRAMMAR_NAME,
+                           "CREATE / ALTER / DROP / SHOW / DESCRIBE SEMANTIC VIEW and SEMANTIC_VIEW(...) syntax"),
           changes(std::move(changes_p)) {
     }
     vector<GrammarChange> GetChanges() const override {
@@ -4071,6 +4115,8 @@ static vector<GrammarChange> sv_grammar_changes() {
                 changes.push_back(GrammarChange::AddRule(fields[1], sv_grammar_start_query));
             } else if (shape == "statement") {
                 changes.push_back(GrammarChange::AddRule(fields[1], sv_grammar_start_statement));
+            } else if (shape == "tableref") {
+                changes.push_back(GrammarChange::AddRule(fields[1], sv_grammar_start_tableref));
             } else if (shape.empty()) {
                 changes.push_back(GrammarChange::AddRule(fields[1]));
             } else {

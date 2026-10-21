@@ -22,7 +22,9 @@
 
 use std::collections::{HashMap, HashSet};
 
-use crate::expr_tokens::{inline_references, scan_references};
+use crate::expr_tokens::{
+    inline_references_outside_subqueries, scan_references_outside_subqueries,
+};
 use crate::ident::normalize_ident_part;
 use crate::model::SemanticViewDefinition;
 
@@ -194,6 +196,11 @@ pub(super) fn resolve_where_clause(
     def: &SemanticViewDefinition,
     raw: &str,
 ) -> Result<ResolvedWhere, ExpandError> {
+    // Comments are blanked first, as at every parse entry point (PA-7): the
+    // scanners below then see no comment, so none can hide a bracket or a
+    // name from them. Offsets are kept, so carets still point into `raw`.
+    let blanked = crate::util::blank_sql_comments(raw);
+    let raw = blanked.as_ref();
     // Member lookup tables, keyed the same way `inline_references` keys its
     // replacements so FIND and SPLICE agree.
     //
@@ -243,7 +250,7 @@ pub(super) fn resolve_where_clause(
     let mut source_tables: Vec<String> = Vec::new();
     let mut members: Vec<WhereMember> = Vec::new();
     let mut seen_members: HashSet<String> = HashSet::new();
-    for r in scan_references(raw) {
+    for r in scan_references_outside_subqueries(raw) {
         let key = r.key();
         if let Some(table) = member_tables.get(&key) {
             if let Some(t) = table {
@@ -303,10 +310,73 @@ pub(super) fn resolve_where_clause(
         .map(|(k, v)| (k.clone(), v.as_str()))
         .collect();
     Ok(ResolvedWhere {
-        sql: inline_references(raw, &borrowed),
+        sql: inline_references_outside_subqueries(raw, &borrowed),
         source_tables,
         members,
     })
+}
+
+/// The predicate with each subquery moved out into a CTE of the expansion.
+#[derive(Debug, PartialEq, Eq)]
+pub(super) struct HoistedWhere {
+    /// The predicate, each subquery replaced by `(SELECT * FROM __sv_sqN)`.
+    pub(super) predicate: String,
+    /// `__sv_sqN AS (<subquery>)`, one per subquery, in order.
+    pub(super) ctes: Vec<String>,
+}
+
+/// Move each subquery of a `where_clause` into a CTE of its own, so that it
+/// is uncorrelated as in Snowflake.
+///
+/// Inside the expansion, a subquery written in the predicate can see the
+/// semantic view's tables, so a name its own tables lack bound to a raw column
+/// of the view (the stored `c.region`, not the dimension `lower(c.region)`)
+/// and the query silently filtered on the wrong value. A CTE at the top of the
+/// expansion sees no table of the query that follows it, so the same name is
+/// "not found", as in a query of its own. A CTE still sees the CTEs before it
+/// and, inside a caller's query, what the caller's scope offers.
+///
+/// Comments are blanked first, so none ends inside a CTE's brackets. A `(`
+/// without its `)` is left in place for `DuckDB` to report.
+pub(super) fn hoist_subqueries(raw: &str) -> HoistedWhere {
+    let blanked = crate::util::blank_sql_comments(raw);
+    let text = blanked.as_ref();
+    let mut predicate = String::with_capacity(text.len());
+    let mut ctes = Vec::new();
+    let mut copied = 0;
+    for (start, end) in crate::expr_tokens::subquery_spans(text) {
+        if !text[..end].ends_with(')') {
+            continue;
+        }
+        let name = format!("__sv_sq{}", ctes.len());
+        ctes.push(format!("{name} AS ({})", &text[start + 1..end - 1]));
+        predicate.push_str(&text[copied..start]);
+        predicate.push_str("(SELECT * FROM ");
+        predicate.push_str(&name);
+        predicate.push(')');
+        copied = end;
+    }
+    if ctes.is_empty() {
+        return HoistedWhere {
+            predicate: raw.to_string(),
+            ctes,
+        };
+    }
+    predicate.push_str(&text[copied..]);
+    HoistedWhere { predicate, ctes }
+}
+
+/// `sql` with `ctes` ahead of it: merged into its own `WITH` when it has one,
+/// so they come first and every later CTE can read them.
+pub(super) fn with_ctes(sql: &str, ctes: &[String]) -> String {
+    if ctes.is_empty() {
+        return sql.to_string();
+    }
+    let ours = ctes.join(",\n");
+    match sql.strip_prefix("WITH ") {
+        Some(rest) => format!("WITH {ours},\n{rest}"),
+        None => format!("WITH {ours}\n{sql}"),
+    }
 }
 
 #[cfg(test)]
@@ -639,5 +709,300 @@ mod tests {
                 "blank predicate {blank:?} must emit no WHERE: {sql}"
             );
         }
+    }
+
+    // A subquery in the predicate is its own scope: Snowflake's `WHERE` takes
+    // uncorrelated subqueries, and a name inside one is that subquery's column,
+    // not a member. Substituting it turned `region IN (SELECT region FROM
+    // regions)` into `(c.region) IN (SELECT (c.region) FROM regions)`, a
+    // correlated subquery that compares each row with itself.
+
+    #[test]
+    fn a_member_name_inside_a_subquery_is_left_to_the_subquery() {
+        let r =
+            resolve_where_clause("v", &def(), "region IN (SELECT region FROM regions)").unwrap();
+        assert_eq!(r.sql, "(c.region) IN (SELECT region FROM regions)");
+        assert_eq!(r.source_tables, vec!["c"]);
+        assert_eq!(r.members.len(), 1, "{:?}", r.members);
+    }
+
+    #[test]
+    fn a_from_first_subquery_is_a_subquery_too() {
+        let r =
+            resolve_where_clause("v", &def(), "region IN (FROM regions SELECT region)").unwrap();
+        assert_eq!(r.sql, "(c.region) IN (FROM regions SELECT region)");
+    }
+
+    #[test]
+    fn a_subquery_with_a_cte_is_a_subquery_too() {
+        let r = resolve_where_clause(
+            "v",
+            &def(),
+            "order_date > ( WITH d AS (SELECT order_date FROM t) SELECT max(order_date) FROM d)",
+        )
+        .unwrap();
+        assert_eq!(
+            r.sql,
+            "(o.ordered_at) > ( WITH d AS (SELECT order_date FROM t) SELECT max(order_date) FROM d)"
+        );
+        assert_eq!(r.source_tables, vec!["o"]);
+    }
+
+    #[test]
+    fn a_metric_name_inside_a_subquery_is_not_a_metric_reference() {
+        let r = resolve_where_clause("v", &def(), "region IN (SELECT revenue FROM t)").unwrap();
+        assert_eq!(r.sql, "(c.region) IN (SELECT revenue FROM t)");
+    }
+
+    /// A member name can't correlate a subquery with the outer query: inside
+    /// the subquery it is the subquery's own name, as in Snowflake, whose
+    /// `WHERE` takes uncorrelated subqueries (CHANGELOG).
+    #[test]
+    fn a_member_name_does_not_correlate_a_subquery() {
+        let r = resolve_where_clause("v", &def(), "EXISTS (SELECT 1 FROM t WHERE t.k = region)")
+            .unwrap();
+        assert_eq!(r.sql, "EXISTS (SELECT 1 FROM t WHERE t.k = region)");
+        assert!(r.source_tables.is_empty(), "{:?}", r.source_tables);
+    }
+
+    /// `semantic_view()`'s `where_clause` reaches here with its comments, which
+    /// are blanked before the scan.
+    #[test]
+    fn a_subquery_with_a_comment_before_its_select_is_a_subquery() {
+        let r =
+            resolve_where_clause("v", &def(), "region IN (/* r */ SELECT region FROM t)").unwrap();
+        assert_eq!(r.sql, "(c.region) IN (        SELECT region FROM t)");
+    }
+
+    #[test]
+    fn a_subquery_with_a_line_comment_before_its_select_is_a_subquery() {
+        let r =
+            resolve_where_clause("v", &def(), "region IN ( -- r\n SELECT region FROM t)").unwrap();
+        assert_eq!(r.sql, "(c.region) IN (     \n SELECT region FROM t)");
+    }
+
+    /// A `(` in a comment opens nothing: the names after the comment are the
+    /// predicate's, so they are still members. Comments come out blanked.
+    #[test]
+    fn a_bracket_in_a_comment_before_the_predicate_opens_no_subquery() {
+        let r = resolve_where_clause("v", &def(), "/* (select EU only */ region = 'EU'").unwrap();
+        assert_eq!(r.sql, "                      (c.region) = 'EU'");
+        assert_eq!(r.source_tables, vec!["c"]);
+    }
+
+    #[test]
+    fn a_bracket_in_a_line_comment_before_the_predicate_opens_no_subquery() {
+        let r = resolve_where_clause("v", &def(), "-- (select EU only\nregion = 'EU'").unwrap();
+        assert_eq!(r.sql, "                  \n(c.region) = 'EU'");
+    }
+
+    /// A `)` in a comment inside a subquery does not end it: the name after the
+    /// comment is still the subquery's own.
+    #[test]
+    fn a_bracket_in_a_comment_inside_a_subquery_does_not_end_it() {
+        let r = resolve_where_clause(
+            "v",
+            &def(),
+            "region IN (SELECT r /* ) */ FROM t WHERE region = 1)",
+        )
+        .unwrap();
+        assert_eq!(
+            r.sql,
+            "(c.region) IN (SELECT r         FROM t WHERE region = 1)"
+        );
+    }
+
+    #[test]
+    fn a_bracket_in_a_line_comment_inside_a_subquery_does_not_end_it() {
+        let r = resolve_where_clause(
+            "v",
+            &def(),
+            "region IN (SELECT r -- )\n FROM t WHERE region = 1)",
+        )
+        .unwrap();
+        assert_eq!(
+            r.sql,
+            "(c.region) IN (SELECT r     \n FROM t WHERE region = 1)"
+        );
+    }
+
+    /// A bare `\r` ends a line comment, as in `DuckDB`: the `)` after it closes
+    /// the subquery, so the name after that is the predicate's.
+    #[test]
+    fn a_carriage_return_ends_a_line_comment_inside_a_subquery() {
+        let r = resolve_where_clause(
+            "v",
+            &def(),
+            "region IN (SELECT r FROM t -- note\r) AND order_date > DATE '2024-01-01'",
+        )
+        .unwrap();
+        assert!(
+            r.sql.ends_with(") AND (o.ordered_at) > DATE '2024-01-01'"),
+            "{}",
+            r.sql
+        );
+        assert_eq!(r.source_tables, vec!["c", "o"]);
+    }
+
+    /// Brackets nested deeper than any stack would hold are scanned without
+    /// recursing on each one.
+    #[test]
+    fn deeply_nested_brackets_do_not_exhaust_the_stack() {
+        let depth = 200_000;
+        let predicate = format!("{}region = 'EU'{}", "(".repeat(depth), ")".repeat(depth));
+        let r = resolve_where_clause("v", &def(), &predicate).unwrap();
+        assert!(
+            r.sql.contains("(c.region) = 'EU'"),
+            "the member is still inlined"
+        );
+    }
+
+    /// A set operation whose first query is bracketed is one subquery: the
+    /// names after `UNION` are its own too.
+    #[test]
+    fn a_set_operation_with_a_bracketed_first_query_is_a_subquery() {
+        let r = resolve_where_clause(
+            "v",
+            &def(),
+            "region IN ((SELECT region FROM a) UNION SELECT region FROM b)",
+        )
+        .unwrap();
+        assert_eq!(
+            r.sql,
+            "(c.region) IN ((SELECT region FROM a) UNION SELECT region FROM b)"
+        );
+    }
+
+    /// A bracketed query that `ORDER BY`, `LIMIT` or `OFFSET` continues is one
+    /// subquery too.
+    #[test]
+    fn a_bracketed_query_with_order_by_or_limit_is_a_subquery() {
+        let wrong: Vec<String> = ["ORDER BY region", "LIMIT region", "OFFSET region"]
+            .iter()
+            .filter_map(|tail| {
+                let predicate = format!("region IN ((SELECT region FROM t) {tail})");
+                let sql = resolve_where_clause("v", &def(), &predicate).unwrap().sql;
+                (sql != format!("(c.region) IN ((SELECT region FROM t) {tail})")).then_some(sql)
+            })
+            .collect();
+        assert!(wrong.is_empty(), "{wrong:#?}");
+    }
+
+    /// Control: brackets around arithmetic on a scalar subquery hold an
+    /// expression, so the name outside the subquery is the member.
+    #[test]
+    fn brackets_around_a_scalar_subquery_expression_are_not_a_subquery() {
+        let r = resolve_where_clause(
+            "v",
+            &def(),
+            "order_date > ((SELECT max(order_date) FROM t) - order_date)",
+        )
+        .unwrap();
+        assert_eq!(
+            r.sql,
+            "(o.ordered_at) > ((SELECT max(order_date) FROM t) - (o.ordered_at))"
+        );
+    }
+
+    /// Control: parentheses that hold an expression, not a query, are part of
+    /// the predicate.
+    #[test]
+    fn parentheses_around_an_expression_are_not_a_subquery() {
+        let r = resolve_where_clause("v", &def(), "(region = 'x') AND (order_date > 1)").unwrap();
+        assert_eq!(r.sql, "((c.region) = 'x') AND ((o.ordered_at) > 1)");
+    }
+
+    // A subquery in the predicate is hoisted into a CTE ahead of the
+    // expansion, where the view's tables are out of its sight: a name its own
+    // tables lack is "not found" instead of binding to a raw column of the view.
+
+    #[test]
+    fn a_subquery_becomes_a_cte() {
+        let h = hoist_subqueries("region IN (SELECT code FROM t) AND order_date > 1");
+        assert_eq!(
+            h.predicate,
+            "region IN (SELECT * FROM __sv_sq0) AND order_date > 1"
+        );
+        assert_eq!(h.ctes, vec!["__sv_sq0 AS (SELECT code FROM t)"]);
+    }
+
+    #[test]
+    fn each_subquery_becomes_its_own_cte_and_a_nested_one_stays_inside() {
+        let h = hoist_subqueries(
+            "EXISTS (SELECT 1 FROM t WHERE k IN (SELECT k FROM u)) OR x = (FROM w SELECT max(x))",
+        );
+        assert_eq!(
+            h.predicate,
+            "EXISTS (SELECT * FROM __sv_sq0) OR x = (SELECT * FROM __sv_sq1)"
+        );
+        assert_eq!(
+            h.ctes,
+            vec![
+                "__sv_sq0 AS (SELECT 1 FROM t WHERE k IN (SELECT k FROM u))",
+                "__sv_sq1 AS (FROM w SELECT max(x))",
+            ]
+        );
+    }
+
+    /// Comments are blanked before hoisting: a line comment carried into a
+    /// CTE could otherwise hide its closing bracket.
+    #[test]
+    fn a_hoisted_subquery_carries_no_comment() {
+        let h = hoist_subqueries("x IN (SELECT k FROM t -- the keys\n)");
+        let blank = " ".repeat("-- the keys".len());
+        assert_eq!(
+            h.ctes,
+            vec![format!("__sv_sq0 AS (SELECT k FROM t {blank}\n)")]
+        );
+    }
+
+    #[test]
+    fn a_predicate_without_a_subquery_is_left_as_written() {
+        let raw = "(region = 'x') /* c */ AND f((1))";
+        let h = hoist_subqueries(raw);
+        assert_eq!(h.predicate, raw);
+        assert!(h.ctes.is_empty());
+    }
+
+    /// An unclosed subquery is left for `DuckDB` to report.
+    #[test]
+    fn an_unclosed_subquery_is_left_in_place() {
+        let h = hoist_subqueries("x IN (SELECT k FROM t");
+        assert_eq!(h.predicate, "x IN (SELECT k FROM t");
+        assert!(h.ctes.is_empty());
+    }
+
+    #[test]
+    fn hoisted_ctes_come_first_in_an_existing_with() {
+        let ctes = vec!["__sv_sq0 AS (SELECT 1)".to_string()];
+        assert_eq!(
+            with_ctes("WITH __sv_agg AS (SELECT 2)\nSELECT * FROM __sv_agg", &ctes),
+            "WITH __sv_sq0 AS (SELECT 1),\n__sv_agg AS (SELECT 2)\nSELECT * FROM __sv_agg"
+        );
+        assert_eq!(
+            with_ctes("SELECT 3", &ctes),
+            "WITH __sv_sq0 AS (SELECT 1)\nSELECT 3"
+        );
+        assert_eq!(with_ctes("SELECT 3", &[]), "SELECT 3");
+    }
+
+    #[test]
+    fn the_expansion_reads_a_predicate_subquery_from_its_cte() {
+        use crate::expand::{expand, MetricName, QueryRequest};
+        let req = QueryRequest {
+            dimensions: vec![],
+            metrics: vec![MetricName::new("revenue")],
+            facts: vec![],
+            where_clause: Some("region IN (SELECT region FROM regions)".to_string()),
+        };
+        let sql = expand("v", &def(), &req).unwrap();
+        assert!(
+            sql.starts_with("WITH __sv_sq0 AS (SELECT region FROM regions)\n"),
+            "{sql}"
+        );
+        assert!(
+            sql.contains("(c.region) IN (SELECT * FROM __sv_sq0)"),
+            "{sql}"
+        );
     }
 }

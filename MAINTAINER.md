@@ -90,6 +90,8 @@ src/
 │   ├── create.rs              #   CREATE [OR REPLACE] SEMANTIC VIEW: the body is taken by DuckDB's
 │   │                          #   any-token matcher (ANY_TOKEN rules), rebuilt at its query offsets
 │   │                          #   and planned by parse::plan_rewrite (TECH-DEBT #100)
+│   ├── query.rs               #   SEMANTIC_VIEW(...) in FROM (a table reference, an InnerTableRef
+│   │                          #   alternative), lowered to a semantic_view() call
 │   ├── ffi.rs                 #   FFI entry points: sv_grammar_changes_rust / sv_grammar_transform_rust
 │   └── mod.rs                 #   the rule list registered with DuckDB, and transform dispatch
 ├── graph/                     # Relationship graph: cardinality, join tree, toposort, derived-metric DAG
@@ -120,6 +122,8 @@ src/
 └── query/                     # Query interface
     ├── table_function.rs      #   semantic_view() — main table function (FFI-heavy, extension-only)
     ├── explain.rs             #   explain_semantic_view() — expanded SQL + EXPLAIN plan (extension-only)
+    ├── items.rs               #   Request items `<member> [[AS] alias]`, column_order and the output
+    │                          #   column layout they ask for (always compiled)
     ├── wire.rs                #   Pure wire-format/SQL-shape helpers (always compiled + unit-tested)
     ├── raw_sql.rs             #   Raw C-API query helpers: LIMIT-0 schema inference, DESCRIBE types, VARCHAR reads (always compiled)
     ├── member_types.rs        #   Read-side member type probe for SHOW/DESCRIBE `data_type` (TECH-DEBT #51; always compiled)
@@ -216,7 +220,7 @@ The crate has two Cargo feature configurations (think of features as build-time 
 
 This split exists because DuckDB loadable extensions cannot be tested as standalone binaries -- the function-pointer stubs are only initialized when DuckDB loads the extension at runtime. The `bundled` feature sidesteps this for unit tests.
 
-The `ddl/` module and the FFI entrypoints in `query/` (`table_function.rs`, `explain.rs`, `error.rs`) are gated behind `#[cfg(feature = "extension")]` -- they are excluded from `cargo test` compilation because they use DuckDB APIs only available in the extension build. `query/wire.rs`, `query/raw_sql.rs` and `query/member_types.rs` are always compiled: they take a raw `duckdb_connection`, so `cargo test` drives them against the bundled DuckDB (`test_helpers::RawDb`).
+The `ddl/` module and the FFI entrypoints in `query/` (`table_function.rs`, `explain.rs`, `error.rs`) are gated behind `#[cfg(feature = "extension")]` -- they are excluded from `cargo test` compilation because they use DuckDB APIs only available in the extension build. `query/wire.rs`, `query/items.rs`, `query/raw_sql.rs` and `query/member_types.rs` are always compiled: `items.rs` is pure, and the others take a raw `duckdb_connection`, so `cargo test` drives them against the bundled DuckDB (`test_helpers::RawDb`).
 
 ### Catalog Persistence
 

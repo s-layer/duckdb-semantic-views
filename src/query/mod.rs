@@ -10,6 +10,10 @@ pub mod table_function;
 // entrypoints that call them are `extension`-gated (TC-8).
 pub mod wire;
 
+// The items of a request (`<member> [[AS] <alias>]`) and the column layout
+// they ask for; pure, so always compiled.
+pub mod items;
+
 // Raw C-API query helpers (schema inference, DESCRIBE, VARCHAR reads) shared by
 // `table_function`, `explain` and `member_types`; always compiled so `cargo
 // test` drives them against the bundled DuckDB.

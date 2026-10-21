@@ -200,11 +200,12 @@ The ``internal`` column is ``true`` for every function the extension registers, 
    │ parameter    │ type      │
    ├──────────────┼───────────┤
    │ view_name    │ VARCHAR   │
-   │ where_clause │ VARCHAR   │
-   │ facts        │ VARCHAR[] │
-   │ search_path  │ VARCHAR[] │
-   │ metrics      │ VARCHAR[] │
    │ dimensions   │ VARCHAR[] │
+   │ metrics      │ VARCHAR[] │
+   │ facts        │ VARCHAR[] │
+   │ where_clause │ VARCHAR   │
+   │ column_order │ VARCHAR[] │
+   │ search_path  │ VARCHAR[] │
    └──────────────┴───────────┘
 
 .. code-block:: sql
@@ -218,9 +219,13 @@ The ``internal`` column is ``true`` for every function the extension registers, 
    description = Queries a semantic view: returns the requested dimensions,
                  metrics and/or facts, generating the joins and GROUP BY from
                  the view definition. Pass at least one of dimensions, metrics
-                 or facts; where_clause filters rows before aggregation. The
-                 search_path parameter is reserved (kept so views stored by
-                 earlier releases still bind); do not pass it.
+                 or facts; an item may name its column ('region AS r').
+                 where_clause filters rows before aggregation, and
+                 column_order (e.g. ['metrics', 'dimensions']) sets the order
+                 of the columns. The SEMANTIC_VIEW(...) construct is the same
+                 query written as SQL. The search_path parameter is reserved
+                 (kept so views stored by earlier releases still bind); do not
+                 pass it.
       examples = [SELECT * FROM semantic_view('sales', dimensions := ['region'],
                  metrics := ['revenue']);]
 

@@ -42,8 +42,11 @@
 //!   declaration `revenue` — TECH-DEBT #28) with no third case/quote rule.
 //!
 //! Expressions reaching this layer are already comment-blanked at the parse
-//! entry points (PA-7, [`crate::util::blank_sql_comments`]), so the tokenizer
+//! entry points (PA-7, [`crate::util::blank_sql_comments`]), and a query's
+//! `where_clause` where `expand::where_clause` resolves it, so the tokenizer
 //! does not handle SQL comments — they are spaces by the time we see them.
+//! Only the subquery scan ([`subquery_spans`]) skips them as well, for its
+//! callers that pass text with comments in it.
 //!
 //! The **alias-qualifier** rewriters (`expand::window` / `expand::sql_gen` /
 //! `expand::semi_additive`, which rewrite the `a` in `a.city` to a scoped
@@ -399,13 +402,18 @@ fn skip_type(bytes: &[u8], start: usize) -> usize {
 }
 
 /// Offset just past the bracket that closes the `open` at `bytes[i]`, skipping
-/// literal and quoted-identifier content and nested pairs. Saturates at `len`.
+/// literal, quoted-identifier and comment content and nested pairs. Saturates
+/// at `len`.
 fn skip_balanced(bytes: &[u8], i: usize, open: u8, close: u8) -> usize {
     let len = bytes.len();
     let mut nesting = 0usize;
     let mut j = i;
     while j < len {
         let b = bytes[j];
+        if starts_comment(bytes, j) {
+            j = skip_whitespace_and_comments(bytes, j);
+            continue;
+        }
         if b == b'\'' {
             j = skip_single_quoted(bytes, j);
             continue;
@@ -675,12 +683,30 @@ pub(crate) fn references_ref(expr: &str, name: &str, source_table: Option<&str>)
 /// [`crate::ident::normalize_ident_part`]): a bare `revenue` or a qualified
 /// `o.net_price`.
 pub(crate) fn inline_references(expr: &str, replacements: &HashMap<String, &str>) -> String {
+    splice_references(expr, scan_references(expr), replacements)
+}
+
+/// [`inline_references`] for a predicate that may hold subqueries: a reference
+/// inside one ([`subquery_spans`]) is the subquery's own name and is left as
+/// written.
+pub(crate) fn inline_references_outside_subqueries(
+    expr: &str,
+    replacements: &HashMap<String, &str>,
+) -> String {
+    splice_references(expr, scan_references_outside_subqueries(expr), replacements)
+}
+
+fn splice_references(
+    expr: &str,
+    refs: Vec<IdentRef<'_>>,
+    replacements: &HashMap<String, &str>,
+) -> String {
     if replacements.is_empty() {
         return expr.to_string();
     }
     let mut out = String::with_capacity(expr.len());
     let mut copied = 0;
-    for r in scan_references(expr) {
+    for r in refs {
         if let Some(repl) = replacements.get(&r.key()) {
             out.push_str(&expr[copied..r.start]);
             out.push_str(repl);
@@ -689,6 +715,147 @@ pub(crate) fn inline_references(expr: &str, replacements: &HashMap<String, &str>
     }
     out.push_str(&expr[copied..]);
     out
+}
+
+/// The reserved words that open a query, so that a `(` whose first word is one
+/// of them starts a subquery. `DuckDB` also starts a query with unreserved words
+/// (`PIVOT`, `SUMMARIZE`, `SHOW`, …), which could equally be a member's name
+/// inside ordinary parentheses, so those are not counted.
+const QUERY_OPENERS: &[&str] = &["select", "with", "from", "values", "table"];
+
+/// The byte spans `(start, end)` of the subqueries in `expr`, in order: each `(`
+/// that opens a query ([`opens_query`]), through its matching `)`. A subquery
+/// nested in another lies inside the outer span and is not listed separately.
+/// Literal, quoted-identifier and comment content is skipped: `semantic_view()`'s
+/// `where_clause` arrives with its comments (only the construct strips them
+/// first), and a bracket in one opens or closes nothing.
+pub(crate) fn subquery_spans(expr: &str) -> Vec<(usize, usize)> {
+    let bytes = expr.as_bytes();
+    let mut out = Vec::new();
+    let mut i = 0;
+    while i < bytes.len() {
+        if starts_comment(bytes, i) {
+            i = skip_whitespace_and_comments(bytes, i);
+            continue;
+        }
+        match bytes[i] {
+            b'\'' => i = skip_single_quoted(bytes, i),
+            b'"' => i = skip_quoted_part(bytes, i),
+            b'$' => i = try_skip_dollar_quoted(bytes, i).unwrap_or(i + 1),
+            b'(' => match opens_query(bytes, i) {
+                Opens::Query => {
+                    let end = skip_balanced(bytes, i, b'(', b')');
+                    out.push((i, end));
+                    i = end;
+                }
+                Opens::NoQueryBefore(next) => i = next,
+            },
+            _ => i += 1,
+        }
+    }
+    out
+}
+
+/// Whether a `(` opens a query, from [`opens_query`].
+enum Opens {
+    Query,
+    /// No `(` from this one up to the offset opens a query, so the scan
+    /// resumes there rather than asking again of each bracket in a chain.
+    NoQueryBefore(usize),
+}
+
+/// `DuckDB` refuses an expression nested deeper than this
+/// (`max_expression_depth`), so a longer chain of directly nested brackets is
+/// no query that runs; the scan stops following it there.
+const MAX_BRACKET_CHAIN: usize = 1000;
+
+/// Whether the `(` at `open` starts a query: its first word is one of
+/// [`QUERY_OPENERS`], or it starts with a bracketed query that a set operation,
+/// `ORDER BY`, `LIMIT` or `OFFSET` continues (`((SELECT …) UNION SELECT …)`).
+/// Comments are skipped.
+///
+/// The brackets that open directly inside one another (`((( …`) are walked
+/// in a loop, not by recursion, since their number comes from the caller's
+/// text.
+fn opens_query(bytes: &[u8], open: usize) -> Opens {
+    let mut chain = vec![open];
+    let mut first = skip_whitespace_and_comments(bytes, open + 1);
+    while bytes.get(first) == Some(&b'(') {
+        if chain.len() == MAX_BRACKET_CHAIN {
+            return Opens::NoQueryBefore(first);
+        }
+        chain.push(first);
+        first = skip_whitespace_and_comments(bytes, first + 1);
+    }
+    let mut word_end = first;
+    while word_end < bytes.len() && crate::util::is_ident_byte(bytes[word_end]) {
+        word_end += 1;
+    }
+    let word = String::from_utf8_lossy(&bytes[first..word_end]);
+    if !QUERY_OPENERS.iter().any(|w| w.eq_ignore_ascii_case(&word)) {
+        // The innermost bracket holds no query, so none around it does.
+        return Opens::NoQueryBefore(first);
+    }
+    // The innermost bracket holds a query. Each one around it does too only if
+    // a clause of a query continues the bracketed query just inside it.
+    for &inner in &chain[1..] {
+        let after = skip_whitespace_and_comments(bytes, skip_balanced(bytes, inner, b'(', b')'));
+        if !QUERY_CONTINUATIONS
+            .iter()
+            .any(|words| match_words(bytes, after, words).is_some())
+        {
+            return Opens::NoQueryBefore(inner);
+        }
+    }
+    Opens::Query
+}
+
+/// Whether a `/* … */` or `-- …` comment starts at `pos`.
+fn starts_comment(bytes: &[u8], pos: usize) -> bool {
+    bytes[pos..].starts_with(b"/*") || bytes[pos..].starts_with(b"--")
+}
+
+/// The words that continue a query after a bracketed one: a set operation, or
+/// a clause that orders or limits the bracketed query.
+const QUERY_CONTINUATIONS: &[&[&str]] = &[
+    &["union"],
+    &["intersect"],
+    &["except"],
+    &["order", "by"],
+    &["limit"],
+    &["offset"],
+];
+
+/// Offset of the first byte at or after `pos` that is neither whitespace nor
+/// inside a `/* … */` or `-- …` comment (or `len`).
+fn skip_whitespace_and_comments(bytes: &[u8], pos: usize) -> usize {
+    let mut j = pos;
+    loop {
+        j = skip_whitespace(bytes, j);
+        if bytes[j..].starts_with(b"/*") {
+            j = bytes[j + 2..]
+                .windows(2)
+                .position(|w| w == b"*/")
+                .map_or(bytes.len(), |p| j + 2 + p + 2);
+        } else if bytes[j..].starts_with(b"--") {
+            j = bytes[j..]
+                .iter()
+                .position(|&b| b == b'\n' || b == b'\r')
+                .map_or(bytes.len(), |p| j + p + 1);
+        } else {
+            return j;
+        }
+    }
+}
+
+/// [`scan_references`] without the references inside a subquery
+/// ([`subquery_spans`]), which name the subquery's own columns and tables.
+pub(crate) fn scan_references_outside_subqueries(expr: &str) -> Vec<IdentRef<'_>> {
+    let spans = subquery_spans(expr);
+    scan_references(expr)
+        .into_iter()
+        .filter(|r| !spans.iter().any(|&(s, e)| r.start >= s && r.end <= e))
+        .collect()
 }
 
 /// Rewrite the leading **qualifier** (first part) of every reference chain in

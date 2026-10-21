@@ -199,6 +199,87 @@ statement ok
 DROP TABLE wc_items;
 
 # ============================================================
+# A subquery is its own scope: Snowflake's WHERE takes uncorrelated
+# subqueries, and a name inside one is the subquery's column, not a member.
+# `amt` is both a fact (o.amount) and a column of wc_targets. Substituting the
+# member inside the subquery made it `SELECT (o.amount) FROM wc_targets`, which
+# matches every order: EU came out 150.00 instead of 100.00.
+# ============================================================
+
+statement ok
+CREATE TABLE wc_targets (amt DECIMAL(10,2));
+
+statement ok
+INSERT INTO wc_targets VALUES (100.00), (70.00);
+
+query TT rowsort
+SELECT * FROM semantic_view('wc_sv', metrics := ['revenue'], dimensions := ['region'], where_clause := 'amt IN (SELECT amt FROM wc_targets)');
+----
+EU	100.00
+US	70.00
+
+statement ok
+DROP TABLE wc_targets;
+
+# A subquery in the predicate is uncorrelated, as in Snowflake: a name its own
+# tables lack does not reach into the semantic view's tables. Before, DuckDB
+# found `region` there as the raw column c.region ('EU', not the dimension's
+# lower(c.region)), and the query silently matched nothing.
+
+statement ok
+CREATE TABLE wc_codes (code VARCHAR);
+
+statement ok
+INSERT INTO wc_codes VALUES ('eu');
+
+statement ok
+CREATE SEMANTIC VIEW wc_lower AS
+  TABLES (o AS wc_orders PRIMARY KEY (id), c AS wc_customers PRIMARY KEY (id))
+  RELATIONSHIPS (order_customer AS o(customer_id) REFERENCES c)
+  DIMENSIONS (c.region AS lower(c.region))
+  METRICS (o.revenue AS sum(o.amount));
+
+statement error
+SELECT * FROM semantic_view('wc_lower', metrics := ['revenue'], dimensions := ['region'], where_clause := 'EXISTS (SELECT 1 FROM wc_codes k WHERE k.code = region)');
+----
+Referenced column "region" not found
+
+# Nor does a table alias of the view's.
+statement error
+SELECT * FROM semantic_view('wc_lower', metrics := ['revenue'], dimensions := ['region'], where_clause := 'EXISTS (SELECT 1 FROM wc_codes k WHERE k.code = c.region)');
+----
+Referenced table "c" not found
+
+# The same inside a subquery nested in another.
+statement error
+SELECT * FROM semantic_view('wc_lower', metrics := ['revenue'], dimensions := ['region'], where_clause := 'region IN (SELECT code FROM wc_codes k WHERE EXISTS (SELECT 1 FROM wc_codes j WHERE j.code = c.region))');
+----
+Referenced table "c" not found
+
+# Controls: uncorrelated subqueries of each kind still filter.
+query TT rowsort
+SELECT * FROM semantic_view('wc_lower', metrics := ['revenue'], dimensions := ['region'], where_clause := 'region IN (SELECT code FROM wc_codes)');
+----
+eu	150.00
+
+query TT rowsort
+SELECT * FROM semantic_view('wc_lower', metrics := ['revenue'], dimensions := ['region'], where_clause := 'region = (SELECT max(code) FROM wc_codes) OR NOT EXISTS (SELECT 1 FROM wc_codes WHERE code = ''us'')');
+----
+eu	150.00
+us	70.00
+
+query TT rowsort
+SELECT * FROM semantic_view('wc_lower', metrics := ['revenue'], dimensions := ['region'], where_clause := 'region = ANY (SELECT code FROM wc_codes k WHERE k.code IN (SELECT ''eu''))');
+----
+eu	150.00
+
+statement ok
+DROP SEMANTIC VIEW wc_lower;
+
+statement ok
+DROP TABLE wc_codes;
+
+# ============================================================
 # Cleanup
 # ============================================================
 

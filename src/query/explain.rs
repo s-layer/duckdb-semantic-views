@@ -7,6 +7,7 @@ use crate::model::SemanticViewDefinition;
 use crate::util::suggest_closest;
 
 use super::error::QueryError;
+use super::items::{aliases_for, RequestItems};
 use crate::expand::wildcard::{expand_wildcards, WildcardItemType};
 
 use super::table_function::{execute_sql_raw, read_varchar_from_vector};
@@ -71,6 +72,8 @@ pub unsafe extern "C" fn sv_explain_semantic_view_bind_rust(
     facts_len: usize,
     where_ptr: *const u8,
     where_len: usize,
+    order_ptr: *const u8,
+    order_len: usize,
     out_ptr: *mut *mut u8,
     out_len: *mut usize,
     error_buf: *mut u8,
@@ -101,6 +104,8 @@ pub unsafe extern "C" fn sv_explain_semantic_view_bind_rust(
                 facts_len,
                 where_ptr,
                 where_len,
+                order_ptr,
+                order_len,
             )
         },
     )
@@ -133,6 +138,8 @@ unsafe fn explain_semantic_view_bind_body(
     facts_len: usize,
     where_ptr: *const u8,
     where_len: usize,
+    order_ptr: *const u8,
+    order_len: usize,
 ) -> Result<Vec<u8>, String> {
     use crate::ddl::read_ffi::{probe_catalog_table_present, read_str_arg, serialize_varchar_rows};
 
@@ -148,6 +155,8 @@ unsafe fn explain_semantic_view_bind_body(
         .map_err(|detail| format!("malformed `metrics` payload: {detail}"))?;
     let facts = parse_varchar_list(facts_ptr, facts_len)
         .map_err(|detail| format!("malformed `facts` payload: {detail}"))?;
+    let column_order = parse_varchar_list(order_ptr, order_len)
+        .map_err(|detail| format!("malformed `column_order` payload: {detail}"))?;
 
     // The `where_clause` named parameter is optional: the shim passes
     // (nullptr, 0) when the caller omitted it. An explicitly empty string is
@@ -191,30 +200,38 @@ unsafe fn explain_semantic_view_bind_body(
 
     let def = SemanticViewDefinition::from_json(&view_name, &json_str)?;
 
+    // The items are parsed as semantic_view() parses them, and a member
+    // requested twice with different aliases is refused as there. The aliases
+    // and the column order rename and reorder only the output, which the
+    // explained SQL does not show, so the check that two output columns don't
+    // share a name, which needs the expansion's column names, is left to
+    // semantic_view().
+    let invalid = |detail: String| {
+        QueryError::InvalidRequest {
+            view_name: view_name.clone(),
+            detail,
+        }
+        .to_string()
+    };
+    let items =
+        RequestItems::parse(&dimensions, &metrics, &facts, &column_order).map_err(invalid)?;
     // R-3 (code-review 2026-07-11): wildcard failures render through
     // QueryError::WildcardExpansion, matching semantic_view()'s wording.
-    let dimensions =
-        expand_wildcards(&dimensions, &def, &WildcardItemType::Dimension).map_err(|e| {
+    let expand_list = |list: &[crate::query::items::Item], kind: &WildcardItemType| {
+        expand_wildcards(&RequestItems::members(list), &def, kind).map_err(|e| {
             QueryError::WildcardExpansion {
                 view_name: view_name.clone(),
                 detail: e,
             }
             .to_string()
-        })?;
-    let metrics = expand_wildcards(&metrics, &def, &WildcardItemType::Metric).map_err(|e| {
-        QueryError::WildcardExpansion {
-            view_name: view_name.clone(),
-            detail: e,
-        }
-        .to_string()
-    })?;
-    let facts = expand_wildcards(&facts, &def, &WildcardItemType::Fact).map_err(|e| {
-        QueryError::WildcardExpansion {
-            view_name: view_name.clone(),
-            detail: e,
-        }
-        .to_string()
-    })?;
+        })
+    };
+    let dimensions = expand_list(&items.dimensions, &WildcardItemType::Dimension)?;
+    let metrics = expand_list(&items.metrics, &WildcardItemType::Metric)?;
+    let facts = expand_list(&items.facts, &WildcardItemType::Fact)?;
+    aliases_for(&items.dimensions, &dimensions).map_err(invalid)?;
+    aliases_for(&items.metrics, &metrics).map_err(invalid)?;
+    aliases_for(&items.facts, &facts).map_err(invalid)?;
 
     let mat_name = {
         // Resolve the requested names to their stored items with the SAME
