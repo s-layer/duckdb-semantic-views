@@ -9,7 +9,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-_No unreleased changes yet._
+### Changed
+
+- **`GET_DDL` and `READ_YAML_FROM_SEMANTIC_VIEW` follow `search_path`.** An unqualified
+  view name now resolves through the session's `search_path`, as it already did for the
+  DDL statements and `semantic_view()`: when several schemas hold a view of that name,
+  the first one on the path wins, where before these two raised an ambiguity error
+  whatever the path said. Table functions called without going through the extension's
+  parser hook (with `allow_parser_override_extension` set to `DEFAULT`, or from DuckDB's
+  Python relational API) follow the path too, instead of requiring a unique match.
 
 ## [0.15.0] - 2026-10-21
 
@@ -22,13 +30,6 @@ _No unreleased changes yet._
 
 ### Changed
 
-- **`GET_DDL` and `READ_YAML_FROM_SEMANTIC_VIEW` follow `search_path`.** An unqualified
-  view name now resolves through the session's `search_path`, as it already did for the
-  DDL statements and `semantic_view()`: when several schemas hold a view of that name,
-  the first one on the path wins, where before these two raised an ambiguity error
-  whatever the path said. Table functions called without going through the extension's
-  parser hook (with `allow_parser_override_extension` set to `DEFAULT`, or from DuckDB's
-  Python relational API) follow the path too, instead of requiring a unique match.
 - **The extension now runs on DuckDB 2.0, and only there.** This release is built
   against DuckDB `v2.0.0` and loads only in that exact DuckDB release. If you stay on
   DuckDB 1.5, keep v0.14.1, the last release for 1.5.
