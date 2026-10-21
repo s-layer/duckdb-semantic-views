@@ -424,7 +424,7 @@ DIMENSIONS (
 
 # --- Statement framing: one DDL statement per call (ffi.rs, TECH-DEBT #85) ---
 
-# F-061: ffi.rs::ddl_after_another_statement_says_one_statement_per_call — a DDL after another statement in one query string is refused as a whole (nothing runs: neither the CREATE TABLE nor the view exists after). A grammar is expected to accept this shape; flip the row to an accept then.
+# F-061: ffi.rs::ddl_after_another_statement_says_one_statement_per_call — a DDL after another statement in one query string is refused, and the view is not created. DuckDB 2.0.0 runs a string's earlier statements before it parses the later ones, so the CREATE TABLE ahead of the DDL has already run (the 2.0 alpha parsed the whole string first, and nothing ran). A grammar is expected to accept this shape; flip the row to an accept then.
 statement error
 CREATE TABLE dcf_ms (id INTEGER); CREATE SEMANTIC VIEW dcf_ms_v AS TABLES (t AS dcf_orders PRIMARY KEY (id)) DIMENSIONS (t.region AS region);
 ----
@@ -433,7 +433,7 @@ one statement per call
 query I
 SELECT count(*) FROM duckdb_tables() WHERE table_name = 'dcf_ms';
 ----
-0
+1
 
 query I
 SELECT count(*) FROM list_semantic_views() WHERE name = 'dcf_ms_v';
