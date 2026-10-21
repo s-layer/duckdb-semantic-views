@@ -21,6 +21,12 @@ Each scenario runs on a fresh in-memory database and reports independently:
   ddl_after_read_call          SELECT * FROM semantic_view(...); CREATE SEMANTIC
                                VIEW ... -- a string the override REWRITES (the
                                read call's search path) rather than declines.
+  ddl_after_describe           SELECT * FROM describe_semantic_view(...); CREATE
+                               SEMANTIC VIEW ... -- a read the override declines.
+                               DuckDB 2.0 runs it before it parses the DDL, and it
+                               runs its own catalog queries through the override.
+  caret_after_read_call        an invalid DDL on line 2, after a read call: the
+                               caret still points into the query as written.
   control_override_disabled    the override really is off (SET
                                allow_parser_override_extension='DEFAULT'), DDL
                                sent alone: the original "not active" message
@@ -122,6 +128,34 @@ def scenario_ddl_after_read_call():
     assert msg is not None, "a multi-statement string with semantic-view DDL must still fail"
     assert NEW_HINT in msg, f"error must say {NEW_HINT!r}; got: {msg}"
     assert OLD_HINT not in msg, f"error must not blame the override setting; got: {msg}"
+
+
+def scenario_ddl_after_describe():
+    con = connect()
+    try:
+        con.execute("CREATE TABLE orders (id INTEGER, region VARCHAR, amount DOUBLE)")
+        con.execute(DDL.replace("sales", "existing", 1))
+        msg = error_of(con, "SELECT * FROM describe_semantic_view('existing'); " + DDL)
+    finally:
+        con.close()
+    assert msg is not None, "a multi-statement string with semantic-view DDL must still fail"
+    assert NEW_HINT in msg, f"error must say {NEW_HINT!r}; got: {msg}"
+    assert OLD_HINT not in msg, f"error must not blame the override setting; got: {msg}"
+
+
+def scenario_caret_after_read_call():
+    con = connect()
+    try:
+        con.execute("CREATE TABLE orders (id INTEGER, region VARCHAR, amount DOUBLE)")
+        con.execute(DDL.replace("sales", "existing", 1))
+        bad = DDL.replace("DIMENSIONS", "DIMENSIONZ", 1)
+        msg = error_of(
+            con, "SELECT * FROM semantic_view('existing', metrics := ['revenue']);\n" + bad
+        )
+    finally:
+        con.close()
+    assert msg is not None, "an invalid DDL must fail"
+    assert "LINE 2:" in msg, f"the caret must point into the query as written; got: {msg}"
 
 
 def scenario_control_override_disabled():
@@ -245,6 +279,8 @@ SCENARIOS = [
     scenario_ddl_after_other_statements,
     scenario_ddl_before_other_statement,
     scenario_ddl_after_read_call,
+    scenario_ddl_after_describe,
+    scenario_caret_after_read_call,
     scenario_control_override_disabled,
     scenario_control_single_statement,
     scenario_control_stale_other_database,

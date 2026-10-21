@@ -146,8 +146,11 @@ pub unsafe extern "C" fn sv_parser_override_rust(
         // still fails when the plain re-parse below meets its DDL. A DDL
         // rewrite, though, took the whole string as ONE statement, whatever
         // `;` it holds in a literal or comment -- nothing to remember.
-        let one_ddl_statement = matches!(outcome, Ok(Some(_))) && detect_ddl_kind(query).is_some();
-        note_override_query(if one_ddl_statement { "" } else { query });
+        if matches!(outcome, Ok(Some(_))) && detect_ddl_kind(query).is_some() {
+            forget_override_query();
+        } else {
+            note_override_query(query);
+        }
         match outcome {
             Ok(Some(sql)) => {
                 publish_owned_sql(sql, sql_out_ptr, sql_out_len);
@@ -221,22 +224,31 @@ const MULTI_STATEMENT_MSG: &str = "semantic_views: semantic-view DDL must be sen
                                    contains other statements; send each statement in a \
                                    separate call (a single trailing ';' is fine).";
 
-// The last query string `parser_override` was handed on this thread, kept
-// only when it looks like several statements (a `;` with more text after it)
-// and mentions SEMANTIC (every statement `parse_function` reports on does),
-// else empty. DuckDB's `Parser::ParseQuery` calls the override and then -- on
-// the same thread, within the same call -- `parse_function` on each statement
-// the default parser could not handle, so this is how `parse_function` learns
-// that the override DID run on the string the statement came from. The
-// override overwrites the record on every query it sees, and every
-// `parse_function` call consumes it, so a record cannot outlive the query it
-// came from into a later one -- in particular not into a query on a
-// connection whose override is off (the record is per thread, not per
-// connection). A string the override rewrote as one DDL statement is not
-// recorded at all, even when a literal or comment in it holds a `;`. The one
-// survivor is a multi-statement string mentioning SEMANTIC that parsed
-// without any parse_function call, which means it held no semantic-view DDL
-// as its own statement, so no later DDL statement can match it.
+// The last multi-statement query string `parser_override` was handed on this
+// thread (a `;` with more text after it), kept only when it mentions SEMANTIC
+// (every statement `parse_function` reports on does), else empty. DuckDB's
+// `Parser::ParseQuery` calls the override and then -- on the same thread --
+// `parse_function` on each statement the default parser could not handle, so
+// this is how `parse_function` learns that the override DID run on the string
+// the statement came from.
+//
+// DuckDB 2.0 runs a string's earlier statements before it parses the later
+// ones, and a statement that reads a semantic view runs its own catalog
+// queries on this thread meanwhile, each through the override. Those are
+// single statements, so a single-statement query leaves the record alone:
+// only another multi-statement string replaces it, and a DDL statement the
+// override rewrote (one statement, whatever `;` a literal or comment in it
+// holds) clears it. Every `parse_function` call consumes it, since its answer
+// ends the parse of the string it came from.
+//
+// So a record outlives its query only when no `parse_function` call reads
+// it: the string parsed without one, which means it held no semantic-view DDL
+// as its own statement (no later DDL statement can match it), or an earlier
+// statement of it failed when it ran, before the DDL was parsed. In that last
+// case the DDL sent alone on a connection whose override is off (the record
+// is per thread, not per connection) and before any other multi-statement
+// string or DDL rewrite on this thread is blamed on splitting rather than on
+// the setting.
 #[cfg(any(feature = "extension", test))]
 thread_local! {
     static OVERRIDE_MULTI_STATEMENT: std::cell::RefCell<String> =
@@ -256,16 +268,20 @@ fn looks_multi_statement(query: &str) -> bool {
         .is_some_and(|(_, rest)| !rest.trim().is_empty())
 }
 
-/// Record the query string `parser_override` was handed (see
-/// `OVERRIDE_MULTI_STATEMENT`). Anything else clears the record and frees it,
-/// so a large script does not stay allocated for the life of the thread.
+/// Note a query string `parser_override` was handed and did not rewrite as
+/// one DDL statement (see `OVERRIDE_MULTI_STATEMENT`). A single statement
+/// leaves the record as it is. A multi-statement string replaces it when it
+/// mentions SEMANTIC, and otherwise clears it and frees it, so a large script
+/// does not stay allocated for the life of the thread.
 #[cfg(any(feature = "extension", test))]
 pub(crate) fn note_override_query(query: &str) {
-    let keep = looks_multi_statement(query)
-        && query
-            .as_bytes()
-            .windows(b"semantic".len())
-            .any(|w| w.eq_ignore_ascii_case(b"semantic"));
+    if !looks_multi_statement(query) {
+        return;
+    }
+    let keep = query
+        .as_bytes()
+        .windows(b"semantic".len())
+        .any(|w| w.eq_ignore_ascii_case(b"semantic"));
     OVERRIDE_MULTI_STATEMENT.with(|cell| {
         *cell.borrow_mut() = if keep {
             query.to_owned()
@@ -273,6 +289,13 @@ pub(crate) fn note_override_query(query: &str) {
             String::new()
         };
     });
+}
+
+/// Clear the record (see `OVERRIDE_MULTI_STATEMENT`): the override rewrote a
+/// query as one DDL statement.
+#[cfg(any(feature = "extension", test))]
+fn forget_override_query() {
+    OVERRIDE_MULTI_STATEMENT.with(|cell| drop(std::mem::take(&mut *cell.borrow_mut())));
 }
 
 /// Take the record (see `OVERRIDE_MULTI_STATEMENT`), leaving it empty.
@@ -644,6 +667,35 @@ mod tests {
         note_override_query(&format!("SELEC 1; {DDL}"));
         let (rc, _) = call_parse_function("SELEC 1");
         assert_eq!(rc, 2, "a typo far from every DDL prefix is not ours");
+        let (_, msg) = call_parse_function(DDL);
+        assert!(msg.contains("parser_override is not active"), "got: {msg}");
+    }
+
+    /// `DuckDB` 2.0 runs a string's earlier statements before it parses the
+    /// later ones, so a semantic-view read call ahead of the DDL runs its
+    /// own catalog queries through the override first. Those are single
+    /// statements on the same thread and must not wipe the record the DDL's
+    /// `parse_function` call is about to read.
+    #[test]
+    fn a_single_statement_run_before_the_ddl_keeps_the_record() {
+        note_override_query(&format!(
+            "SELECT * FROM semantic_view('existing', metrics := ['revenue']); {DDL}"
+        ));
+        note_override_query(
+            "SELECT definition FROM semantic_layer._definitions WHERE name = 'existing'",
+        );
+        let (rc, msg) = call_parse_function(DDL);
+        assert_eq!(rc, 3, "msg={msg}");
+        assert!(msg.contains("one statement per call"), "got: {msg}");
+    }
+
+    /// A DDL statement the override rewrote ends the record: whatever string
+    /// came before it is no longer being parsed.
+    #[test]
+    fn a_rewritten_ddl_statement_clears_the_record() {
+        use super::forget_override_query;
+        note_override_query(&format!("SELECT 1; {DDL}"));
+        forget_override_query();
         let (_, msg) = call_parse_function(DDL);
         assert!(msg.contains("parser_override is not active"), "got: {msg}");
     }

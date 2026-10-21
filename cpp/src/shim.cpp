@@ -446,6 +446,30 @@ struct SemanticViewsParserInfo : public ParserExtensionInfo {};
 // Otherwise a connection whose override is off, which records nothing, would
 // quote an earlier query on this thread that ended with the same statement.
 static thread_local std::string sv_override_query;
+
+// The last multi-statement query the override saw on this thread that
+// mentions SEMANTIC, as the Rust side keeps it (OVERRIDE_MULTI_STATEMENT in
+// src/parse/ffi.rs). DuckDB 2.0 runs a string's earlier statements before it
+// parses the later ones, and a statement that reads a semantic view runs its
+// own catalog queries through the override meanwhile, replacing
+// sv_override_query. They are single statements, so they leave this alone,
+// and the stub looks here when the tokens are not in sv_override_query.
+static thread_local std::string sv_override_multi;
+
+// A `;` with more than whitespace after it, once trailing `;` and whitespace
+// are dropped (looks_multi_statement in src/parse/ffi.rs).
+static bool sv_looks_multi_statement(const std::string &query) {
+    auto end = query.find_last_not_of(" \t\n\r\f\v;");
+    if (end == std::string::npos) {
+        return false;
+    }
+    auto semi = query.find(';');
+    return semi != std::string::npos && semi < end;
+}
+
+static bool sv_mentions_semantic(const std::string &query) {
+    return StringUtil::Contains(StringUtil::Lower(query), "semantic");
+}
 #endif
 
 // ---------------------------------------------------------------------------
@@ -472,6 +496,14 @@ static ParserOverrideResult sv_parser_override(
     }
 #ifdef SV_DUCKDB_2
     sv_override_query = query;
+    const bool multi_statement = sv_looks_multi_statement(query);
+    if (multi_statement) {
+        if (sv_mentions_semantic(query)) {
+            sv_override_multi = query;
+        } else {
+            std::string().swap(sv_override_multi);
+        }
+    }
 #endif
 
     SvOwnedBuffer sql_buf;
@@ -508,6 +540,9 @@ static ParserOverrideResult sv_parser_override(
         parser.ParseQuery(native_sql);
 #ifdef SV_DUCKDB_2
         sv_override_query.clear();
+        if (multi_statement) {
+            sv_override_multi.clear();
+        }
 #endif
         return ParserOverrideResult(std::move(parser.statements));
     } catch (std::exception &e) {
@@ -732,8 +767,13 @@ static ParserExtensionParseResult sv_parse_stub(
     ParserExtensionInfo * /*info*/, const vector<SimpleToken> &tokens) {
     idx_t start = 0;
     idx_t statement_end = 0;
-    const std::string &query = sv_override_query;
-    bool located = sv_locate_tail(query, tokens, start, statement_end);
+    const std::string *source = &sv_override_query;
+    bool located = sv_locate_tail(*source, tokens, start, statement_end);
+    if (!located) {
+        source = &sv_override_multi;
+        located = sv_locate_tail(*source, tokens, start, statement_end);
+    }
+    const std::string &query = *source;
     auto result = sv_parse_statement(located ? query.substr(start, statement_end - start)
                                              : sv_statement_from_tokens(tokens));
     // DISPLAY_EXTENSION_ERROR -> throw; DISPLAY_ORIGINAL_ERROR keeps the
@@ -751,6 +791,7 @@ static ParserExtensionParseResult sv_parse_stub(
     // (Only another extension claiming the statement lets the parse go on;
     // a later failing statement then gets no caret, as with the override off.)
     sv_override_query.clear();
+    std::string().swap(sv_override_multi);
     return result;
 }
 #else
