@@ -602,7 +602,9 @@ Areas where test coverage is reduced compared to ideal, with justification.
 - **Why not removed here:** decision D2 drops DuckDB 1.x with this phase, but deleting the branches is a large mechanical diff best reviewed apart from the build change, and keeping them makes the port reviewable against the code it replaced.
 - **What would finish it:** delete every `#else` branch and the macro itself (the define in `build.rs`, the v1.5 re-declarations at the top of the compat header), so each `sv_compat::` helper is the 2.0 expression alone or is inlined.
 
-### 90. ❌ The engine pin is a DuckDB 2.0 pre-release — OPEN
+### 90. ✅ The engine pin is a DuckDB 2.0 pre-release — RESOLVED in v0.15.0
+
+- **Resolution:** 2026-10-21, DuckDB 2.0.0 GA. `.duckdb-version` is `v2.0.0`, `.duckdb-pypi-version` is gone, both workflows pass `duckdb_version: v2.0.0` with no `duckdb_tag`, the PEP 723 headers pin `duckdb==2.0.0`, and the CHANGELOG's DuckDB 2.0 bullet names `v2.0.0`. The registry's `DUCKDB_LATEST_STABLE` is `v2.0.0`, so the release gate maps the pin to `ref`. The history below is kept for the mechanism it describes.
 
 - **Origin:** 2026-10-16, Phase 2 of the DuckDB 2.0 epic. v0.15.0 is built ahead of DuckDB 2.0.0 GA (scheduled 2026-10-21) against the newest pre-release that has a PyPI wheel: `v2.0.0-alpha47600` (`.duckdb-version`), wheel `2.0.0.dev2610151406` (`.duckdb-pypi-version`), engine commit `d4355d01c5`. The extension loads only in that exact build.
 - **The interim parts:** the pre-release has no release tag upstream, so `BuildAll.yml` / `BuildQuick.yml` pass its commit as `duckdb_version` plus `duckdb_tag: v2.0.0-alpha47600`, which the Makefile's `set_duckdb_tag` turns into a tag on the clone; `.duckdb-pypi-version` exists only because the wheel name is not the version; and the PEP 723 headers pin the dev wheel. `just release` cannot publish this pin: the registry builds against its own default engine, which `scripts/registry_target.py` matches by name.
