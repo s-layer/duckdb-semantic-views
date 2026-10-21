@@ -348,6 +348,66 @@ impl<'a> Cursor<'a> {
         }
         None
     }
+
+    /// The first bracket token, from the cursor on, that does not nest by
+    /// kind: a closer that is not the partner of the innermost open bracket, a
+    /// closer with nothing open, or an opener still open at the end. Brackets
+    /// inside strings, quoted names and dollar-quoted strings are part of
+    /// those tokens and never seen here.
+    ///
+    /// The depth scanners count `(`, `[` and `{` as one depth and let any
+    /// closer close any opener, while [`Cursor::take_parens`] counts only
+    /// `(`/`)`. On text whose brackets nest by kind the two agree; on other
+    /// text they split it differently (fuzz #277, #285), so a clause must
+    /// pass this check before they run on it.
+    pub(super) fn bracket_mismatch(&self) -> Option<BracketMismatch> {
+        let mut open: Vec<Token> = Vec::new();
+        for &t in &self.toks[self.idx..] {
+            let TokenKind::Symbol(b) = t.kind else {
+                continue;
+            };
+            match b {
+                b'(' | b'[' | b'{' => open.push(t),
+                b')' | b']' | b'}' => match open.pop() {
+                    None => return Some(BracketMismatch::Unmatched(t)),
+                    Some(o) if closer_of(self.symbol(o)) != b => {
+                        return Some(BracketMismatch::Mismatched {
+                            closer: t,
+                            opener: o,
+                        });
+                    }
+                    Some(_) => {}
+                },
+                _ => {}
+            }
+        }
+        open.pop().map(BracketMismatch::Unclosed)
+    }
+
+    /// The byte at the start of `t` (a [`TokenKind::Symbol`] is one byte).
+    pub(super) fn symbol(&self, t: Token) -> u8 {
+        self.src.as_bytes()[t.start]
+    }
+}
+
+/// The closing bracket that partners `open` (`(`, `[` or `{`).
+pub(super) fn closer_of(open: u8) -> u8 {
+    match open {
+        b'(' => b')',
+        b'[' => b']',
+        _ => b'}',
+    }
+}
+
+/// A bracket that does not nest by kind, from [`Cursor::bracket_mismatch`].
+#[derive(Debug, PartialEq, Eq)]
+pub(super) enum BracketMismatch {
+    /// `closer` is not the partner of `opener`, the innermost open bracket.
+    Mismatched { closer: Token, opener: Token },
+    /// A closer with no bracket open.
+    Unmatched(Token),
+    /// An opener (the innermost one) never closed.
+    Unclosed(Token),
 }
 
 #[cfg(test)]
