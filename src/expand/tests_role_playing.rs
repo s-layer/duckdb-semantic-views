@@ -91,6 +91,7 @@ fn flights_airports_def() -> SemanticViewDefinition {
         database_name: None,
         schema_name: None,
         resolution_schema_name: None,
+        temp_tables: vec![],
         comment: None,
     }
 }
@@ -376,6 +377,7 @@ fn fan_trap_detection_works_with_using_paths() {
         database_name: None,
         schema_name: None,
         resolution_schema_name: None,
+        temp_tables: vec![],
         comment: None,
     };
     let req = QueryRequest {
@@ -440,6 +442,7 @@ fn metric_using_from_base_table_no_unnecessary_join() {
         database_name: None,
         schema_name: None,
         resolution_schema_name: None,
+        temp_tables: vec![],
         comment: None,
     };
     let req = QueryRequest {
@@ -497,6 +500,7 @@ fn backward_compat_no_using_expands_as_before() {
         database_name: None,
         schema_name: None,
         resolution_schema_name: None,
+        temp_tables: vec![],
         comment: None,
     };
     let req = QueryRequest {

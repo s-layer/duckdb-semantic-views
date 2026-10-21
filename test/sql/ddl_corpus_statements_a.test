@@ -182,7 +182,7 @@ DIMENSION	region	dcs_orders	EXPRESSION	o.region
 DIMENSION	region	dcs_orders	DATA_TYPE	VARCHAR
 METRIC	total	dcs_orders	TABLE	dcs_orders
 METRIC	total	dcs_orders	EXPRESSION	SUM(o.amount)
-METRIC	total	dcs_orders	DATA_TYPE	BIGINT
+METRIC	total	dcs_orders	DATA_TYPE	HUGEINT
 METRIC	total	dcs_orders	ACCESS_MODIFIER	PUBLIC
 
 # S-021: rewrite.rs::phase34_1_1_show_filter_tests::test_rewrite_show_columns_in_semantic_view — SHOW COLUMNS IN SEMANTIC VIEW lists dimensions and metrics
@@ -190,7 +190,7 @@ query TTTTTTTT rowsort
 SHOW COLUMNS IN SEMANTIC VIEW sales;
 ----
 memory	main	sales	region	VARCHAR	DIMENSION	o.region	(empty)
-memory	main	sales	total	BIGINT	METRIC	SUM(o.amount)	(empty)
+memory	main	sales	total	HUGEINT	METRIC	SUM(o.amount)	(empty)
 
 # S-022: rewrite.rs::test_detect_show, test_ddl_kind_show, test_rewrite_show, test_validate_and_rewrite_show, phase34_1_1_show_filter_tests::test_rewrite_show_views_no_clauses_regression, test_build_filter_suffix_none — SHOW SEMANTIC VIEWS with no clauses lists every view
 query TTTTTT nosort
@@ -213,7 +213,7 @@ DIMENSION	region	dcs_orders	EXPRESSION	o.region
 DIMENSION	region	dcs_orders	DATA_TYPE	VARCHAR
 METRIC	total	dcs_orders	TABLE	dcs_orders
 METRIC	total	dcs_orders	EXPRESSION	SUM(o.amount)
-METRIC	total	dcs_orders	DATA_TYPE	BIGINT
+METRIC	total	dcs_orders	DATA_TYPE	HUGEINT
 METRIC	total	dcs_orders	ACCESS_MODIFIER	PUBLIC
 
 query TTTTTT nosort
@@ -424,7 +424,7 @@ DIMENSION	region	dcs_orders	EXPRESSION	o.region
 DIMENSION	region	dcs_orders	DATA_TYPE	VARCHAR
 METRIC	total	dcs_orders	TABLE	dcs_orders
 METRIC	total	dcs_orders	EXPRESSION	SUM(o.amount)
-METRIC	total	dcs_orders	DATA_TYPE	BIGINT
+METRIC	total	dcs_orders	DATA_TYPE	HUGEINT
 METRIC	total	dcs_orders	ACCESS_MODIFIER	PUBLIC
 
 query TTTTTT nosort
@@ -437,7 +437,7 @@ query TTTTTT nosort
 query TTTTTTTT rowsort
 /* x */ SHOW SEMANTIC METRICS IN v
 ----
-memory	main	v	dcs_orders	total	BIGINT	[]	(empty)
+memory	main	v	dcs_orders	total	HUGEINT	[]	(empty)
 
 # S-066: rewrite.rs::detect_other_ddl_forms_with_leading_comment — a leading block comment before ALTER ... RENAME TO
 statement ok
@@ -820,7 +820,7 @@ DIMENSION	region	dcs_orders	EXPRESSION	o.region
 DIMENSION	region	dcs_orders	DATA_TYPE	VARCHAR
 METRIC	total	dcs_orders	TABLE	dcs_orders
 METRIC	total	dcs_orders	EXPRESSION	SUM(o.amount)
-METRIC	total	dcs_orders	DATA_TYPE	BIGINT
+METRIC	total	dcs_orders	DATA_TYPE	HUGEINT
 METRIC	total	dcs_orders	ACCESS_MODIFIER	PUBLIC
 
 # S-112: rewrite.rs::test_unquoted_names_fold_to_lowercase_across_ddl_forms — ALTER folds both the source and the RENAME TO target [text]

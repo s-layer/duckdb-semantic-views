@@ -450,6 +450,36 @@ fn expand_facts(
     .render())
 }
 
+/// The name of each column [`expand`] returns for `req`, in its order: the
+/// requested dimensions, then metrics, then facts, each named after its stored
+/// name with the quotes taken off (`"Order Date"` is the column `Order Date`).
+///
+/// # Errors
+///
+/// The resolution errors [`expand`] reports for the same request: an unknown,
+/// duplicated or PRIVATE member.
+pub fn output_column_names(
+    view_name: &str,
+    def: &SemanticViewDefinition,
+    req: &QueryRequest,
+) -> Result<Vec<String>, ExpandError> {
+    let unquoted = |stored: &str| match crate::ident::parse_qualified_identifier(stored) {
+        Ok(mut parts) if parts.len() == 1 => parts.pop().unwrap_or_default(),
+        _ => stored.to_string(),
+    };
+    let mut names = Vec::new();
+    for d in resolve_names::<Dimension, _>(&req.dimensions, view_name, def)? {
+        names.push(unquoted(&d.name));
+    }
+    for m in resolve_names::<Metric, _>(&req.metrics, view_name, def)? {
+        names.push(unquoted(&m.name));
+    }
+    for f in resolve_names::<Fact, _>(&req.facts, view_name, def)? {
+        names.push(unquoted(&f.name));
+    }
+    Ok(names)
+}
+
 /// Expand a semantic view definition into a SQL query string.
 ///
 /// Takes a view name (for error messages), its definition, and a query request
@@ -471,6 +501,9 @@ pub fn expand(
     // they are uncorrelated (`where_clause::hoist_subqueries`). What is left in
     // the predicate is resolved as before: a `(SELECT * FROM __sv_sqN)` is
     // still a subquery to the member scan.
+    if let Some(raw) = req.where_clause.as_deref() {
+        super::where_clause::refuse_outside_one_predicate(view_name, raw)?;
+    }
     let Some(hoisted) = req
         .where_clause
         .as_deref()

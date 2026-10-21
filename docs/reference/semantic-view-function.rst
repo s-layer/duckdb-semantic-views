@@ -202,9 +202,23 @@ The alias is one identifier, quoted or not, or a string (``AS 'r'``). Two column
 
    Aliases in items and the ``column_order`` parameter.
 
-Column types are inferred when the query is bound, by running the generated SQL as a ``LIMIT 0`` probe and reading back the result schema. Every query infers this way -- there is no ``CREATE``-time type cache to fall back on, and views stored by older releases that still carry one are ignored in favor of the probe.
+DuckDB plans the generated SQL as part of the query that calls ``semantic_view()``, so the column types are the ones DuckDB gives the generated SQL: ``SUM`` over an integer column is a ``HUGEINT``, and an ``ENUM`` or ``STRUCT`` column keeps its type. Nothing is cached at ``CREATE``.
 
-If the probe fails, the query raises ``semantic_view: type inference failed for query ...`` with the underlying error. It does not fall back to VARCHAR: a placeholder type would mask a broken ``FACTS`` expression until something downstream tripped over it.
+Because it is part of your query, ``semantic_view()`` reads your open transaction, including rows you have not committed yet, and DuckDB can push your query's filters and column choices down into it. ``where_clause`` can refer to a column of an enclosing query, as in a ``LATERAL`` join:
+
+.. code-block:: sql
+
+   SELECT t.r, s.revenue
+   FROM targets t,
+        LATERAL (SELECT * FROM semantic_view('shop',
+                    metrics := ['revenue'],
+                    where_clause := 'region = t.r')) s;
+
+If the generated SQL does not bind, for example because a metric names a column that has since been dropped, the query fails with DuckDB's own error, and the caret points at the ``semantic_view(...)`` call. Use :ref:`explain_semantic_view() <ref-explain-semantic-view>` to see the generated SQL.
+
+.. versionchanged:: 0.16.0
+
+   Column types are DuckDB's own. Earlier releases returned a ``HUGEINT`` as ``BIGINT``, a ``UHUGEINT`` as ``UBIGINT``, and ``ENUM``, ``STRUCT`` and ``MAP`` columns as ``VARCHAR``. Errors in the generated SQL used to be wrapped as ``semantic_view: SQL execution failed: ...`` or ``semantic_view: type inference failed for query ...``.
 
 .. versionchanged:: 0.11.0
 
@@ -362,6 +376,8 @@ DuckDB 2.0's per-query time limit, ``SET max_execution_time`` (in milliseconds),
 
 The limit also covers the commands that report member data types, because they run a typing query against the view's tables: :ref:`DESCRIBE SEMANTIC VIEW <ref-describe-semantic-view>`, :ref:`SHOW COLUMNS IN SEMANTIC VIEW <ref-show-columns>`, :ref:`SHOW SEMANTIC DIMENSIONS <ref-show-semantic-dimensions>`, :ref:`SHOW SEMANTIC METRICS <ref-show-semantic-metrics>`, :ref:`SHOW SEMANTIC FACTS <ref-show-semantic-facts>`, and :ref:`SHOW SEMANTIC DIMENSIONS FOR METRIC <ref-show-dims-for-metric>`. ``RESET max_execution_time`` removes the limit. See :ref:`ref-err-time-limit`.
 
+As with DuckDB's own queries, the limit counts from when the query starts running. Time DuckDB spends planning a source that is slow to bind, such as a ``read_parquet`` over a long list of files, is not limited.
+
 
 .. _ref-sv-name-resolution:
 
@@ -373,6 +389,13 @@ Dimension, metric, and fact names are resolved case-insensitively, following Duc
 Wildcard patterns (``alias.*``) are expanded before name resolution. The expansion respects ``PRIVATE`` access modifiers -- private items are excluded.
 
 If a name does not match any defined dimension, metric, or fact, the error message lists available names and suggests the closest match (if one exists within 3 edits).
+
+**Tables in the definition.** Each table in ``TABLES`` is the one CREATE found. A name written without a schema is the table of that name in the database and schema the view was created in, or your session's temporary table of that name if that is what it named at CREATE, so a semantic view over a temporary table can be queried in the session that has the table. A name written ``schema.table`` is looked up in the database the view was created in. A table created later, in your current schema or as a temporary table, is not read in its place.
+
+**Names in member expressions.** A table in a subquery inside a dimension, fact or metric expression, a function or macro, and a type in a cast resolve as they would in a DuckDB view stored in the schema the semantic view was created in: your session's temporary objects first, then that schema, then its database's default schema, then your search path. A CTE of the same name in your query, or an object of that name in your current schema, is not used in their place. A table named in a ``where_clause`` subquery is part of your query and resolves there, so it can read your CTEs. A function or type ``where_clause`` names outside its subqueries resolves like the definition's.
+
+.. versionchanged:: 0.16.0
+   Names in member expressions no longer resolve to your query's CTEs or your current schema, and a semantic view over a temporary table can be queried.
 
 
 .. _ref-sv-examples:

@@ -82,18 +82,18 @@ memory	main	v	dcs_orders	cust_tier	VARCHAR	[]	(empty)
 query TTTTTTTT nosort
 SHOW SEMANTIC METRICS STARTS WITH 'total' LIMIT 1
 ----
-memory	main	product_sv	dcs_orders	total	BIGINT	[]	(empty)
+memory	main	product_sv	dcs_orders	total	HUGEINT	[]	(empty)
 
 query TTTTTTTT rowsort
 SHOW SEMANTIC METRICS STARTS WITH 'total'
 ----
-memory	dcs_sch	sch_sv	dcs_orders	total	BIGINT	[]	(empty)
-memory	main	product_sv	dcs_orders	total	BIGINT	[]	(empty)
-memory	main	sales_a	dcs_orders	total	BIGINT	[]	(empty)
-memory	main	sales_b	dcs_orders	total	BIGINT	[]	(empty)
-memory	main	v	dcs_orders	total_amount	BIGINT	[]	(empty)
+memory	dcs_sch	sch_sv	dcs_orders	total	HUGEINT	[]	(empty)
+memory	main	product_sv	dcs_orders	total	HUGEINT	[]	(empty)
+memory	main	sales_a	dcs_orders	total	HUGEINT	[]	(empty)
+memory	main	sales_b	dcs_orders	total	HUGEINT	[]	(empty)
+memory	main	v	dcs_orders	total_amount	HUGEINT	[]	(empty)
 memory	main	v	dcs_orders	total_orders	BIGINT	[]	(empty)
-memory	main	w	dcs_orders	total_units	BIGINT	[]	(empty)
+memory	main	w	dcs_orders	total_units	HUGEINT	[]	(empty)
 
 # S-203: rewrite.rs::phase34_1_1_show_filter_tests::test_rewrite_show_facts_limit, test_build_filter_suffix_limit_only — LIMIT alone; LIMIT 1 below the two facts shows it takes effect
 query TTTTTTTT rowsort
@@ -622,7 +622,7 @@ memory	dcs_sch	sch_sv	dcs_orders	region	VARCHAR	[]	(empty)
 query TTTTTTTT rowsort
 SHOW SEMANTIC METRICS IN SCHEMA dcs_sch
 ----
-memory	dcs_sch	sch_sv	dcs_orders	total	BIGINT	[]	(empty)
+memory	dcs_sch	sch_sv	dcs_orders	total	HUGEINT	[]	(empty)
 
 # S-274: rewrite.rs::show_scope_other_commands_tests::in_schema_scopes_show_facts — SHOW SEMANTIC FACTS IN SCHEMA
 query TTTTTTTT rowsort

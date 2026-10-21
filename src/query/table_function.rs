@@ -8,7 +8,7 @@ use crate::util::suggest_closest;
 
 use super::error::QueryError;
 use super::items::{aliases_for, Item, OutputColumns, RequestItems};
-use super::wire::{build_projected_execution_sql, parse_varchar_list, serialize_register_payload};
+use super::wire::{build_projected_sql, frame_bind_payload, parse_varchar_list};
 
 // The raw C-API helpers moved to the always-compiled `raw_sql` module so the
 // read-side member-type probe (TECH-DEBT #51) can share them; re-exported here
@@ -31,25 +31,15 @@ pub(crate) use super::raw_sql::{execute_sql_raw, read_varchar_from_vector};
 // Responsibilities of the Rust side:
 //   - Catalog lookup (name normalisation, view-not-found suggestion).
 //   - Wildcard expansion + `QueryRequest` construction.
-//   - `expand::expand()` → expanded SQL.
-//   - Column-type inference at read-side bind time per D-16/D-17: a single
-//     unconditional LIMIT 0 probe on the per-call conn, for every query shape.
-//     AR-4 (PR-2) removed the DDL-time persisted-types fast path this comment
-//     used to describe — `column_type_names` / `column_types_inferred` are gone
-//     from the model (src/model.rs) and legacy rows carrying them fall through
-//     to the same probe. A failed probe is an error, not a VARCHAR fallback
-//     (WR-08 / D-15).
-//   - `build_execution_sql()` wrapping for HUGEINT→BIGINT casts etc.
+//   - `expand::expand()` → expanded SQL, laid out as the items ask (aliases,
+//     `column_order`).
 //
-// The dispatcher returns a flat binary buffer to the C++ side encoding
-// the schema + execution_sql for bind to declare output columns and the
-// init_global callback to run the query. Wire format:
-//
-//   u32 n_cols (little-endian)
-//   for each col:
-//     u32 byte_len + bytes (column name, UTF-8)
-//     u32 type_id (little-endian; already passed through normalize_type_id)
-//   u32 byte_len + bytes (execution_sql, UTF-8)
+// The dispatcher returns that SQL, UTF-8, and nothing else: the C++ side
+// (`sv_semantic_view_bind_replace`) parses it into a subquery that DuckDB binds
+// and plans inside the caller's query, so its column names and types are
+// DuckDB's own and it runs in the caller's transaction (TECH-DEBT #42). No
+// probe runs here: the only query on the per-call connection is the catalog
+// read (TECH-DEBT #19).
 //
 // Return codes mirror the Wave 5 dispatcher:
 //   0 — success; (out_ptr, out_len) populated.
@@ -79,6 +69,7 @@ pub unsafe extern "C" fn sv_semantic_view_bind_rust(
     where_len: usize,
     order_ptr: *const u8,
     order_len: usize,
+    fence: u8,
     out_ptr: *mut *mut u8,
     out_len: *mut usize,
     error_buf: *mut u8,
@@ -112,14 +103,15 @@ pub unsafe extern "C" fn sv_semantic_view_bind_rust(
                 where_len,
                 order_ptr,
                 order_len,
+                fence != 0,
             )
         },
     )
 }
 
 /// Body for [`sv_semantic_view_bind_rust`]: decode the request args, resolve
-/// the view, expand + type-infer, and serialize the register payload. Returns
-/// the wire buffer on success or the user-visible error message.
+/// the view and expand it. Returns the SQL to plan, UTF-8, or the user-visible
+/// error message.
 ///
 /// # Safety
 ///
@@ -146,6 +138,7 @@ unsafe fn semantic_view_bind_body(
     where_len: usize,
     order_ptr: *const u8,
     order_len: usize,
+    fence: bool,
 ) -> Result<Vec<u8>, String> {
     use crate::ddl::read_ffi::{probe_catalog_table_present, read_str_arg};
 
@@ -204,6 +197,18 @@ unsafe fn semantic_view_bind_body(
 
     let def = SemanticViewDefinition::from_json(&view_name, &json_str)?;
 
+    // For the shim's isolated bind (`fence`), the predicate becomes one that
+    // names only its members (`expand::where_fence`), so the expansion checks
+    // their expressions and joins on the query's own route without the
+    // caller's outer columns.
+    let where_clause = match where_clause {
+        Some(raw) if fence => Some(
+            crate::expand::where_fence(&view_name, &def, &raw)
+                .map_err(|e| QueryError::from(e).to_string())?,
+        ),
+        other => other,
+    };
+
     let invalid = |detail: String| {
         QueryError::InvalidRequest {
             view_name: view_name.clone(),
@@ -247,85 +252,19 @@ unsafe fn semantic_view_bind_body(
     let expanded_sql =
         expand(&view_name, &def, &req).map_err(|e| QueryError::from(e).to_string())?;
 
-    // Type inference: a LIMIT-0 probe on the per-call connection yields
-    // the output column names + types. The probe runs on `conn`, not a
-    // long-lived handle (H2). AR-4 (PR-2) removed the DDL-time
-    // persisted-types fast path (`column_type_names` / `column_types_inferred`
-    // were dead for post-v0.10 rows) — every row now infers at read time,
-    // matching Plan 03 D-16, so this is a single unconditional probe.
-    let (column_names, column_type_ids): (Vec<String>, Vec<u32>) = {
-        let limit0_sql = format!("{expanded_sql} LIMIT 0");
-        // Phase 65.1 Plan 11 / WR-08 / D-15: surface probe failures via
-        // the error message. No silent vec![0u32; names.len()] fallback to
-        // DUCKDB_TYPE_INVALID — that masked broken FACTS expressions behind a
-        // VARCHAR placeholder at query time.
-        let (names, types) = try_infer_schema(borrowed, &limit0_sql).map_err(|msg| {
-            format!(
-                "semantic_view: type inference failed for query \
-                 `{limit0_sql}`: {msg}"
-            )
-        })?;
-        let type_ids: Vec<u32> = types.iter().map(|t| normalize_type_id(*t)).collect();
-        (names, type_ids)
-    };
-
-    // Lay the columns out as the items ask (aliases, column_order), and build
-    // the execution SQL with casts where needed (HUGEINT→BIGINT etc).
+    // Lay the columns out as the items ask (aliases, column_order).
+    let column_names = crate::expand::output_column_names(&view_name, &def, &req)
+        .map_err(|e| QueryError::from(e).to_string())?;
     let output = OutputColumns::new(
         &column_names,
         [&dimension_aliases, &metric_aliases, &fact_aliases],
         items.order,
     )
     .map_err(invalid)?;
-    let (column_names, column_type_ids, execution_sql) =
-        build_projected_execution_sql(&expanded_sql, &column_names, &column_type_ids, &output);
-
-    // Serialise schema + execution_sql into a flat binary buffer.
-    serialize_register_payload(&column_names, &column_type_ids, &execution_sql)
-}
-
-// ---------------------------------------------------------------------------
-// FFI helpers
-// ---------------------------------------------------------------------------
-
-/// Normalize HUGEINT/UHUGEINT type IDs to BIGINT/UBIGINT.
-///
-/// `DuckDB`'s query planner infers `sum()` as HUGEINT at LIMIT-0 time, but the
-/// runtime optimizer may substitute `sum_no_overflow` → BIGINT (8 bytes/value).
-/// Normalizing stored type IDs prevents stale HUGEINT values from propagating
-/// into output declarations.
-pub(crate) fn normalize_type_id(t: u32) -> u32 {
-    const HUGEINT: u32 = ffi::DUCKDB_TYPE_DUCKDB_TYPE_HUGEINT;
-    const UHUGEINT: u32 = ffi::DUCKDB_TYPE_DUCKDB_TYPE_UHUGEINT;
-    const BIGINT: u32 = ffi::DUCKDB_TYPE_DUCKDB_TYPE_BIGINT;
-    const UBIGINT: u32 = ffi::DUCKDB_TYPE_DUCKDB_TYPE_UBIGINT;
-    match t {
-        HUGEINT => BIGINT,
-        UHUGEINT => UBIGINT,
-        _ => t,
-    }
-}
-
-// ---------------------------------------------------------------------------
-// Schema inference
-// ---------------------------------------------------------------------------
-
-/// Attempt to infer column names and types by executing a LIMIT 0 query.
-///
-/// Returns `Err(msg)` with the underlying `execute_sql_raw` error text when
-/// the LIMIT 0 probe fails. Phase 65.1 Plan 11 / WR-08 / D-15: callers
-/// surface the error via `write_err` + return rc=1, which the C++ binder
-/// re-raises as `BinderException`. The previous `Option` return type
-/// swallowed the diagnostic via `.ok()?`, masking broken DDL behind a
-/// silent VARCHAR placeholder for `DUCKDB_TYPE_INVALID`.
-///
-/// # Safety
-///
-/// The underlying `duckdb_connection` accessed via `borrowed.as_raw()` must
-/// be valid for the lifetime of the borrow.
-pub(crate) unsafe fn try_infer_schema(
-    borrowed: &crate::ddl::read_ffi::BorrowedConnection,
-    sql: &str,
-) -> Result<(Vec<String>, Vec<ffi::duckdb_type>), String> {
-    super::raw_sql::infer_schema_raw(borrowed.as_raw(), sql).map_err(String::from)
+    let (database, schema) = crate::expand::body_qualifier(&def);
+    Ok(frame_bind_payload(
+        database,
+        schema,
+        &build_projected_sql(&expanded_sql, &column_names, &output),
+    ))
 }

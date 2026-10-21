@@ -723,12 +723,73 @@ fn splice_references(
 /// inside ordinary parentheses, so those are not counted.
 const QUERY_OPENERS: &[&str] = &["select", "with", "from", "values", "table"];
 
+/// Whether `expr` holds a `;` outside its literals, quoted identifiers and
+/// comments: a statement separator, which no single expression contains.
+pub(crate) fn has_statement_separator(expr: &str) -> bool {
+    let bytes = expr.as_bytes();
+    let mut i = 0;
+    while i < bytes.len() {
+        match bytes[i] {
+            b'\'' => i = skip_single_quoted(bytes, i),
+            b'"' => i = skip_quoted_part(bytes, i),
+            b'$' => i = try_skip_dollar_quoted(bytes, i).unwrap_or(i + 1),
+            b'/' | b'-' => {
+                let next = skip_whitespace_and_comments(bytes, i);
+                i = if next == i { i + 1 } else { next };
+            }
+            b';' => return true,
+            _ => i += 1,
+        }
+    }
+    false
+}
+
+/// The first prepared-statement parameter in `expr` outside its literals,
+/// quoted identifiers and comments, with its offset: `?`, `?<n>`, `$<n>` or
+/// `$<name>`.
+pub(crate) fn find_parameter(expr: &str) -> Option<(usize, &str)> {
+    let bytes = expr.as_bytes();
+    let run_end = |from: usize, ok: fn(u8) -> bool| {
+        let mut j = from;
+        while j < bytes.len() && ok(bytes[j]) {
+            j += 1;
+        }
+        j
+    };
+    let mut i = 0;
+    while i < bytes.len() {
+        match bytes[i] {
+            b'\'' => i = skip_single_quoted(bytes, i),
+            b'"' => i = skip_quoted_part(bytes, i),
+            b'$' => {
+                if let Some(end) = try_skip_dollar_quoted(bytes, i) {
+                    i = end;
+                    continue;
+                }
+                let end = run_end(i + 1, crate::util::is_ident_byte);
+                let starts_word = i == 0 || !crate::util::is_ident_byte(bytes[i - 1]);
+                if starts_word && end > i + 1 {
+                    return Some((i, &expr[i..end]));
+                }
+                i += 1;
+            }
+            b'?' => return Some((i, &expr[i..run_end(i + 1, |b| b.is_ascii_digit())])),
+            b'/' | b'-' => {
+                let next = skip_whitespace_and_comments(bytes, i);
+                i = if next == i { i + 1 } else { next };
+            }
+            _ => i += 1,
+        }
+    }
+    None
+}
+
 /// The byte spans `(start, end)` of the subqueries in `expr`, in order: each `(`
 /// that opens a query ([`opens_query`]), through its matching `)`. A subquery
 /// nested in another lies inside the outer span and is not listed separately.
-/// Literal, quoted-identifier and comment content is skipped: `semantic_view()`'s
-/// `where_clause` arrives with its comments (only the construct strips them
-/// first), and a bracket in one opens or closes nothing.
+/// Literal, quoted-identifier and comment content is skipped: a caller may pass
+/// text with comments in it (`expand::where_clause` blanks them first), and a
+/// bracket in one opens or closes nothing.
 pub(crate) fn subquery_spans(expr: &str) -> Vec<(usize, usize)> {
     let bytes = expr.as_bytes();
     let mut out = Vec::new();

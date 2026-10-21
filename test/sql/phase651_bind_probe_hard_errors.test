@@ -1,33 +1,15 @@
-# Phase 65.1 Plan 11 — WR-07 / WR-08 / D-14 / D-15 / D-16 hard-error coverage
-# for the bind-time LIMIT 0 type-inference probe.
+# Phase 65.1 Plan 11 — WR-07 / WR-08 / D-14 / D-15 hard-error coverage.
 #
-# Before Plan 11, two silent fallbacks lived behind the type-inference probe:
-#   WR-07 (cpp/src/shim.cpp `sv_resolve_output_logical_types`) — if the C++
-#         LIMIT 0 probe failed, the function fell back to a type_id-only
-#         declaration that mapped DUCKDB_TYPE_DECIMAL → DECIMAL(18,3) and
-#         DUCKDB_TYPE_LIST → LIST(VARCHAR), masking real errors.
-#   WR-08 (src/query/table_function.rs `try_infer_schema`) — if the Rust
-#         LIMIT 0 probe failed, the function returned `None` (via `.ok()?`)
-#         and the caller substituted `vec![0u32; names.len()]`
-#         (DUCKDB_TYPE_INVALID, declared as VARCHAR at query time).
+# Before Plan 11, two silent fallbacks lived behind `semantic_view()`'s
+# bind-time LIMIT 0 type-inference probe: a failed probe declared its columns
+# with a placeholder type (DECIMAL(18,3), LIST(VARCHAR), or VARCHAR for
+# DUCKDB_TYPE_INVALID), masking broken definitions. Plan 11 made a failed
+# probe an error.
 #
-# Both surfaces now propagate the underlying DuckDB error verbatim:
-#   WR-07 raises BinderException with prefix
-#         "semantic_view: failed to infer column types via LIMIT 0 probe:"
-#   WR-08 surfaces via error_buf + the C++ binder re-raise as
-#         "Binder Error: semantic_view: semantic_view: type inference \
-#          failed for query `<sql>`: <inner>"
-#
-# In practice the Rust LIMIT 0 probe runs FIRST (to obtain type IDs for the
-# wire format), so a broken expanded SQL fails via WR-08 before WR-07's
-# DECIMAL-only second probe is reached. This file pins the WR-08 surface
-# for the broken-METRIC case; WR-07's distinct wording is exercised by the
-# C++ branch unreachable from SQL alone (covered by structural inspection
-# of cpp/src/shim.cpp at lines containing
-# "failed to infer column types via LIMIT 0 probe").
-#
-# Plan 06 already added the CHANGELOG `### Changed` entry covering this
-# user-visible behaviour shift (D-16).
+# The probe is gone now: `semantic_view()` hands DuckDB its expansion to plan
+# as part of the caller's query (TECH-DEBT #42), so the column types are
+# DuckDB's own and a broken definition fails as any broken query does, with
+# DuckDB's error. This file keeps pinning that it fails, loudly.
 
 require semantic_views
 
@@ -35,10 +17,8 @@ statement ok
 LOAD semantic_views;
 
 # ---- B1: happy path regression guard ---------------------------------------
-# A valid semantic view + query must still succeed post-promotion.
-# Confirms the LIMIT 0 probe path resolves types cleanly when the underlying
-# expressions compile, i.e. the new hard-error paths did NOT regress the
-# common case.
+# A valid semantic view + query must still succeed: the hard-error paths
+# must not regress the common case.
 
 statement ok
 CREATE TABLE p651_orders (order_id INTEGER, total DECIMAL(10,2));
@@ -58,23 +38,14 @@ SELECT COUNT(*) FROM semantic_view('v_good_probe', metrics := ['total'])
 ----
 1
 
-# ---- B2: WR-08 hard-error surface ------------------------------------------
+# ---- B2: a broken metric is a hard error -----------------------------------
 # A METRIC expression referencing a column that doesn't exist on the
-# underlying base table. DDL creates the view (Phase 65 deliberately does
-# not run the expressions at CREATE time — the binder probe is the
-# read-side gate). At query time the LIMIT 0 probe in
-# `sv_semantic_view_bind_rust::try_infer_schema` raises a Binder Error
-# (because "o.no_such_column" cannot be bound); Plan 11 / WR-08 / D-15
-# now surfaces that error verbatim via `error_buf` + the C++ binder
-# re-raise, instead of swallowing it through `.ok()?` and declaring the
-# column as `DUCKDB_TYPE_INVALID` (silent VARCHAR placeholder at query
-# time).
-#
-# The substring "type inference failed for query" is the stable WR-08
-# prefix (from the Rust write_err call in
-# `src/query/table_function.rs`). The substring "Table \"o\" does not
-# have a column named \"no_such_column\"" is the verbatim inner DuckDB
-# diagnostic now made user-visible.
+# underlying base table. DDL creates the view (the expressions are not run at
+# CREATE time). At query time DuckDB binds the expansion as part of the query
+# and raises its own Binder Error, verbatim — never a VARCHAR placeholder
+# column (WR-08 / D-15). Before `semantic_view()` handed DuckDB its expansion
+# to plan (TECH-DEBT #42) the error came from a LIMIT 0 probe, wrapped as
+# "type inference failed for query".
 
 statement ok
 CREATE SEMANTIC VIEW v_bad_probe
@@ -86,7 +57,7 @@ CREATE SEMANTIC VIEW v_bad_probe
 statement error
 SELECT * FROM semantic_view('v_bad_probe', metrics := ['bogus'])
 ----
-type inference failed for query
+Table "o" does not have a column named "no_such_column"
 
 # Cleanup: drop both semantic views and the base table so subsequent tests
 # in the runner cascade see a clean catalog.

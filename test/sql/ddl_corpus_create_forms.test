@@ -839,7 +839,7 @@ TABLE	dcs_orders	(empty)	BASE_TABLE_SCHEMA_NAME	main
 TABLE	dcs_orders	(empty)	BASE_TABLE_NAME	dcs_orders
 METRIC	total	dcs_orders	TABLE	dcs_orders
 METRIC	total	dcs_orders	EXPRESSION	sum(o.amount)
-METRIC	total	dcs_orders	DATA_TYPE	BIGINT
+METRIC	total	dcs_orders	DATA_TYPE	HUGEINT
 METRIC	total	dcs_orders	ACCESS_MODIFIER	PUBLIC
 
 query I
@@ -1224,7 +1224,7 @@ DIMENSION	region	dcs_orders	EXPRESSION	region
 DIMENSION	region	dcs_orders	DATA_TYPE	VARCHAR
 METRIC	revenue	dcs_orders	TABLE	dcs_orders
 METRIC	revenue	dcs_orders	EXPRESSION	SUM(amount)
-METRIC	revenue	dcs_orders	DATA_TYPE	BIGINT
+METRIC	revenue	dcs_orders	DATA_TYPE	HUGEINT
 METRIC	revenue	dcs_orders	ACCESS_MODIFIER	PUBLIC
 
 # S-381: rewrite.rs::phase33_inference_tests::keeps_explicit_ref_columns — an explicit `REFERENCES c(email)` column list is kept

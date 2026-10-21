@@ -201,6 +201,7 @@ pub(super) fn resolve_where_clause(
     // name from them. Offsets are kept, so carets still point into `raw`.
     let blanked = crate::util::blank_sql_comments(raw);
     let raw = blanked.as_ref();
+    refuse_outside_one_predicate(view_name, raw)?;
     // Member lookup tables, keyed the same way `inline_references` keys its
     // replacements so FIND and SPLICE agree.
     //
@@ -314,6 +315,50 @@ pub(super) fn resolve_where_clause(
         source_tables,
         members,
     })
+}
+
+/// The predicate the shim binds in isolation to check `raw`'s members
+/// (TECH-DEBT #107): each dimension or fact `raw` names, outside a subquery,
+/// as `(<name>) IS NULL`, joined by `OR` and ending in `OR TRUE`. It names
+/// the same members as `raw`, so its expansion joins the same tables and,
+/// with a predicate set, takes the same route, but none of `raw`'s other
+/// names, which may be an enclosing query's columns.
+#[cfg_attr(not(feature = "extension"), allow(dead_code))]
+pub(crate) fn where_fence(
+    view_name: &str,
+    def: &SemanticViewDefinition,
+    raw: &str,
+) -> Result<String, ExpandError> {
+    let resolved = resolve_where_clause(view_name, def, raw)?;
+    let mut terms: Vec<String> = resolved
+        .members
+        .iter()
+        .map(|m| format!("({}) IS NULL", m.name))
+        .collect();
+    terms.push("TRUE".to_string());
+    Ok(terms.join(" OR "))
+}
+
+/// Refuse what would reach outside the predicate: a `;` that ends the
+/// expansion's statement, or a prepared statement's parameter, which would be
+/// one of the caller's (the expansion is bound in the caller's statement,
+/// TECH-DEBT #105). Run on the predicate as written, before its subqueries are
+/// hoisted ([`hoist_subqueries`]), as well as by [`resolve_where_clause`].
+pub(super) fn refuse_outside_one_predicate(view_name: &str, raw: &str) -> Result<(), ExpandError> {
+    let blanked = crate::util::blank_sql_comments(raw);
+    let raw = blanked.as_ref();
+    if crate::expr_tokens::has_statement_separator(raw) {
+        return Err(ExpandError::WhereClauseNotOnePredicate {
+            view_name: view_name.to_string(),
+        });
+    }
+    if let Some((_, parameter)) = crate::expr_tokens::find_parameter(raw) {
+        return Err(ExpandError::WhereClauseParameter {
+            view_name: view_name.to_string(),
+            parameter: parameter.to_string(),
+        });
+    }
+    Ok(())
 }
 
 /// The predicate with each subquery moved out into a CTE of the expansion.
@@ -754,6 +799,35 @@ mod tests {
         assert_eq!(r.sql, "(c.region) IN (SELECT revenue FROM t)");
     }
 
+    /// The predicate is spliced into the expansion as written, so a `;` would
+    /// end the expansion's statement and start another.
+    #[test]
+    fn a_semicolon_in_the_predicate_is_refused() {
+        for raw in [
+            "true; SELECT 1",
+            "region IN (SELECT 1; SELECT 2)",
+            "region = 'x';",
+        ] {
+            let err = resolve_where_clause("v", &def(), raw)
+                .unwrap_err()
+                .to_string();
+            assert!(err.contains("cannot contain ';'"), "{raw}: {err}");
+        }
+    }
+
+    #[test]
+    fn a_semicolon_in_a_literal_or_comment_is_kept() {
+        for raw in [
+            "region = ';'",
+            "region = $$;$$",
+            "\"a;b\" = 1",
+            "region = 'x' /* ; */",
+            "region = 'x' -- ;",
+        ] {
+            assert!(resolve_where_clause("v", &def(), raw).is_ok(), "{raw}");
+        }
+    }
+
     /// A member name can't correlate a subquery with the outer query: inside
     /// the subquery it is the subquery's own name, as in Snowflake, whose
     /// `WHERE` takes uncorrelated subqueries (CHANGELOG).
@@ -842,6 +916,86 @@ mod tests {
             r.sql
         );
         assert_eq!(r.source_tables, vec!["c", "o"]);
+    }
+
+    /// A prepared statement's parameter is refused, outside a literal or a
+    /// quoted name; inside one it is text.
+    #[test]
+    fn a_parameter_is_refused() {
+        let wrong: Vec<String> = ["region = ?", "region = ?2", "region = $1", "region = $name"]
+            .iter()
+            .filter_map(|p| match resolve_where_clause("v", &def(), p) {
+                Err(ExpandError::WhereClauseParameter { .. }) => None,
+                other => Some(format!("{p}: {other:?}")),
+            })
+            .collect();
+        assert!(wrong.is_empty(), "{wrong:#?}");
+        for p in [
+            "region = '?'",
+            "region = $$?$$",
+            "\"a?\" = 1",
+            "region = $x$ $1 $x$",
+        ] {
+            assert!(resolve_where_clause("v", &def(), p).is_ok(), "{p}");
+        }
+    }
+
+    /// A `;` or a parameter inside a subquery is refused too: the subquery is
+    /// hoisted into a CTE before the predicate is resolved, so the refusal
+    /// has to see the predicate as written.
+    fn expand_with(predicate: &str) -> Result<String, ExpandError> {
+        use crate::expand::{expand, MetricName, QueryRequest};
+        let req = QueryRequest {
+            dimensions: vec![],
+            metrics: vec![MetricName::new("revenue")],
+            facts: vec![],
+            where_clause: Some(predicate.to_string()),
+        };
+        expand("v", &def(), &req)
+    }
+
+    #[test]
+    fn a_separator_inside_a_subquery_is_refused() {
+        let got = expand_with("region IN (SELECT r FROM t; SELECT 1)");
+        assert!(
+            matches!(got, Err(ExpandError::WhereClauseNotOnePredicate { .. })),
+            "{got:?}"
+        );
+    }
+
+    #[test]
+    fn a_parameter_inside_a_subquery_is_refused() {
+        let got = expand_with("region IN (SELECT r FROM t WHERE k = ?)");
+        assert!(
+            matches!(got, Err(ExpandError::WhereClauseParameter { .. })),
+            "{got:?}"
+        );
+    }
+
+    /// The fence names the predicate's members, in its spelling, and nothing
+    /// else of it: not an outer column, a literal or a subquery's own name.
+    #[test]
+    fn the_fence_names_only_the_predicates_members() {
+        let fence = where_fence(
+            "v",
+            &def(),
+            "o.order_date > t.since AND \"Region\" IN (SELECT region FROM r) AND x = 'region'",
+        )
+        .unwrap();
+        assert_eq!(
+            fence,
+            "(o.order_date) IS NULL OR (\"Region\") IS NULL OR TRUE"
+        );
+        assert_eq!(where_fence("v", &def(), "t.x = 1").unwrap(), "TRUE");
+    }
+
+    /// The fence's errors are the predicate's: it refuses what the query does.
+    #[test]
+    fn the_fence_refuses_what_the_predicate_does() {
+        assert!(matches!(
+            where_fence("v", &def(), "revenue > 1"),
+            Err(ExpandError::WhereClauseReferencesMetric { .. })
+        ));
     }
 
     /// Brackets nested deeper than any stack would hold are scanned without

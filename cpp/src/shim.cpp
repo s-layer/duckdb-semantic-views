@@ -370,25 +370,12 @@ extern "C" {
         char **out_ptr, size_t *out_len,
         char *error_buf, size_t error_buf_len);
 
-    // Phase 65 Plan 05 Task 6 (Wave 6) — Rust dispatcher for the bind half
-    // of the migrated `semantic_view(view_name, dimensions := [...],
-    // metrics := [...], facts := [...])` table function. Same per-call
-    // BORROW contract as Wave 5. Performs catalog lookup + expand + LIMIT-0
-    // type-inference + execution-SQL construction, and returns:
-    //
-    //   wire format (u32 little-endian unless noted):
-    //     u32 n_cols
-    //     for each column:
-    //       u32 byte_len + bytes (column name, UTF-8)
-    //       u32 duckdb_type_id (normalised: HUGEINT→BIGINT, UHUGEINT→UBIGINT,
-    //                           STRUCT/MAP/INVALID→VARCHAR for declaration)
-    //     u32 byte_len + bytes (execution_sql, UTF-8)
-    //
-    // The C++ bind callback parses the buffer, declares the output schema
-    // (handling DECIMAL/LIST/ENUM logical-type metadata via a second
-    // LIMIT-0 query on the per-call Connection only when needed), stashes
-    // the execution_sql in BindData, and runs the actual query inside
-    // init_global so chunks can be streamed during exec.
+    // Rust dispatcher for `semantic_view(view_name, dimensions := [...],
+    // metrics := [...], ...)`. Same per-call BORROW contract as the other
+    // read-side dispatchers. Reads the definition, expands the request and
+    // returns the SQL to plan, UTF-8: one SELECT, with its columns named and
+    // ordered as the request asks. `sv_semantic_view_bind_replace` parses it
+    // into the subquery DuckDB binds in the call's place.
     uint8_t sv_semantic_view_bind_rust(
         duckdb_connection conn,
         const uint8_t *name_ptr, size_t name_len,
@@ -398,6 +385,7 @@ extern "C" {
         const uint8_t *facts_ptr, size_t facts_len,
         const uint8_t *where_ptr, size_t where_len,
         const uint8_t *order_ptr, size_t order_len,
+        uint8_t fence,
         char **out_ptr, size_t *out_len,
         char *error_buf, size_t error_buf_len);
 }
@@ -1089,6 +1077,9 @@ struct SvTableFunctionSpec {
     // (semantic_view's per-execution global). The core enforces the XOR.
     table_function_init_local_t init_local_cb = nullptr;
     table_function_init_global_t init_global_cb = nullptr;
+    // A TF whose bind hands DuckDB a table reference to bind in its place
+    // (semantic_view). It sets this alone: no bind, exec or init callback.
+    table_function_bind_replace_t bind_replace_cb = nullptr;
 };
 
 // The named LIST(VARCHAR) parameters shared by explain_semantic_view and
@@ -1145,18 +1136,25 @@ static bool sv_register_table_function_core(
         std::string(caller != nullptr ? caller : "sv_register_table_function_core") +
         "('" + (spec.name != nullptr ? spec.name : "(null)") + "')";
     try {
+        const bool replaces = spec.bind_replace_cb != nullptr;
         if (db_handle == nullptr || spec.name == nullptr ||
-            spec.bind_cb == nullptr || spec.exec_cb == nullptr) {
+            (!replaces && (spec.bind_cb == nullptr || spec.exec_cb == nullptr))) {
             write_err(who + ": null required argument");
             return false;
         }
         // D-05 generalized (CR-02): every TF must have exactly one
         // per-execution state constructor so the single-shot/streaming exec
         // cannot double-emit or loop. init_local XOR init_global — both-null
-        // reopens that hazard; both-set mixes the two state models.
+        // reopens that hazard; both-set mixes the two state models. A
+        // bind_replace TF has no scan of its own, so it sets none of them.
         const bool has_local = spec.init_local_cb != nullptr;
         const bool has_global = spec.init_global_cb != nullptr;
-        if (has_local == has_global) {
+        if (replaces) {
+            if (spec.bind_cb != nullptr || spec.exec_cb != nullptr || has_local || has_global) {
+                write_err(who + ": a bind_replace table function sets no bind, exec or init callback");
+                return false;
+            }
+        } else if (has_local == has_global) {
             write_err(who +
                 ": exactly one of init_local / init_global must be non-null "
                 "(D-05)");
@@ -1193,6 +1191,7 @@ static bool sv_register_table_function_core(
             spec.init_global_cb,
             spec.init_local_cb);
 
+        tf.bind_replace = spec.bind_replace_cb;
         for (const auto &np : spec.named_params) {
             sv_compat::add_named_parameter(tf, np.first, np.second);
         }
@@ -2008,10 +2007,9 @@ static void sv_emit_varchar_bool_rows(
 // (one `LIMIT 0` statement per member kind per view, with per-member
 // fallbacks), a cancelled cross-view SHOW kept probing view after view, and a
 // probe whose source binds slowly ran to completion — the INTERRUPT surfaced
-// only afterwards. `sv_query_interruptible` solves the same problem for
-// `semantic_view()` execution by polling between executor tasks; a bind has no
-// such task loop (a `LIMIT 0` probe is planned to an empty result — its cost is
-// all bind and optimisation), so the flag is carried across differently:
+// only afterwards. A bind has no executor task loop to poll between (a
+// `LIMIT 0` probe is planned to an empty result — its cost is all bind and
+// optimisation), so the flag is carried across as follows:
 //
 //   1. `sv_bind_caller_interrupted()` exposes the caller's flag to Rust, which
 //      consults it before every probe and stops typing (`member_types`), so a
@@ -2025,8 +2023,9 @@ static void sv_emit_varchar_bool_rows(
 //      a cancellation on the Rust side rather than as an untypable member.
 //   3. Once the dispatcher returns, a cancelled caller wins: a bare
 //      `InterruptException` is thrown, never the `"<fn> failed: ..."` wrapper,
-//      so the error is an INTERRUPT with the "Interrupted!" message (see
-//      `sv_query_interruptible` for why that matters to ADBC). Thrown from a
+//      so the error is an INTERRUPT with the "Interrupted!" message: ADBC
+//      maps a failure to ADBC_STATUS_CANCELLED only on an exact match against
+//      `InterruptException::INTERRUPT_MESSAGE`. Thrown from a
 //      bind, the binder appends the call's query location, exactly as it does
 //      when one of DuckDB's own table functions (`read_csv` over a glob) is
 //      interrupted while binding.
@@ -3163,352 +3162,313 @@ extern "C" {
 }
 
 // ---------------------------------------------------------------------------
-// Phase 65 Plan 05 Task 6 (Wave 6) — semantic_view migration
+// semantic_view(): planned inside the caller's query
 // ---------------------------------------------------------------------------
 //
-// Migrates the main expansion-path `semantic_view(view_name, dimensions :=
-// [...], metrics := [...], facts := [...])` table function off duckdb-rs's
-// `register_table_function_with_extra_info` (which marshals
-// `ClientContext &` away and consumed the long-lived H2 query_conn) to
-// the C++ Catalog API path. The bind callback opens a per-call
-// `Connection probe(*context.db)` and dispatches to
-// `sv_semantic_view_bind_rust` for catalog lookup + expand + LIMIT-0 type
-// inference + execution-SQL construction.
+// `semantic_view(view_name, dimensions := [...], metrics := [...], ...)` is a
+// `bind_replace` table function, as DuckDB's own `query()` is: its bind hands
+// back a table reference, a subquery over the expanded SQL, and DuckDB binds
+// and plans that subquery in place of the call. So the expansion is part of the
+// caller's query:
 //
-// Streaming model: bind returns a column schema + the execution SQL
-// string in BindData. `init_global` opens its OWN per-call
-// `Connection probe(*context.db)`, runs `probe.Query(execution_sql)` to
-// materialise the result, and stashes the
-// `unique_ptr<MaterializedQueryResult>` inside the GlobalState. The
-// Connection drops at end of init_global; the materialised result is
-// self-contained (`ColumnDataCollection` owns its storage) and lives
-// for the rest of the query. `func()` then fetches chunks via
-// `result->Fetch()` and copies vector data into the output DataChunk.
+//   - it runs in the caller's transaction and session, so it sees the
+//     transaction's own uncommitted rows and the session's temporary tables;
+//   - DuckDB optimises it together with the query around it (filter and
+//     projection pushdown, parallel scans) and streams it, with no buffering;
+//   - a cancelled caller stops it as it stops any query;
+//   - its columns have the types DuckDB gives them (`sum()` over an INTEGER is a
+//     HUGEINT), and the table alias and column aliases apply as to any table;
+//   - it may refer to a column of an enclosing query (`LATERAL`).
 //
-// Per-call lifecycle: TWO Connections are constructed per
-// `semantic_view(...)` invocation — one for bind (catalog probe +
-// LIMIT 0 type inference), one for init_global (actual query). Both
-// drop before any exec call runs. No long-lived extension-owned
-// `duckdb_connection` is consumed by this path.
+// The bind still opens a per-call `Connection probe(*context.db)` for one
+// thing: `sv_semantic_view_bind_rust` reads the definition from the catalog
+// table on it (TECH-DEBT #19). That connection runs no part of the query.
 //
-// Borrow contract: identical to the 15 prior migrations. The Rust
-// dispatcher MUST NOT call `duckdb_disconnect` on the borrowed handle —
-// teardown is the C++ scope's responsibility.
+// Borrow contract: identical to the other read-side binds. The Rust dispatcher
+// MUST NOT call `duckdb_disconnect` on the borrowed handle — teardown is the
+// C++ scope's responsibility.
+// Point every expression and table reference in `node` at `location`. The
+// expansion is parsed from SQL the user never wrote, so the positions the
+// parser gave it are offsets into that text; left alone, an error in it (a
+// column a metric names that no longer exists, a value that fails a cast)
+// would put its caret on whatever the caller's query has at that offset. The
+// call's own location is where the error belongs.
+static void sv_relocate(QueryNode &node, QueryLocation location) {
+    std::function<void(ParsedExpression &)> visit = [&](ParsedExpression &expr) {
+        expr.SetQueryLocation(location);
+        if (expr.GetExpressionClass() == ExpressionClass::SUBQUERY) {
+            auto &subquery = expr.Cast<SubqueryExpression>().SubqueryMutable();
+            if (subquery && subquery->node) {
+                sv_relocate(*subquery->node, location);
+            }
+        }
+        ParsedExpressionIterator::EnumerateChildren(expr, [&](ParsedExpression &child) { visit(child); });
+    };
+    ParsedExpressionIterator::EnumerateQueryNodeChildren(
+        node,
+        [&](unique_ptr<ParsedExpression> &expr) {
+            if (expr) {
+                visit(*expr);
+            }
+        },
+        [&](TableRef &ref) { ref.query_location = location; });
+}
 
-struct SemanticViewColumnInfo {
-    std::string name;
-    uint32_t type_id = 0;  // C-API DUCKDB_TYPE_* enum value (normalised:
-                           // HUGEINT→BIGINT, UHUGEINT→UBIGINT).
-};
-
-// Map a C-API `DUCKDB_TYPE` enum value (which is what
-// `duckdb_column_type` / `ffi::duckdb_column_type` return in Rust) to a
-// C++ `LogicalType`. The two enum spaces have DIFFERENT integer values
-// (e.g. C-API DUCKDB_TYPE_DECIMAL=19 vs C++ LogicalTypeId::DECIMAL=21),
-// so a naive `static_cast<LogicalTypeId>(c_type_id)` would silently
-// mis-type columns. This helper is the single source of truth for the
-// conversion and mirrors `type_from_duckdb_type_u32` /
-// `declare_output_type` in `src/query/table_function.rs`.
+// Resolve the names the expansion's member expressions use as DuckDB resolves
+// them in a view stored in the schema stamped at CREATE, and pin each to what it
+// finds, so DuckDB's bind of the expansion inside the caller's query can't pick
+// up the caller's CTE of that name, or an object of that name in the caller's
+// current schema. A view looks in the temporary schema, then its own schema,
+// then its database's default schema, ahead of the session's search path
+// (`Binder::GetSearchPath`); so does this, for a table (a member subquery's
+// `FROM`), a function or macro, a table function, and a type a cast names. The
+// `TABLES` entries arrive qualified already (`expand::qualify_and_quote_table_ref`,
+// with a table that was temporary at CREATE as `temp.main`); a two-part name is
+// looked up in the stamp's database first, as `TABLES` entries written that way
+// were at CREATE.
 //
-// DECIMAL / LIST / ENUM intentionally return a default (precisionless)
-// LogicalType — callers (see `sv_resolve_output_logical_types`) override
-// with the probed LogicalType from the LIMIT-0 result so width/scale/
-// child-type are preserved.
-static LogicalType sv_logical_type_from_c_type_id(uint32_t c_type_id) {
-    using duckdb::LogicalTypeId;
-    switch (c_type_id) {
-        case DUCKDB_TYPE_INVALID:    return LogicalType::VARCHAR;  // fallback
-        case DUCKDB_TYPE_BOOLEAN:    return LogicalType::BOOLEAN;
-        case DUCKDB_TYPE_TINYINT:    return LogicalType::TINYINT;
-        case DUCKDB_TYPE_SMALLINT:   return LogicalType::SMALLINT;
-        case DUCKDB_TYPE_INTEGER:    return LogicalType::INTEGER;
-        case DUCKDB_TYPE_BIGINT:     return LogicalType::BIGINT;
-        case DUCKDB_TYPE_UTINYINT:   return LogicalType::UTINYINT;
-        case DUCKDB_TYPE_USMALLINT:  return LogicalType::USMALLINT;
-        case DUCKDB_TYPE_UINTEGER:   return LogicalType::UINTEGER;
-        case DUCKDB_TYPE_UBIGINT:    return LogicalType::UBIGINT;
-        case DUCKDB_TYPE_FLOAT:      return LogicalType::FLOAT;
-        case DUCKDB_TYPE_DOUBLE:     return LogicalType::DOUBLE;
-        case DUCKDB_TYPE_TIMESTAMP:  return LogicalType::TIMESTAMP;
-        case DUCKDB_TYPE_DATE:       return LogicalType::DATE;
-        case DUCKDB_TYPE_TIME:       return LogicalType::TIME;
-        case DUCKDB_TYPE_INTERVAL:   return LogicalType::INTERVAL;
-        case DUCKDB_TYPE_HUGEINT:    return LogicalType::BIGINT;   // normalised
-        case DUCKDB_TYPE_UHUGEINT:   return LogicalType::UBIGINT;  // normalised
-        case DUCKDB_TYPE_VARCHAR:    return LogicalType::VARCHAR;
-        case DUCKDB_TYPE_BLOB:       return LogicalType::BLOB;
-        case DUCKDB_TYPE_TIMESTAMP_S:  return LogicalType::TIMESTAMP_S;
-        case DUCKDB_TYPE_TIMESTAMP_MS: return LogicalType::TIMESTAMP_MS;
-        case DUCKDB_TYPE_TIMESTAMP_NS: return LogicalType::TIMESTAMP_NS;
-        case DUCKDB_TYPE_TIMESTAMP_TZ: return LogicalType::TIMESTAMP_TZ;
-        case DUCKDB_TYPE_TIME_TZ:    return LogicalType::TIME_TZ;
-        case DUCKDB_TYPE_UUID:       return LogicalType::UUID;
-        case DUCKDB_TYPE_BIT:        return LogicalType::BIT;
-        case DUCKDB_TYPE_ENUM:       return LogicalType::VARCHAR;  // declared as VARCHAR
-        case DUCKDB_TYPE_STRUCT:     return LogicalType::VARCHAR;  // fallback to VARCHAR
-        case DUCKDB_TYPE_MAP:        return LogicalType::VARCHAR;
-        case DUCKDB_TYPE_DECIMAL:    return LogicalType::DECIMAL(18, 3);  // placeholder
-        case DUCKDB_TYPE_LIST:       return LogicalType::LIST(LogicalType::VARCHAR);  // placeholder
+// Left as written: a CTE name in scope, anything inside a hoisted where_clause
+// subquery (`__sv_sqN`, the caller's own text, which resolves in the caller's
+// query), an operator, a name already qualified with its catalog, and a name in
+// no catalog (a replacement scan such as a file path). A table name in no
+// catalog that the caller's query has a CTE for is refused, since the CTE would
+// be read. The rest of where_clause is spliced into the expansion, so a function
+// or type it names is resolved here like the definition's.
+struct SvTablePinner {
+    ClientContext &context;
+    optional_ptr<Binder> caller;
+    Identifier database;
+    Identifier schema;
+    std::vector<Identifier> scope;
+
+    static bool IsHoisted(const Identifier &name) {
+        return StringUtil::StartsWith(name.GetIdentifierName(), "__sv_sq");
+    }
+
+    optional_ptr<CatalogEntry> Lookup(CatalogType type, QualifiedName name) {
+        EntryLookupInfo lookup(type, std::move(name));
+        return Catalog::GetEntry(context, lookup, OnEntryNotFound::RETURN_NULL);
+    }
+
+    bool HasDatabase() {
+        return !database.empty() && Catalog::GetCatalogEntry(context, database);
+    }
+
+    // The first of the places a view in the stamp's schema looks for `name`
+    // that has it.
+    optional_ptr<CatalogEntry> Anchored(CatalogType type, const Identifier &name) {
+        if (auto entry = Lookup(type, QualifiedName(Identifier::TempCatalog(), Identifier::DefaultSchema(), name))) {
+            return entry;
+        }
+        if (HasDatabase()) {
+            auto own = schema.empty() ? Identifier::DefaultSchema() : schema;
+            if (auto entry = Lookup(type, QualifiedName(database, own, name))) {
+                return entry;
+            }
+            if (own != Identifier::DefaultSchema()) {
+                return Lookup(type, QualifiedName(database, Identifier::DefaultSchema(), name));
+            }
+            return nullptr;
+        }
+        if (!schema.empty()) {
+            return Lookup(type, QualifiedName(vector<Identifier> {schema}, name));
+        }
+        return nullptr;
+    }
+
+    // A function, macro or type found where the view looks first is named by
+    // where it was found. One in the temporary schema needs no qualifier: the
+    // caller's search path starts there too.
+    template <class T>
+    void PinObject(T &expr, CatalogType type) {
+        auto &name = expr.GetQualifiedName();
+        if (name.Path().size() != 1) {
+            return;
+        }
+        auto entry = Anchored(type, name.Name());
+        if (entry && entry->ParentCatalog().GetName() != Identifier::TempCatalog()) {
+            expr.SetQualifiedName(entry->ParentCatalog().GetName(), entry->ParentSchema().name, name.Name());
+        }
+    }
+
+    void Pin(BaseTableRef &ref) {
+        auto &path = ref.GetQualifiedName().Path();
+        if (path.size() == 2) {
+            if (HasDatabase() && Lookup(CatalogType::TABLE_ENTRY, QualifiedName(database, path[0], path[1]))) {
+                ref.SetQualifiedName(database, path[0], path[1]);
+            }
+            return;
+        }
+        if (path.size() != 1) {
+            return;
+        }
+        auto table = path[0];
+        for (auto &cte : scope) {
+            if (cte == table) {
+                return;
+            }
+        }
+        auto entry = Anchored(CatalogType::TABLE_ENTRY, table);
+        if (!entry) {
+            entry = Lookup(CatalogType::TABLE_ENTRY, QualifiedName(table));
+        }
+        if (entry) {
+            ref.SetQualifiedName(entry->ParentCatalog().GetName(), entry->ParentSchema().name, table);
+            return;
+        }
+        if (caller && caller->GetCTEBinding(BindingAlias(table))) {
+            throw BinderException(
+                "semantic_view: the view's definition names table \"%s\", which does not exist; the "
+                "query's CTE of that name is not read in its place",
+                table.GetIdentifierName());
+        }
+    }
+
+    void Expr(ParsedExpression &expr) {
+        switch (expr.GetExpressionClass()) {
+        case ExpressionClass::SUBQUERY: {
+            auto &subquery = expr.Cast<SubqueryExpression>().SubqueryMutable();
+            if (subquery && subquery->node) {
+                Node(*subquery->node);
+            }
+            break;
+        }
+        case ExpressionClass::FUNCTION: {
+            auto &function = expr.Cast<FunctionExpression>();
+            if (!function.IsOperator()) {
+                PinObject(function, CatalogType::SCALAR_FUNCTION_ENTRY);
+            }
+            break;
+        }
+        case ExpressionClass::WINDOW:
+            PinObject(expr.Cast<WindowExpression>(), CatalogType::SCALAR_FUNCTION_ENTRY);
+            break;
+        case ExpressionClass::CAST:
+            Expr(expr.Cast<CastExpression>().TargetTypeMutable());
+            break;
+        case ExpressionClass::TYPE:
+            PinObject(expr.Cast<TypeExpression>(), CatalogType::TYPE_ENTRY);
+            break;
         default:
-            // Unknown type — declare VARCHAR so downstream operators don't
-            // get a junk LogicalTypeId. Type mismatch will surface at exec.
-            return LogicalType::VARCHAR;
-    }
-}
-
-struct SemanticViewBindData : public TableFunctionData {
-    std::vector<SemanticViewColumnInfo> columns;
-    std::string execution_sql;
-    std::string expanded_sql_for_error;  // Mirror of execution_sql for SqlExecution error.
-};
-
-struct SemanticViewGlobalState : public GlobalTableFunctionState {
-    // `result` is drained by a single, unsynchronized cursor: the exec
-    // function (`sv_semantic_view_function`) calls `result->Fetch()` with no
-    // lock. That is safe ONLY because this state does not override
-    // `MaxThreads()`, so it inherits the base `GlobalTableFunctionState`
-    // default of 1 — DuckDB scans the semantic_view() table function
-    // single-threaded and never calls the exec function concurrently on the
-    // same global state. If a future change overrides `MaxThreads()` to allow
-    // parallel scans, the `Fetch()` cursor must be guarded (mutex, or a
-    // per-thread local state) or it will data-race.
-    std::unique_ptr<sv_compat::materialized_result_t> result;
-};
-
-// Run `sql` on `probe` the way `Connection::Query` would, but polling the OUTER
-// caller's interrupt flag so a cancelled query actually stops.
-//
-// `semantic_view()` executes its expanded SQL on a per-call
-// `Connection(*context.db)`, which carries its OWN `ClientContext`, and DuckDB's
-// interrupt flag is per-`ClientContext`. `duckdb_interrupt()` — and therefore
-// ADBC's `adbc_cancel()`, the CLI's Ctrl-C, and any framework timeout built on
-// them — sets `interrupted` on the *caller's* context. A plain
-// `probe.Query(sql)` blocks until the inner query finishes and only ever reads
-// the inner context's flag, which nothing sets, so a cancelled query ran to full
-// completion and the INTERRUPT surfaced only afterwards. Nor is there a yield
-// point in between: the inner query runs eagerly from a single outer executor
-// task, and the outer executor's own interrupt checks live in
-// `PipelineExecutor::Execute`, which does not run until this callback returns.
-//
-// So this unrolls the loop `Connection::Query` runs internally
-// (`PendingQueryResult::ExecuteInternal`) to get a poll point between tasks. On a
-// cancel the flag is forwarded to the inner connection and the loop keeps
-// draining rather than throwing immediately, so the inner executor's tasks are
-// wound down before `probe` leaves the caller's scope.
-//
-// The interrupt MUST be reported bare. ADBC maps a failure to
-// ADBC_STATUS_CANCELLED only on an exact match against
-// `InterruptException::INTERRUPT_MESSAGE` ("Interrupted!"), so wrapping it the
-// way the SqlExecution path wraps every other failure would report a cancelled
-// query as an internal error. Hence it is thrown from in here, ahead of any
-// caller's wrap, instead of being returned as an error-carrying result.
-//
-// DuckDB 2.0's per-query deadline (`SET max_execution_time`) is handled the
-// same way. It belongs to the caller's context, so the inner connection never
-// sees it: the loop forwards it as an interrupt and raises the engine's own
-// "Query exceeded maximum execution time" (`sv_compat::throw_if_cancelled`).
-//
-// Interrupt latency is one task slice. A BLOCKED inner query (async I/O — httpfs
-// and friends) adds at most one `Executor::WAIT_TIME` (20 ms) per poll, since
-// `WaitForTask()` waits with that timeout rather than indefinitely.
-//
-// Everything else matches `Connection::Query`, including returning an
-// error-carrying result rather than throwing, so callers keep their existing
-// `HasError()` handling. The one behavioural difference: a *multi*-statement
-// string would be rejected ("Cannot prepare multiple statements at once!")
-// instead of executed. `execution_sql` is always a single generated SELECT.
-//
-// DuckDB 2.0 (SV_DUCKDB_2) removed PendingQuery / PendingQueryResult /
-// MaterializedQueryResult: a single `QueryResult` handle now carries the
-// execution. `Connection::Submit` replaces `PendingQuery` (same single-statement
-// restriction, same error-carrying result on a parse/bind failure);
-// `QueryResult::ExecuteTask` / `WaitForTask` replace the pending result's; and
-// `QueryResult::Complete` collects the rows and ends the query, after which the
-// handle is detached from `probe` and serves `Fetch()` from its own collection —
-// the role `pending->Execute()` and MaterializedQueryResult had. The loop below
-// is the one `Connection::Query` runs internally in 2.0
-// (`QueryResult::CompleteInternal`): `Materialize()` settles retention
-// at submission exactly as `Connection::Query` does, so READY is waited on like
-// BLOCKED and only a terminal state (FINISHED / EXECUTION_ERROR) ends it.
-static unique_ptr<QueryResult> sv_query_interruptible(Connection &probe,
-                                                      ClientContext &outer,
-                                                      const std::string &sql) {
-#ifdef SV_DUCKDB_2
-    auto result = probe.Submit(sql, QueryParameters());
-    if (result->HasError()) {
-        // Parse/bind failure — nothing has executed. Same shape
-        // Connection::Query hands back for the identical failure.
-        return make_uniq<QueryResult>(result->GetErrorObject());
-    }
-    // Settle retention up front, as Connection::Query does: without it the
-    // engine parks on READY waiting for the caller to pick stream vs retain.
-    result->Materialize();
-
-    bool forwarded = false;
-    // A query whose custom result collector builds its own result is run to
-    // completion inside Submit and comes back already detached; there is
-    // nothing left to drive.
-    QueryResultState state =
-        result->IsOpen() ? QueryResultState::NOT_READY : QueryResultState::FINISHED;
-    while (!IsTerminal(state)) {
-        if (!forwarded && sv_compat::is_cancelled(outer)) {
-            // A cancelled caller (an interrupt, or 2.0's max_execution_time
-            // deadline, which is the caller's alone) sets the inner context's
-            // flag; the inner executor picks it up at
-            // its own next poll (2.0's ExecuteTask also checks it before running
-            // a task) and unwinds into an INTERRUPT error, which ends this loop
-            // via EXECUTION_ERROR.
-            forwarded = true;
-            probe.Interrupt();
+            break;
         }
-        state = result->ExecuteTask();
-        if (state == QueryResultState::BLOCKED || state == QueryResultState::READY) {
-            result->WaitForTask();
+        ParsedExpressionIterator::EnumerateChildren(expr, [&](ParsedExpression &child) { Expr(child); });
+    }
+
+    void Expr(unique_ptr<ParsedExpression> &expr) {
+        if (expr) {
+            Expr(*expr);
         }
     }
 
-    // The caller cancelled (interrupted, or past its deadline) — authoritative
-    // however the inner query ended. It may have raced to completion, or
-    // stopped on the forwarded flag.
-    sv_compat::throw_if_cancelled(outer);
-    if (result->HasError()) {
-        return make_uniq<QueryResult>(result->GetErrorObject());
-    }
-    // Collect the rows and end the query on `probe`; a commit failure lands on
-    // the result as an error, as it did from pending->Execute().
-    result->Complete();
-    return result;
-#else
-    auto pending = probe.PendingQuery(sql);
-    if (pending->HasError()) {
-        // Parse/bind failure — nothing has executed. Same shape
-        // Connection::Query hands back for the identical failure.
-        return make_uniq<MaterializedQueryResult>(pending->GetErrorObject());
-    }
-
-    bool forwarded = false;
-    PendingExecutionResult exec_result = PendingExecutionResult::RESULT_NOT_READY;
-    while (!PendingQueryResult::IsResultReady(exec_result)) {
-        if (!forwarded && sv_compat::is_cancelled(outer)) {
-            // Sets the inner context's flag; the inner executor picks it up at
-            // its own next poll and unwinds into an INTERRUPT error, which ends
-            // this loop via EXECUTION_ERROR.
-            forwarded = true;
-            probe.Interrupt();
+    void Ref(TableRef &ref) {
+        switch (ref.type) {
+        case TableReferenceType::BASE_TABLE:
+            Pin(ref.Cast<BaseTableRef>());
+            break;
+        case TableReferenceType::JOIN: {
+            auto &join = ref.Cast<JoinRef>();
+            Ref(*join.left);
+            Ref(*join.right);
+            Expr(join.condition);
+            break;
         }
-        exec_result = pending->ExecuteTask();
-        if (exec_result == PendingExecutionResult::BLOCKED) {
-            pending->WaitForTask();
+        case TableReferenceType::SUBQUERY: {
+            auto &subquery = ref.Cast<SubqueryRef>();
+            if (subquery.subquery && subquery.subquery->node) {
+                Node(*subquery.subquery->node);
+            }
+            break;
         }
-    }
-
-    // The caller cancelled (interrupted, or past its deadline) — authoritative
-    // however the inner query ended. It may have raced to completion, or
-    // stopped on the forwarded flag.
-    sv_compat::throw_if_cancelled(outer);
-    if (pending->HasError()) {
-        return make_uniq<MaterializedQueryResult>(pending->GetErrorObject());
-    }
-    return pending->Execute();
-#endif
-}
-
-// Look up DECIMAL/LIST logical types via a LIMIT-0 probe. Returns a
-// per-column LogicalType for every column in the declared schema; for
-// columns whose type_id isn't DECIMAL/LIST, the LogicalType is constructed
-// from the type_id directly (matching the behaviour of
-// `type_from_duckdb_type_u32` on the Rust side).
-//
-// Phase 65.1 WR-03: ENUM is intentionally declared as VARCHAR via
-// `sv_logical_type_from_c_type_id` (see that helper) — the LIMIT-0 probe
-// is NOT required for ENUM. The earlier comment claiming otherwise was a
-// maintenance trap.
-//
-// Phase 65.1 WR-07: takes the caller's per-bind Connection by reference
-// rather than opening a fresh one. This eliminates one ctor/dtor pair
-// per `semantic_view(...)` invocation when DECIMAL/LIST is present and,
-// more importantly, ensures the bind-time LIMIT-0 query runs on the same
-// Connection (and therefore the same transaction/catalog snapshot) as
-// the Rust dispatcher's catalog reads. Previously the FFI dispatcher
-// borrowed one Connection while this helper opened a second — two
-// separate Connections viewing potentially different uncommitted state.
-//
-// Probe failures (DuckDB error from the LIMIT 0 query) and column-count
-// mismatches now raise BinderException with full diagnostic text instead
-// of silently falling back to a type_id-only declaration (Phase 65.1
-// Plan 11 / WR-07 / D-14). The previous fallback masked real DDL-level
-// errors (broken FACTS / METRICS expressions referencing nonexistent
-// columns) behind a DECIMAL(18,3) placeholder at query time.
-static std::vector<LogicalType> sv_resolve_output_logical_types(
-    Connection &probe,
-    const std::vector<SemanticViewColumnInfo> &cols,
-    const std::string &execution_sql) {
-    std::vector<LogicalType> out;
-    out.reserve(cols.size());
-
-    bool needs_logical_probe = false;
-    for (const auto &c : cols) {
-        // C-API DUCKDB_TYPE_* enum values from duckdb.h. These two need
-        // logical-type metadata to declare correctly: DECIMAL needs
-        // width+scale; LIST needs child type. ENUM is intentionally
-        // declared as VARCHAR via sv_logical_type_from_c_type_id, so no
-        // probe is needed for it (Phase 65.1 WR-03).
-        if (c.type_id == DUCKDB_TYPE_DECIMAL ||
-            c.type_id == DUCKDB_TYPE_LIST) {
-            needs_logical_probe = true;
+        case TableReferenceType::TABLE_FUNCTION: {
+            auto &function = ref.Cast<TableFunctionRef>().function;
+            if (function && function->GetExpressionClass() == ExpressionClass::FUNCTION) {
+                PinObject(function->Cast<FunctionExpression>(), CatalogType::TABLE_FUNCTION_ENTRY);
+                ParsedExpressionIterator::EnumerateChildren(*function, [&](ParsedExpression &child) { Expr(child); });
+            } else {
+                Expr(function);
+            }
+            break;
+        }
+        case TableReferenceType::EXPRESSION_LIST:
+            for (auto &row : ref.Cast<ExpressionListRef>().values) {
+                for (auto &value : row) {
+                    Expr(value);
+                }
+            }
+            break;
+        case TableReferenceType::PIVOT: {
+            auto &pivot = ref.Cast<PivotRef>();
+            Ref(*pivot.source);
+            for (auto &aggregate : pivot.aggregates) {
+                Expr(aggregate);
+            }
+            for (auto &column : pivot.pivots) {
+                for (auto &pivot_expr : column.pivot_expressions) {
+                    Expr(pivot_expr);
+                }
+                if (column.subquery) {
+                    Node(*column.subquery);
+                }
+            }
+            break;
+        }
+        default:
             break;
         }
     }
 
-    if (!needs_logical_probe) {
-        // Fast path: build each LogicalType straight from the C-API type_id.
-        for (const auto &c : cols) {
-            out.emplace_back(sv_logical_type_from_c_type_id(c.type_id));
+    void Node(QueryNode &node) {
+        auto outer = scope.size();
+        // A CTE is in scope from the next one on: its own body, unless it is
+        // recursive, reads the table of its name.
+        for (auto &cte : node.cte_map.map) {
+            if (!IsHoisted(cte.first) && cte.second->query_node) {
+                Node(*cte.second->query_node);
+            }
+            scope.push_back(cte.first);
         }
-        return out;
-    }
-
-    // Slow path: run LIMIT 0 on the caller-supplied Connection to extract
-    // logical type metadata for DECIMAL/LIST columns. Reusing the bind's
-    // Connection (rather than opening a fresh one) preserves the
-    // transaction/catalog snapshot the FFI dispatcher already borrowed.
-    std::string limit0_sql = "SELECT * FROM (" + execution_sql + ") __sv_probe LIMIT 0";
-    auto probe_result = probe.Query(limit0_sql);
-    if (probe_result->HasError()) {
-        // Phase 65.1 Plan 11 / WR-07 / D-14: surface the underlying DuckDB
-        // error verbatim. No silent fallback to a type_id-only declaration.
-        throw BinderException(
-            "semantic_view: failed to infer column types via LIMIT 0 probe: " +
-            probe_result->GetError());
-    }
-    const auto &probe_types = sv_compat::result_types(*probe_result);
-    if (probe_types.size() != cols.size()) {
-        // Phase 65.1 Plan 11 / WR-07 / D-14: distinct diagnostic naming
-        // both counts so a future contributor can see which side disagrees.
-        throw BinderException(
-            "semantic_view: LIMIT 0 probe returned " +
-            std::to_string(probe_types.size()) +
-            " columns, expected " + std::to_string(cols.size()));
-    }
-
-    for (idx_t i = 0; i < cols.size(); ++i) {
-        const auto &c = cols[i];
-        const LogicalType &probed = probe_types[i];
-        if (c.type_id == DUCKDB_TYPE_DECIMAL || c.type_id == DUCKDB_TYPE_LIST) {
-            // Use the probed logical type (preserves width/scale/child type).
-            out.emplace_back(probed);
-        } else {
-            out.emplace_back(sv_logical_type_from_c_type_id(c.type_id));
+        switch (node.type) {
+        case QueryNodeType::SELECT_NODE: {
+            auto &select = node.Cast<SelectNode>();
+            for (auto &expr : select.select_list) {
+                Expr(expr);
+            }
+            for (auto &expr : select.groups.group_expressions) {
+                Expr(expr);
+            }
+            Expr(select.where_clause);
+            Expr(select.having);
+            Expr(select.qualify);
+            if (select.from_table) {
+                Ref(*select.from_table);
+            }
+            break;
         }
+        case QueryNodeType::SET_OPERATION_NODE:
+            for (auto &child : node.Cast<SetOperationNode>().children) {
+                Node(*child);
+            }
+            break;
+        case QueryNodeType::RECURSIVE_CTE_NODE: {
+            auto &recursive = node.Cast<RecursiveCTENode>();
+            scope.push_back(recursive.ctename);
+            Node(*recursive.left);
+            Node(*recursive.right);
+            break;
+        }
+        default:
+            break;
+        }
+        ParsedExpressionIterator::EnumerateQueryNodeModifiers(
+            node, [&](unique_ptr<ParsedExpression> &expr) { Expr(expr); });
+        scope.resize(outer);
     }
-    return out;
-}
+};
 
-static unique_ptr<FunctionData> sv_semantic_view_bind(
+static unique_ptr<TableRef> sv_semantic_view_bind_replace(
     ClientContext &context,
-    TableFunctionBindInput &input,
-    vector<LogicalType> &return_types,
-    sv_compat::bind_names_t &names) {
+    TableFunctionBindInput &input) {
     if (input.inputs.empty() || input.inputs[0].IsNull()) {
         throw BinderException(
             "semantic_view: view name is required (positional arg 0)");
@@ -3546,176 +3506,111 @@ static unique_ptr<FunctionData> sv_semantic_view_bind(
 
     SvNestedQueryGuard nested_query;
     Connection probe(*context.db);
-    // The Rust bind types the requested members on `probe`, and a DECIMAL or
-    // LIST output adds a LIMIT 0 probe below; both read the view's tables, so a
-    // cancelled caller (interrupt or deadline) is forwarded and raised bare, as
-    // in the metadata binds.
+    // The catalog read runs on `probe`; a cancelled caller (interrupt or
+    // deadline) is forwarded and raised bare, as in the metadata binds.
     SvBindCancellationScope cancellation(context, probe);
     duckdb_connection borrowed = reinterpret_cast<duckdb_connection>(&probe);
 
-    SvOwnedBuffer payload;
-    char error_buf[1024];
-    std::memset(error_buf, 0, sizeof(error_buf));
-    uint8_t rc = sv_semantic_view_bind_rust(
-        borrowed,
-        reinterpret_cast<const uint8_t *>(view_name.data()), view_name.size(),
-        sp_buf.empty()      ? nullptr : sp_buf.data(),      sp_buf.size(),
-        dims_buf.empty()    ? nullptr : dims_buf.data(),    dims_buf.size(),
-        metrics_buf.empty() ? nullptr : metrics_buf.data(), metrics_buf.size(),
-        facts_buf.empty()   ? nullptr : facts_buf.data(),   facts_buf.size(),
-        where_clause.empty() ? nullptr : reinterpret_cast<const uint8_t *>(where_clause.data()),
-        where_clause.size(),
-        order_buf.empty()   ? nullptr : order_buf.data(),   order_buf.size(),
-        &payload.ptr, &payload.len,
-        error_buf, sizeof(error_buf));
-    cancellation.ThrowIfCancelled();
-    if (rc != 0) {
-        throw BinderException(std::string("semantic_view: ") + error_buf);
-    }
-
-    auto bd = make_uniq<SemanticViewBindData>();
-
-    // Parse the schema + execution_sql wire format.
-    size_t offset = 0;
-    uint32_t n_cols = sv_read_u32_le(payload.ptr, payload.len, offset, "semantic_view");
-    bd->columns.reserve(n_cols);
-    for (uint32_t i = 0; i < n_cols; ++i) {
-        SemanticViewColumnInfo info;
-        info.name = sv_read_string(payload.ptr, payload.len, offset, "semantic_view");
-        info.type_id = sv_read_u32_le(payload.ptr, payload.len, offset, "semantic_view");
-        bd->columns.push_back(std::move(info));
-    }
-    bd->execution_sql = sv_read_string(payload.ptr, payload.len, offset, "semantic_view");
-    if (offset != payload.len) {
-        throw BinderException(
-            "semantic_view: FFI buffer has trailing bytes (consumed " +
-            std::to_string(offset) + " of " + std::to_string(payload.len) + ")");
-    }
-    bd->expanded_sql_for_error = bd->execution_sql;
-
-    // Resolve declared logical types — runs a LIMIT-0 probe on the SAME
-    // Connection the FFI dispatcher already borrowed, if any DECIMAL/LIST
-    // column is in the schema (so width/scale/child-type can be honoured).
-    // Phase 65.1 WR-07: reusing `probe` here avoids a second Connection
-    // ctor/dtor pair and keeps both queries on the same
-    // transaction/catalog snapshot.
-    std::vector<LogicalType> declared_types;
-    try {
-        declared_types = sv_resolve_output_logical_types(
-            probe, bd->columns, bd->execution_sql);
-    } catch (...) {
-        // A probe stopped by the forwarded cancellation fails as a probe error;
-        // the cancellation is what the caller sees.
+    // Expand the request into one SELECT whose parse positions are the call's.
+    // With `fence`, the predicate is one that names only where_clause's
+    // members (`expand::where_fence`), for the isolated bind below.
+    auto expand = [&](bool fence) {
+        SvOwnedBuffer payload;
+        char error_buf[1024];
+        std::memset(error_buf, 0, sizeof(error_buf));
+        uint8_t rc = sv_semantic_view_bind_rust(
+            borrowed,
+            reinterpret_cast<const uint8_t *>(view_name.data()), view_name.size(),
+            sp_buf.empty()      ? nullptr : sp_buf.data(),      sp_buf.size(),
+            dims_buf.empty()    ? nullptr : dims_buf.data(),    dims_buf.size(),
+            metrics_buf.empty() ? nullptr : metrics_buf.data(), metrics_buf.size(),
+            facts_buf.empty()   ? nullptr : facts_buf.data(),   facts_buf.size(),
+            where_clause.empty() ? nullptr
+                                 : reinterpret_cast<const uint8_t *>(where_clause.data()),
+            where_clause.size(),
+            order_buf.empty()   ? nullptr : order_buf.data(),   order_buf.size(),
+            fence ? 1 : 0,
+            &payload.ptr, &payload.len,
+            error_buf, sizeof(error_buf));
         cancellation.ThrowIfCancelled();
-        throw;
-    }
-    cancellation.ThrowIfCancelled();
-    for (idx_t i = 0; i < bd->columns.size(); ++i) {
-        return_types.push_back(declared_types[i]);
-        names.emplace_back(bd->columns[i].name);
-    }
-    return std::move(bd);
-}
-
-static unique_ptr<GlobalTableFunctionState> sv_semantic_view_init_global(
-    ClientContext &context,
-    TableFunctionInitInput &input) {
-    auto &bd = input.bind_data->Cast<SemanticViewBindData>();
-    auto state = make_uniq<SemanticViewGlobalState>();
-
-    // Open a per-call Connection on the caller's DatabaseInstance and run
-    // the materialised query. The Connection drops at end of scope; the
-    // returned MaterializedQueryResult owns its data (via ColumnDataCollection)
-    // and is safe to use across exec invocations.
-    //
-    // Routed through sv_query_interruptible rather than Connection::Query so a
-    // cancel on the CALLER's connection stops this query instead of being
-    // noticed only once it has finished — the inner query runs on `probe`'s own
-    // ClientContext, which carries its own interrupt flag. An interrupt leaves
-    // via a bare InterruptException thrown from in there, deliberately ahead of
-    // the SqlExecution wrap below: ADBC recognises a cancellation only by the
-    // exact "Interrupted!" text, so wrapping it would report it as an internal
-    // error.
-    SvNestedQueryGuard nested_query;
-    Connection probe(*context.db);
-    auto qresult = sv_query_interruptible(probe, context, bd.execution_sql);
-    if (qresult->HasError()) {
-        // Match the legacy QueryError::SqlExecution wording so existing
-        // sqllogictest matchers stay byte-identical.
-        throw InvalidInputException(
-            "semantic_view: SQL execution failed: " + qresult->GetError() +
-            "  (expanded SQL: " + bd.expanded_sql_for_error + ")");
-    }
-    if (!sv_compat::is_materialized(*qresult)) {
-        throw InternalException(
-            "semantic_view: expected MaterializedQueryResult from Connection::Query");
-    }
-    state->result = sv_compat::take_materialized(std::move(qresult));
-    return std::move(state);
-}
-
-static void sv_semantic_view_function(
-    ClientContext & /*context*/,
-    TableFunctionInput &data_p,
-    DataChunk &output) {
-    auto &bd = data_p.bind_data->Cast<SemanticViewBindData>();
-    auto &gs = data_p.global_state->Cast<SemanticViewGlobalState>();
-
-    // Fetch the next chunk from the materialised result. Fetch() flattens
-    // vectors and returns nullptr when the stream is exhausted.
-    auto chunk = gs.result->Fetch();
-    if (!chunk || chunk->size() == 0) {
-        output.SetCardinality(0);
-        return;
-    }
-
-    // Validate column count — defensive against a planner inserting projections
-    // we didn't anticipate. The legacy Rust impl had a Mutex + col_count check;
-    // for the C++ path the bind-time schema agreement is authoritative.
-    //
-    // Phase 65.1 WR-02: previously this took `std::min(chunk->ColumnCount(),
-    // bd.columns.size())` and silently truncated on mismatch, leaving any
-    // unfilled output slots with default-constructed Vector contents that
-    // are not guaranteed to be NULL-marked — readers downstream could see
-    // garbage. Replace with an explicit mismatch error so a future planner
-    // change that violates the bind contract fails loud at first emission
-    // rather than producing silently-wrong data.
-    if (chunk->ColumnCount() != bd.columns.size()) {
-        throw InternalException(
-            "semantic_view: column count mismatch — chunk has " +
-            std::to_string(chunk->ColumnCount()) + " columns, bind declared " +
-            std::to_string(bd.columns.size()) +
-            " (please report this bug)");
-    }
-    idx_t n_cols = chunk->ColumnCount();
-
-    // Copy each column into the output chunk via Vector::Reference (zero-copy
-    // when types match exactly; falls back to a cast when build_execution_sql
-    // already inserted a `::TYPE` wrapper but the runtime type still differs).
-    for (idx_t col_idx = 0; col_idx < n_cols; ++col_idx) {
-        auto &src = chunk->data[col_idx];
-        auto &dst = output.data[col_idx];
-        if (src.GetType() == dst.GetType()) {
-            // Same logical type — zero-copy reference.
-            dst.Reference(src);
-        } else {
-            // Type mismatch despite the bind-time cast wrapper — last-resort
-            // cast. Matches the legacy QueryError::TypeMismatch fallback but
-            // does the cast instead of erroring; the bind-time cast wrapper
-            // (build_execution_sql) is the primary defence.
-            VectorOperations::DefaultCast(src, dst, chunk->size());
+        if (rc != 0) {
+            throw BinderException(std::string("semantic_view: ") + error_buf);
         }
+
+        // The payload is the SQL to plan: one SELECT. It is parsed with the
+        // built-in grammar, as DuckDB's `query()` parses its argument; it is
+        // generated SQL and uses none of this extension's syntax.
+        //
+        // The expansion carries `where_clause` as written, so a malformed
+        // predicate fails here. Its parse error is reported at the call, like
+        // the binder's (see `sv_relocate`): the position the parser gives is an
+        // offset into SQL the caller never wrote.
+        // The payload frames the database and schema stamped at CREATE ahead of
+        // the SQL (`query::wire::frame_bind_payload`).
+        const char *framed = reinterpret_cast<const char *>(payload.ptr);
+        size_t offset = 0;
+        std::string database = sv_read_string(framed, payload.len, offset, "semantic_view");
+        std::string schema = sv_read_string(framed, payload.len, offset, "semantic_view");
+        std::string sql(framed + offset, payload.len - offset);
+        Parser parser = sv_compat::builtin_parser();
+        try {
+            parser.ParseQuery(sql);
+        } catch (ParserException &e) {
+            ErrorData error(e);
+            throw ParserException(Exception::InitializeExtraInfo(input.ref.query_location),
+                                  "semantic_view: the query does not parse, so check "
+                                  "where_clause: " + error.RawMessage());
+        }
+        // The Rust side refuses a `;` in where_clause, so the expansion is one
+        // statement; this guards the shape all the same, as an input error,
+        // since the expansion's text comes from the caller's arguments.
+        if (parser.statements.size() != 1 ||
+            parser.statements[0]->type != StatementType::SELECT_STATEMENT) {
+            throw InvalidInputException(
+                "semantic_view: the expansion is not one SELECT statement: %s", sql);
+        }
+        auto select = unique_ptr_cast<SQLStatement, SelectStatement>(
+            std::move(parser.statements[0]));
+        sv_relocate(*select->node, input.ref.query_location);
+        SvTablePinner pinner {context, input.binder, Identifier(database), Identifier(schema), {}};
+        pinner.Node(*select->node);
+        return select;
+    };
+    auto select = expand(false);
+
+    // DuckDB binds the returned subquery in the caller's scope, so a name the
+    // expansion's own tables lack would bind to a column of an enclosing query
+    // (a comma join's right side is bound as LATERAL) instead of failing: a
+    // member expression's bare `amount` would read the outer row's `amount`.
+    // Only `where_clause` may refer outward (TECH-DEBT #107). So the expansion
+    // is bound first on a binder of its own, with no enclosing scope, where
+    // such a name fails as it would in a query of its own; its error carries
+    // the call's position, like the real bind's. Its predicate names only
+    // where_clause's members, so the member expressions where_clause brings in
+    // are checked too, and the expansion joins the same tables and takes the
+    // same route (a filtered query is never answered from a materialization).
+    //
+    // DuckDB resolves a name outward only through the binder's enclosing
+    // scopes, so with none (a top-level FROM, a join's left side, a CTE or a
+    // subquery in FROM) the real bind is already isolated, and the second bind,
+    // which costs as much as the first, is skipped.
+    if (input.binder && input.binder->HasEnclosingScope()) {
+        auto isolated = where_clause.empty()
+                            ? unique_ptr_cast<SQLStatement, SelectStatement>(select->Copy())
+                            : expand(true);
+        auto isolated_binder = Binder::CreateBinder(context);
+        isolated_binder->Bind(static_cast<SQLStatement &>(*isolated));
     }
-    output.SetCardinality(chunk->size());
+
+    unique_ptr<TableRef> ref = make_uniq<SubqueryRef>(std::move(select));
+    return ref;
 }
 
-// semantic_view takes the same named LIST(VARCHAR) parameters as
-// explain_semantic_view, but uses an init_global state constructor (its exec
-// streams the materialised query result across invocations) rather than
-// init_local. It builds a spec from the single shared `sv_semantic_named_params`
-// and registers via `sv_register_table_function_core` (C-7); the shared triple
-// makes it impossible for this TF and explain_semantic_view to drift. Same
-// per-call borrow contract and error_buf convention (D-08/D-09); no stderr.
+// semantic_view takes the same named parameters as explain_semantic_view, from
+// the single shared `sv_semantic_named_params` (C-7), so the two cannot drift.
+// It has only a `bind_replace`: DuckDB binds the subquery it returns, so there
+// is no bind data, state or scan of its own. Same error_buf convention
+// (D-08/D-09); no stderr.
 static bool sv_register_semantic_view_impl(duckdb_database db_handle,
                                            char *error_buf,
                                            size_t error_buf_len) {
@@ -3725,10 +3620,7 @@ static bool sv_register_semantic_view_impl(duckdb_database db_handle,
     spec.arg_types = arg_types;
     spec.arg_count = 1;
     spec.named_params = sv_semantic_named_params();
-    spec.bind_cb = sv_semantic_view_bind;
-    spec.exec_cb = sv_semantic_view_function;
-    spec.init_local_cb = nullptr;
-    spec.init_global_cb = sv_semantic_view_init_global;
+    spec.bind_replace_cb = sv_semantic_view_bind_replace;
     return sv_register_table_function_core(
         db_handle, spec, "sv_register_semantic_view", error_buf,
         error_buf_len);

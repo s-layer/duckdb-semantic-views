@@ -99,6 +99,7 @@ fn simple_definition() -> SemanticViewDefinition {
         database_name: None,
         schema_name: None,
         resolution_schema_name: None,
+        temp_tables: vec![],
         comment: None,
     }
 }
@@ -247,6 +248,7 @@ fn joined_definition() -> SemanticViewDefinition {
         database_name: None,
         schema_name: None,
         resolution_schema_name: None,
+        temp_tables: vec![],
         comment: None,
     }
 }

@@ -1,0 +1,619 @@
+# semantic_view() plans its expanded SQL inside the caller's query
+# (`bind_replace`), rather than running it on a connection of its own. So the
+# query reads the caller's transaction, its columns keep DuckDB's own types,
+# and it may refer to a lateral column.
+
+require semantic_views
+
+statement ok
+CREATE TABLE cq_customers (id INTEGER, region VARCHAR);
+
+statement ok
+CREATE TABLE cq_orders (id INTEGER, customer_id INTEGER, amount INTEGER);
+
+statement ok
+INSERT INTO cq_customers VALUES (1, 'EU'), (2, 'US');
+
+statement ok
+INSERT INTO cq_orders VALUES (10, 1, 100), (11, 1, 50), (12, 2, 70);
+
+statement ok
+CREATE SEMANTIC VIEW cq_sv AS
+  TABLES (
+    o AS cq_orders PRIMARY KEY (id),
+    c AS cq_customers PRIMARY KEY (id)
+  )
+  RELATIONSHIPS (
+    order_customer AS o(customer_id) REFERENCES c
+  )
+  DIMENSIONS (
+    c.region AS c.region
+  )
+  METRICS (
+    o.revenue AS sum(o.amount)
+  );
+
+# A row the caller's open transaction inserted is counted.
+
+statement ok
+BEGIN;
+
+statement ok
+INSERT INTO cq_orders VALUES (13, 2, 30);
+
+query TI rowsort
+SELECT * FROM semantic_view('cq_sv', dimensions := ['region'], metrics := ['revenue']);
+----
+EU	150
+US	100
+
+statement ok
+ROLLBACK;
+
+query TI rowsort
+SELECT * FROM semantic_view('cq_sv', dimensions := ['region'], metrics := ['revenue']);
+----
+EU	150
+US	70
+
+# A semantic view over a temporary table can be queried in the session that
+# has the table. A `TABLES` entry is the table CREATE found: one that resolved
+# to a temporary table then is read from the session's temporary table of that
+# name, and any other is the one in the database and schema stamped at CREATE
+# (`memory.main`). (A table the stamped schema lacks for another reason, such as
+# a CREATE under a search path, still fails: TECH-DEBT #97,
+# `ddl_corpus_frontdoor_c.test` F-095.)
+
+statement ok
+CREATE TEMP TABLE cq_scratch (id INTEGER, amount INTEGER);
+
+statement ok
+INSERT INTO cq_scratch VALUES (1, 5), (2, 6);
+
+statement ok
+CREATE SEMANTIC VIEW cq_tmp AS
+  TABLES (s AS cq_scratch PRIMARY KEY (id))
+  METRICS (s.total AS sum(s.amount));
+
+query I
+SELECT * FROM semantic_view('cq_tmp', metrics := ['total']);
+----
+11
+
+# Another session has no such table, so the query fails there.
+
+statement error con2
+SELECT * FROM semantic_view('cq_tmp', metrics := ['total']);
+----
+Table with name cq_scratch does not exist
+
+# The member types SHOW reports and explain_semantic_view's plan are still found
+# on a connection of the extension's own, which cannot see the session's
+# temporary tables, so they are missing for this view (TECH-DEBT #19).
+
+query TT
+SELECT name, data_type FROM (SHOW SEMANTIC METRICS IN cq_tmp);
+----
+total	(empty)
+
+query I
+SELECT count(*) FROM explain_semantic_view('cq_tmp', metrics := ['total'])
+WHERE explain_output LIKE '-- (not available -- Catalog Error: Table with name cq_scratch does not exist!%';
+----
+1
+
+# DESCRIBE names the temporary schema as the table's.
+
+query TT rowsort
+SELECT property, property_value FROM (DESCRIBE SEMANTIC VIEW cq_tmp)
+WHERE property IN ('BASE_TABLE_DATABASE_NAME', 'BASE_TABLE_SCHEMA_NAME');
+----
+BASE_TABLE_DATABASE_NAME	temp
+BASE_TABLE_SCHEMA_NAME	main
+
+# A table of the same name created in the stamped schema afterwards does not
+# take the temporary one's place.
+
+statement ok
+CREATE TABLE memory.main.cq_scratch (id INTEGER, amount INTEGER);
+
+statement ok
+INSERT INTO memory.main.cq_scratch VALUES (1, 100);
+
+query I
+SELECT * FROM semantic_view('cq_tmp', metrics := ['total']);
+----
+11
+
+statement ok
+DROP TABLE memory.main.cq_scratch;
+
+statement ok
+DROP SEMANTIC VIEW cq_tmp;
+
+# A table the definition names with its schema is that table only.
+
+statement ok
+CREATE TABLE memory.main.cq_spelled (id INTEGER, amount INTEGER);
+
+statement ok
+CREATE SEMANTIC VIEW cq_tmp_spelled AS
+  TABLES (s AS memory.main.cq_spelled PRIMARY KEY (id))
+  METRICS (s.total AS sum(s.amount));
+
+statement ok
+DROP TABLE memory.main.cq_spelled;
+
+statement ok
+CREATE TEMP TABLE cq_spelled AS SELECT 1 AS id, 7 AS amount;
+
+statement error
+SELECT * FROM semantic_view('cq_tmp_spelled', metrics := ['total']);
+----
+does not exist
+
+statement ok
+DROP SEMANTIC VIEW cq_tmp_spelled;
+
+statement ok
+DROP TABLE cq_spelled;
+
+# Nor does a temporary table created after the table CREATE found was dropped.
+
+statement ok
+CREATE TABLE cq_dropme (id INTEGER, amount INTEGER);
+
+statement ok
+CREATE SEMANTIC VIEW cq_dropv AS
+  TABLES (s AS cq_dropme PRIMARY KEY (id))
+  METRICS (s.total AS sum(s.amount));
+
+statement ok
+DROP TABLE cq_dropme;
+
+statement ok
+CREATE TEMP TABLE cq_dropme AS SELECT 1 AS id, 999 AS amount;
+
+statement error
+SELECT * FROM semantic_view('cq_dropv', metrics := ['total']);
+----
+Table with name cq_dropme does not exist
+
+statement ok
+DROP SEMANTIC VIEW cq_dropv;
+
+statement ok
+DROP TABLE cq_dropme;
+
+# A `TABLES` entry written `schema.table` is looked up in the database CREATE
+# ran in, whatever database the caller has selected.
+
+statement ok
+ATTACH ':memory:' AS cq_x;
+
+statement ok
+CREATE TABLE cq_x.main.cq_q AS SELECT 1 AS id, 999 AS amount;
+
+statement ok
+CREATE TABLE memory.main.cq_q AS SELECT 1 AS id, 5 AS amount;
+
+statement ok
+CREATE SEMANTIC VIEW cq_qv AS
+  TABLES (q AS main.cq_q PRIMARY KEY (id))
+  METRICS (q.total AS sum(q.amount));
+
+statement ok
+USE cq_x;
+
+query I
+SELECT * FROM semantic_view('memory.main.cq_qv', metrics := ['total']);
+----
+5
+
+statement ok
+USE memory;
+
+statement ok
+DROP SEMANTIC VIEW cq_qv;
+
+statement ok
+DROP TABLE memory.main.cq_q;
+
+statement ok
+DETACH cq_x;
+
+statement ok
+DROP TABLE cq_scratch;
+
+# The result types are DuckDB's own: sum() over INTEGER is a HUGEINT.
+
+query T
+SELECT typeof(revenue) FROM semantic_view('cq_sv', metrics := ['revenue']);
+----
+HUGEINT
+
+# A lateral column can be used in the predicate.
+
+query TTI rowsort
+SELECT t.r, s.region, s.revenue
+FROM (VALUES ('EU'), ('US')) t(r),
+     LATERAL (SELECT * FROM semantic_view('cq_sv', dimensions := ['region'], metrics := ['revenue'], where_clause := 'region = t.r')) s;
+----
+EU	EU	150
+US	US	70
+
+# Only where_clause may refer to an enclosing query. A member expression's bare
+# column that the semantic view's tables lack still fails, as it does in a
+# query of its own, rather than reading the outer row's column of that name:
+# DuckDB binds a comma join's right side as LATERAL.
+
+statement ok
+CREATE TABLE cq_outer (price INTEGER);
+
+statement ok
+INSERT INTO cq_outer VALUES (7), (9);
+
+statement ok
+CREATE SEMANTIC VIEW cq_bare AS
+  TABLES (o AS cq_orders PRIMARY KEY (id))
+  METRICS (o.bad AS sum(price));
+
+statement error
+SELECT * FROM cq_outer, semantic_view('cq_bare', metrics := ['bad']);
+----
+Referenced column "price" not found
+
+statement error
+SELECT * FROM cq_outer JOIN semantic_view('cq_bare', metrics := ['bad']) ON true;
+----
+Referenced column "price" not found
+
+statement error
+SELECT (SELECT bad FROM semantic_view('cq_bare', metrics := ['bad'])) FROM cq_outer;
+----
+Referenced column "price" not found
+
+statement error
+SELECT * FROM cq_outer, LATERAL (SELECT * FROM semantic_view('cq_bare', metrics := ['bad'])) s;
+----
+Referenced column "price" not found
+
+statement error
+SELECT (SELECT bad FROM (SELECT * FROM semantic_view('cq_bare', metrics := ['bad'])) x) FROM cq_outer;
+----
+Referenced column "price" not found
+
+# With nothing enclosing the call, the name fails all the same.
+
+statement error
+SELECT * FROM semantic_view('cq_bare', metrics := ['bad']), cq_outer;
+----
+Referenced column "price" not found
+
+# The same holds for a member that only where_clause brings into the query:
+# its expression is the semantic view's, not the caller's predicate.
+
+statement ok
+CREATE SEMANTIC VIEW cq_bare_dim AS
+  TABLES (o AS cq_orders PRIMARY KEY (id))
+  DIMENSIONS (o.d AS price)
+  METRICS (o.revenue AS sum(o.amount));
+
+statement error
+SELECT * FROM cq_outer, semantic_view('cq_bare_dim', metrics := ['revenue'], where_clause := 'd = 7');
+----
+Referenced column "price" not found
+
+statement ok
+DROP SEMANTIC VIEW cq_bare_dim;
+
+# The isolated bind takes the route the query takes. A filtered query is never
+# answered from a materialization, so one whose table is gone does not stop it,
+# in a join as at the top level.
+
+statement ok
+CREATE TABLE cq_mat (region VARCHAR, revenue HUGEINT);
+
+statement ok
+CREATE SEMANTIC VIEW cq_routed AS
+  TABLES (o AS cq_orders PRIMARY KEY (id), c AS cq_customers PRIMARY KEY (id))
+  RELATIONSHIPS (order_customer AS o(customer_id) REFERENCES c)
+  DIMENSIONS (c.region AS c.region)
+  METRICS (o.revenue AS sum(o.amount))
+  MATERIALIZATIONS (m AS (TABLE cq_mat, DIMENSIONS (region), METRICS (revenue)));
+
+statement ok
+DROP TABLE cq_mat;
+
+query ITI rowsort
+SELECT p.price, s.region, s.revenue
+FROM cq_outer p, semantic_view('cq_routed', dimensions := ['region'], metrics := ['revenue'], where_clause := 'region = ''EU''') s;
+----
+7	EU	150
+9	EU	150
+
+statement ok
+DROP SEMANTIC VIEW cq_routed;
+
+statement ok
+DROP SEMANTIC VIEW cq_bare;
+
+statement ok
+DROP TABLE cq_outer;
+
+# The predicate is spliced into the expansion, so a ';' in it is refused rather
+# than ending the expansion's statement.
+
+statement error
+SELECT * FROM semantic_view('cq_sv', metrics := ['revenue'], where_clause := 'true; SELECT 1');
+----
+where_clause is one predicate, so it cannot contain ';'
+
+# A table named in a member expression's subquery is the table it named at
+# CREATE: the caller's CTE of that name, or a table of that name in the
+# caller's current schema, is not read in its place. A CTE the member
+# expression declares itself is still its own.
+
+statement ok
+CREATE TABLE cq_tiers (t INTEGER);
+
+statement ok
+INSERT INTO cq_tiers VALUES (1);
+
+statement ok
+CREATE SEMANTIC VIEW cq_tiered AS
+  TABLES (o AS cq_orders PRIMARY KEY (id))
+  DIMENSIONS (
+    o.tier AS (SELECT max(t) FROM cq_tiers),
+    o.own_tier AS (WITH cq_tiers AS (SELECT 5 AS t) SELECT max(t) FROM cq_tiers)
+  )
+  METRICS (o.revenue AS sum(o.amount));
+
+query II
+WITH cq_tiers AS (SELECT 99 AS t) SELECT * FROM semantic_view('cq_tiered', dimensions := ['tier'], metrics := ['revenue']);
+----
+1	220
+
+# The call on a join's right side, where the expansion is bound twice.
+
+query II
+WITH cq_tiers AS (SELECT 99 AS t)
+SELECT s.* FROM (SELECT 1) AS one
+CROSS JOIN semantic_view('cq_tiered', dimensions := ['tier'], metrics := ['revenue']) AS s;
+----
+1	220
+
+query II
+WITH cq_tiers AS (SELECT 99 AS t) SELECT * FROM semantic_view('cq_tiered', dimensions := ['own_tier'], metrics := ['revenue']);
+----
+5	220
+
+# A CTE's own body reads the table of its name, not the CTE.
+
+statement ok
+CREATE SEMANTIC VIEW cq_self AS
+  TABLES (o AS cq_orders PRIMARY KEY (id))
+  DIMENSIONS (o.tier AS (WITH cq_tiers AS (SELECT * FROM cq_tiers WHERE t > 0) SELECT max(t) FROM cq_tiers))
+  METRICS (o.revenue AS sum(o.amount));
+
+query II
+WITH cq_tiers AS (SELECT 99 AS t) SELECT * FROM semantic_view('cq_self', dimensions := ['tier'], metrics := ['revenue']);
+----
+1	220
+
+statement ok
+DROP SEMANTIC VIEW cq_self;
+
+statement ok
+CREATE SCHEMA cq_other;
+
+statement ok
+CREATE TABLE cq_other.cq_tiers AS SELECT 7 AS t;
+
+statement ok
+SET schema = 'cq_other';
+
+query II
+SELECT * FROM semantic_view('main.cq_tiered', dimensions := ['tier'], metrics := ['revenue']);
+----
+1	220
+
+statement ok
+SET schema = 'main';
+
+statement ok
+DROP SCHEMA cq_other CASCADE;
+
+# Macros and types resolve the same way, as they would in a DuckDB view stored
+# in the schema the semantic view was created from: a macro or type of the same
+# name in the caller's current schema is not used in place of the view's.
+
+statement ok
+CREATE MACRO cq_cents(x) AS x * 100;
+
+statement ok
+CREATE TYPE cq_mood AS ENUM ('a', 'b');
+
+statement ok
+CREATE SEMANTIC VIEW cq_objs AS
+  TABLES (o AS cq_orders PRIMARY KEY (id))
+  DIMENSIONS (o.moods AS array_length(enum_range(NULL::cq_mood)))
+  METRICS (o.cents AS sum(cq_cents(o.amount)));
+
+query II
+SELECT * FROM semantic_view('cq_objs', dimensions := ['moods'], metrics := ['cents']);
+----
+2	22000
+
+statement ok
+CREATE SCHEMA cq_other;
+
+statement ok
+CREATE MACRO cq_other.cq_cents(x) AS x * 7;
+
+statement ok
+CREATE TYPE cq_other.cq_mood AS ENUM ('x', 'y', 'z');
+
+statement ok
+SET schema = 'cq_other';
+
+query II
+SELECT * FROM semantic_view('main.cq_objs', dimensions := ['moods'], metrics := ['cents']);
+----
+2	22000
+
+statement ok
+SET schema = 'main';
+
+statement ok
+DROP SCHEMA cq_other CASCADE;
+
+# As in a DuckDB view, the session's temporary macro or type of that name is
+# found first.
+
+statement ok
+CREATE TEMP MACRO cq_cents(x) AS x;
+
+statement ok
+CREATE TEMP TYPE cq_mood AS ENUM ('p', 'q', 'r', 's');
+
+query II
+SELECT * FROM semantic_view('cq_objs', dimensions := ['moods'], metrics := ['cents']);
+----
+4	220
+
+statement ok
+DROP MACRO temp.main.cq_cents;
+
+statement ok
+DROP TYPE temp.main.cq_mood;
+
+statement ok
+DROP SEMANTIC VIEW cq_objs;
+
+statement ok
+DROP MACRO cq_cents;
+
+statement ok
+DROP TYPE cq_mood;
+
+# where_clause is the caller's own text, so its subquery reads the caller's CTE.
+
+query II
+WITH cq_pick AS (SELECT 1 AS t)
+SELECT * FROM semantic_view('cq_tiered', dimensions := ['tier'], metrics := ['revenue'],
+                            where_clause := 'tier IN (SELECT t FROM cq_pick)');
+----
+1	220
+
+statement ok
+DROP SEMANTIC VIEW cq_tiered;
+
+# A row stored before CREATE recorded the database has only a schema
+# (`resolution_schema_name`): its member subqueries read that schema too.
+
+statement ok
+CREATE SCHEMA cq_an;
+
+statement ok
+CREATE TABLE cq_an.cq_orders AS SELECT 1 AS id, 20 AS amount;
+
+statement ok
+CREATE TABLE cq_an.cq_tiers AS SELECT 3 AS t;
+
+statement ok
+CREATE SEMANTIC VIEW cq_boot AS
+  TABLES (o AS cq_orders PRIMARY KEY (id))
+  METRICS (o.revenue AS sum(o.amount));
+
+statement ok
+INSERT INTO semantic_layer._definitions (schema_name, name, definition) VALUES ('main', 'cq_legacy',
+  '{"tables":[{"alias":"o","table":"cq_orders","pk_columns":["id"]}],"dimensions":[{"name":"tier","expr":"(SELECT max(t) FROM cq_tiers)","source_table":"o"}],"metrics":[{"name":"revenue","expr":"sum(o.amount)","source_table":"o"}],"resolution_schema_name":"cq_an"}');
+
+query II
+SELECT * FROM semantic_view('cq_legacy', dimensions := ['tier'], metrics := ['revenue']);
+----
+3	20
+
+statement ok
+DELETE FROM semantic_layer._definitions WHERE name = 'cq_legacy';
+
+statement ok
+DROP SEMANTIC VIEW cq_boot;
+
+statement ok
+DROP SCHEMA cq_an CASCADE;
+
+statement ok
+DROP TABLE cq_tiers;
+
+# A temporary table the definition names is read in the session that has it,
+# still ahead of a caller's CTE of that name.
+
+statement ok
+CREATE TEMP TABLE cq_tmp_tiers AS SELECT 3 AS t;
+
+statement ok
+CREATE SEMANTIC VIEW cq_tmp_tiered AS
+  TABLES (o AS cq_orders PRIMARY KEY (id))
+  DIMENSIONS (o.tier AS (SELECT max(t) FROM cq_tmp_tiers))
+  METRICS (o.revenue AS sum(o.amount));
+
+query II
+WITH cq_tmp_tiers AS (SELECT 99 AS t) SELECT * FROM semantic_view('cq_tmp_tiered', dimensions := ['tier'], metrics := ['revenue']);
+----
+3	220
+
+statement ok
+DROP SEMANTIC VIEW cq_tmp_tiered;
+
+statement ok
+DROP TABLE cq_tmp_tiers;
+
+# A table the definition names that no longer exists is an error, even where
+# the caller's query has a CTE of that name.
+
+statement ok
+CREATE TABLE cq_gone (t INTEGER);
+
+statement ok
+CREATE SEMANTIC VIEW cq_gone_sv AS
+  TABLES (o AS cq_orders PRIMARY KEY (id))
+  DIMENSIONS (o.tier AS (SELECT max(t) FROM cq_gone))
+  METRICS (o.revenue AS sum(o.amount));
+
+statement ok
+DROP TABLE cq_gone;
+
+statement error
+WITH cq_gone AS (SELECT 99 AS t) SELECT * FROM semantic_view('cq_gone_sv', dimensions := ['tier'], metrics := ['revenue']);
+----
+names table "cq_gone", which does not exist
+
+statement error
+SELECT * FROM semantic_view('cq_gone_sv', dimensions := ['tier'], metrics := ['revenue']);
+----
+Table with name cq_gone does not exist
+
+statement ok
+DROP SEMANTIC VIEW cq_gone_sv;
+
+# A prepared statement's parameter inside where_clause is refused: the
+# expansion is bound in the caller's statement, so it would take one of the
+# caller's parameters (TECH-DEBT #105).
+
+statement error
+PREPARE cq_p AS SELECT * FROM semantic_view('cq_sv', dimensions := ['region'], metrics := ['revenue'], where_clause := 'region <> ?') WHERE region = ?;
+----
+TECH-DEBT #105
+
+# Cleanup
+
+statement ok
+DROP SEMANTIC VIEW cq_sv;
+
+statement ok
+DROP TABLE cq_orders;
+
+statement ok
+DROP TABLE cq_customers;

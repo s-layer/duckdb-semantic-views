@@ -347,6 +347,13 @@ SELECT * FROM SEMANTIC_VIEW(svc_sv DIMENSIONS region METRICS revenue AS region);
 ----
 two columns of the query are named
 
+# explain_semantic_view() refuses the same query.
+
+statement error
+SELECT * FROM explain_semantic_view('svc_sv', dimensions := ['region AS revenue'], metrics := ['revenue']);
+----
+two columns of the query are named
+
 statement error
 SELECT * FROM SEMANTIC_VIEW(svc_sv DIMENSIONS c.* AS x METRICS revenue);
 ----

@@ -31,10 +31,11 @@
 /// would each need to exceed 4 GiB), so the error is a hard corruption signal,
 /// not a routine path.
 ///
-/// This is the single source shared by the read-path (`ddl::read_ffi`) and
-/// query-path (`query::wire`) serializers — C-6 (code-review 2026-07-11)
-/// collapsed the two divergent copies (a module fn and an inline closure) onto
-/// it.
+/// The read-path serializers (`ddl::read_ffi`) use it. C-6 (code-review
+/// 2026-07-11) collapsed two divergent copies onto it; the query path's copy
+/// left with the result wire format when `semantic_view()` moved to
+/// `bind_replace` (TECH-DEBT #42).
+#[cfg(feature = "extension")]
 pub(crate) fn wire_len(n: usize, what: &str) -> Result<u32, String> {
     u32::try_from(n).map_err(|_| format!("{what} ({n} bytes) exceeds the wire-format u32 limit"))
 }

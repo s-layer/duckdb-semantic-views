@@ -4,10 +4,9 @@
 //! per-call connection a bind callback borrowed) and read the result through
 //! the C API directly. They used to live in the `extension`-gated
 //! `table_function` module; they moved here, always compiled, so the
-//! read-side member-type probe (`member_types`, TECH-DEBT #51) can share the
-//! exact schema inference `semantic_view()` uses, and so `cargo test` can
-//! drive both against the bundled `DuckDB`. `table_function` re-exports the
-//! two older helpers for its existing callers.
+//! read-side member-type probe (`member_types`, TECH-DEBT #51) can use them,
+//! and so `cargo test` can drive them against the bundled `DuckDB`.
+//! `table_function` re-exports the two older helpers for its existing callers.
 
 use std::ffi::{CStr, CString};
 
@@ -78,61 +77,19 @@ pub(crate) unsafe fn execute_sql_checked(
     Ok(result)
 }
 
-/// Infer the output column names and C-API type ids of `sql` by executing it.
-///
-/// The caller supplies a cheap statement (the query path appends `LIMIT 0`).
-/// Returns `Err` with `DuckDB`'s own error text (and its interrupt class) when
-/// the statement fails to bind or run; callers decide whether that is fatal (`semantic_view()`) or
-/// a per-member "type unknown" (the member-type probe).
-///
-/// # Safety
-///
-/// `conn` must be a valid, non-null `duckdb_connection` handle.
-pub(crate) unsafe fn infer_schema_raw(
-    conn: ffi::duckdb_connection,
-    sql: &str,
-) -> Result<(Vec<String>, Vec<ffi::duckdb_type>), RawSqlError> {
-    let mut result = execute_sql_checked(conn, sql)?;
-
-    // idx_t (u64) column count; `unwrap_or(0)` avoids a 32-bit truncation cast.
-    let col_count = usize::try_from(ffi::duckdb_column_count(&raw mut result)).unwrap_or(0);
-    let mut names = Vec::with_capacity(col_count);
-    let mut types = Vec::with_capacity(col_count);
-
-    for i in 0..col_count {
-        let name_ptr = ffi::duckdb_column_name(&raw mut result, i as ffi::idx_t);
-        let name = if name_ptr.is_null() {
-            format!("column{i}")
-        } else {
-            CStr::from_ptr(name_ptr).to_string_lossy().into_owned()
-        };
-        names.push(name);
-
-        let ty = ffi::duckdb_column_type(&raw mut result, i as ffi::idx_t);
-        types.push(ty);
-    }
-
-    ffi::duckdb_destroy_result(&raw mut result);
-    Ok((names, types))
-}
-
-/// The full logical type of every output column of `sql`, in `DuckDB`'s own
-/// spelling (`DECIMAL(18,2)`, `VARCHAR[]`, `STRUCT(a INTEGER)`), via
-/// `DESCRIBE`. `DESCRIBE` binds the statement without running it.
-///
-/// The C API exposes a type *id* per column but no way to print a parameterised
-/// type, so this is how a probe recovers the width/scale of a DECIMAL or the
-/// child type of a LIST — the same information `semantic_view()`'s bind gets
-/// from its own logical-type probe.
+/// The name and full logical type of every output column of `sql`, the type in
+/// `DuckDB`'s own spelling (`HUGEINT`, `DECIMAL(18,2)`, `VARCHAR[]`,
+/// `STRUCT(a INTEGER)`), which is what `typeof()` reports for the column. Via
+/// `DESCRIBE`, which binds the statement without running it.
 ///
 /// # Safety
 ///
 /// `conn` must be a valid, non-null `duckdb_connection` handle.
 #[allow(clippy::cast_possible_truncation)]
-pub(crate) unsafe fn describe_column_types(
+pub(crate) unsafe fn describe_columns(
     conn: ffi::duckdb_connection,
     sql: &str,
-) -> Result<Vec<String>, RawSqlError> {
+) -> Result<Vec<(String, String)>, RawSqlError> {
     // `DESCRIBE <query>` output: column_name, column_type, null, key, default,
     // extra. Wrapping in a subquery keeps a leading `WITH` legal.
     let mut result = execute_sql_checked(
@@ -148,7 +105,10 @@ pub(crate) unsafe fn describe_column_types(
         }
         let row_count = ffi::duckdb_data_chunk_get_size(chunk) as usize;
         for row_idx in 0..row_count {
-            out.push(read_varchar_from_vector(chunk, 1, row_idx));
+            out.push((
+                read_varchar_from_vector(chunk, 0, row_idx),
+                read_varchar_from_vector(chunk, 1, row_idx),
+            ));
         }
         ffi::duckdb_destroy_data_chunk(&mut { chunk });
     }

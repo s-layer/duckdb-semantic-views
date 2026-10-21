@@ -35,6 +35,7 @@ fn make_def_with_private_metric() -> SemanticViewDefinition {
         database_name: None,
         schema_name: None,
         resolution_schema_name: None,
+        temp_tables: vec![],
         comment: None,
     }
 }
@@ -73,6 +74,7 @@ fn make_def_with_private_and_derived() -> SemanticViewDefinition {
         database_name: None,
         schema_name: None,
         resolution_schema_name: None,
+        temp_tables: vec![],
         comment: None,
     }
 }

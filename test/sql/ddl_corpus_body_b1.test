@@ -968,7 +968,7 @@ query TTTT rowsort
 SELECT object_kind, object_name, property, property_value FROM describe_semantic_view('dcc_c045') WHERE object_name = 'profit';
 ----
 DERIVED_METRIC	profit	ACCESS_MODIFIER	PUBLIC
-DERIVED_METRIC	profit	DATA_TYPE	BIGINT
+DERIVED_METRIC	profit	DATA_TYPE	HUGEINT
 DERIVED_METRIC	profit	EXPRESSION	revenue - cost
 
 # C-046: body_parser/mod.rs::parse_metrics_clause_mixed_entries — qualified, derived, qualified in one clause: order and kinds kept (derived may reference a later metric)

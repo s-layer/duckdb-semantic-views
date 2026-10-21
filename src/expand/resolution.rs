@@ -113,6 +113,66 @@ pub fn quote_table_ref(table: &str) -> String {
     }
 }
 
+/// The database and schema a bare table name in the view's definition
+/// resolves in: the ones stamped at CREATE.
+///
+/// The schema is the one the BODY resolves in, not the one the view lives in.
+/// Those differ when the CREATE name carried a qualifier — a view created as
+/// `analytics.sales` from `main` still means `main.orders` by a bare `orders`,
+/// following `DuckDB`'s rule that a view body resolves in the creating session's
+/// context. Rows written before views were schema-scoped have no
+/// `resolution_schema_name`; falling back to `schema_name` is exactly what they
+/// always did.
+#[must_use]
+pub fn body_qualifier(def: &SemanticViewDefinition) -> (Option<&str>, Option<&str>) {
+    let schema = def
+        .resolution_schema_name
+        .as_deref()
+        .or(def.schema_name.as_deref());
+    (def.database_name.as_deref(), schema)
+}
+
+/// The name a `TABLES` entry or materialization table would be found by in
+/// the temporary schema: its unquoted name when it is written without a
+/// schema, or with the `main` schema (`DuckDB` looks for `main.x` in
+/// `temp.main` first). `None` for any other spelling.
+fn temp_reachable_name(table: &str) -> Option<String> {
+    match crate::ident::parse_qualified_identifier(table) {
+        Ok(parts) => match parts.as_slice() {
+            [name] => Some(name.clone()),
+            [schema, name] if schema.eq_ignore_ascii_case("main") => Some(name.clone()),
+            _ => None,
+        },
+        Err(_) => Some(table.to_string()),
+    }
+}
+
+/// The unquoted name of `table` when it resolved to a temporary table at
+/// CREATE ([`SemanticViewDefinition::temp_tables`]): that table is
+/// `temp.main.<name>`.
+#[must_use]
+pub fn temp_table_name(table: &str, def: &SemanticViewDefinition) -> Option<String> {
+    temp_reachable_name(table)
+        .filter(|name| def.temp_tables.iter().any(|t| t.eq_ignore_ascii_case(name)))
+}
+
+/// The tables the definition names in a way a temporary table could answer
+/// (see `temp_reachable_name`), by unquoted name. CREATE records which of
+/// these resolve to a temporary table in the creating session
+/// ([`SemanticViewDefinition::temp_tables`]).
+#[must_use]
+pub fn temp_table_candidates(def: &SemanticViewDefinition) -> Vec<String> {
+    let mut names: Vec<String> = Vec::new();
+    let tables = def.tables.iter().map(|t| t.table.as_str());
+    let materialized = def.materializations.iter().map(|m| m.table.as_str());
+    for name in tables.chain(materialized).filter_map(temp_reachable_name) {
+        if !names.iter().any(|n| n.eq_ignore_ascii_case(&name)) {
+            names.push(name);
+        }
+    }
+    names
+}
+
 /// Qualify a table name with the definition's catalog/schema, then quote it.
 ///
 /// If the table name is already dot-qualified (more than one structural part),
@@ -135,6 +195,11 @@ pub fn qualify_and_quote_table_ref(table: &str, def: &SemanticViewDefinition) ->
     // Structural "is already qualified" test: a parsed identifier with more
     // than one part means the user already wrote `db.t` / `db.schema.t` /
     // `"db"."schema"."t"` etc. and we must not prepend a second qualifier.
+    // A table that resolved to a temporary table at CREATE is that one.
+    if let Some(name) = temp_table_name(table, def) {
+        return format!("\"temp\".\"main\".{}", quote_ident(&name));
+    }
+
     let is_qualified = matches!(
         crate::ident::parse_qualified_identifier(table),
         Ok(ref parts) if parts.len() > 1
@@ -144,21 +209,11 @@ pub fn qualify_and_quote_table_ref(table: &str, def: &SemanticViewDefinition) ->
     }
 
     let mut parts = Vec::new();
-    if let Some(db) = &def.database_name {
+    let (db, schema) = body_qualifier(def);
+    if let Some(db) = db {
         parts.push(quote_ident(db));
     }
-    // The schema the BODY resolves in, not the one the view lives in. Those
-    // differ when the CREATE name carried a qualifier — a view created as
-    // `analytics.sales` from `main` still means `main.orders` by a bare
-    // `orders`, following DuckDB's rule that a view body resolves in the
-    // creating session's context. Rows written before views were schema-scoped
-    // have no `resolution_schema_name`; falling back to `schema_name` is
-    // exactly what they always did.
-    let body_schema = def
-        .resolution_schema_name
-        .as_ref()
-        .or(def.schema_name.as_ref());
-    if let Some(schema) = body_schema {
+    if let Some(schema) = schema {
         parts.push(quote_ident(schema));
     }
     // `table` here is logically single-part. If it parses cleanly we emit
@@ -319,6 +374,7 @@ mod tests {
             database_name: db.map(str::to_string),
             schema_name: schema.map(str::to_string),
             resolution_schema_name: schema.map(str::to_string),
+            temp_tables: vec![],
             comment: None,
         }
     }
@@ -758,6 +814,30 @@ mod tests {
         }
 
         #[test]
+        fn a_table_that_was_temporary_at_create_is_qualified_with_temp() {
+            let mut def = def_with_db_schema(Some("db"), Some("schema"));
+            def.temp_tables = vec!["Scratch".to_string()];
+            assert_eq!(
+                qualify_and_quote_table_ref("scratch", &def),
+                "\"temp\".\"main\".\"scratch\"",
+            );
+            assert_eq!(
+                qualify_and_quote_table_ref("t", &def),
+                "\"db\".\"schema\".\"t\"",
+            );
+            // `main.scratch` reached the temporary table at CREATE too.
+            assert_eq!(
+                qualify_and_quote_table_ref("main.scratch", &def),
+                "\"temp\".\"main\".\"scratch\"",
+            );
+            // Written with another schema, the name is that table only.
+            assert_eq!(
+                qualify_and_quote_table_ref("schema.scratch", &def),
+                "\"schema\".\"scratch\"",
+            );
+        }
+
+        #[test]
         fn quoted_bare_name_with_dot_inside_treated_as_single_part() {
             // `"a.b"` is a SINGLE quoted part (the `.` is data, not a separator).
             // The old substring-dot heuristic mistakenly treated this as
@@ -822,6 +902,50 @@ mod tests {
                 result.starts_with("\"db\".\"schema\"."),
                 "expected db/schema prefix on malformed input, got: {result}",
             );
+        }
+    }
+
+    mod temp_table_candidates_tests {
+        use super::*;
+        use crate::expand::resolution::temp_table_candidates;
+        use crate::model::{Materialization, TableRef};
+
+        fn table(table: &str) -> TableRef {
+            TableRef {
+                alias: "a".to_string(),
+                table: table.to_string(),
+                ..TableRef::default()
+            }
+        }
+
+        #[test]
+        fn names_written_without_a_schema_or_in_main_are_listed() {
+            let mut def = def_with_db_schema(Some("db"), Some("main"));
+            def.tables = vec![
+                table("orders"),
+                table("\"Line Items\""),
+                table("ORDERS"),
+                table("MAIN.customers"),
+            ];
+            def.materializations = vec![Materialization {
+                table: "daily".to_string(),
+                ..Materialization::default()
+            }];
+            assert_eq!(
+                temp_table_candidates(&def),
+                ["orders", "Line Items", "customers", "daily"]
+            );
+        }
+
+        #[test]
+        fn names_in_another_schema_or_database_are_not_listed() {
+            let mut def = def_with_db_schema(Some("db"), Some("main"));
+            def.tables = vec![table("sales.orders"), table("db.main.customers")];
+            def.materializations = vec![Materialization {
+                table: "agg.daily".to_string(),
+                ..Materialization::default()
+            }];
+            assert!(temp_table_candidates(&def).is_empty());
         }
     }
 }

@@ -345,16 +345,19 @@ is always the type a query returns for that member:
 - **DuckDB type names.** Types are spelled the way DuckDB spells them
   (``VARCHAR``, ``BIGINT``, ``DECIMAL(38,2)``, ``VARCHAR[]``), not as Snowflake would
   (``TEXT``, ``NUMBER(38,0)``).
-- **The query's own type, not DuckDB's raw one.** ``semantic_view()`` returns a
-  ``HUGEINT`` result (for example ``SUM`` over an integer column) as ``BIGINT``, and
-  ``ENUM`` / ``STRUCT`` / ``MAP`` columns as ``VARCHAR``; ``data_type`` reports those
-  returned types.
+- **DuckDB's own types.** ``SUM`` over an integer column is a ``HUGEINT``, and
+  ``ENUM`` / ``STRUCT`` / ``MAP`` columns keep their types, both in what
+  ``semantic_view()`` returns and in ``data_type``.
 - **When a member cannot be typed** -- its source table or column was dropped or
   renamed after ``CREATE`` -- ``data_type`` is empty for that member, and the command
   still succeeds for the rest. Querying the member reports the underlying error.
   The same goes for a metric that cannot be queried on its own because it would
   aggregate across a fan-out (see :ref:`howto-fan-traps`): its ``data_type`` is
   empty, and querying it reports the fan trap.
+- **Over a temporary table** the members are not typed yet: ``data_type`` is empty,
+  though querying them works in the session that has the table. The command reads
+  committed state on a connection of its own, which cannot see your session's
+  temporary tables or your open transaction's changes.
 - **PRIVATE members** are typed too, though they cannot be queried directly.
 - **Role-played members** -- on a table that several relationships point at -- are
   typed too, although querying one needs a metric whose ``USING`` names the role. The

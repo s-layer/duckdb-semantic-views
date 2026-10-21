@@ -141,5 +141,9 @@ pub fn enrich_definition_for_create(
     // 4. Serialize. Metadata (created_on, database_name, schema_name) is
     //    populated by SQL inside the rewritten INSERT — not here. Column
     //    type inference is deferred to read-side bind (Plan 05).
+    //    `temp_tables` goes out holding every name written without a schema;
+    //    the INSERT keeps only those that are temporary tables in the
+    //    creating session (`native_sql::temp_tables_expr`).
+    def.temp_tables = crate::expand::temp_table_candidates(&def);
     serde_json::to_string(&def).map_err(|e| crate::errors::ParseError::positionless(e.to_string()))
 }

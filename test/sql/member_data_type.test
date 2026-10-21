@@ -3,12 +3,12 @@
 # DESCRIBE SEMANTIC VIEW report each member's `data_type`.
 #
 # The type is probed on the READ side, at SHOW / DESCRIBE bind time, by
-# expanding a request for the member and binding it with a LIMIT 0 probe —
-# the same mechanism `semantic_view()` uses to declare its output columns. So
-# the reported type is exactly what `typeof()` of that member's column returns
-# from `semantic_view()`, in DuckDB's spelling. That includes the query path's
-# own normalisation: `SUM` over an integer column is HUGEINT in plain DuckDB but
-# `semantic_view()` returns it as BIGINT, so BIGINT is reported.
+# expanding a request for the member and asking DuckDB to DESCRIBE it, which
+# binds the same SQL `semantic_view()` hands DuckDB to plan. So the reported
+# type is exactly what `typeof()` of that member's column returns from
+# `semantic_view()`, in DuckDB's spelling. `semantic_view()` returns the
+# expanded SQL's own types, so that is also the type plain DuckDB gives the
+# member's expression: `SUM` over an integer column is a HUGEINT.
 #
 # Nothing is stored at CREATE, so the type follows the source columns: a
 # column whose type changes after CREATE is reported with its new type, and a
@@ -98,12 +98,11 @@ SELECT name, data_type FROM show_semantic_metrics('dt_sv') WHERE name = 'avg_qty
 ----
 avg_qty	DOUBLE
 
-# CASE metric: SUM over INTEGER is reported as semantic_view() returns it
-# (BIGINT; plain DuckDB would say HUGEINT)
+# CASE metric: SUM over INTEGER is a HUGEINT
 query TT
 SELECT name, data_type FROM show_semantic_metrics('dt_sv') WHERE name = 'total_qty'
 ----
-total_qty	BIGINT
+total_qty	HUGEINT
 
 # CASE metric: SUM over DECIMAL(10,2) widens to DECIMAL(38,2); MAX keeps DATE
 query TT
@@ -122,7 +121,7 @@ avg_order	DOUBLE
 query TT
 SELECT name, data_type FROM show_semantic_metrics('dt_sv') WHERE name = 'qty_lag'
 ----
-qty_lag	BIGINT
+qty_lag	HUGEINT
 
 # CASE semi-additive metric (cannot share a probe with the derived metric)
 query TT
@@ -158,9 +157,9 @@ ORDER BY object_name
 ----
 DERIVED_METRIC	avg_order	DOUBLE
 FACT	line_total	DECIMAL(18,2)
-METRIC	qty_lag	BIGINT
+METRIC	qty_lag	HUGEINT
 DIMENSION	region	VARCHAR
-METRIC	total_qty	BIGINT
+METRIC	total_qty	HUGEINT
 
 # CASE SHOW COLUMNS IN SEMANTIC VIEW
 query TT
@@ -188,7 +187,7 @@ query TTTTTT
 SELECT typeof(total_qty), typeof(order_count), typeof(avg_qty), typeof(total_amount), typeof(last_placed), typeof(avg_order)
 FROM semantic_view('dt_sv', metrics := ['total_qty', 'order_count', 'avg_qty', 'total_amount', 'last_placed', 'avg_order']) LIMIT 1
 ----
-BIGINT	BIGINT	DOUBLE	DECIMAL(38,2)	DATE	DOUBLE
+HUGEINT	BIGINT	DOUBLE	DECIMAL(38,2)	DATE	DOUBLE
 
 query TTTT
 SELECT typeof("Customer Name"), typeof(tier), typeof(tags), typeof(placed)
@@ -199,7 +198,7 @@ VARCHAR	SMALLINT	VARCHAR[]	DATE
 query T
 SELECT typeof(qty_lag) FROM semantic_view('dt_sv', dimensions := ['placed'], metrics := ['qty_lag']) LIMIT 1
 ----
-BIGINT
+HUGEINT
 
 query T
 SELECT typeof(closing_amount) FROM semantic_view('dt_sv', metrics := ['closing_amount']) LIMIT 1
@@ -353,8 +352,8 @@ SELECT name, data_type FROM show_semantic_dimensions_all() WHERE schema_name = '
 sku	UUID
 
 # ============================================================
-# Types semantic_view() declares differently from the raw expression: an ENUM
-# or STRUCT column is returned as VARCHAR, so that is what is reported.
+# ENUM, STRUCT and HUGEINT columns keep their own types: semantic_view()
+# returns them as the table has them, and that is what is reported.
 # ============================================================
 
 statement ok
@@ -375,14 +374,14 @@ DIMENSIONS (x.mood AS x.mood, x.info AS x.info, x.big AS x.big);
 query TT
 SELECT name, data_type FROM show_semantic_dimensions('dt_odd_sv') ORDER BY name
 ----
-big	BIGINT
-info	VARCHAR
-mood	VARCHAR
+big	HUGEINT
+info	STRUCT(a INTEGER)
+mood	ENUM('ok', 'sad')
 
 query TTT
 SELECT typeof(big), typeof(info), typeof(mood) FROM semantic_view('dt_odd_sv', dimensions := ['big', 'info', 'mood'])
 ----
-BIGINT	VARCHAR	VARCHAR
+HUGEINT	STRUCT(a INTEGER)	ENUM('ok', 'sad')
 
 # ============================================================
 # Role-playing: two relationships to the same table make its members ambiguous

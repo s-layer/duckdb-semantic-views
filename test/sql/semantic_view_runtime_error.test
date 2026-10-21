@@ -1,27 +1,14 @@
-# Runtime (execution-time) failures of the inner query keep the SqlExecution
-# error surface.
+# An error in the expanded SQL is DuckDB's own error, pointing at the call.
 #
-# `semantic_view()` runs its expanded SQL from `sv_semantic_view_init_global`
-# (cpp/src/shim.cpp) and wraps any failure as
-# `semantic_view: SQL execution failed: <duckdb error>  (expanded SQL: ...)`.
-# TECH-DEBT #42 re-routed that execution through `sv_query_interruptible`
-# (PendingQuery + ExecuteTask, so the caller's interrupt flag can be polled),
-# which moved where the error is produced — from `Connection::Query`'s own
-# error-carrying result to one built from the PendingQueryResult's ErrorData.
-# Nothing pinned that wording, so the refactor could have changed the error
-# surface silently. This pins it.
+# `semantic_view()` hands DuckDB its expanded SQL to plan as part of the
+# caller's query (`sv_semantic_view_bind_replace`, cpp/src/shim.cpp), so a
+# failure in it, at bind or at execution, is reported as any failure in the
+# query is: DuckDB's own error, with no wrapper around it. The caret goes on the
+# `semantic_view(...)` call, since the expansion is text the user never wrote:
+# `sv_relocate` moves every position in it to the call's.
 #
-# GUARD, not a capability: this passes before and after the TECH-DEBT #42
-# change by design — its job is to fail if the wrap is ever dropped, reworded,
-# or bypassed. It is not vacuous: the assertions were confirmed against the
-# built extension to be produced by exactly this branch, which is the only
-# thing that emits that text.
-#
-# Why an execution-time error specifically: bind runs a `LIMIT 0` probe over the
-# same SQL, so anything that fails at *bind* is reported by the probe as a
-# BinderException and never reaches `init_global`. A cast that fails only on
-# actual row data binds cleanly, evaluates nothing under `LIMIT 0`, and so is
-# the shape that exercises the execution path.
+# The two shapes: a metric over a column that no longer exists fails at bind; a
+# cast that fails only on actual row data binds cleanly and fails at execution.
 
 require semantic_views
 
@@ -35,26 +22,22 @@ statement ok
 CREATE SEMANTIC VIEW sve_view AS
   TABLES (e AS sve_rows PRIMARY KEY (id))
   DIMENSIONS (e.id AS e.id)
-  METRICS (e.bad AS sum(CAST(e.txt AS INTEGER)));
+  METRICS (
+    e.bad AS sum(CAST(e.txt AS INTEGER)),
+    e.gone AS sum(e.no_such_column)
+  );
 
-# Binds fine (the LIMIT 0 probe evaluates no rows), fails at execution.
-#
-# Matched only as far as `Conversion Error:` deliberately. The wrapper prefix is
-# ours and is what this file exists to pin; everything past it is DuckDB's own
-# diagnostic wording ("Could not convert string 'not a number' to INT32"), which
-# a version bump may reword without anything here being wrong. Keeping
-# `Conversion Error:` still proves the underlying error is carried through the
-# wrapper rather than swallowed or replaced.
+# Fails at execution: DuckDB's conversion error, unwrapped.
 statement error
 SELECT * FROM semantic_view('sve_view', metrics := ['e.bad']);
 ----
-semantic_view: SQL execution failed: Conversion Error:
+Conversion Error: Could not convert string 'not a number'
 
-# The expanded SQL is carried in the same message, so a user can see what ran.
+# The caret spans the call (47 characters), not an offset into the expansion.
 statement error
 SELECT * FROM semantic_view('sve_view', metrics := ['e.bad']);
 ----
-(expanded SQL: SELECT
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 
 # A metric over the rows that DO convert still works, so the view itself is
 # sound and the error above is the data's, not the definition's.
@@ -62,6 +45,32 @@ query I
 SELECT bad FROM semantic_view('sve_view', metrics := ['e.bad'], where_clause := 'id = 1');
 ----
 10
+
+# Fails at bind: DuckDB's binder error, with the caret on the construct (37
+# characters, the construct and the statement's `;`).
+statement error
+SELECT * FROM SEMANTIC_VIEW(sve_view METRICS gone);
+----
+Table "e" does not have a column named "no_such_column"
+
+statement error
+SELECT * FROM SEMANTIC_VIEW(sve_view METRICS gone);
+----
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+# Fails to parse: where_clause is spliced into the expansion, so a predicate
+# that does not parse makes the expansion not parse. The error names
+# where_clause, and the caret goes on the call (here cut, with the line, where
+# DuckDB cuts a long one), not on an offset into the expansion.
+statement error
+SELECT * FROM semantic_view('sve_view', metrics := ['bad'], where_clause := 'id =');
+----
+the query does not parse, so check where_clause: syntax error
+
+statement error
+SELECT * FROM semantic_view('sve_view', metrics := ['bad'], where_clause := 'id =');
+----
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 
 statement ok
 DROP SEMANTIC VIEW sve_view;

@@ -63,7 +63,7 @@ So this sequence:
 
 is expected. The same applies to in-flight ``DROP`` (the row keeps appearing until commit) and ``ALTER ... RENAME TO`` (the row appears under its old name until commit). If you need ``SHOW`` or ``DESCRIBE`` to reflect a change, commit first.
 
-The same rule covers the data itself: when you query a semantic view with :ref:`semantic_view() <ref-semantic-view-function>`, that query also reads committed state from your underlying tables. If you have inserted rows into ``orders`` inside an open transaction and then query a semantic view over ``orders`` in the same transaction, those new rows will not be included. Commit the data writes first, or do the data write and the semantic-view query in separate transactions.
+The data is different. When you query a semantic view with :ref:`semantic_view() <ref-semantic-view-function>`, DuckDB runs the query in your transaction, so rows you have inserted into ``orders`` inside an open transaction are included. What the query reads committed is the semantic view's *definition*: a semantic view you create in an open transaction can't be queried until you commit.
 
 In short: commit before introspecting.
 
