@@ -238,16 +238,9 @@ const MULTI_STATEMENT_MSG: &str = "semantic_views: semantic-view DDL must be sen
 // without any parse_function call, which means it held no semantic-view DDL
 // as its own statement, so no later DDL statement can match it.
 //
-// Only queries the user sent count. DuckDB 2.0 runs a string's earlier
-// statements before it parses the later ones, and a statement that reads a
-// semantic view runs its own queries on this thread meanwhile (on a per-call
-// `Connection probe`, each through the override and, if it fails to parse,
-// `parse_function`). Each probe site in `cpp/src/shim.cpp` holds an
-// `SvNestedQueryGuard` while its connection is open, and while one is held
-// the record is neither written nor consumed (`NESTED_QUERY_DEPTH`).
-//
-// The same 2.0 change lets a record outlive its query: when an earlier
-// statement of the string fails as it runs, the DDL after it is never parsed.
+// DuckDB 2.0 runs a string's earlier statements before it parses the later
+// ones, which lets a record outlive its query: when an earlier statement of
+// the string fails as it runs, the DDL after it is never parsed.
 // So the record also names the database it was made on (`RECORD_DATABASE`,
 // from the key the shim passes with each hook call), and `parse_function` on
 // another database never reads it.
@@ -257,7 +250,6 @@ thread_local! {
         const { std::cell::RefCell::new(String::new()) };
     static RECORD_DATABASE: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
     static HOOK_DATABASE: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
-    static NESTED_QUERY_DEPTH: std::cell::Cell<u32> = const { std::cell::Cell::new(0) };
 }
 
 /// FFI export: the database (any value unique to it; the shim passes its
@@ -267,30 +259,6 @@ thread_local! {
 #[no_mangle]
 pub extern "C" fn sv_parser_hook_database(key: usize) {
     HOOK_DATABASE.with(|db| db.set(key));
-}
-
-/// FFI export: the extension is about to run queries of its own on this
-/// thread (see `OVERRIDE_MULTI_STATEMENT`). Paired with
-/// [`sv_nested_query_exit`] by `SvNestedQueryGuard` in `cpp/src/shim.cpp`.
-#[cfg(any(feature = "extension", test))]
-#[no_mangle]
-pub extern "C" fn sv_nested_query_enter() {
-    NESTED_QUERY_DEPTH.with(|depth| depth.set(depth.get().saturating_add(1)));
-}
-
-/// FFI export: the queries [`sv_nested_query_enter`] announced are done.
-#[cfg(any(feature = "extension", test))]
-#[no_mangle]
-pub extern "C" fn sv_nested_query_exit() {
-    NESTED_QUERY_DEPTH.with(|depth| depth.set(depth.get().saturating_sub(1)));
-}
-
-/// FFI export: whether the extension is running queries of its own on this
-/// thread, so the query the parser hooks see is one of them.
-#[cfg(any(feature = "extension", test))]
-#[no_mangle]
-pub extern "C" fn sv_nested_query_active() -> bool {
-    NESTED_QUERY_DEPTH.with(|depth| depth.get() > 0)
 }
 
 /// Whether `query` holds more than one statement, approximately: a `;` with
@@ -311,9 +279,6 @@ fn looks_multi_statement(query: &str) -> bool {
 /// so a large script does not stay allocated for the life of the thread.
 #[cfg(any(feature = "extension", test))]
 pub(crate) fn note_override_query(query: &str) {
-    if sv_nested_query_active() {
-        return;
-    }
     let keep = looks_multi_statement(query)
         && query
             .as_bytes()
@@ -332,13 +297,9 @@ pub(crate) fn note_override_query(query: &str) {
 }
 
 /// Take the record (see `OVERRIDE_MULTI_STATEMENT`), leaving it empty. A
-/// query the extension runs itself gets nothing and leaves the record alone,
-/// and a record made on another database is dropped unread.
+/// record made on another database is dropped unread.
 #[cfg(any(feature = "extension", test))]
 fn take_override_query() -> String {
-    if sv_nested_query_active() {
-        return String::new();
-    }
     let record = OVERRIDE_MULTI_STATEMENT.with(|cell| std::mem::take(&mut *cell.borrow_mut()));
     let same_database =
         RECORD_DATABASE.with(std::cell::Cell::get) == HOOK_DATABASE.with(std::cell::Cell::get);
@@ -714,30 +675,6 @@ mod tests {
         assert_eq!(rc, 2, "a typo far from every DDL prefix is not ours");
         let (_, msg) = call_parse_function(DDL);
         assert!(msg.contains("parser_override is not active"), "got: {msg}");
-    }
-
-    /// DuckDB 2.0 runs a string's earlier statements before it parses the
-    /// later ones, so a semantic-view read ahead of the DDL runs the
-    /// extension's own queries through the parser hooks first. They neither
-    /// replace the record nor consume it, even one that fails to parse.
-    #[test]
-    fn queries_the_extension_runs_itself_leave_the_record_alone() {
-        use super::{sv_nested_query_active, sv_nested_query_enter, sv_nested_query_exit};
-        note_override_query(&format!(
-            "SELECT * FROM semantic_view('existing', metrics := ['revenue']); {DDL}"
-        ));
-        sv_nested_query_enter();
-        sv_nested_query_enter();
-        note_override_query("SELECT 1 AS probe; SELECT 2 AS semantic");
-        let (rc, _) = call_parse_function("SELEC 1 AS probe");
-        assert_eq!(rc, 2, "a typo far from every DDL prefix is not ours");
-        sv_nested_query_exit();
-        assert!(sv_nested_query_active(), "the outer guard is still held");
-        sv_nested_query_exit();
-        assert!(!sv_nested_query_active());
-        let (rc, msg) = call_parse_function(DDL);
-        assert_eq!(rc, 3, "msg={msg}");
-        assert!(msg.contains("one statement per call"), "got: {msg}");
     }
 
     /// A record made on one database is not read by `parse_function` on

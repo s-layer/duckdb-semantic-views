@@ -124,14 +124,6 @@ extern "C" {
         char *error_out, size_t error_out_len,
         uint32_t *position_out);
 
-    // The extension is about to run / has finished running queries of its
-    // own on this thread; while any are running, the parser hooks keep the
-    // record of the user's query as it is (OVERRIDE_MULTI_STATEMENT in
-    // src/parse/ffi.rs). Held through SvNestedQueryGuard below.
-    void sv_nested_query_enter();
-    void sv_nested_query_exit();
-    bool sv_nested_query_active();
-
     // The database of the parser hook call about to be made on this thread
     // (its SemanticViewsParserInfo pointer): a record of the user's query is
     // read only on the database it was made on (src/parse/ffi.rs).
@@ -401,21 +393,6 @@ struct SvOwnedBuffer {
 // marker.)
 struct SemanticViewsParserInfo : public ParserExtensionInfo {};
 
-// Held at every per-call `Connection probe` for as long as the connection is
-// open (declare it first, so it outlives the connection). DuckDB 2.0 runs a
-// query string's earlier statements before it parses the later ones, so the
-// queries a semantic-view read runs here go through the parser hooks between
-// the override call on the user's string and the parse_function call on a
-// DDL statement later in it. The hooks ignore them while a guard is held,
-// so the records of the user's string (sv_override_query below, and the Rust
-// side's OVERRIDE_MULTI_STATEMENT) survive to that call.
-struct SvNestedQueryGuard {
-    SvNestedQueryGuard() { sv_nested_query_enter(); }
-    ~SvNestedQueryGuard() { sv_nested_query_exit(); }
-    SvNestedQueryGuard(const SvNestedQueryGuard &) = delete;
-    SvNestedQueryGuard &operator=(const SvNestedQueryGuard &) = delete;
-};
-
 #ifdef SV_DUCKDB_2
 // The query the last parser_override call on this thread saw. DuckDB 2.0's
 // parse_function gets tokens without source offsets; when it runs, it is inside
@@ -456,11 +433,8 @@ static ParserOverrideResult sv_parser_override(
     }
     sv_parser_hook_database(reinterpret_cast<uintptr_t>(info));
 #ifdef SV_DUCKDB_2
-    const bool users_query = !sv_nested_query_active();
-    if (users_query) {
-        sv_override_query = query;
-        sv_override_info = info;
-    }
+    sv_override_query = query;
+    sv_override_info = info;
 #endif
 
     SvOwnedBuffer sql_buf;
@@ -496,9 +470,7 @@ static ParserOverrideResult sv_parser_override(
         Parser parser = sv_compat::builtin_parser();
         parser.ParseQuery(native_sql);
 #ifdef SV_DUCKDB_2
-        if (users_query) {
-            sv_override_query.clear();
-        }
+        sv_override_query.clear();
 #endif
         return ParserOverrideResult(std::move(parser.statements));
     } catch (std::exception &e) {
@@ -733,13 +705,11 @@ static std::string sv_statement_from_tokens(const vector<SimpleToken> &tokens) {
 static ParserExtensionParseResult sv_parse_stub(
     ParserExtensionInfo *info, const vector<SimpleToken> &tokens) {
     sv_parser_hook_database(reinterpret_cast<uintptr_t>(info));
-    // The user's query, recorded on this database; not a query the extension
-    // runs itself, whose tokens are not in it.
-    const bool users_query = !sv_nested_query_active();
+    // The user's query, recorded on this database.
     idx_t start = 0;
     idx_t statement_end = 0;
     const std::string &query = sv_override_query;
-    bool located = users_query && sv_override_info == info &&
+    bool located = sv_override_info == info &&
                    sv_locate_tail(query, tokens, start, statement_end);
     auto result = sv_parse_statement(located ? query.substr(start, statement_end - start)
                                              : sv_statement_from_tokens(tokens));
@@ -757,10 +727,7 @@ static ParserExtensionParseResult sv_parse_stub(
     // thrown, and an unclaimed statement makes DuckDB rethrow its own error.
     // (Only another extension claiming the statement lets the parse go on;
     // a later failing statement then gets no caret, as with the override off.)
-    // A query the extension runs itself is not the user's, whose record stays.
-    if (users_query) {
-        sv_override_query.clear();
-    }
+    sv_override_query.clear();
     return result;
 }
 #else
