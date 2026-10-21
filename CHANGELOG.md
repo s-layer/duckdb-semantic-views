@@ -19,10 +19,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Changed
 
 - **The extension now runs on DuckDB 2.0, and only there.** This release is built
-  against DuckDB 2.0 and loads only in that exact DuckDB release. Until DuckDB 2.0.0 is
-  released it is built against the `v2.0.0-alpha47600` pre-release (the `duckdb`
-  `2.0.0.dev2610151406` Python wheel) and loads only there. If you stay on DuckDB 1.5, keep
-  v0.14.1, the last release for 1.5.
+  against DuckDB `v2.0.0` and loads only in that exact DuckDB release. If you stay on
+  DuckDB 1.5, keep v0.14.1, the last release for 1.5.
 - **Two identifier errors now come from DuckDB.** In semantic-view DDL, an unterminated
   quoted identifier and an empty one (`""`) are now rejected by DuckDB 2.0 before the
   extension sees the statement. The errors read `unterminated quoted identifier` and
