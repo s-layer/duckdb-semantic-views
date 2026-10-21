@@ -519,12 +519,20 @@ pub enum ExpandError {
     /// spliced into the expansion as written, so the `;` would end the
     /// expansion's statement and start another.
     WhereClauseNotOnePredicate { view_name: String },
-    /// The `where_clause` predicate holds a prepared statement's parameter.
-    /// The expansion is bound in the caller's statement, so it would take one
-    /// of the caller's parameters (TECH-DEBT #105).
+    /// The `where_clause` predicate holds a prepared statement's parameter
+    /// other than `$1`, `$2`, ..., which refer to the values of `params`. The
+    /// expansion is bound in the caller's statement, so it would take one of
+    /// the caller's parameters (TECH-DEBT #105).
     WhereClauseParameter {
         view_name: String,
         parameter: String,
+    },
+    /// The `where_clause` predicate refers to a value of `params` past the
+    /// last one supplied.
+    WhereClauseParamMissing {
+        view_name: String,
+        reference: String,
+        supplied: usize,
     },
     /// A `where_clause` member sits across a fan-out edge from a metric's
     /// grain. Filtering on a table requires joining it, and that join
@@ -955,8 +963,21 @@ impl fmt::Display for ExpandError {
             } => {
                 write!(
                     f,
-                    "semantic view '{view_name}': prepared statement parameters such as \
-                     {parameter} are not supported in where_clause yet (TECH-DEBT #105)"
+                    "semantic view '{view_name}': where_clause cannot hold a prepared \
+                     statement parameter such as {parameter}; pass the values in params \
+                     and refer to params as $1, $2, ..."
+                )
+            }
+            Self::WhereClauseParamMissing {
+                view_name,
+                reference,
+                supplied,
+            } => {
+                let values = if *supplied == 1 { "value" } else { "values" };
+                write!(
+                    f,
+                    "semantic view '{view_name}': where_clause refers to {reference}, but \
+                     params has {supplied} {values}"
                 )
             }
             Self::WhereClauseFanTrap {

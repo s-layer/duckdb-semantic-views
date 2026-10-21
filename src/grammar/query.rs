@@ -13,6 +13,13 @@
 //! stores a view's body in its lowered form, so a view over the construct
 //! stores the `semantic_view()` call, which expands against the semantic view's
 //! definition each time it is queried.
+//!
+//! A prepared statement's parameter in `WHERE` is one of the statement's
+//! parameters (TECH-DEBT #105). The predicate goes to `where_clause` as text,
+//! so there it becomes `$1`, `$2`, ..., and the parameter itself goes, in that
+//! order, into `params := row(...)`, which `semantic_view()` reads the values
+//! from. The bridge has `DuckDB` transform each parameter as it would anywhere
+//! else in the statement, so it is numbered in the statement's order.
 
 use super::tree::{Node, Tree};
 use super::{internal, name_or};
@@ -60,15 +67,51 @@ struct Clause<'a> {
     items: Vec<String>,
 }
 
+/// What the bridge writes the statement's parameters as in the lowered query:
+/// it puts each one, transformed by `DuckDB`, in place of these in turn
+/// (`sv_grammar_finalize_tableref` in `cpp/src/shim.cpp`).
+pub(crate) const PARAMETER_PLACEHOLDER: &str = "$__sv_parameter";
+
 /// Lower a matched `SEMANTIC_VIEW(...)` to a query over `semantic_view()`.
 pub(super) fn transform(tree: &Tree) -> Result<String, ParseError> {
-    reject_parameters(tree)?;
-    Ok(format!("SELECT * FROM {}", lower(tree, &tree.root)?))
+    let mut statement = || PARAMETER_PLACEHOLDER.to_string();
+    Ok(format!(
+        "SELECT * FROM {}",
+        lower(tree, &tree.root, &mut statement)?
+    ))
+}
+
+/// The values one construct's `params` holds: each the way the text around
+/// the construct refers to a parameter, in the order the predicate refers to
+/// them as `$1`, `$2`, ....
+struct Params<'e> {
+    row: Vec<String>,
+    /// How the text around the construct refers to its next parameter: the
+    /// statement's placeholder, or for a construct inside another's predicate,
+    /// that one's next `$n`.
+    around: &'e mut dyn FnMut() -> String,
+}
+
+impl Params<'_> {
+    /// Take the next value; the predicate refers to it as the result.
+    fn take(&mut self) -> String {
+        self.row.push((self.around)());
+        format!("${}", self.row.len())
+    }
 }
 
 /// The `semantic_view()` call, with its table alias, that the construct at
-/// `root` lowers to.
-fn lower(tree: &Tree, root: &Node) -> Result<String, ParseError> {
+/// `root` lowers to. `around` gives how the text around it refers to each of
+/// its parameters in turn.
+fn lower(
+    tree: &Tree,
+    root: &Node,
+    around: &mut dyn FnMut() -> String,
+) -> Result<String, ParseError> {
+    let mut params = Params {
+        row: Vec::new(),
+        around,
+    };
     let name_node = root
         .find("SvViewName")
         .ok_or_else(|| internal(root, "missing view name"))?;
@@ -81,7 +124,7 @@ fn lower(tree: &Tree, root: &Node) -> Result<String, ParseError> {
         .into_iter()
         .map(|p| classify(tree, p))
         .collect::<Result<Vec<_>, _>>()?;
-    let clauses = group(tree, &parts)?;
+    let clauses = group(tree, &parts, &mut params)?;
 
     let mut args = vec![format!("'{}'", SqlLit::escape(&name))];
     let mut order = Vec::new();
@@ -107,6 +150,9 @@ fn lower(tree: &Tree, root: &Node) -> Result<String, ParseError> {
             .collect::<Vec<_>>()
             .join(", ");
         args.push(format!("column_order := [{names}]"));
+    }
+    if !params.row.is_empty() {
+        args.push(format!("params := row({})", params.row.join(", ")));
     }
 
     let alias = table_alias(root)
@@ -171,7 +217,11 @@ struct ItemParts<'a> {
 /// Group the parts into clauses: a clause word, then its items separated by
 /// commas (each an expression with at most one alias, `AS <name>` or a bare
 /// name), or for `WHERE` one predicate.
-fn group<'a>(tree: &Tree, parts: &[Part<'a>]) -> Result<Vec<Clause<'a>>, ParseError> {
+fn group<'a>(
+    tree: &Tree,
+    parts: &[Part<'a>],
+    params: &mut Params<'_>,
+) -> Result<Vec<Clause<'a>>, ParseError> {
     let mut clauses: Vec<Clause<'a>> = Vec::new();
     let mut item: Option<ItemParts<'a>> = None;
     let mut after_comma: Option<&Node> = None;
@@ -179,13 +229,14 @@ fn group<'a>(tree: &Tree, parts: &[Part<'a>]) -> Result<Vec<Clause<'a>>, ParseEr
     let finish = |clauses: &mut Vec<Clause<'a>>,
                   item: &mut Option<ItemParts<'a>>,
                   after_comma: Option<&Node>,
-                  next: Option<&Node>|
+                  next: Option<&Node>,
+                  params: &mut Params<'_>|
      -> Result<(), ParseError> {
         let Some(clause) = clauses.last_mut() else {
             return Ok(());
         };
         if let Some(parts) = item.take() {
-            let text = item_text(tree, &clause.word, parts)?;
+            let text = item_text(tree, &clause.word, parts, params)?;
             clause.items.push(text);
         } else {
             let at = after_comma.or(next).or(Some(clause.at));
@@ -205,7 +256,7 @@ fn group<'a>(tree: &Tree, parts: &[Part<'a>]) -> Result<Vec<Clause<'a>>, ParseEr
         match part {
             Part::Word(word, node) => {
                 if !clauses.is_empty() {
-                    finish(&mut clauses, &mut item, after_comma, Some(node))?;
+                    finish(&mut clauses, &mut item, after_comma, Some(node), params)?;
                     after_comma = None;
                 }
                 if clauses.iter().any(|c| c.word == *word) {
@@ -236,7 +287,7 @@ fn group<'a>(tree: &Tree, parts: &[Part<'a>]) -> Result<Vec<Clause<'a>>, ParseEr
                         format!("expected an item before ',' in {}", clause.word),
                     ));
                 };
-                let text = item_text(tree, &clause.word, parts)?;
+                let text = item_text(tree, &clause.word, parts, params)?;
                 clause.items.push(text);
                 after_comma = Some(node);
             }
@@ -250,7 +301,7 @@ fn group<'a>(tree: &Tree, parts: &[Part<'a>]) -> Result<Vec<Clause<'a>>, ParseEr
             }
         }
     }
-    finish(&mut clauses, &mut item, after_comma, None)?;
+    finish(&mut clauses, &mut item, after_comma, None, params)?;
     Ok(clauses)
 }
 
@@ -298,10 +349,28 @@ fn extend<'a>(
 /// (`crate::query::items::parse_item`), so a bare alias gets one. The predicate
 /// of `WHERE` goes as written, but for a construct in a subquery of it, which
 /// is lowered too: `semantic_view()` parses `where_clause` with `DuckDB`'s own
-/// parser, which does not know the construct.
-fn item_text(tree: &Tree, word: &str, item: ItemParts<'_>) -> Result<String, ParseError> {
+/// parser, which does not know the construct. A parameter in it becomes a
+/// reference into `params`; anywhere else in the construct it is refused.
+fn item_text(
+    tree: &Tree,
+    word: &str,
+    item: ItemParts<'_>,
+    params: &mut Params<'_>,
+) -> Result<String, ParseError> {
     if word == "WHERE" {
-        return Ok(clean(&lower_inside(tree, item.expr)?));
+        return Ok(clean(&lower_inside(tree, item.expr, params)?));
+    }
+    let parts = std::iter::once(item.expr).chain(item.alias.map(|(a, _)| a));
+    if let Some(at) = parts
+        .flat_map(|n| inner_parts(n).into_iter())
+        .find(|p| !p.1)
+    {
+        return Err(error_at(
+            Some(at.0),
+            "prepared statement parameters are only supported in the WHERE clause of \
+             SEMANTIC_VIEW(...)"
+                .to_string(),
+        ));
     }
     let expr = clean(&tree.text(item.expr));
     let is_member = expr.ends_with('*') || {
@@ -324,20 +393,52 @@ fn item_text(tree: &Tree, word: &str, item: ItemParts<'_>) -> Result<String, Par
     })
 }
 
-/// `node`'s text with each construct inside it lowered. A construct's own
-/// constructs are lowered with it.
-fn lower_inside(tree: &Tree, node: &Node) -> Result<String, ParseError> {
+/// `node`'s text with each construct inside it lowered, and each parameter
+/// replaced by its reference into `params`. A construct's own constructs and
+/// parameters are lowered with it, and its parameters are values of `params`
+/// too, so they are taken in the order they are written.
+fn lower_inside(tree: &Tree, node: &Node, params: &mut Params<'_>) -> Result<String, ParseError> {
     let mut text = tree.text(node);
     let start = node.offset().unwrap_or_default();
-    for inner in node.find_all("SvSemanticView").into_iter().rev() {
+    let mut replacements = Vec::new();
+    for (inner, is_construct) in inner_parts(node) {
         let range = inner
             .span
             .and_then(|(o, l)| o.checked_sub(start).map(|at| at..at + l))
             .filter(|r| text.get(r.clone()).is_some())
             .ok_or_else(|| internal(inner, "construct outside its expression"))?;
-        text.replace_range(range, &lower(tree, inner)?);
+        let lowered = if is_construct {
+            lower(tree, inner, &mut || params.take())?
+        } else {
+            params.take()
+        };
+        replacements.push((range, lowered));
+    }
+    for (range, lowered) in replacements.into_iter().rev() {
+        text.replace_range(range, &lowered);
     }
     Ok(text)
+}
+
+/// The constructs (`true`) and parameters (`false`) under `node`, in the
+/// order they are written, not looking inside either.
+fn inner_parts(node: &Node) -> Vec<(&Node, bool)> {
+    fn collect<'a>(node: &'a Node, out: &mut Vec<(&'a Node, bool)>) {
+        if node.rule.eq_ignore_ascii_case("SvSemanticView") {
+            out.push((node, true));
+        } else if node.rule.eq_ignore_ascii_case("Parameter") {
+            out.push((node, false));
+        } else {
+            for c in &node.children {
+                collect(c, out);
+            }
+        }
+    }
+    let mut out = Vec::new();
+    for c in &node.children {
+        collect(c, &mut out);
+    }
+    out
 }
 
 fn clean(text: &str) -> String {
@@ -359,33 +460,6 @@ fn error_at(node: Option<&Node>, message: String) -> ParseError {
     ParseError {
         message,
         position: node.and_then(Node::offset),
-    }
-}
-
-/// A prepared statement's parameter would be lowered into a string argument,
-/// where it is text rather than a parameter, so it is refused (TECH-DEBT #105).
-fn reject_parameters(tree: &Tree) -> Result<(), ParseError> {
-    let is_parameter = |text: &str| {
-        let mut chars = text.chars();
-        match chars.next() {
-            Some('?') => chars.all(|c| c.is_ascii_digit()),
-            Some('$') => {
-                let rest = chars.as_str();
-                !rest.is_empty() && rest.bytes().all(crate::util::is_ident_byte)
-            }
-            _ => false,
-        }
-    };
-    match tree.tokens_in(&tree.root).find(|t| is_parameter(&t.text)) {
-        Some(t) => Err(ParseError {
-            message: format!(
-                "prepared statement parameters such as {} are not supported inside \
-                 SEMANTIC_VIEW(...) yet (TECH-DEBT #105)",
-                t.text
-            ),
-            position: Some(t.offset),
-        }),
-        None => Ok(()),
     }
 }
 
@@ -793,16 +867,119 @@ mod tests {
         );
     }
 
-    #[test]
-    fn a_parameter_is_refused() {
-        for p in ["?", "?2", "$1", "$name"] {
-            let sql = format!("SEMANTIC_VIEW(v METRICS m WHERE x = {p})");
-            let pred = format!("x = {p}");
-            let parts = [(W, "METRICS"), (E, "m"), (W, "WHERE"), (E, pred.as_str())];
-            let e = transform(&construct(&sql, "v", &parts, None)).unwrap_err();
-            assert!(e.message.contains("TECH-DEBT #105"), "{p}: {}", e.message);
-            assert_eq!(e.position, sql.rfind(p), "{p}");
+    /// `tree` with a `Parameter` node for each of `params`, found in `sql` in
+    /// turn, under the innermost node it lies in, as `DuckDB`'s parse has it.
+    fn with_parameters(mut tree: Tree, sql: &str, params: &[&str]) -> Tree {
+        fn place(node: &mut Node, param: Node) {
+            let (at, len) = param.span.unwrap();
+            let inside = |n: &Node| n.span.is_some_and(|(o, l)| o <= at && at + len <= o + l);
+            if let Some(child) = node.children.iter_mut().find(|c| inside(c)) {
+                place(child, param);
+            } else {
+                node.children.push(param);
+                node.children.sort_by_key(|c| c.span.map(|(o, _)| o));
+            }
         }
+        let mut from = 0;
+        for p in params {
+            let at = from + sql[from..].find(p).unwrap();
+            from = at + p.len();
+            let param = Node {
+                rule: "Parameter".to_string(),
+                kind: Kind::Choice,
+                span: Some((at, p.len())),
+                value: String::new(),
+                children: Vec::new(),
+            };
+            place(&mut tree.root, param);
+        }
+        tree
+    }
+
+    /// A parameter in `WHERE` becomes `$n` in `where_clause`, and the
+    /// statement's parameter goes into `params` in the same order, as the
+    /// placeholder the bridge replaces (TECH-DEBT #105).
+    #[test]
+    fn a_parameter_in_where_goes_into_params() {
+        let sql = "SEMANTIC_VIEW(v METRICS m WHERE x = ? AND y > $name OR z = $3)";
+        let parts = [
+            (W, "METRICS"),
+            (E, "m"),
+            (W, "WHERE"),
+            (E, "x = ? AND y > $name OR z = $3"),
+        ];
+        let tree = with_parameters(
+            construct(sql, "v", &parts, None),
+            sql,
+            &["?", "$name", "$3"],
+        );
+        let p = super::PARAMETER_PLACEHOLDER;
+        assert_eq!(
+            transform(&tree).unwrap(),
+            format!(
+                "SELECT * FROM semantic_view('v', metrics := ['m'], where_clause := \
+                 'x = $1 AND y > $2 OR z = $3', params := row({p}, {p}, {p}))"
+            )
+        );
+    }
+
+    /// A parameter in a construct inside the predicate is a value of the outer
+    /// construct's `params` too: the inner one's `params` refers to it there.
+    #[test]
+    fn a_parameter_in_a_construct_inside_where_goes_into_both_params() {
+        let sql = "SEMANTIC_VIEW(v METRICS m WHERE x = ? AND d IN (SELECT r FROM \
+                   SEMANTIC_VIEW(v DIMENSIONS d METRICS m WHERE y = $p) AS z) AND w = ?) AS s";
+        let inner = "SEMANTIC_VIEW(v DIMENSIONS d METRICS m WHERE y = $p) AS z";
+        let tree = nested(
+            sql,
+            &[
+                (W, "METRICS"),
+                (E, "m"),
+                (W, "WHERE"),
+                (
+                    E,
+                    "x = ? AND d IN (SELECT r FROM SEMANTIC_VIEW(v DIMENSIONS d METRICS m \
+                     WHERE y = $p) AS z) AND w = ?",
+                ),
+            ],
+            Some("AS s"),
+            inner,
+            &[
+                (W, "DIMENSIONS"),
+                (E, "d"),
+                (W, "METRICS"),
+                (E, "m"),
+                (W, "WHERE"),
+                (E, "y = $p"),
+            ],
+            Some("AS z"),
+        );
+        let tree = with_parameters(tree, sql, &["?", "$p", "?"]);
+        let p = super::PARAMETER_PLACEHOLDER;
+        assert_eq!(
+            transform(&tree).unwrap(),
+            format!(
+                "SELECT * FROM semantic_view('v', metrics := ['m'], where_clause := \
+                 'x = $1 AND d IN (SELECT r FROM semantic_view(''v'', dimensions := [''d''], \
+                 metrics := [''m''], where_clause := ''y = $1'', params := row($2)) AS z) \
+                 AND w = $3', params := row({p}, {p}, {p})) AS s"
+            )
+        );
+    }
+
+    /// An item names a member, so a parameter there has nothing to bind to.
+    #[test]
+    fn a_parameter_outside_where_is_refused() {
+        let sql = "SEMANTIC_VIEW(v DIMENSIONS ? METRICS m)";
+        let parts = [(W, "DIMENSIONS"), (E, "?"), (W, "METRICS"), (E, "m")];
+        let tree = with_parameters(construct(sql, "v", &parts, None), sql, &["?"]);
+        let e = transform(&tree).unwrap_err();
+        assert!(
+            e.message.contains("only supported in the WHERE clause"),
+            "{}",
+            e.message
+        );
+        assert_eq!(e.position, sql.find('?'));
     }
 
     #[test]

@@ -43,13 +43,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   them in is the order of the columns. `WHERE` filters the rows the metrics aggregate, as
   `where_clause` does. A view over the construct expands against the semantic view's
   current definition each time it is queried. Items are member names or `<table>.*`
-  wildcards for now; expressions are not supported yet. A prepared statement's `?`
-  parameter inside the construct is refused with an error.
+  wildcards for now; expressions are not supported yet. A prepared statement's
+  parameter (`?`, `$1`, `$name`) in its `WHERE` is one of the statement's parameters, as
+  in `PREPARE p AS SELECT * FROM SEMANTIC_VIEW(sales METRICS o.revenue WHERE o.year = ?)`.
 
 - **Output names and column order for `semantic_view()`.** A `dimensions`, `metrics` or
   `facts` item can name its output column with `AS`, as in `'o.region AS r'`, and the new
   `column_order` parameter (for example `['metrics', 'dimensions']`) sets which list's
   columns come first. Two columns with the same name are an error.
+
+- **Values for `where_clause` in `params`.** `semantic_view()` and `explain_semantic_view()`
+  take a `params` row, and `where_clause` refers to its values as `$1`, `$2`, ..., as in
+  `where_clause := 'o.year = $1', params := row(2024)`. Each value goes into the predicate
+  as a value of its own type, never as SQL text, so user-supplied values no longer need to
+  be quoted into the predicate.
 
 ### Changed
 

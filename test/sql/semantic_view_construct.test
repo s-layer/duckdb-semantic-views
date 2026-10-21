@@ -337,10 +337,12 @@ SELECT * FROM SEMANTIC_VIEW(svc_sv METRICS revenue WHERE region = 'EU', odate > 
 ----
 WHERE takes one predicate; combine conditions with AND
 
+# A parameter in an item is refused; in WHERE it is the statement's
+# (semantic_view_parameters.test).
 statement error
-PREPARE svc_p AS SELECT * FROM SEMANTIC_VIEW(svc_sv METRICS revenue WHERE region = ?);
+PREPARE svc_p AS SELECT * FROM SEMANTIC_VIEW(svc_sv METRICS ?);
 ----
-TECH-DEBT #105
+parameters are only supported in the WHERE clause of SEMANTIC_VIEW(...)
 
 statement error
 SELECT * FROM SEMANTIC_VIEW(svc_sv DIMENSIONS region METRICS revenue AS region);

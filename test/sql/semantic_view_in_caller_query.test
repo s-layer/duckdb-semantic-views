@@ -613,12 +613,19 @@ DROP SEMANTIC VIEW cq_gone_sv;
 
 # A prepared statement's parameter inside where_clause is refused: the
 # expansion is bound in the caller's statement, so it would take one of the
-# caller's parameters (TECH-DEBT #105).
+# caller's parameters. where_clause refers to the values of params instead,
+# as $1, $2, ... (TECH-DEBT #105), and a $1 with no params has no value; it
+# does not take the caller's $1.
 
 statement error
 PREPARE cq_p AS SELECT * FROM semantic_view('cq_sv', dimensions := ['region'], metrics := ['revenue'], where_clause := 'region <> ?') WHERE region = ?;
 ----
-TECH-DEBT #105
+refer to params as $1, $2, ...
+
+statement error
+PREPARE cq_p AS SELECT * FROM semantic_view('cq_sv', dimensions := ['region'], metrics := ['revenue'], where_clause := 'region <> $1') WHERE region = $1;
+----
+where_clause refers to $1, but params has 0 values
 
 # Cleanup
 

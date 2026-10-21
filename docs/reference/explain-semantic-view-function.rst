@@ -23,6 +23,7 @@ Syntax
        [ metrics := [ '<metric_name> [ AS <alias> ]' [, ...] ] , ]
        [ facts := [ '<fact_name> [ AS <alias> ]' [, ...] ] , ]
        [ where_clause := '<predicate>' , ]
+       [ params := row( <value> [, ...] ) , ]
        [ column_order := [ '<list_name>' [, ...] ] ]
    )
 
@@ -56,6 +57,9 @@ Parameters
    * - ``where_clause``
      - VARCHAR (named)
      - Optional predicate applied **before** metrics are aggregated -- the equivalent of Snowflake's ``SEMANTIC_VIEW( ... WHERE <predicate> )``. See :ref:`ref-sv-pre-agg-filtering`. An omitted, empty, or whitespace-only value is treated as absent.
+   * - ``params``
+     - row (named)
+     - Optional values for ``where_clause``'s ``$1``, ``$2``, ..., as in :ref:`semantic_view() <ref-sv-where-params>`. The plan is of the query with the values in place.
    * - ``column_order``
      - VARCHAR[] (named)
      - Optional order of the lists' columns, for example ``['metrics', 'dimensions']``. It is checked as in :ref:`semantic_view() <ref-semantic-view-function>`.

@@ -744,10 +744,10 @@ pub(crate) fn has_statement_separator(expr: &str) -> bool {
     false
 }
 
-/// The first prepared-statement parameter in `expr` outside its literals,
-/// quoted identifiers and comments, with its offset: `?`, `?<n>`, `$<n>` or
-/// `$<name>`.
-pub(crate) fn find_parameter(expr: &str) -> Option<(usize, &str)> {
+/// The prepared-statement parameters in `expr` outside its literals, quoted
+/// identifiers and comments, in order, each with its offset: `?`, `?<n>`,
+/// `$<n>` or `$<name>`.
+pub(crate) fn find_parameters(expr: &str) -> Vec<(usize, &str)> {
     let bytes = expr.as_bytes();
     let run_end = |from: usize, ok: fn(u8) -> bool| {
         let mut j = from;
@@ -756,6 +756,7 @@ pub(crate) fn find_parameter(expr: &str) -> Option<(usize, &str)> {
         }
         j
     };
+    let mut out = Vec::new();
     let mut i = 0;
     while i < bytes.len() {
         match bytes[i] {
@@ -769,11 +770,17 @@ pub(crate) fn find_parameter(expr: &str) -> Option<(usize, &str)> {
                 let end = run_end(i + 1, crate::util::is_ident_byte);
                 let starts_word = i == 0 || !crate::util::is_ident_byte(bytes[i - 1]);
                 if starts_word && end > i + 1 {
-                    return Some((i, &expr[i..end]));
+                    out.push((i, &expr[i..end]));
+                    i = end;
+                } else {
+                    i += 1;
                 }
-                i += 1;
             }
-            b'?' => return Some((i, &expr[i..run_end(i + 1, |b| b.is_ascii_digit())])),
+            b'?' => {
+                let end = run_end(i + 1, |b| b.is_ascii_digit());
+                out.push((i, &expr[i..end]));
+                i = end;
+            }
             b'/' | b'-' => {
                 let next = skip_whitespace_and_comments(bytes, i);
                 i = if next == i { i + 1 } else { next };
@@ -781,7 +788,7 @@ pub(crate) fn find_parameter(expr: &str) -> Option<(usize, &str)> {
             _ => i += 1,
         }
     }
-    None
+    out
 }
 
 /// The byte spans `(start, end)` of the subqueries in `expr`, in order: each `(`
