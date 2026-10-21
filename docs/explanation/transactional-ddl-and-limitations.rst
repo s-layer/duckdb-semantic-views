@@ -257,7 +257,7 @@ A query string can hold semantic-view statements alongside other SQL, separated 
        METRICS (o.revenue AS SUM(o.amount));
    """)
 
-As with any multi-statement string in DuckDB, a syntax error in one statement means none of them runs, and an error while running one leaves the statements before it in place.
+DuckDB 2.0 runs a string's statements one at a time and parses each one just before it runs. So when one statement fails, whether on a syntax error or while it runs, the statements before it have already run and their effects stay, and nothing after it runs. The exception is a string that opens its own transaction with ``BEGIN``: the error aborts that transaction, so the statements before it are rolled back with it, and the connection needs a ``ROLLBACK`` before it runs anything else.
 
 One name still needs its own call: a view named with a reserved word such as ``select``, written without quotes. DuckDB does not accept an unquoted reserved word as a name, so in a multi-statement string a ``DROP``, ``ALTER``, ``DESCRIBE`` or ``SHOW`` naming such a view fails with :ref:`one statement per call <ref-err-one-statement>`. (``CREATE`` still accepts the name there.) Quote the name (``DROP SEMANTIC VIEW "select"; ...``) and it works there too.
 
