@@ -122,3 +122,13 @@ test/sql/member_data_type.test
 test/sql/show_dims_for_metric_required_refs.test
 test/sql/cor3_cast_type_not_a_reference.test
 test/sql/scalar_errors_are_input_errors.test
+test/sql/ddl_corpus_body_a1.test
+test/sql/ddl_corpus_body_a2.test
+test/sql/ddl_corpus_body_b1.test
+test/sql/ddl_corpus_body_b2.test
+test/sql/ddl_corpus_create_forms.test
+test/sql/ddl_corpus_frontdoor_a.test
+test/sql/ddl_corpus_frontdoor_b.test
+test/sql/ddl_corpus_frontdoor_c.test
+test/sql/ddl_corpus_statements_a.test
+test/sql/ddl_corpus_statements_b.test

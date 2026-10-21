@@ -1,0 +1,1053 @@
+# DDL accept/reject corpus — non-CREATE statements, part A (Phase 3 of the PEG epic).
+#
+# Ports the DROP / ALTER / DESCRIBE / SHOW / SHOW COLUMNS cases, statement
+# prefixes and word boundaries, view-name handling and comments around names
+# from the `#[test]`s in `src/parse/rewrite.rs` (`mod tests`). Part B
+# (`ddl_corpus_statements_b.test`) holds the SHOW filter-clause, name-slot and
+# scope cases; the CREATE-side cases from the same module live in
+# `ddl_corpus_create_forms.test`.
+#
+# Every row carries an id `S-NNN`; the case map from Rust test to row id is
+# `_notes/phase3-corpus/map-S.md`. Row tags:
+#   [syntax]  a syntactic reject: no message is pinned (it will change under
+#             the grammar), only that the statement fails. The runner insists
+#             on a `----` line after `statement error`; an empty block after it
+#             accepts any error message.
+#   [text]    today's contract on something a grammar might plausibly change
+#             (case folding, quoting, whitespace).
+#
+# DROP and ALTER are asserted through the catalog state after them (the runner
+# reads a DDL statement's own result as a changed-row count). SHOW SEMANTIC
+# VIEWS leads with a live `created_on` timestamp, matched by a <REGEX> value;
+# its rows come back sorted by schema then name, so those queries are `nosort`.
+
+require semantic_views
+
+# --- fixtures ---
+
+statement ok
+CREATE TABLE dcs_orders (id INTEGER, region VARCHAR, cust VARCHAR, amount INTEGER);
+
+statement ok
+INSERT INTO dcs_orders VALUES (1, 'east', 'ann', 10), (2, 'west', 'bob', 20), (3, 'east', 'cat', 30);
+
+statement ok
+CREATE SCHEMA dcs_sch;
+
+statement ok
+CREATE TABLE dcs_sch.dcs_orders (id INTEGER, region VARCHAR, cust VARCHAR, amount INTEGER);
+
+statement ok
+CREATE MACRO dcs_ddl(v) AS TABLE SELECT unnest(string_split(rtrim(get_ddl('SEMANTIC_VIEW', v), chr(10)), chr(10))) AS line;
+
+# Catalog state: every semantic view, with its schema and comment.
+statement ok
+CREATE MACRO dcs_views() AS TABLE SELECT schema_name, name, comment FROM list_semantic_views();
+
+# --- statements that are not semantic-view DDL pass through untouched ---
+
+# S-001: rewrite.rs::sv_parse_function_rust_returns_2_for_select, test_detect_non_matching, test_ddl_kind_none, test_rewrite_not_semantic, test_validate_and_rewrite_not_ours, test_near_miss_select, test_non_matching — a plain SELECT is not intercepted
+query I
+SELECT 1;
+----
+1
+
+# S-002: rewrite.rs::test_detect_non_matching, test_non_matching — CREATE TABLE is DuckDB's, not ours
+statement ok
+CREATE TABLE dcs_plain (id INTEGER);
+
+query I
+SELECT count(*) FROM dcs_plain;
+----
+0
+
+# S-003: rewrite.rs::test_non_matching — CREATE VIEW is DuckDB's: the full form works...
+statement ok
+CREATE VIEW dcs_plain_view AS SELECT 1 AS x;
+
+query I
+SELECT x FROM dcs_plain_view;
+----
+1
+
+# S-004: rewrite.rs::test_non_matching — ...and a truncated CREATE VIEW / bare CREATE get DuckDB's own syntax error, not ours [syntax]
+statement error
+CREATE VIEW dcs_plain_view2
+----
+
+statement error
+CREATE
+----
+
+# S-005: rewrite.rs::test_detect_non_matching, test_non_matching — an empty statement (`;`) is not ours and is a no-op
+# (sent ahead of a SELECT: the runner cannot execute a statement that returns no result set)
+query I
+;
+SELECT 42;
+----
+42
+
+# S-006: rewrite.rs::test_detect_describe_must_have_view — DESCRIBE <table> is DuckDB's DESCRIBE
+query TTTTTT nosort
+DESCRIBE dcs_orders;
+----
+id	INTEGER	YES	NULL	NULL	NULL
+region	VARCHAR	YES	NULL	NULL	NULL
+cust	VARCHAR	YES	NULL	NULL	NULL
+amount	INTEGER	YES	NULL	NULL	NULL
+
+# S-007: rewrite.rs::test_detect_show_must_have_views, test_near_miss_show_tables — SHOW TABLES is DuckDB's, and gets no near-miss suggestion
+query T rowsort
+SHOW TABLES;
+----
+dcs_orders
+dcs_plain
+dcs_plain_view
+
+# --- DROP / DROP IF EXISTS ---
+
+statement ok
+CREATE SEMANTIC VIEW sales AS TABLES (o AS dcs_orders PRIMARY KEY (id)) DIMENSIONS (o.region AS o.region) METRICS (o.total AS SUM(o.amount));
+
+# S-010: rewrite.rs::test_detect_drop, test_ddl_kind_drop, test_rewrite_drop, test_validate_and_rewrite_drop, phase25_parse_tests::drop_still_rewrites_unchanged — DROP SEMANTIC VIEW removes the view
+statement ok
+DROP SEMANTIC VIEW sales;
+
+query TTT nosort
+SELECT * FROM dcs_views();
+----
+
+# S-011: rewrite.rs::test_rewrite_drop — plain DROP is not IF EXISTS: a second DROP of the same name fails
+statement error
+DROP SEMANTIC VIEW sales;
+----
+semantic view 'sales' does not exist
+
+# S-012: rewrite.rs::test_detect_drop_if_exists, test_ddl_kind_drop_if_exists, test_rewrite_drop_if_exists, test_validate_and_rewrite_drop_if_exists — DROP IF EXISTS is a no-op on a missing view and drops an existing one
+statement ok
+DROP SEMANTIC VIEW IF EXISTS sales;
+
+statement ok
+CREATE SEMANTIC VIEW sv1 AS TABLES (o AS dcs_orders PRIMARY KEY (id)) DIMENSIONS (o.region AS o.region) METRICS (o.total AS SUM(o.amount));
+
+statement ok
+DROP SEMANTIC VIEW IF EXISTS sv1;
+
+query TTT nosort
+SELECT * FROM dcs_views();
+----
+
+# S-013: rewrite.rs::test_rewrite_drop_missing_name — DROP SEMANTIC VIEW with no name [syntax]
+statement error
+DROP SEMANTIC VIEW
+----
+
+# S-014: rewrite.rs::test_rewrite_name_with_single_quote — an unquoted name containing `'` is captured raw, created and dropped intact [text]
+# PRE-EXISTING (TECH-DEBT #98): `it's_a_view` is not a legal unquoted DuckDB identifier (DuckDB's own tokenizer reads `'s_a_view ...` as a string literal), yet both CREATE and DROP accept it as a view name.
+statement ok
+CREATE SEMANTIC VIEW it's_a_view AS TABLES (o AS dcs_orders PRIMARY KEY (id)) DIMENSIONS (o.region AS o.region) METRICS (o.total AS SUM(o.amount));
+
+query TTT nosort
+SELECT * FROM dcs_views();
+----
+main	it's_a_view	(empty)
+
+statement ok
+DROP SEMANTIC VIEW it's_a_view;
+
+query TTT nosort
+SELECT * FROM dcs_views();
+----
+
+# --- DESCRIBE / SHOW COLUMNS / SHOW SEMANTIC VIEWS ---
+
+statement ok
+CREATE SEMANTIC VIEW sales AS TABLES (o AS dcs_orders PRIMARY KEY (id)) DIMENSIONS (o.region AS o.region) METRICS (o.total AS SUM(o.amount));
+
+# S-020: rewrite.rs::test_detect_describe, test_ddl_kind_describe, test_rewrite_describe, test_validate_and_rewrite_describe — DESCRIBE SEMANTIC VIEW lists the view's objects
+query TTTTT nosort
+DESCRIBE SEMANTIC VIEW sales;
+----
+TABLE	dcs_orders	(empty)	BASE_TABLE_DATABASE_NAME	memory
+TABLE	dcs_orders	(empty)	BASE_TABLE_SCHEMA_NAME	main
+TABLE	dcs_orders	(empty)	BASE_TABLE_NAME	dcs_orders
+TABLE	dcs_orders	(empty)	PRIMARY_KEY	["id"]
+DIMENSION	region	dcs_orders	TABLE	dcs_orders
+DIMENSION	region	dcs_orders	EXPRESSION	o.region
+DIMENSION	region	dcs_orders	DATA_TYPE	VARCHAR
+METRIC	total	dcs_orders	TABLE	dcs_orders
+METRIC	total	dcs_orders	EXPRESSION	SUM(o.amount)
+METRIC	total	dcs_orders	DATA_TYPE	BIGINT
+METRIC	total	dcs_orders	ACCESS_MODIFIER	PUBLIC
+
+# S-021: rewrite.rs::phase34_1_1_show_filter_tests::test_rewrite_show_columns_in_semantic_view — SHOW COLUMNS IN SEMANTIC VIEW lists dimensions and metrics
+query TTTTTTTT rowsort
+SHOW COLUMNS IN SEMANTIC VIEW sales;
+----
+memory	main	sales	region	VARCHAR	DIMENSION	o.region	(empty)
+memory	main	sales	total	BIGINT	METRIC	SUM(o.amount)	(empty)
+
+# S-022: rewrite.rs::test_detect_show, test_ddl_kind_show, test_rewrite_show, test_validate_and_rewrite_show, phase34_1_1_show_filter_tests::test_rewrite_show_views_no_clauses_regression, test_build_filter_suffix_none — SHOW SEMANTIC VIEWS with no clauses lists every view
+query TTTTTT nosort
+SHOW SEMANTIC VIEWS;
+----
+<REGEX>:\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z	sales	SEMANTIC_VIEW	memory	main	(empty)
+
+# --- keyword case and surrounding whitespace ---
+
+# S-030: rewrite.rs::test_detect_case_insensitive_all_forms — lower-case DESCRIBE / SHOW / DROP IF EXISTS keywords
+query TTTTT nosort
+describe semantic view sales;
+----
+TABLE	dcs_orders	(empty)	BASE_TABLE_DATABASE_NAME	memory
+TABLE	dcs_orders	(empty)	BASE_TABLE_SCHEMA_NAME	main
+TABLE	dcs_orders	(empty)	BASE_TABLE_NAME	dcs_orders
+TABLE	dcs_orders	(empty)	PRIMARY_KEY	["id"]
+DIMENSION	region	dcs_orders	TABLE	dcs_orders
+DIMENSION	region	dcs_orders	EXPRESSION	o.region
+DIMENSION	region	dcs_orders	DATA_TYPE	VARCHAR
+METRIC	total	dcs_orders	TABLE	dcs_orders
+METRIC	total	dcs_orders	EXPRESSION	SUM(o.amount)
+METRIC	total	dcs_orders	DATA_TYPE	BIGINT
+METRIC	total	dcs_orders	ACCESS_MODIFIER	PUBLIC
+
+query TTTTTT nosort
+show semantic views;
+----
+<REGEX>:\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z	sales	SEMANTIC_VIEW	memory	main	(empty)
+
+statement ok
+CREATE SEMANTIC VIEW x AS TABLES (o AS dcs_orders PRIMARY KEY (id)) DIMENSIONS (o.region AS o.region) METRICS (o.total AS SUM(o.amount));
+
+statement ok
+drop semantic view if exists x;
+
+query TTT nosort
+SELECT * FROM dcs_views();
+----
+main	sales	(empty)
+
+# S-031: rewrite.rs::test_detect_whitespace_and_semicolon — leading/trailing whitespace and a trailing `;` around DROP and SHOW
+statement ok
+CREATE SEMANTIC VIEW x AS TABLES (o AS dcs_orders PRIMARY KEY (id)) DIMENSIONS (o.region AS o.region) METRICS (o.total AS SUM(o.amount));
+
+statement ok
+  DROP SEMANTIC VIEW x  ;
+
+query TTTTTT nosort
+	SHOW SEMANTIC VIEWS;
+----
+<REGEX>:\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z	sales	SEMANTIC_VIEW	memory	main	(empty)
+
+# --- prefix keywords need a trailing word boundary ---
+
+# The plural typo `DROP SEMANTIC VIEWS x` used to match the `DROP SEMANTIC VIEW`
+# prefix and drop a view named `s`. Both `s` and `x` exist for these rows, so
+# the catalog check after them shows nothing was dropped.
+
+statement ok
+CREATE SEMANTIC VIEW s AS TABLES (o AS dcs_orders PRIMARY KEY (id)) DIMENSIONS (o.region AS o.region) METRICS (o.total AS SUM(o.amount));
+
+statement ok
+CREATE SEMANTIC VIEW x AS TABLES (o AS dcs_orders PRIMARY KEY (id)) DIMENSIONS (o.region AS o.region) METRICS (o.total AS SUM(o.amount));
+
+# S-040: rewrite.rs::test_prefix_requires_trailing_word_boundary — `DROP SEMANTIC VIEWS x` / `DROP SEMANTIC VIEWS` are not DROP SEMANTIC VIEW [syntax]
+statement error
+DROP SEMANTIC VIEWS x
+----
+
+statement error
+DROP SEMANTIC VIEWS
+----
+
+# S-041: rewrite.rs::test_prefix_requires_trailing_word_boundary — `DESCRIBE SEMANTIC VIEWER x` is not DESCRIBE SEMANTIC VIEW [syntax]
+statement error
+DESCRIBE SEMANTIC VIEWER x
+----
+
+# S-042: rewrite.rs::test_prefix_requires_trailing_word_boundary — a non-ASCII letter continues the keyword: `SHOW SEMANTIC VIEWSé` [syntax]
+statement error
+SHOW SEMANTIC VIEWSé
+----
+
+# S-043: rewrite.rs::test_prefix_requires_trailing_word_boundary — digits and `_` continue the keyword: `VIEW2`, `VIEW_` [syntax]
+statement error
+DROP SEMANTIC VIEW2 x
+----
+
+statement error
+DROP SEMANTIC VIEW_ x
+----
+
+# S-044: rewrite.rs::test_prefix_requires_trailing_word_boundary — none of the rejected forms dropped `s` or `x`
+query TTT nosort
+SELECT * FROM dcs_views();
+----
+main	s	(empty)
+main	sales	(empty)
+main	x	(empty)
+
+# S-045: rewrite.rs::test_prefix_accepts_punctuation_boundaries — `;` and end-of-input end the SHOW keyword
+query TTTTTT nosort
+SHOW SEMANTIC VIEWS
+----
+<REGEX>:\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z	s	SEMANTIC_VIEW	memory	main	(empty)
+<REGEX>:\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z	sales	SEMANTIC_VIEW	memory	main	(empty)
+<REGEX>:\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z	x	SEMANTIC_VIEW	memory	main	(empty)
+
+query TTTTTT nosort
+SHOW SEMANTIC VIEWS;
+----
+<REGEX>:\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z	s	SEMANTIC_VIEW	memory	main	(empty)
+<REGEX>:\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z	sales	SEMANTIC_VIEW	memory	main	(empty)
+<REGEX>:\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z	x	SEMANTIC_VIEW	memory	main	(empty)
+
+# S-046: rewrite.rs::test_prefix_accepts_punctuation_boundaries — `"` ends the VIEW keyword: `DROP SEMANTIC VIEW"my view"`
+statement ok
+CREATE SEMANTIC VIEW "my view" AS TABLES (o AS dcs_orders PRIMARY KEY (id)) DIMENSIONS (o.region AS o.region) METRICS (o.total AS SUM(o.amount));
+
+statement ok
+DROP SEMANTIC VIEW"my view";
+
+query TTT nosort
+SELECT * FROM dcs_views();
+----
+main	s	(empty)
+main	sales	(empty)
+main	x	(empty)
+
+statement ok
+DROP SEMANTIC VIEW s;
+
+statement ok
+DROP SEMANTIC VIEW x;
+
+# --- near-miss prefixes on the non-CREATE forms ---
+
+# S-050: rewrite.rs::test_near_miss_drop_semantc — `DROP SEMANTC VIEW` is rejected with a suggestion [text]
+statement error
+DROP SEMANTC VIEW sales
+----
+Did you mean 'DROP SEMANTIC VIEW'?
+
+# S-051: rewrite.rs::test_near_miss_show_semantic_view — `SHOW SEMANTIC VIEW` (singular) is rejected [syntax]
+statement error
+SHOW SEMANTIC VIEW
+----
+
+# S-052: rewrite.rs::near_miss_show_materialization — `SHOW SEMANTIC MATERIALIZATION` (singular) is rejected [text]
+statement error
+SHOW SEMANTIC MATERIALIZATION
+----
+Did you mean 'SHOW SEMANTIC MATERIALIZATIONS'?
+
+# --- comments around prefixes and names ---
+
+statement ok
+CREATE SEMANTIC VIEW a AS TABLES (o AS dcs_orders PRIMARY KEY (id)) DIMENSIONS (o.region AS o.region) METRICS (o.total AS SUM(o.amount));
+
+# S-060: rewrite.rs::test_trailing_comment_after_name_is_ignored — a trailing `--` comment after the DROP name is not part of it
+statement ok
+DROP SEMANTIC VIEW a -- trailing comment
+
+query TTT nosort
+SELECT * FROM dcs_views();
+----
+main	sales	(empty)
+
+statement ok
+CREATE SEMANTIC VIEW a AS TABLES (o AS dcs_orders PRIMARY KEY (id)) DIMENSIONS (o.region AS o.region) METRICS (o.total AS SUM(o.amount));
+
+# S-061: rewrite.rs::test_alter_rename_trailing_comment_not_absorbed — a trailing `--` comment is not absorbed into the RENAME TO target
+statement ok
+ALTER SEMANTIC VIEW a RENAME TO x -- oops
+
+query TTT nosort
+SELECT * FROM dcs_views();
+----
+main	sales	(empty)
+main	x	(empty)
+
+statement ok
+CREATE SEMANTIC VIEW a AS TABLES (o AS dcs_orders PRIMARY KEY (id)) DIMENSIONS (o.region AS o.region) METRICS (o.total AS SUM(o.amount));
+
+# S-062: rewrite.rs::test_comment_markers_inside_string_survive — `--` and `/* */` inside the SET COMMENT literal are content
+statement ok
+ALTER SEMANTIC VIEW a SET COMMENT = 'keep -- this /* too */';
+
+query TTT nosort
+SELECT * FROM dcs_views() WHERE name = 'a';
+----
+main	a	keep -- this /* too */
+
+# S-063: rewrite.rs::test_comment_between_prefix_keywords — a block comment between the prefix keywords
+statement ok
+DROP /* which? */ SEMANTIC VIEW a
+
+query TTT nosort
+SELECT * FROM dcs_views();
+----
+main	sales	(empty)
+main	x	(empty)
+
+statement ok
+CREATE SEMANTIC VIEW a AS TABLES (o AS dcs_orders PRIMARY KEY (id)) DIMENSIONS (o.region AS o.region) METRICS (o.total AS SUM(o.amount));
+
+# S-064: rewrite.rs::test_nested_block_comment_fully_skipped — a nested block comment before the statement is skipped whole
+statement ok
+/* outer /* inner */ still comment */ DROP SEMANTIC VIEW a
+
+query TTT nosort
+SELECT * FROM dcs_views();
+----
+main	sales	(empty)
+main	x	(empty)
+
+statement ok
+CREATE SEMANTIC VIEW v AS TABLES (o AS dcs_orders PRIMARY KEY (id)) DIMENSIONS (o.region AS o.region) METRICS (o.total AS SUM(o.amount));
+
+# S-065: rewrite.rs::detect_other_ddl_forms_with_leading_comment — a leading block comment before DESCRIBE / SHOW / SHOW ... IN
+query TTTTT nosort
+/* x */ DESCRIBE SEMANTIC VIEW v
+----
+TABLE	dcs_orders	(empty)	BASE_TABLE_DATABASE_NAME	memory
+TABLE	dcs_orders	(empty)	BASE_TABLE_SCHEMA_NAME	main
+TABLE	dcs_orders	(empty)	BASE_TABLE_NAME	dcs_orders
+TABLE	dcs_orders	(empty)	PRIMARY_KEY	["id"]
+DIMENSION	region	dcs_orders	TABLE	dcs_orders
+DIMENSION	region	dcs_orders	EXPRESSION	o.region
+DIMENSION	region	dcs_orders	DATA_TYPE	VARCHAR
+METRIC	total	dcs_orders	TABLE	dcs_orders
+METRIC	total	dcs_orders	EXPRESSION	SUM(o.amount)
+METRIC	total	dcs_orders	DATA_TYPE	BIGINT
+METRIC	total	dcs_orders	ACCESS_MODIFIER	PUBLIC
+
+query TTTTTT nosort
+/* x */ SHOW SEMANTIC VIEWS
+----
+<REGEX>:\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z	sales	SEMANTIC_VIEW	memory	main	(empty)
+<REGEX>:\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z	v	SEMANTIC_VIEW	memory	main	(empty)
+<REGEX>:\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z	x	SEMANTIC_VIEW	memory	main	(empty)
+
+query TTTTTTTT rowsort
+/* x */ SHOW SEMANTIC METRICS IN v
+----
+memory	main	v	dcs_orders	total	BIGINT	[]	(empty)
+
+# S-066: rewrite.rs::detect_other_ddl_forms_with_leading_comment — a leading block comment before ALTER ... RENAME TO
+statement ok
+/* x */ ALTER SEMANTIC VIEW v RENAME TO w
+
+query TTT nosort
+SELECT * FROM dcs_views();
+----
+main	sales	(empty)
+main	w	(empty)
+main	x	(empty)
+
+statement ok
+ALTER SEMANTIC VIEW w RENAME TO v
+
+# S-067: rewrite.rs::detect_other_ddl_forms_with_leading_comment, validate_and_rewrite_with_leading_comment_succeeds — a leading block comment before DROP
+statement ok
+/* annotation */ DROP SEMANTIC VIEW v
+
+query TTT nosort
+SELECT * FROM dcs_views();
+----
+main	sales	(empty)
+main	x	(empty)
+
+statement ok
+CREATE SEMANTIC VIEW v AS TABLES (o AS dcs_orders PRIMARY KEY (id)) DIMENSIONS (o.region AS o.region) METRICS (o.total AS SUM(o.amount));
+
+# S-068: rewrite.rs::detect_other_ddl_forms_with_leading_comment — a leading line comment on its own line before DROP
+statement ok
+-- annotation
+DROP SEMANTIC VIEW v
+
+query TTT nosort
+SELECT * FROM dcs_views();
+----
+main	sales	(empty)
+main	x	(empty)
+
+# S-069: rewrite.rs::comment_only_is_not_semantic_view_ddl — a statement that is only a comment is not ours and is a no-op
+# (each sent ahead of a SELECT: the runner cannot execute a statement that returns no result set)
+query I
+/* just a comment */;
+SELECT 42;
+----
+42
+
+query I
+-- just a comment
+;
+SELECT 42;
+----
+42
+
+# S-070: rewrite.rs::error_position_accounts_for_leading_comment — leading comment, then DROP with no name [syntax]
+statement error
+/* hi */ DROP SEMANTIC VIEW
+----
+
+# S-071: rewrite.rs::parse_error_position_survives_leading_comment — leading comment, then an unknown SHOW clause token [syntax]
+statement error
+/* hi */ SHOW SEMANTIC VIEWS FOREIGN
+----
+
+query TTT nosort
+SELECT * FROM dcs_views();
+----
+main	sales	(empty)
+main	x	(empty)
+
+# --- ALTER: RENAME TO / SET COMMENT / UNSET COMMENT, IF EXISTS ---
+
+statement ok
+DROP SEMANTIC VIEW x;
+
+statement ok
+DROP SEMANTIC VIEW sales;
+
+statement ok
+CREATE SEMANTIC VIEW v AS TABLES (o AS dcs_orders PRIMARY KEY (id)) DIMENSIONS (o.region AS o.region) METRICS (o.total AS SUM(o.amount));
+
+# S-080: rewrite.rs::test_detect_ddl_kind_alter_rename_backwards_compat, test_validate_rewrite_alter_rename_unchanged — ALTER ... RENAME TO
+statement ok
+ALTER SEMANTIC VIEW v RENAME TO w
+
+query TTT nosort
+SELECT * FROM dcs_views();
+----
+main	w	(empty)
+
+statement ok
+ALTER SEMANTIC VIEW w RENAME TO v
+
+# S-081: rewrite.rs::test_detect_ddl_kind_alter_set_comment, test_validate_rewrite_alter_set_comment — ALTER ... SET COMMENT
+statement ok
+ALTER SEMANTIC VIEW v SET COMMENT = 'hello'
+
+query T nosort
+SELECT * FROM dcs_ddl('v') LIMIT 1;
+----
+CREATE OR REPLACE SEMANTIC VIEW v COMMENT = 'hello' AS
+
+# S-082: rewrite.rs::test_validate_rewrite_alter_set_comment_escaped_quotes, phase34_1_1_show_filter_tests::test_extract_quoted_string_escaped_quotes — `''` in the comment literal stores one `'`
+statement ok
+ALTER SEMANTIC VIEW v SET COMMENT = 'it''s a test'
+
+query TTT nosort
+SELECT * FROM dcs_views();
+----
+main	v	it's a test
+
+query T nosort
+SELECT * FROM dcs_ddl('v') LIMIT 1;
+----
+CREATE OR REPLACE SEMANTIC VIEW v COMMENT = 'it''s a test' AS
+
+# S-083: rewrite.rs::test_detect_ddl_kind_alter_unset_comment, test_validate_rewrite_alter_unset_comment — ALTER ... UNSET COMMENT
+statement ok
+ALTER SEMANTIC VIEW v UNSET COMMENT
+
+query TTT nosort
+SELECT * FROM dcs_views();
+----
+main	v	(empty)
+
+# S-084: rewrite.rs::test_detect_ddl_kind_alter_if_exists_set_comment, test_validate_rewrite_alter_if_exists_set_comment — ALTER IF EXISTS ... SET COMMENT sets it on an existing view and is a no-op on a missing one
+statement ok
+ALTER SEMANTIC VIEW IF EXISTS v SET COMMENT = 'hello'
+
+statement ok
+ALTER SEMANTIC VIEW IF EXISTS nope SET COMMENT = 'hello'
+
+query TTT nosort
+SELECT * FROM dcs_views();
+----
+main	v	hello
+
+# S-085: rewrite.rs::test_detect_ddl_kind_alter_if_exists_unset_comment, test_validate_rewrite_alter_if_exists_unset_comment — ALTER IF EXISTS ... UNSET COMMENT on an existing and a missing view
+statement ok
+ALTER SEMANTIC VIEW IF EXISTS v UNSET COMMENT
+
+statement ok
+ALTER SEMANTIC VIEW IF EXISTS nope UNSET COMMENT
+
+query TTT nosort
+SELECT * FROM dcs_views();
+----
+main	v	(empty)
+
+# S-086: rewrite.rs::test_validate_rewrite_alter_set_comment, test_validate_rewrite_alter_unset_comment — without IF EXISTS, ALTER of a missing view fails
+statement error
+ALTER SEMANTIC VIEW nope SET COMMENT = 'hello'
+----
+semantic view 'nope' does not exist
+
+statement error
+ALTER SEMANTIC VIEW nope UNSET COMMENT
+----
+semantic view 'nope' does not exist
+
+# S-087: rewrite.rs::test_validate_rewrite_alter_unsupported_operation, parse_error_position_points_at_offending_token — an unsupported ALTER sub-operation [text]
+statement error
+ALTER SEMANTIC VIEW v TRUNCATE
+----
+Unsupported ALTER operation
+
+# S-088: rewrite.rs::test_validate_rewrite_alter_missing_operation — ALTER with a name but no sub-operation [syntax]
+statement error
+ALTER SEMANTIC VIEW v
+----
+
+# S-089: rewrite.rs::test_alter_subops_tolerate_multiple_spaces, test_validate_alter_agrees_with_rewriter — any run of spaces/tabs between sub-operation keywords
+statement ok
+ALTER SEMANTIC VIEW v RENAME  	 TO b
+
+query TTT nosort
+SELECT * FROM dcs_views();
+----
+main	b	(empty)
+
+statement ok
+ALTER SEMANTIC VIEW b RENAME  TO w
+
+query TTT nosort
+SELECT * FROM dcs_views();
+----
+main	w	(empty)
+
+statement ok
+ALTER SEMANTIC VIEW w RENAME	TO v
+
+query TTT nosort
+SELECT * FROM dcs_views();
+----
+main	v	(empty)
+
+statement ok
+ALTER SEMANTIC VIEW v SET   COMMENT = 'x'
+
+query TTT nosort
+SELECT * FROM dcs_views();
+----
+main	v	x
+
+statement ok
+ALTER SEMANTIC VIEW v UNSET	COMMENT
+
+query TTT nosort
+SELECT * FROM dcs_views();
+----
+main	v	(empty)
+
+# S-090: rewrite.rs::test_validate_alter_agrees_with_rewriter — a quoted source name with an inner space survives ALTER
+statement ok
+CREATE SEMANTIC VIEW "my view" AS TABLES (o AS dcs_orders PRIMARY KEY (id)) DIMENSIONS (o.region AS o.region) METRICS (o.total AS SUM(o.amount));
+
+statement ok
+ALTER SEMANTIC VIEW "my view" RENAME TO w
+
+query TTT nosort
+SELECT * FROM dcs_views();
+----
+main	v	(empty)
+main	w	(empty)
+
+statement ok
+DROP SEMANTIC VIEW w
+
+# S-091: rewrite.rs::test_alter_subops_reject_trailing_garbage, parse_error_position_points_at_offending_token — trailing tokens after each ALTER sub-operation [syntax]
+statement error
+ALTER SEMANTIC VIEW v RENAME TO x oops
+----
+
+statement error
+ALTER SEMANTIC VIEW v RENAME TO w oops
+----
+
+statement error
+ALTER SEMANTIC VIEW v SET COMMENT = 'x' oops
+----
+
+statement error
+ALTER SEMANTIC VIEW v UNSET COMMENT oops
+----
+
+# S-092: rewrite.rs::test_alter_subops_reject_trailing_garbage — none of the rejected ALTERs renamed or commented `v`
+query TTT nosort
+SELECT * FROM dcs_views();
+----
+main	v	(empty)
+
+# S-093: rewrite.rs::phase34_1_1_show_filter_tests::test_extract_quoted_string_normal, test_extract_quoted_string_empty — the SET COMMENT literal: plain, and empty
+statement ok
+ALTER SEMANTIC VIEW v SET COMMENT = 'hello'
+
+query TTT nosort
+SELECT * FROM dcs_views();
+----
+main	v	hello
+
+statement ok
+ALTER SEMANTIC VIEW v SET COMMENT = ''
+
+query TTT nosort
+SELECT * FROM dcs_views();
+----
+main	v	(empty)
+
+# S-094: rewrite.rs::phase34_1_1_show_filter_tests::test_extract_quoted_string_utf8_cyrillic — a Cyrillic SET COMMENT round-trips byte-exact
+statement ok
+ALTER SEMANTIC VIEW v SET COMMENT = 'Привет'
+
+query TTT nosort
+SELECT * FROM dcs_views();
+----
+main	v	Привет
+
+# S-095: rewrite.rs::phase34_1_1_show_filter_tests::test_extract_quoted_string_utf8_cjk_and_emoji — CJK and emoji in SET COMMENT
+statement ok
+ALTER SEMANTIC VIEW v SET COMMENT = '你好 🦆'
+
+query TTT nosort
+SELECT * FROM dcs_views();
+----
+main	v	你好 🦆
+
+# S-096: rewrite.rs::phase34_1_1_show_filter_tests::test_extract_quoted_string_utf8_em_dash_and_smart_quotes — em dash and smart quotes in SET COMMENT
+statement ok
+ALTER SEMANTIC VIEW v SET COMMENT = 'a — b “c” d'
+
+query TTT nosort
+SELECT * FROM dcs_views();
+----
+main	v	a — b “c” d
+
+# S-097: rewrite.rs::phase34_1_1_show_filter_tests::test_extract_quoted_string_utf8_escaped_quotes_around_nonascii — `''` escapes next to non-ASCII text
+statement ok
+ALTER SEMANTIC VIEW v SET COMMENT = 'café ''noir'''
+
+query TTT nosort
+SELECT * FROM dcs_views();
+----
+main	v	café 'noir'
+
+# S-098: rewrite.rs::phase34_1_1_show_filter_tests::test_extract_quoted_string_unterminated — an unterminated SET COMMENT literal [syntax]
+statement error
+ALTER SEMANTIC VIEW v SET COMMENT = 'unterminated
+----
+
+# S-099: rewrite.rs::phase34_1_1_show_filter_tests::test_extract_quoted_string_no_opening_quote — SET COMMENT = <bare word> [syntax]
+statement error
+ALTER SEMANTIC VIEW v SET COMMENT = no_quote
+----
+
+query TTT nosort
+SELECT * FROM dcs_views();
+----
+main	v	café 'noir'
+
+statement ok
+ALTER SEMANTIC VIEW v UNSET COMMENT
+
+# --- trailing tokens after a name-only form ---
+
+statement ok
+CREATE SEMANTIC VIEW a AS TABLES (o AS dcs_orders PRIMARY KEY (id)) DIMENSIONS (o.region AS o.region) METRICS (o.total AS SUM(o.amount));
+
+# S-100: rewrite.rs::test_name_only_forms_reject_trailing_garbage, parse_error_position_points_at_offending_token — DROP / DROP IF EXISTS / DESCRIBE / SHOW COLUMNS reject tokens after the name [syntax]
+statement error
+DROP SEMANTIC VIEW a b c
+----
+
+statement error
+DROP SEMANTIC VIEW IF EXISTS a b
+----
+
+statement error
+DESCRIBE SEMANTIC VIEW a CASCADE
+----
+
+statement error
+SHOW COLUMNS IN SEMANTIC VIEW a b
+----
+
+statement error
+DROP SEMANTIC VIEW a bar
+----
+
+# S-101: rewrite.rs::test_name_only_forms_reject_trailing_garbage — the rejected DROPs dropped nothing
+query TTT nosort
+SELECT * FROM dcs_views();
+----
+main	a	(empty)
+main	v	(empty)
+
+statement ok
+DROP SEMANTIC VIEW a
+
+# --- view-name case folding (DuckDB rule: quoted or not, names fold) ---
+
+# S-110: rewrite.rs::test_unquoted_names_fold_to_lowercase_across_ddl_forms — CREATE `Sales` stores `sales` [text]
+statement ok
+CREATE SEMANTIC VIEW Sales AS TABLES (o AS dcs_orders PRIMARY KEY (id)) DIMENSIONS (o.region AS o.region) METRICS (o.total AS SUM(o.amount))
+
+query T nosort
+SELECT * FROM dcs_ddl('sales') LIMIT 1;
+----
+CREATE OR REPLACE SEMANTIC VIEW sales AS
+
+# S-111: rewrite.rs::test_unquoted_names_fold_to_lowercase_across_ddl_forms — DESCRIBE `SALES` finds `sales` [text]
+query TTTTT nosort
+DESCRIBE SEMANTIC VIEW SALES
+----
+TABLE	dcs_orders	(empty)	BASE_TABLE_DATABASE_NAME	memory
+TABLE	dcs_orders	(empty)	BASE_TABLE_SCHEMA_NAME	main
+TABLE	dcs_orders	(empty)	BASE_TABLE_NAME	dcs_orders
+TABLE	dcs_orders	(empty)	PRIMARY_KEY	["id"]
+DIMENSION	region	dcs_orders	TABLE	dcs_orders
+DIMENSION	region	dcs_orders	EXPRESSION	o.region
+DIMENSION	region	dcs_orders	DATA_TYPE	VARCHAR
+METRIC	total	dcs_orders	TABLE	dcs_orders
+METRIC	total	dcs_orders	EXPRESSION	SUM(o.amount)
+METRIC	total	dcs_orders	DATA_TYPE	BIGINT
+METRIC	total	dcs_orders	ACCESS_MODIFIER	PUBLIC
+
+# S-112: rewrite.rs::test_unquoted_names_fold_to_lowercase_across_ddl_forms — ALTER folds both the source and the RENAME TO target [text]
+statement ok
+ALTER SEMANTIC VIEW Sales RENAME TO NewSales
+
+query TTT nosort
+SELECT * FROM dcs_views();
+----
+main	newsales	(empty)
+main	v	(empty)
+
+# S-113: rewrite.rs::test_unquoted_names_fold_to_lowercase_across_ddl_forms — DROP `NewSales` drops `newsales` [text]
+statement ok
+DROP SEMANTIC VIEW NewSales
+
+query TTT nosort
+SELECT * FROM dcs_views();
+----
+main	v	(empty)
+
+# S-114: rewrite.rs::test_quoted_names_also_fold_to_lowercase_across_ddl_forms — a quoted CREATE name folds too [text]
+statement ok
+CREATE SEMANTIC VIEW "Sales" AS TABLES (o AS dcs_orders PRIMARY KEY (id)) DIMENSIONS (o.region AS o.region) METRICS (o.total AS SUM(o.amount))
+
+query TTT nosort
+SELECT * FROM dcs_views();
+----
+main	sales	(empty)
+main	v	(empty)
+
+# S-115: rewrite.rs::test_quoted_names_also_fold_to_lowercase_across_ddl_forms — quoted ALTER source and target fold [text]
+statement ok
+ALTER SEMANTIC VIEW "Sales" RENAME TO "NewSales"
+
+query TTT nosort
+SELECT * FROM dcs_views();
+----
+main	newsales	(empty)
+main	v	(empty)
+
+# S-116: rewrite.rs::test_quoted_names_also_fold_to_lowercase_across_ddl_forms — quoted DROP folds [text]
+statement ok
+ALTER SEMANTIC VIEW newsales RENAME TO sales
+
+statement ok
+DROP SEMANTIC VIEW "Sales"
+
+query TTT nosort
+SELECT * FROM dcs_views();
+----
+main	v	(empty)
+
+# --- qualified and quoted view names on DROP / DESCRIBE / SHOW COLUMNS / ALTER ---
+
+# Two views named `v`: one in `main`, one in `dcs_sch`. A qualified name has to
+# pick the right one, so the catalog checks below tell a kept qualifier from a
+# discarded one.
+
+statement ok
+CREATE SEMANTIC VIEW memory.dcs_sch.v AS TABLES (o AS dcs_orders PRIMARY KEY (id)) DIMENSIONS (o.cust AS o.cust) METRICS (o.n AS COUNT(*))
+
+query TTT nosort
+SELECT * FROM dcs_views();
+----
+dcs_sch	v	(empty)
+main	v	(empty)
+
+# S-120: rewrite.rs::phase64_quoted_ident_tests::describe_with_quoted_fqn — DESCRIBE with a quoted three-part name reads that schema's view
+query TTTTT nosort
+DESCRIBE SEMANTIC VIEW "memory"."dcs_sch"."v"
+----
+TABLE	dcs_orders	(empty)	BASE_TABLE_DATABASE_NAME	memory
+TABLE	dcs_orders	(empty)	BASE_TABLE_SCHEMA_NAME	dcs_sch
+TABLE	dcs_orders	(empty)	BASE_TABLE_NAME	dcs_orders
+TABLE	dcs_orders	(empty)	PRIMARY_KEY	["id"]
+DIMENSION	cust	dcs_orders	TABLE	dcs_orders
+DIMENSION	cust	dcs_orders	EXPRESSION	o.cust
+DIMENSION	cust	dcs_orders	DATA_TYPE	VARCHAR
+METRIC	n	dcs_orders	TABLE	dcs_orders
+METRIC	n	dcs_orders	EXPRESSION	COUNT(*)
+METRIC	n	dcs_orders	DATA_TYPE	BIGINT
+METRIC	n	dcs_orders	ACCESS_MODIFIER	PUBLIC
+
+# S-121: rewrite.rs::phase64_quoted_ident_tests::show_columns_with_quoted_fqn — SHOW COLUMNS with a quoted three-part name
+query TTTTTTTT rowsort
+SHOW COLUMNS IN SEMANTIC VIEW "memory"."dcs_sch"."v"
+----
+memory	dcs_sch	v	cust	VARCHAR	DIMENSION	o.cust	(empty)
+memory	dcs_sch	v	n	BIGINT	METRIC	COUNT(*)	(empty)
+
+# S-122: rewrite.rs::phase64_quoted_ident_tests::drop_with_quoted_fqn — DROP with a quoted three-part name drops only that schema's view
+statement ok
+DROP SEMANTIC VIEW "memory"."dcs_sch"."v"
+
+query TTT nosort
+SELECT * FROM dcs_views();
+----
+main	v	(empty)
+
+# S-123: rewrite.rs::phase64_quoted_ident_tests::drop_with_unquoted_fqn — DROP with an unquoted three-part name keeps its qualifier
+statement ok
+CREATE SEMANTIC VIEW memory.dcs_sch.v AS TABLES (o AS dcs_orders PRIMARY KEY (id)) DIMENSIONS (o.cust AS o.cust) METRICS (o.n AS COUNT(*))
+
+statement ok
+DROP SEMANTIC VIEW memory.dcs_sch.v
+
+query TTT nosort
+SELECT * FROM dcs_views();
+----
+main	v	(empty)
+
+# S-124: rewrite.rs::phase64_quoted_ident_tests::drop_with_unquoted_fqn — the database part is not discarded either: naming another database is refused
+statement error
+DROP SEMANTIC VIEW db.sch.v
+----
+names database 'db', but semantic views are single-catalog
+
+# S-125: rewrite.rs::phase64_quoted_ident_tests::drop_if_exists_with_quoted_fqn — DROP IF EXISTS with a quoted three-part name
+statement ok
+CREATE SEMANTIC VIEW memory.dcs_sch.v AS TABLES (o AS dcs_orders PRIMARY KEY (id)) DIMENSIONS (o.cust AS o.cust) METRICS (o.n AS COUNT(*))
+
+statement ok
+DROP SEMANTIC VIEW IF EXISTS "memory"."dcs_sch"."v"
+
+statement ok
+DROP SEMANTIC VIEW IF EXISTS "memory"."dcs_sch"."v"
+
+query TTT nosort
+SELECT * FROM dcs_views();
+----
+main	v	(empty)
+
+# S-126: rewrite.rs::phase64_quoted_ident_tests::drop_with_quoted_bare — DROP with a quoted one-part name
+statement ok
+CREATE SEMANTIC VIEW orders_sv AS TABLES (o AS dcs_orders PRIMARY KEY (id)) DIMENSIONS (o.region AS o.region) METRICS (o.total AS SUM(o.amount))
+
+statement ok
+DROP SEMANTIC VIEW "orders_sv"
+
+query TTT nosort
+SELECT * FROM dcs_views();
+----
+main	v	(empty)
+
+# S-127: rewrite.rs::phase64_quoted_ident_tests::drop_with_partial_quoting — DROP with an unquoted schema and quoted name
+statement ok
+CREATE SEMANTIC VIEW orders_sv AS TABLES (o AS dcs_orders PRIMARY KEY (id)) DIMENSIONS (o.region AS o.region) METRICS (o.total AS SUM(o.amount))
+
+statement ok
+DROP SEMANTIC VIEW main."orders_sv"
+
+query TTT nosort
+SELECT * FROM dcs_views();
+----
+main	v	(empty)
+
+# S-128: rewrite.rs::phase64_quoted_ident_tests::drop_with_quoted_whitespace_name — a quoted name with an inner space is captured whole
+statement ok
+CREATE SEMANTIC VIEW "my view" AS TABLES (o AS dcs_orders PRIMARY KEY (id)) DIMENSIONS (o.region AS o.region) METRICS (o.total AS SUM(o.amount))
+
+statement ok
+DROP SEMANTIC VIEW "my view"
+
+query TTT nosort
+SELECT * FROM dcs_views();
+----
+main	v	(empty)
+
+# S-129: rewrite.rs::phase64_quoted_ident_tests::drop_with_unterminated_quote_errors, parse_error_position_points_at_offending_token — an unterminated quoted DROP name [syntax]
+statement error
+DROP SEMANTIC VIEW "foo
+----
+
+statement error
+DROP SEMANTIC VIEW   "unterminated
+----
+
+# S-130: rewrite.rs::phase64_quoted_ident_tests::alter_rename_source_quoted — ALTER with a quoted source name
+statement ok
+ALTER SEMANTIC VIEW "v" RENAME TO new_name
+
+query TTT nosort
+SELECT * FROM dcs_views();
+----
+main	new_name	(empty)
+
+# S-131: rewrite.rs::phase64_quoted_ident_tests::alter_rename_target_quoted — a quoted three-part RENAME TO target moves the view into that schema
+statement ok
+ALTER SEMANTIC VIEW new_name RENAME TO "memory"."dcs_sch"."new_v"
+
+query TTT nosort
+SELECT * FROM dcs_views();
+----
+dcs_sch	new_v	(empty)
+
+# S-132: rewrite.rs::phase64_quoted_ident_tests::alter_rename_both_quoted — quoted three-part source and target
+statement ok
+ALTER SEMANTIC VIEW "memory"."dcs_sch"."new_v" RENAME TO "memory"."main"."v"
+
+query TTT nosort
+SELECT * FROM dcs_views();
+----
+main	v	(empty)
+
+# S-133: rewrite.rs::phase64_quoted_ident_tests::alter_set_comment_with_quoted_source — SET COMMENT with a quoted source name
+statement ok
+ALTER SEMANTIC VIEW "v" SET COMMENT = 'x'
+
+query TTT nosort
+SELECT * FROM dcs_views();
+----
+main	v	x
+
+# S-134: rewrite.rs::phase64_quoted_ident_tests::alter_unset_comment_with_quoted_source — UNSET COMMENT with a quoted source name
+statement ok
+ALTER SEMANTIC VIEW "v" UNSET COMMENT
+
+query TTT nosort
+SELECT * FROM dcs_views();
+----
+main	v	(empty)
+
+# S-135: rewrite.rs::phase64_quoted_ident_tests::alter_rename_target_unterminated_quote_errors — an unterminated quoted RENAME TO target [syntax]
+statement error
+ALTER SEMANTIC VIEW v RENAME TO "foo
+----
+
+query TTT nosort
+SELECT * FROM dcs_views();
+----
+main	v	(empty)
+
+statement ok
+DROP SEMANTIC VIEW v

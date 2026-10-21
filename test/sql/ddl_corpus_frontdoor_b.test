@@ -1,0 +1,513 @@
+require semantic_views
+
+# Phase 3 grammar corpus -- slice F (statement front door), part B of 3.
+#
+# Continues ddl_corpus_frontdoor_a.test (same sources, same conventions; read
+# its header). This part holds:
+#   - tests/parse_proptest.rs body-clause properties (TEST-09/10/11/12):
+#     FACTS, derived / mixed metrics, quoted member names, relationships
+#     without cardinality, USING;
+#   - tests/create_front_door_proptest.rs: hostile bodies through the full
+#     CREATE OR REPLACE front door, one row per generator axis;
+#   - src/parse/ffi.rs: statement framing (multi-statement strings, the
+#     parser_override-inactive diagnosis, and the per-thread record behind it).
+# Part C (ddl_corpus_frontdoor_c.test) ports src/parse/search_path.rs and
+# src/parse/show_clauses.rs. Case map: _notes/phase3-corpus/map-F.md.
+#
+# Row markers: `[syntax]` = a syntactic reject (`statement error` with an empty
+# `----` block, which accepts any message; its wording will change under the
+# grammar). `[text]` = today's contract for something a grammar might
+# plausibly change. `PRE-EXISTING` = today's behaviour pinned although it
+# looks wrong.
+
+statement ok
+CREATE TABLE dcf_orders (id INTEGER PRIMARY KEY, region VARCHAR, amount INTEGER, status VARCHAR, customer_id INTEGER);
+
+statement ok
+INSERT INTO dcf_orders VALUES (1, 'north', 10, 'open', 1), (2, 'south', 20, 'closed', 2);
+
+statement ok
+CREATE TABLE dcf_customers (id INTEGER PRIMARY KEY, name VARCHAR);
+
+statement ok
+INSERT INTO dcf_customers VALUES (1, 'ann'), (2, 'bob');
+
+statement ok
+CREATE TABLE dcf_flights (id INTEGER PRIMARY KEY, airport_id INTEGER);
+
+statement ok
+INSERT INTO dcf_flights VALUES (1, 1), (2, 1), (3, 2);
+
+statement ok
+CREATE TABLE dcf_airports (id INTEGER PRIMARY KEY, name VARCHAR);
+
+statement ok
+INSERT INTO dcf_airports VALUES (1, 'AMS'), (2, 'LHR');
+
+statement ok
+CREATE MACRO dcf_ddl(v) AS TABLE SELECT unnest(string_split(rtrim(get_ddl('SEMANTIC_VIEW', v), chr(10)), chr(10))) AS line;
+
+# --- FACTS clause (TEST-09) ---
+
+# F-048: parse_proptest.rs::empty_facts_clause_valid — an empty FACTS () is accepted and stores no facts (GET_DDL omits the clause)
+statement ok
+CREATE SEMANTIC VIEW dcf_fe AS TABLES (t AS dcf_orders PRIMARY KEY (id)) FACTS () DIMENSIONS (t.region AS region) METRICS (t.rev AS SUM(amount));
+
+query T nosort
+SELECT * FROM dcf_ddl('dcf_fe');
+----
+CREATE OR REPLACE SEMANTIC VIEW dcf_fe AS
+TABLES (
+    t AS dcf_orders PRIMARY KEY (id)
+)
+DIMENSIONS (
+    t.region AS region
+)
+METRICS (
+    t.rev AS SUM(amount)
+)
+
+# F-049: parse_proptest.rs::facts_clause_no_panic — one FACTS entry per expression shape of the generator (alias-qualified column, `a + b`, `alias.SUM(x)`, `a * (1 - b)`), stored verbatim (zero entries: F-048) [text]
+statement ok
+CREATE SEMANTIC VIEW dcf_f1 AS TABLES (t AS dcf_orders PRIMARY KEY (id)) FACTS (t.f_col AS t.amount, t.f_add AS t.amount + id, t.f_sum AS t.SUM(amount), t.f_mul AS t.amount * (1 - id)) DIMENSIONS (t.region AS region) METRICS (t.rev AS SUM(amount));
+
+query T nosort
+SELECT * FROM dcf_ddl('dcf_f1');
+----
+CREATE OR REPLACE SEMANTIC VIEW dcf_f1 AS
+TABLES (
+    t AS dcf_orders PRIMARY KEY (id)
+)
+FACTS (
+    t.f_col AS t.amount,
+    t.f_add AS t.amount + id,
+    t.f_sum AS t.SUM(amount),
+    t.f_mul AS t.amount * (1 - id)
+)
+DIMENSIONS (
+    t.region AS region
+)
+METRICS (
+    t.rev AS SUM(amount)
+)
+
+# F-050: parse_proptest.rs::facts_clause_no_panic — the generator's alias is arbitrary: a FACTS entry on an alias TABLES never declared is refused (near miss of F-049)
+statement error
+CREATE SEMANTIC VIEW dcf_f2 AS TABLES (t AS dcf_orders PRIMARY KEY (id)) FACTS (x.f_col AS x.amount) DIMENSIONS (t.region AS region) METRICS (t.rev AS SUM(amount));
+----
+unknown source table 'x'
+
+# --- Derived and mixed metrics (TEST-10) ---
+
+# F-051: parse_proptest.rs::derived_metric_parsing_no_panic — a qualified base metric plus an unqualified derived metric over it is accepted
+statement ok
+CREATE SEMANTIC VIEW dcf_d1 AS TABLES (t AS dcf_orders PRIMARY KEY (id)) DIMENSIONS (t.region AS region) METRICS (t.base AS SUM(t.amount), derived AS base + 1);
+
+query T nosort
+SELECT * FROM dcf_ddl('dcf_d1');
+----
+CREATE OR REPLACE SEMANTIC VIEW dcf_d1 AS
+TABLES (
+    t AS dcf_orders PRIMARY KEY (id)
+)
+DIMENSIONS (
+    t.region AS region
+)
+METRICS (
+    t.base AS SUM(t.amount),
+    derived AS base + 1
+)
+
+# F-052: parse_proptest.rs::derived_metric_parsing_no_panic — the generator can draw the same name for base and derived: that collision is refused (near miss of F-051)
+statement error
+CREATE SEMANTIC VIEW dcf_d2 AS TABLES (t AS dcf_orders PRIMARY KEY (id)) DIMENSIONS (t.region AS region) METRICS (t.base AS SUM(t.amount), base AS base + 1);
+----
+duplicate name 'base'
+
+# F-053: parse_proptest.rs::mixed_metrics_no_panic — qualified and unqualified metrics mixed under an arbitrary alias; the derived metric computes from both bases
+statement ok
+CREATE SEMANTIC VIEW dcf_d3 AS TABLES (ord AS dcf_orders PRIMARY KEY (id)) DIMENSIONS (ord.region AS region) METRICS (ord.b1 AS SUM(ord.amount), ord.b2 AS COUNT(*), d AS b1 + b2);
+
+query T nosort
+SELECT * FROM dcf_ddl('dcf_d3');
+----
+CREATE OR REPLACE SEMANTIC VIEW dcf_d3 AS
+TABLES (
+    ord AS dcf_orders PRIMARY KEY (id)
+)
+DIMENSIONS (
+    ord.region AS region
+)
+METRICS (
+    ord.b1 AS SUM(ord.amount),
+    ord.b2 AS COUNT(*),
+    d AS b1 + b2
+)
+
+query TI rowsort
+SELECT * FROM semantic_view('dcf_d3', dimensions := ['region'], metrics := ['d']);
+----
+north	11
+south	21
+
+# F-054: parse_proptest.rs::mixed_metrics_no_panic — two base metrics drawn with the same name collide (near miss of F-053)
+statement error
+CREATE SEMANTIC VIEW dcf_d4 AS TABLES (ord AS dcf_orders PRIMARY KEY (id)) DIMENSIONS (ord.region AS region) METRICS (ord.b1 AS SUM(ord.amount), ord.b1 AS COUNT(*), d AS b1 + b1);
+----
+duplicate name 'b1'
+
+# --- Quoted member names reach the expansion (TEST-11) ---
+
+# F-055: parse_proptest.rs::quote_ident_never_panics — a member name holding an embedded double quote is stored with its quoting and is queryable (the expansion quotes it as an output identifier); requested by its stored or its bare spelling [text]
+statement ok
+CREATE SEMANTIC VIEW dcf_q1 AS TABLES (o AS dcf_orders PRIMARY KEY (id)) DIMENSIONS (o."dim""q" AS o.region) METRICS (o.total AS SUM(o.amount));
+
+query T nosort
+SELECT line FROM dcf_ddl('dcf_q1') WHERE line LIKE '    o.%';
+----
+    o."dim""q" AS o.region
+    o.total AS SUM(o.amount)
+
+query TI rowsort
+SELECT * FROM semantic_view('dcf_q1', dimensions := ['"dim""q"'], metrics := ['total']);
+----
+north	10
+south	20
+
+query TI rowsort
+SELECT * FROM semantic_view('dcf_q1', dimensions := ['dim"q'], metrics := ['total']);
+----
+north	10
+south	20
+
+# --- Relationships and USING (TEST-12) ---
+
+# F-056: parse_proptest.rs::relationship_no_cardinality_defaults — a relationship with no cardinality keyword parses; the omitted REF key is inferred from the target's PRIMARY KEY
+statement ok
+CREATE SEMANTIC VIEW dcf_r1 AS TABLES (a1 AS dcf_orders PRIMARY KEY (id), a2 AS dcf_customers PRIMARY KEY (id)) RELATIONSHIPS (rel_x AS a1(customer_id) REFERENCES a2) DIMENSIONS (a1.r AS region) METRICS (a1.m AS SUM(amount));
+
+query T nosort
+SELECT * FROM dcf_ddl('dcf_r1');
+----
+CREATE OR REPLACE SEMANTIC VIEW dcf_r1 AS
+TABLES (
+    a1 AS dcf_orders PRIMARY KEY (id),
+    a2 AS dcf_customers PRIMARY KEY (id)
+)
+RELATIONSHIPS (
+    rel_x AS a1(customer_id) REFERENCES a2
+)
+DIMENSIONS (
+    a1.r AS region
+)
+METRICS (
+    a1.m AS SUM(amount)
+)
+
+query TTTTT nosort
+SELECT * FROM describe_semantic_view('dcf_r1') WHERE object_kind = 'RELATIONSHIP';
+----
+RELATIONSHIP	rel_x	dcf_orders	TABLE	dcf_orders
+RELATIONSHIP	rel_x	dcf_orders	REF_TABLE	dcf_customers
+RELATIONSHIP	rel_x	dcf_orders	FOREIGN_KEY	["customer_id"]
+RELATIONSHIP	rel_x	dcf_orders	REF_KEY	["id"]
+
+# F-057: parse_proptest.rs::metric_using_clause_roundtrip — USING in lower / mixed / upper case attaches the named relationship to the metric; GET_DDL renders it upper case
+statement ok
+CREATE SEMANTIC VIEW dcf_u1 AS TABLES (f AS dcf_flights PRIMARY KEY (id), a AS dcf_airports PRIMARY KEY (id)) RELATIONSHIPS (dep_rel AS f(airport_id) REFERENCES a) DIMENSIONS (a.name AS airport_name) METRICS (f.flight_cnt using (dep_rel) AS COUNT(*));
+
+statement ok
+CREATE SEMANTIC VIEW dcf_u2 AS TABLES (f AS dcf_flights PRIMARY KEY (id), a AS dcf_airports PRIMARY KEY (id)) RELATIONSHIPS (dep_rel AS f(airport_id) REFERENCES a) DIMENSIONS (a.name AS airport_name) METRICS (f.flight_cnt UsInG (dep_rel) AS COUNT(*));
+
+statement ok
+CREATE SEMANTIC VIEW dcf_u3 AS TABLES (f AS dcf_flights PRIMARY KEY (id), a AS dcf_airports PRIMARY KEY (id)) RELATIONSHIPS (dep_rel AS f(airport_id) REFERENCES a) DIMENSIONS (a.name AS airport_name) METRICS (f.flight_cnt USING (dep_rel) AS COUNT(*));
+
+query T nosort
+SELECT * FROM dcf_ddl('dcf_u1');
+----
+CREATE OR REPLACE SEMANTIC VIEW dcf_u1 AS
+TABLES (
+    f AS dcf_flights PRIMARY KEY (id),
+    a AS dcf_airports PRIMARY KEY (id)
+)
+RELATIONSHIPS (
+    dep_rel AS f(airport_id) REFERENCES a
+)
+DIMENSIONS (
+    a.name AS airport_name
+)
+METRICS (
+    f.flight_cnt USING (dep_rel) AS COUNT(*)
+)
+
+query T nosort
+SELECT line FROM dcf_ddl('dcf_u2') WHERE line LIKE '    f.%';
+----
+    f.flight_cnt USING (dep_rel) AS COUNT(*)
+
+query T nosort
+SELECT line FROM dcf_ddl('dcf_u3') WHERE line LIKE '    f.%';
+----
+    f.flight_cnt USING (dep_rel) AS COUNT(*)
+
+# (The generator's `a.name AS airport_name` declares a dimension NAMED `name`
+# over a column `airport_name` that does not exist; expressions bind at query
+# time, so only the metric is queried here.)
+query I
+SELECT * FROM semantic_view('dcf_u2', metrics := ['flight_cnt']);
+----
+3
+
+# --- Hostile bodies through the CREATE OR REPLACE front door (create_front_door_proptest) ---
+# One row per generator axis of tests/common/mod.rs::arb_canonical_def. The
+# Rust property compares tables / dimensions / facts / metrics after
+# plan_rewrite; here GET_DDL pins all of them (and the joins and
+# materializations the property skips). Base tables exist so the real front
+# door's catalog checks pass.
+
+statement ok
+CREATE TABLE "dcf Hostile.Tbl" ("Key Col" INTEGER PRIMARY KEY, "AS" INTEGER, "comment" INTEGER, c VARCHAR, n INTEGER);
+
+statement ok
+CREATE TABLE "dcf PRIMARY KEY (id)" (id INTEGER PRIMARY KEY, fk_0_0 INTEGER, d2 VARCHAR);
+
+statement ok
+CREATE TABLE dcf_h2a (k1 INTEGER, k2 INTEGER, rc_0_0 INTEGER, rc_0_1 INTEGER, c VARCHAR, n INTEGER, PRIMARY KEY (k1, k2));
+
+statement ok
+CREATE TABLE dcf_h2b (fk_0_0 INTEGER, fk_0_1 INTEGER, n INTEGER);
+
+statement ok
+CREATE TABLE dcf_h2c (fk_1_0 INTEGER, fk_1_1 INTEGER);
+
+# F-058: create_front_door_proptest.rs::create_front_door_accepts_hostile_bodies (quoted-identifier and payload axes) — quoted table / column / member / relationship names with spaces, dots, commas, uppercase, keywords (`AS`, `comment`, `PRIMARY KEY (id)`) and a doubled quote; COMMENT / SYNONYMS payloads with `--`, `/* */`, a backslash, a doubled quote and non-ASCII; string-literal and e'' escape-string expressions holding `--`, `/* */`, `,` and `\'`; PRIVATE, LABELS = (FILTER), USING, NON ADDITIVE BY ... DESC NULLS FIRST, MATERIALIZATIONS. Everything survives verbatim [text]
+statement ok
+CREATE OR REPLACE SEMANTIC VIEW rt_view AS
+TABLES (
+    t0 AS "dcf Hostile.Tbl" PRIMARY KEY ("Key Col") UNIQUE ("AS", "comment") COMMENT = 'has -- and /* inside */' WITH SYNONYMS = ('back\slash and '' quote', '東京☕'),
+    t1 AS "dcf PRIMARY KEY (id)" PRIMARY KEY (id)
+)
+RELATIONSHIPS (
+    "we""ird rel" AS t1(fk_0_0) REFERENCES t0
+)
+FACTS (
+    PRIVATE t0."fact.X" AS (t0.n + 1) * 2 LABELS = (FILTER) COMMENT = 'it''s -- fine',
+    t1.f2 AS e'it\'s, -- a /* b */' WITH SYNONYMS = ('wéird')
+)
+DIMENSIONS (
+    t0."Dim, One" AS t0.c || ' -- not a comment' COMMENT = '/* nope */',
+    t1.d2 AS 'x' || t1.d2 LABELS = (FILTER) WITH SYNONYMS = ('the PRIMARY KEY (id) lives here')
+)
+METRICS (
+    t1.m1 USING ("we""ird rel") NON ADDITIVE BY ("Dim, One" DESC NULLS FIRST) AS SUM(t1.fk_0_0) COMMENT = 'μ',
+    PRIVATE t1.m2 AS MAX('a,b')
+)
+MATERIALIZATIONS (
+    mat_0 AS (TABLE mat_tbl_0, DIMENSIONS ("Dim, One"), METRICS (m1))
+);
+
+query T nosort
+SELECT * FROM dcf_ddl('rt_view');
+----
+CREATE OR REPLACE SEMANTIC VIEW rt_view AS
+TABLES (
+    t0 AS "dcf Hostile.Tbl" PRIMARY KEY ("Key Col") UNIQUE ("AS", "comment") COMMENT = 'has -- and /* inside */' WITH SYNONYMS = ('back\slash and '' quote', '東京☕'),
+    t1 AS "dcf PRIMARY KEY (id)" PRIMARY KEY (id)
+)
+RELATIONSHIPS (
+    "we""ird rel" AS t1(fk_0_0) REFERENCES t0
+)
+FACTS (
+    PRIVATE t0."fact.X" AS (t0.n + 1) * 2 COMMENT = 'it''s -- fine' LABELS = (FILTER),
+    t1.f2 AS e'it\'s, -- a /* b */' WITH SYNONYMS = ('wéird')
+)
+DIMENSIONS (
+    t0."Dim, One" AS t0.c || ' -- not a comment' COMMENT = '/* nope */',
+    t1.d2 AS 'x' || t1.d2 WITH SYNONYMS = ('the PRIMARY KEY (id) lives here') LABELS = (FILTER)
+)
+METRICS (
+    t1.m1 USING ("we""ird rel") NON ADDITIVE BY ("Dim, One" DESC NULLS FIRST) AS SUM(t1.fk_0_0) COMMENT = 'μ',
+    PRIVATE t1.m2 AS MAX('a,b')
+)
+MATERIALIZATIONS (
+    mat_0 AS (
+        TABLE mat_tbl_0,
+        DIMENSIONS ("Dim, One"),
+        METRICS (m1)
+    )
+)
+
+# F-059: create_front_door_proptest.rs::create_front_door_accepts_hostile_bodies (bare-identifier / arithmetic axes; OR REPLACE mode) — re-issuing CREATE OR REPLACE under the same name replaces F-058's body: composite PK, an explicit REF column list and an omitted one, three tables, escape-string backslashes, `||`, `-`, `*`, nested parens, AVG / COUNT / MIN, NON ADDITIVE BY ... ASC NULLS LAST (ASC is the default and is not re-rendered) [text]
+statement ok
+CREATE OR REPLACE SEMANTIC VIEW rt_view AS
+TABLES (
+    t0 AS dcf_h2a PRIMARY KEY (k1, k2) UNIQUE (rc_0_0, rc_0_1),
+    t1 AS dcf_h2b,
+    t2 AS dcf_h2c
+)
+RELATIONSHIPS (
+    r_0 AS t1(fk_0_0, fk_0_1) REFERENCES t0(rc_0_0, rc_0_1),
+    _r1 AS t2(fk_1_0, fk_1_1) REFERENCES t0
+)
+FACTS (
+    t1.f_0 AS 1 - 2 * (t1.n),
+    t0.f_1 AS e'a\\b\'c' LABELS = (FILTER)
+)
+DIMENSIONS (
+    t0.d_0 AS 'it''s ' || t0.c,
+    t2.d_1 AS 0
+)
+METRICS (
+    t1.m_0 USING (r_0) NON ADDITIVE BY (d_0 ASC NULLS LAST) AS AVG((t1.n)),
+    t0.m_1 AS COUNT(t0.n * 3) - MIN(t0.n)
+);
+
+query T nosort
+SELECT * FROM dcf_ddl('rt_view');
+----
+CREATE OR REPLACE SEMANTIC VIEW rt_view AS
+TABLES (
+    t0 AS dcf_h2a PRIMARY KEY (k1, k2) UNIQUE (rc_0_0, rc_0_1),
+    t1 AS dcf_h2b,
+    t2 AS dcf_h2c
+)
+RELATIONSHIPS (
+    r_0 AS t1(fk_0_0, fk_0_1) REFERENCES t0(rc_0_0, rc_0_1),
+    _r1 AS t2(fk_1_0, fk_1_1) REFERENCES t0
+)
+FACTS (
+    t1.f_0 AS 1 - 2 * (t1.n),
+    t0.f_1 AS e'a\\b\'c' LABELS = (FILTER)
+)
+DIMENSIONS (
+    t0.d_0 AS 'it''s ' || t0.c,
+    t2.d_1 AS 0
+)
+METRICS (
+    t1.m_0 USING (r_0) NON ADDITIVE BY (d_0 NULLS LAST) AS AVG((t1.n)),
+    t0.m_1 AS COUNT(t0.n * 3) - MIN(t0.n)
+)
+
+query TTT
+SELECT name, database_name, schema_name FROM list_semantic_views() WHERE name = 'rt_view';
+----
+rt_view	memory	main
+
+# F-060: create_front_door_proptest.rs::create_front_door_accepts_hostile_bodies (empty-collection axes) — a single key-less table with metrics only (no PK, so no relationships), and one with dimensions only, empty COMMENT and two SYNONYMS
+statement ok
+CREATE OR REPLACE SEMANTIC VIEW rt_view3 AS TABLES (t0 AS dcf_orders) METRICS (t0.m_0 AS COUNT(5));
+
+query T nosort
+SELECT * FROM dcf_ddl('rt_view3');
+----
+CREATE OR REPLACE SEMANTIC VIEW rt_view3 AS
+TABLES (
+    t0 AS dcf_orders
+)
+METRICS (
+    t0.m_0 AS COUNT(5)
+)
+
+statement ok
+CREATE OR REPLACE SEMANTIC VIEW rt_view4 AS TABLES (t0 AS dcf_orders COMMENT = '' WITH SYNONYMS = ('the PRIMARY KEY (id) lives here', 'has -- and /* inside */')) DIMENSIONS (t0.d_0 AS t0.region LABELS = (FILTER) COMMENT = 'back\slash and '' quote');
+
+query T nosort
+SELECT * FROM dcf_ddl('rt_view4');
+----
+CREATE OR REPLACE SEMANTIC VIEW rt_view4 AS
+TABLES (
+    t0 AS dcf_orders COMMENT = '' WITH SYNONYMS = ('the PRIMARY KEY (id) lives here', 'has -- and /* inside */')
+)
+DIMENSIONS (
+    t0.d_0 AS t0.region COMMENT = 'back\slash and '' quote' LABELS = (FILTER)
+)
+
+# --- Statement framing: one DDL statement per call (ffi.rs, TECH-DEBT #85) ---
+
+# F-061: ffi.rs::ddl_after_another_statement_says_one_statement_per_call — a DDL after another statement in one query string is refused, and the view is not created. DuckDB 2.0.0 runs a string's earlier statements before it parses the later ones, so the CREATE TABLE ahead of the DDL has already run (the 2.0 alpha parsed the whole string first, and nothing ran). A grammar is expected to accept this shape; flip the row to an accept then.
+statement error
+CREATE TABLE dcf_ms (id INTEGER); CREATE SEMANTIC VIEW dcf_ms_v AS TABLES (t AS dcf_orders PRIMARY KEY (id)) DIMENSIONS (t.region AS region);
+----
+one statement per call
+
+query I
+SELECT count(*) FROM duckdb_tables() WHERE table_name = 'dcf_ms';
+----
+1
+
+query I
+SELECT count(*) FROM list_semantic_views() WHERE name = 'dcf_ms_v';
+----
+0
+
+# F-062: ffi.rs::ddl_before_another_statement_says_one_statement_per_call — the same with the DDL first and another statement after it
+statement error
+CREATE SEMANTIC VIEW dcf_ms_v AS TABLES (t AS dcf_orders PRIMARY KEY (id)) DIMENSIONS (t.region AS region); SELECT 1;
+----
+one statement per call
+
+query I
+SELECT count(*) FROM list_semantic_views() WHERE name = 'dcf_ms_v';
+----
+0
+
+# Control for F-061 / F-062: the DDL alone (single trailing ';') is accepted.
+statement ok
+CREATE SEMANTIC VIEW dcf_ms_v AS TABLES (t AS dcf_orders PRIMARY KEY (id)) DIMENSIONS (t.region AS region);
+
+# --- Statement framing: parser_override inactive (ffi.rs) ---
+# `con2` turns the override off for its own session only.
+#
+# Not portable: the "one statement per call" diagnosis rests on a per-thread
+# record of the last multi-statement string the override saw, and the ffi.rs
+# tests pin how long that record lives (consumed when read, consumed by a
+# not-ours statement, replaced by a later string, matched only as a whole
+# statement). The sqllogictest runner itself runs a settings query on the
+# default connection before EVERY statement, on the same thread, which
+# overwrites the record -- so no .test row can observe its lifetime, and rows
+# that tried would pass vacuously. Only the single-query halves are ported
+# below; the rest is listed N/A in the case map.
+
+statement ok con2
+SET SESSION allow_parser_override_extension = 'DEFAULT';
+
+# F-063: ffi.rs::valid_ddl_without_a_declined_query_reports_override_inactive — with the override off, a valid DDL is refused with the actionable "not active" hint; the same DDL on the default connection (override on) is accepted
+statement error con2
+CREATE SEMANTIC VIEW dcf_off AS TABLES (t AS dcf_orders PRIMARY KEY (id)) DIMENSIONS (t.region AS region);
+----
+parser_override is not active
+
+query I
+SELECT count(*) FROM list_semantic_views() WHERE name = 'dcf_off';
+----
+0
+
+statement ok
+CREATE SEMANTIC VIEW dcf_off AS TABLES (t AS dcf_orders PRIMARY KEY (id)) DIMENSIONS (t.region AS region);
+
+# F-064: ffi.rs::record_is_consumed_when_read (first half) — a DROP after a plain SELECT in one query string is refused with the one-statement message and drops nothing
+statement error
+SELECT 1; DROP SEMANTIC VIEW dcf_off;
+----
+one statement per call
+
+query I
+SELECT count(*) FROM list_semantic_views() WHERE name = 'dcf_off';
+----
+1
+
+# F-065: ffi.rs::record_is_consumed_by_a_statement_that_is_not_ours (first half) — a not-ours typo earlier in the string (`SELEC 1`, far from every DDL prefix) ends the query with DuckDB's own syntax error, before the DDL is reached [syntax]
+statement error
+SELEC 1; DROP SEMANTIC VIEW dcf_off;
+----
+
+query I
+SELECT count(*) FROM list_semantic_views() WHERE name = 'dcf_off';
+----
+1
+
+statement ok
+DROP SEMANTIC VIEW dcf_off;
+
+statement ok
+DROP SEMANTIC VIEW dcf_ms_v;

@@ -3,6 +3,9 @@ repos:
   - repo: builtin
     hooks:
       - id: trailing-whitespace
+        # The front-door corpus tests whitespace on purpose: trailing spaces and
+        # tab-only lines inside its statements are the cases under test.
+        exclude: ^test/sql/ddl_corpus_frontdoor_a\.test$
       - id: end-of-file-fixer
       - id: check-json
       - id: check-toml

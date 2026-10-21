@@ -1,0 +1,540 @@
+require semantic_views
+
+# Phase 3 grammar corpus -- slice F (statement front door), part C of 3.
+#
+# Ports the cases encoded by:
+#   src/parse/search_path.rs   (#[test]s) -- read calls resolve the view name
+#                              through the caller's search path
+#   src/parse/show_clauses.rs  (#[test]s) -- SHOW ... LIKE / STARTS WITH /
+#                              IN SCHEMA / IN DATABASE / LIMIT values
+# Parts A and B (ddl_corpus_frontdoor_a/_b.test) hold the rest of the slice and
+# explain the conventions. Case map: _notes/phase3-corpus/map-F.md.
+#
+# Row markers: `[syntax]` = a syntactic reject (`statement error` with an empty
+# `----` block, which accepts any message). `[text]` = today's contract on
+# something a grammar might plausibly change. `PRE-EXISTING` = today's
+# behaviour pinned although it looks wrong.
+#
+# How the search-path rows discriminate. search_path.rs splices
+# `search_path := <caller's path>` into every resolving read call. The fixture
+# puts a view `dcf_sp` in two schemas whose `total` differs (dcf_a: 30,
+# dcf_b: 3000) and sets the path to dcf_b. A call that got the argument
+# resolves to dcf_b (3000); one that did not falls back to "unique match,
+# else error" and fails, since the name is in two schemas; one whose argument
+# was spliced into the wrong place fails to parse or bind. So every accept row
+# below would go red on the bug its Rust test pins.
+
+statement ok
+CREATE TABLE dcf_orders (id INTEGER PRIMARY KEY, region VARCHAR, amount INTEGER);
+
+statement ok
+INSERT INTO dcf_orders VALUES (1, 'north', 10), (2, 'south', 20);
+
+statement ok
+CREATE MACRO dcf_ddl(v) AS TABLE SELECT unnest(string_split(rtrim(get_ddl('SEMANTIC_VIEW', v), chr(10)), chr(10))) AS line;
+
+statement ok
+CREATE SCHEMA dcf_a;
+
+statement ok
+CREATE SCHEMA dcf_b;
+
+statement ok
+CREATE SEMANTIC VIEW dcf_a.dcf_sp AS TABLES (o AS dcf_orders PRIMARY KEY (id)) FACTS (o.amt_a AS o.amount) DIMENSIONS (o.region AS o.region) METRICS (o.total AS SUM(o.amount)) MATERIALIZATIONS (dcf_mat_a AS (TABLE dcf_orders, DIMENSIONS (region)));
+
+statement ok
+CREATE SEMANTIC VIEW dcf_b.dcf_sp AS TABLES (o AS dcf_orders PRIMARY KEY (id)) FACTS (o.amt_b AS o.amount) DIMENSIONS (o.region AS o.region) METRICS (o.total AS SUM(o.amount) * 100) MATERIALIZATIONS (dcf_mat_b AS (TABLE dcf_orders, DIMENSIONS (region)));
+
+statement ok
+CREATE SEMANTIC VIEW dcf_a.dcf_search_path_v AS TABLES (o AS dcf_orders PRIMARY KEY (id)) DIMENSIONS (o.region AS o.region) METRICS (o.total AS SUM(o.amount));
+
+statement ok
+CREATE SEMANTIC VIEW dcf_b.dcf_search_path_v AS TABLES (o AS dcf_orders PRIMARY KEY (id)) DIMENSIONS (o.region AS o.region) METRICS (o.total AS SUM(o.amount) * 100);
+
+query T nosort
+SELECT * FROM dcf_ddl('dcf_b.dcf_sp');
+----
+CREATE OR REPLACE SEMANTIC VIEW dcf_sp AS
+TABLES (
+    o AS dcf_orders PRIMARY KEY (id)
+)
+FACTS (
+    o.amt_b AS o.amount
+)
+DIMENSIONS (
+    o.region AS o.region
+)
+METRICS (
+    o.total AS SUM(o.amount) * 100
+)
+MATERIALIZATIONS (
+    dcf_mat_b AS (
+        TABLE dcf_orders,
+        DIMENSIONS (region)
+    )
+)
+
+# --- Search path: the fixture's control ---
+
+# F-066: search_path.rs::a_read_call_gains_the_named_parameter (control) — on the default path (main) the name is on neither schema of the path, so the read call refuses rather than guessing between dcf_a and dcf_b
+statement error
+SELECT * FROM semantic_view('dcf_sp', metrics := ['total']);
+----
+does not exist on the search path
+
+statement ok
+SET search_path = 'dcf_b';
+
+# --- Search path: the argument is added to every resolving read call ---
+
+# F-067: search_path.rs::a_read_call_gains_the_named_parameter, ::existing_named_parameters_are_preserved — with the path set to dcf_b, a read call resolves there, and its own named parameters still apply
+query I
+SELECT * FROM semantic_view('dcf_sp', metrics := ['total']);
+----
+3000
+
+query TI rowsort
+SELECT * FROM semantic_view('dcf_sp', dimensions := ['region'], metrics := ['total']);
+----
+north	1000
+south	2000
+
+# F-068: search_path.rs::every_call_in_one_statement_is_injected — both calls of a UNION ALL resolve through the path
+query I rowsort
+SELECT * FROM semantic_view('dcf_sp', metrics := ['total']) UNION ALL SELECT * FROM semantic_view('dcf_search_path_v', metrics := ['total']);
+----
+3000
+3000
+
+# F-069: search_path.rs::a_nested_call_argument_does_not_confuse_the_paren_match, ::matching_close_paren_still_ignores_single_and_dollar_quoted_literals (nested-call arm) — the `)` of a nested function call is not the read call's close
+query I
+SELECT * FROM semantic_view(lower('DCF_SP'), metrics := ['total']);
+----
+3000
+
+# F-070: search_path.rs::a_paren_inside_a_string_literal_is_not_the_close, ::matching_close_paren_still_ignores_single_and_dollar_quoted_literals (single- and dollar-quoted arms) — a `)` inside a '...' or $$...$$ argument is not the call's close
+query TI rowsort
+SELECT * FROM semantic_view('dcf_sp', dimensions := ['region'], metrics := ['total'], where_clause := 'region <> '')''');
+----
+north	1000
+south	2000
+
+query TI rowsort
+SELECT * FROM semantic_view('dcf_sp', dimensions := ['region'], metrics := ['total'], where_clause := $$region <> ')'$$);
+----
+north	1000
+south	2000
+
+# F-071: search_path.rs::matching_close_paren_ignores_a_close_paren_inside_a_double_quoted_identifier — a `)` inside a double-quoted identifier in the argument list (here a struct field name) is not the call's close
+query I
+SELECT * FROM semantic_view(({'a)b': 'dcf_sp'})."a)b", metrics := ['total']);
+----
+3000
+
+# F-072: search_path.rs::the_function_name_matches_case_insensitively — upper / mixed case function names get the argument too
+query I
+SELECT * FROM SEMANTIC_VIEW('dcf_sp', metrics := ['total']);
+----
+3000
+
+query I
+SELECT * FROM Semantic_View('dcf_sp', metrics := ['total']);
+----
+3000
+
+# F-073: search_path.rs::a_view_name_that_merely_contains_the_parameter_text_is_still_injected — a view whose NAME contains `search_path` still resolves through the path
+query I
+SELECT * FROM semantic_view('dcf_search_path_v', metrics := ['total']);
+----
+3000
+
+# F-074: search_path.rs::a_where_clause_mentioning_the_parameter_is_not_an_argument — `search_path :=` inside a where_clause string literal is not the named argument
+query TI rowsort
+SELECT * FROM semantic_view('dcf_sp', dimensions := ['region'], metrics := ['total'], where_clause := 'region <> ''search_path := x''');
+----
+north	1000
+south	2000
+
+# --- Search path: an explicit argument wins, and is never doubled ---
+
+# F-075: search_path.rs::a_caller_supplied_search_path_wins — an explicit search_path argument overrides the session path (dcf_a, not dcf_b)
+query I
+SELECT * FROM semantic_view('dcf_sp', metrics := ['total'], search_path := ['dcf_a']);
+----
+30
+
+# F-076: search_path.rs::a_caller_supplied_search_path_wins_whatever_its_case — SEARCH_PATH / Search_Path are the same named argument (a second one would be a duplicate-argument error, see the control below)
+query I
+SELECT * FROM semantic_view('dcf_sp', metrics := ['total'], SEARCH_PATH := ['dcf_a']);
+----
+30
+
+query I
+SELECT * FROM semantic_view('dcf_sp', metrics := ['total'], Search_Path := ['dcf_a']);
+----
+30
+
+statement error
+SELECT * FROM semantic_view('dcf_sp', metrics := ['total'], search_path := ['dcf_a'], search_path := ['dcf_b']);
+----
+Duplicate named argument
+
+# F-077: search_path.rs::injection_is_idempotent, ::injection_is_idempotent_for_the_nested_shape — the already-injected text itself (what a second rewrite pass sees) runs without a duplicate argument
+query I
+SELECT * FROM semantic_view('dcf_sp', metrics := ['total'], search_path := list_concat(current_schemas(false), [current_schema()]));
+----
+3000
+
+# --- Search path: comments in and around the call (PARSE-5, PARSE-13) ---
+
+# F-078: search_path.rs::a_leading_line_comment_containing_an_apostrophe_does_not_defeat_injection — a `--` comment with an apostrophe ahead of the statement
+query I
+-- don't touch
+SELECT * FROM semantic_view('dcf_sp', metrics := ['total']);
+----
+3000
+
+# F-079: search_path.rs::a_leading_block_comment_containing_an_apostrophe_does_not_defeat_injection
+query I
+/* it's fine */ SELECT * FROM semantic_view('dcf_sp', metrics := ['total']);
+----
+3000
+
+# F-080: search_path.rs::a_close_paren_inside_a_block_comment_does_not_end_the_call — the argument lands after the comment, inside the real call
+query I
+SELECT * FROM semantic_view('dcf_sp', metrics := ['total'] /* x) */);
+----
+3000
+
+# F-081: search_path.rs::a_comment_between_the_function_head_and_its_paren_does_not_defeat_injection
+query I
+SELECT * FROM semantic_view /* c */ ('dcf_sp', metrics := ['total']);
+----
+3000
+
+# F-082: search_path.rs::an_explicit_search_path_inside_a_comment_does_not_suppress_injection — a commented-out argument is not an opt-out (dcf_b, not the commented dcf_a)
+query I
+SELECT * FROM semantic_view('dcf_sp', metrics := ['total'] /* , search_path := ['dcf_a'] */);
+----
+3000
+
+# F-083: search_path.rs::a_read_call_named_only_inside_a_comment_is_not_injected — commented-out code is not a call site; the statement runs as written
+query I
+-- SELECT * FROM semantic_view('dcf_sp')
+SELECT 1;
+----
+1
+
+# F-084: search_path.rs::a_leading_line_comment_ended_by_a_bare_carriage_return_does_not_defeat_injection — a `--` comment ended by a bare CR (built with chr(13) and parsed via query(), see part A's header; the file itself cannot hold a CR); control: the same ended by LF
+query I
+SELECT * FROM query('-- note' || chr(13) || 'SELECT * FROM semantic_view(''dcf_sp'', metrics := [''total''])');
+----
+3000
+
+query I
+SELECT * FROM query('-- note' || chr(10) || 'SELECT * FROM semantic_view(''dcf_sp'', metrics := [''total''])');
+----
+3000
+
+# --- Search path: what is left alone ---
+
+# F-085: search_path.rs::a_statement_with_no_read_call_is_untouched, ::a_function_name_inside_a_string_literal_is_not_a_call — ordinary statements run as written, and a literal that spells a read call is returned verbatim
+statement ok
+CREATE TABLE dcf_plain (a INT);
+
+query T
+SELECT 'semantic_view(x)' AS lit;
+----
+semantic_view(x)
+
+query TI
+SELECT region, amount FROM dcf_orders WHERE region = 'north';
+----
+north	10
+
+# F-086: search_path.rs::the_all_variants_are_left_alone — list_semantic_views() and show_semantic_metrics_all() list every view in every schema, not just those on the path
+query TTT nosort
+SELECT name, database_name, schema_name FROM list_semantic_views();
+----
+dcf_search_path_v	memory	dcf_a
+dcf_sp	memory	dcf_a
+dcf_search_path_v	memory	dcf_b
+dcf_sp	memory	dcf_b
+
+query TTTTT nosort
+SELECT database_name, schema_name, semantic_view_name, name, data_type FROM show_semantic_metrics_all() WHERE semantic_view_name = 'dcf_sp';
+----
+memory	dcf_a	dcf_sp	total	BIGINT
+memory	dcf_b	dcf_sp	total	BIGINT
+
+# F-087: search_path.rs::an_unterminated_call_is_left_alone — an unterminated read call is DuckDB's to reject (near miss of F-067) [syntax]
+statement error
+SELECT * FROM semantic_view('dcf_sp', metrics := ['total'];
+----
+
+# F-088: search_path.rs::nested_resolving_calls_do_not_panic_and_both_get_injected — a resolving call nested in another's argument list can only be written as a subquery, which DuckDB refuses in a table-function argument whatever the injection did; pinned so the shape is known to fail cleanly (near miss of F-067)
+statement error
+SELECT * FROM semantic_view((SELECT semantic_view_name FROM show_semantic_dimensions('dcf_sp') LIMIT 1), metrics := ['total']);
+----
+cannot contain subqueries
+
+# --- Search path: every resolving read function, and the two that are not (module contract) ---
+
+# F-089: search_path.rs::RESOLVING_READ_FUNCTIONS — every read function that takes a view name resolves it through the path: explain_semantic_view, describe_semantic_view, show_columns_in_semantic_view, show_semantic_dimensions / _metrics / _facts / _materializations, show_semantic_dimensions_for_metric, and the SHOW / DESCRIBE DDL that lower onto them
+query I
+SELECT count(*) FROM explain_semantic_view('dcf_sp', metrics := ['total']) WHERE explain_output LIKE '%SUM(o.amount) * 100%';
+----
+1
+
+query T
+SELECT property_value FROM describe_semantic_view('dcf_sp') WHERE object_kind = 'METRIC' AND property = 'EXPRESSION';
+----
+SUM(o.amount) * 100
+
+query TTTTTTTT nosort
+SHOW COLUMNS IN SEMANTIC VIEW dcf_sp;
+----
+memory	dcf_b	dcf_sp	region	VARCHAR	DIMENSION	o.region	(empty)
+memory	dcf_b	dcf_sp	amt_b	INTEGER	FACT	o.amount	(empty)
+memory	dcf_b	dcf_sp	total	BIGINT	METRIC	SUM(o.amount) * 100	(empty)
+
+query TTTTTTTT nosort
+SELECT * FROM show_semantic_dimensions('dcf_sp');
+----
+memory	dcf_b	dcf_sp	dcf_orders	region	VARCHAR	[]	(empty)
+
+query TTTTTTTT nosort
+SHOW SEMANTIC METRICS IN dcf_sp;
+----
+memory	dcf_b	dcf_sp	dcf_orders	total	BIGINT	[]	(empty)
+
+query TTTTTTTT nosort
+SHOW SEMANTIC FACTS IN dcf_sp;
+----
+memory	dcf_b	dcf_sp	dcf_orders	amt_b	INTEGER	[]	(empty)
+
+query TTTTTTT nosort
+SHOW SEMANTIC MATERIALIZATIONS IN dcf_sp;
+----
+memory	dcf_b	dcf_sp	dcf_mat_b	dcf_orders	["region"]	[]
+
+query TTTT nosort
+SHOW SEMANTIC DIMENSIONS IN dcf_sp FOR METRIC total;
+----
+dcf_orders	region	VARCHAR	false
+
+# F-090: search_path.rs::RESOLVING_READ_FUNCTIONS (base-table schema) — PRE-EXISTING (TECH-DEBT #96): DESCRIBE reports BASE_TABLE_SCHEMA_NAME = the VIEW's schema (dcf_b), but the base table resolved at CREATE to memory.main.dcf_orders (as EXPLAIN shows); there is no dcf_b.dcf_orders
+query T
+SELECT property_value FROM describe_semantic_view('dcf_sp') WHERE object_kind = 'TABLE' AND property = 'BASE_TABLE_SCHEMA_NAME';
+----
+dcf_b
+
+query I
+SELECT count(*) FROM explain_semantic_view('dcf_sp', metrics := ['total']) WHERE explain_output LIKE '%FROM "memory"."main"."dcf_orders"%';
+----
+1
+
+# F-091: search_path.rs module doc ("What is deliberately NOT rewritten", TECH-DEBT #25) — the scalar functions get_ddl and read_yaml_from_semantic_view take no path: with the name in two schemas they refuse as ambiguous even though the session path names one. The refusal is a plain Invalid Input error (it was an INTERNAL error on the DuckDB 2.0 engine until the scalars were marked fallible; scalar_errors_are_input_errors.test)
+statement error
+SELECT get_ddl('SEMANTIC_VIEW', 'dcf_sp');
+----
+Invalid Input Error: get_ddl: semantic view 'dcf_sp' is ambiguous
+
+statement error
+SELECT read_yaml_from_semantic_view('dcf_sp');
+----
+Invalid Input Error: read_yaml_from_semantic_view: semantic view 'dcf_sp' is ambiguous
+
+# --- Search path: which list of schemas is passed ---
+
+# F-092: search_path.rs::the_expression_uses_the_explicit_search_path_not_the_implicit_one — USE puts the schema on the explicit path (and current_schema() repeats it, harmlessly)
+statement ok
+USE dcf_a;
+
+query I
+SELECT * FROM semantic_view('dcf_sp', metrics := ['total']);
+----
+30
+
+statement ok
+USE memory.main;
+
+statement ok
+SET search_path = 'dcf_b';
+
+statement ok
+CREATE SEMANTIC VIEW main.dcf_sp AS TABLES (o AS main.dcf_orders PRIMARY KEY (id)) DIMENSIONS (o.region AS o.region) METRICS (o.total AS SUM(o.amount) * 10000);
+
+# F-093: search_path.rs::the_expression_uses_the_explicit_search_path_not_the_implicit_one — with a real `main` later on the path (dcf_b, main), the first entry wins; current_schemas(true) would have put the temp schema `main` first and resolved main.dcf_sp instead
+statement ok
+SET search_path = 'dcf_b,main';
+
+query I
+SELECT * FROM semantic_view('dcf_sp', metrics := ['total']);
+----
+3000
+
+# F-094: search_path.rs::the_expression_uses_the_explicit_search_path_not_the_implicit_one — on a fresh path current_schemas(false) is empty, and the appended current_schema() (main) is what resolves
+statement ok
+RESET search_path;
+
+query I
+SELECT * FROM semantic_view('dcf_sp', metrics := ['total']);
+----
+300000
+
+# F-095: search_path.rs module doc (resolution follows DuckDB's search path) — PRE-EXISTING (TECH-DEBT #97): an UNQUALIFIED base table in a CREATE issued under `SET search_path = 'dcf_b'` is stamped as memory.dcf_b.dcf_orders, a table that does not exist, although DuckDB itself resolves the same name on that path to main.dcf_orders (control: the plain SELECT). The CREATE is accepted and every query of the view then fails
+statement ok
+SET search_path = 'dcf_b';
+
+query I
+SELECT count(*) FROM dcf_orders;
+----
+2
+
+statement ok
+CREATE SEMANTIC VIEW main.dcf_sp_unq AS TABLES (o AS dcf_orders PRIMARY KEY (id)) DIMENSIONS (o.region AS o.region) METRICS (o.total AS SUM(o.amount));
+
+query T
+SELECT bool_or(explain_output LIKE '%FROM "memory"."dcf_b"."dcf_orders"%') FROM explain_semantic_view('main.dcf_sp_unq', metrics := ['total']);
+----
+true
+
+statement error
+SELECT * FROM semantic_view('main.dcf_sp_unq', metrics := ['total']);
+----
+Table with name dcf_orders does not exist
+
+statement ok
+DROP SEMANTIC VIEW main.dcf_sp_unq;
+
+statement ok
+RESET search_path;
+
+# --- SHOW filter clauses (show_clauses.rs) ---
+
+statement ok
+CREATE SEMANTIC VIEW dcf_sw AS TABLES (o AS dcf_orders PRIMARY KEY (id)) DIMENSIONS (o.a_b AS o.region, o.axb AS o.region, o.a_bc AS o.region) METRICS (o.total AS SUM(o.amount), o.cnt AS COUNT(*));
+
+statement ok
+CREATE SEMANTIC VIEW "dcf_o'brien" AS TABLES (o AS dcf_orders PRIMARY KEY (id)) DIMENSIONS (o.region AS o.region);
+
+statement ok
+CREATE SEMANTIC VIEW "dcf_o'bryan" AS TABLES (o AS dcf_orders PRIMARY KEY (id)) DIMENSIONS (o.region AS o.region);
+
+statement ok
+CREATE SEMANTIC VIEW "dcf_pct_100%x" AS TABLES (o AS dcf_orders PRIMARY KEY (id)) DIMENSIONS (o.region AS o.region);
+
+statement ok
+CREATE SEMANTIC VIEW dcf_pct_1005x AS TABLES (o AS dcf_orders PRIMARY KEY (id)) DIMENSIONS (o.region AS o.region);
+
+statement ok
+CREATE SEMANTIC VIEW dcf_cust_1 AS TABLES (o AS dcf_orders PRIMARY KEY (id)) DIMENSIONS (o.region AS o.region);
+
+statement ok
+CREATE SEMANTIC VIEW dcf_cust_2 AS TABLES (o AS dcf_orders PRIMARY KEY (id)) DIMENSIONS (o.region AS o.region);
+
+statement ok
+CREATE SCHEMA "dcf_sch'ema";
+
+statement ok
+CREATE SEMANTIC VIEW "dcf_sch'ema".dcf_q AS TABLES (o AS main.dcf_orders PRIMARY KEY (id)) DIMENSIONS (o.region AS o.region);
+
+# F-096: show_clauses.rs::limit_zero_is_accepted — LIMIT 0 is a zero-row listing; control: the same without LIMIT lists both metrics
+query TTTTTTTT nosort
+SHOW SEMANTIC METRICS IN dcf_sw;
+----
+memory	main	dcf_sw	dcf_orders	cnt	BIGINT	[]	(empty)
+memory	main	dcf_sw	dcf_orders	total	BIGINT	[]	(empty)
+
+query TTTTTTTT nosort
+SHOW SEMANTIC METRICS IN dcf_sw LIMIT 0;
+----
+
+# F-097: show_clauses.rs::limit_rejects_negative_with_non_negative_message — a negative LIMIT is refused with a message naming the accepted range and quoting the token (near miss of F-096)
+statement error
+SHOW SEMANTIC METRICS IN dcf_sw LIMIT -1;
+----
+LIMIT must be a non-negative integer, got: '-1'
+
+# F-098: show_clauses.rs::limit_rejects_negative_with_non_negative_message — a non-numeric LIMIT token is refused (near miss of F-096) [text]
+statement error
+SHOW SEMANTIC METRICS IN dcf_sw LIMIT abc;
+----
+LIMIT must be a non-negative integer
+
+# F-099: show_clauses.rs::filter_suffix_plain_values_and_limit_unchanged — LIKE with a `%` pattern plus LIMIT 10 / LIMIT 1, and a listing with no clauses at all
+query TTTTTT nosort
+SHOW SEMANTIC VIEWS LIKE 'dcf_cust%' LIMIT 10;
+----
+<REGEX>:.+	dcf_cust_1	SEMANTIC_VIEW	memory	main	(empty)
+<REGEX>:.+	dcf_cust_2	SEMANTIC_VIEW	memory	main	(empty)
+
+query TTTTTT nosort
+SHOW SEMANTIC VIEWS LIKE 'dcf_cust%' LIMIT 1;
+----
+<REGEX>:.+	dcf_cust_1	SEMANTIC_VIEW	memory	main	(empty)
+
+query TTTTTTTT nosort
+SHOW SEMANTIC DIMENSIONS IN dcf_sw;
+----
+memory	main	dcf_sw	dcf_orders	a_b	VARCHAR	[]	(empty)
+memory	main	dcf_sw	dcf_orders	a_bc	VARCHAR	[]	(empty)
+memory	main	dcf_sw	dcf_orders	axb	VARCHAR	[]	(empty)
+
+# F-100: show_clauses.rs::filter_suffix_escapes_single_quotes (LIKE, STARTS WITH) — a doubled quote in a LIKE pattern or a STARTS WITH prefix is one literal quote that matches, not a break-out of the literal
+query TTTTTT nosort
+SHOW SEMANTIC VIEWS LIKE 'dcf_o''brien';
+----
+<REGEX>:.+	dcf_o'brien	SEMANTIC_VIEW	memory	main	(empty)
+
+query TTTTTT nosort
+SHOW SEMANTIC VIEWS STARTS WITH 'dcf_o''br';
+----
+<REGEX>:.+	dcf_o'brien	SEMANTIC_VIEW	memory	main	(empty)
+<REGEX>:.+	dcf_o'bryan	SEMANTIC_VIEW	memory	main	(empty)
+
+# PRE-EXISTING (TECH-DEBT #96): `table_name` in SHOW SEMANTIC DIMENSIONS keeps the qualifier as written (`main.dcf_orders`)
+# F-101: show_clauses.rs::filter_suffix_escapes_single_quotes (IN SCHEMA, IN DATABASE) — a quote inside a quoted scope name reaches the predicate as data: the schema matches by its real name, a database of that shape matches nothing (no error), and the qualified <db>.<schema> form applies both halves
+query TTTTTT nosort
+SHOW SEMANTIC VIEWS IN SCHEMA "dcf_sch'ema";
+----
+<REGEX>:.+	dcf_q	SEMANTIC_VIEW	memory	dcf_sch'ema	(empty)
+
+query TTTTTTTT nosort
+SHOW SEMANTIC DIMENSIONS IN SCHEMA memory."dcf_sch'ema";
+----
+memory	dcf_sch'ema	dcf_q	main.dcf_orders	region	VARCHAR	[]	(empty)
+
+query TTTTTTTT nosort
+SHOW SEMANTIC DIMENSIONS IN DATABASE "dcf_d'b";
+----
+
+query TTTTTTTT nosort
+SHOW SEMANTIC DIMENSIONS IN SCHEMA "dcf_d'b"."dcf_sch'ema";
+----
+
+# F-102: show_clauses.rs::starts_with_prefix_is_literal_not_a_like_pattern, ::starts_with_discriminates_underscore_from_wildcard_in_duckdb (underscore) — STARTS WITH 'a_b' is a literal prefix (a_b, a_bc, not axb); LIKE 'a_b' keeps its pattern meaning (a_b and axb, not a_bc)
+query TTTTTTTT nosort
+SHOW SEMANTIC DIMENSIONS IN dcf_sw STARTS WITH 'a_b';
+----
+memory	main	dcf_sw	dcf_orders	a_b	VARCHAR	[]	(empty)
+memory	main	dcf_sw	dcf_orders	a_bc	VARCHAR	[]	(empty)
+
+query TTTTTTTT nosort
+SHOW SEMANTIC DIMENSIONS LIKE 'a_b' IN dcf_sw;
+----
+memory	main	dcf_sw	dcf_orders	a_b	VARCHAR	[]	(empty)
+memory	main	dcf_sw	dcf_orders	axb	VARCHAR	[]	(empty)
+
+# F-103: show_clauses.rs::starts_with_prefix_is_literal_not_a_like_pattern, ::starts_with_discriminates_underscore_from_wildcard_in_duckdb (percent) — STARTS WITH 'dcf_pct_100%' matches only the name with a literal `%`; LIKE 'dcf_pct_100%' matches both
+query TTTTTT nosort
+SHOW SEMANTIC VIEWS STARTS WITH 'dcf_pct_100%';
+----
+<REGEX>:.+	dcf_pct_100%x	SEMANTIC_VIEW	memory	main	(empty)
+
+query TTTTTT nosort
+SHOW SEMANTIC VIEWS LIKE 'dcf_pct_100%';
+----
+<REGEX>:.+	dcf_pct_100%x	SEMANTIC_VIEW	memory	main	(empty)
+<REGEX>:.+	dcf_pct_1005x	SEMANTIC_VIEW	memory	main	(empty)

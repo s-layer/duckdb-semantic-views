@@ -1,0 +1,1204 @@
+require semantic_views
+
+# Phase 3 grammar corpus -- slice F (statement front door), part A of 3.
+#
+# Ports the cases encoded by:
+#   src/parse/detect.rs                  (#[test]s)
+#   src/parse/ffi.rs                     (#[test]s)
+#   tests/parse_proptest.rs              (proptest properties + #[test]s)
+#   tests/create_front_door_proptest.rs  (proptest property)
+#   tests/crlf_body_frontdoor.rs         (LF twins only -- see below)
+#   tests/quoted_idents_regression.rs
+# This part: DDL prefix detection, the view-name slot, and the shape of the
+# CREATE body (whitespace, keyword case, missing pieces). Part B
+# (ddl_corpus_frontdoor_b.test): body-clause properties, hostile bodies through
+# the front door, and statement framing (ffi.rs). Part C
+# (ddl_corpus_frontdoor_c.test): src/parse/search_path.rs and
+# src/parse/show_clauses.rs. The per-test case map is
+# _notes/phase3-corpus/map-F.md.
+#
+# Row markers: `[syntax]` = a syntactic reject (`statement error` with an empty
+# `----` block, which accepts any message -- the runner insists on the line; its
+# wording and caret will change under the grammar). `[text]` = today's
+# contract for something a grammar might plausibly change (case folding,
+# quoting in GET_DDL output, whitespace in stored text). `PRE-EXISTING` =
+# today's behaviour pinned although it looks wrong.
+#
+# Bytes the .test format cannot carry. The runner drops every CR from the
+# file, so a CR cannot be written into a statement. A few rows instead wrap a
+# statement in query(...) to put a NUL, a 0x01, a CR or a 1 MB statement in
+# front of the parser: query() parses its argument through the same parser
+# (parser_override runs on it -- SHOW SEMANTIC VIEWS, which is not DuckDB SQL,
+# works inside it), so those are genuine parser inputs. Only SELECT-shaped
+# statements (SELECT, DESCRIBE, SHOW) can travel that way, so the CRLF CREATE
+# bodies of crlf_body_frontdoor.rs are NOT portable: only their LF twins are
+# here, and the CR axis is listed as unported in the case map.
+#
+# Some statements carry literal tabs and trailing whitespace on purpose (the
+# whitespace axes of the ported properties); keep them when editing. The
+# pre-commit `trailing-whitespace` hook excludes this file, and `.editorconfig`
+# tells editors not to trim it.
+
+statement ok
+CREATE TABLE dcf_orders (id INTEGER PRIMARY KEY, region VARCHAR, amount INTEGER, status VARCHAR, customer_id INTEGER);
+
+statement ok
+INSERT INTO dcf_orders VALUES (1, 'north', 10, 'open', 1), (2, 'south', 20, 'closed', 2);
+
+statement ok
+CREATE TABLE dcf_customers (id INTEGER PRIMARY KEY, name VARCHAR);
+
+statement ok
+INSERT INTO dcf_customers VALUES (1, 'ann'), (2, 'bob');
+
+statement ok
+CREATE TABLE dcf_flights (id INTEGER PRIMARY KEY, airport_id INTEGER);
+
+statement ok
+CREATE TABLE dcf_airports (id INTEGER PRIMARY KEY, name VARCHAR);
+
+statement ok
+CREATE TABLE dcf_t (a VARCHAR);
+
+statement ok
+CREATE TABLE dcf_tr (id INTEGER PRIMARY KEY, r VARCHAR);
+
+statement ok
+CREATE MACRO dcf_ddl(v) AS TABLE SELECT unnest(string_split(rtrim(get_ddl('SEMANTIC_VIEW', v), chr(10)), chr(10))) AS line;
+
+# --- DDL prefix detection: keyword case ---
+
+# F-001: parse_proptest.rs::detect_create_case_insensitive, ::rewrite_create_forms (CREATE), ::as_body_detected_for_create_forms (CREATE), ::as_body_validate_and_rewrite_succeeds, ::detect_semantic_view_ddl_returns_detected (CREATE) — a case-scrambled CREATE SEMANTIC VIEW prefix is ours; the bare name is stored unqualified in the current schema
+statement ok
+cReAtE sEmAnTiC vIeW dcf_c1 AS TABLES (t AS dcf_orders PRIMARY KEY (id)) DIMENSIONS (t.region AS region) METRICS (t.revenue AS SUM(amount));
+
+query T nosort
+SELECT * FROM dcf_ddl('dcf_c1');
+----
+CREATE OR REPLACE SEMANTIC VIEW dcf_c1 AS
+TABLES (
+    t AS dcf_orders PRIMARY KEY (id)
+)
+DIMENSIONS (
+    t.region AS region
+)
+METRICS (
+    t.revenue AS SUM(amount)
+)
+
+query TTT
+SELECT name, database_name, schema_name FROM list_semantic_views() WHERE name = 'dcf_c1';
+----
+dcf_c1	memory	main
+
+# F-002: parse_proptest.rs::as_body_validate_and_rewrite_succeeds — plain CREATE takes the Create mode, not OR REPLACE: re-creating an existing name is refused and the stored definition is left alone
+statement error
+CREATE SEMANTIC VIEW dcf_c1 AS TABLES (t AS dcf_orders PRIMARY KEY (id)) DIMENSIONS (t.status AS status) METRICS (t.revenue AS SUM(amount));
+----
+already exists
+
+query T nosort
+SELECT line FROM dcf_ddl('dcf_c1') WHERE line LIKE '    t.%';
+----
+    t.region AS region
+    t.revenue AS SUM(amount)
+
+# F-003: parse_proptest.rs::detect_create_or_replace_case_insensitive, ::rewrite_create_forms (OR REPLACE), ::as_body_detected_for_create_forms (OR REPLACE) — case-scrambled CREATE OR REPLACE replaces the stored definition
+statement ok
+Create Or rEPLACE Semantic VIEW dcf_c1 AS TABLES (t AS dcf_orders PRIMARY KEY (id)) DIMENSIONS (t.status AS status) METRICS (t.revenue AS SUM(amount));
+
+query T nosort
+SELECT * FROM dcf_ddl('dcf_c1');
+----
+CREATE OR REPLACE SEMANTIC VIEW dcf_c1 AS
+TABLES (
+    t AS dcf_orders PRIMARY KEY (id)
+)
+DIMENSIONS (
+    t.status AS status
+)
+METRICS (
+    t.revenue AS SUM(amount)
+)
+
+# F-004: parse_proptest.rs::detect_create_if_not_exists_case_insensitive, ::rewrite_create_forms (IF NOT EXISTS), ::as_body_detected_for_create_forms (IF NOT EXISTS) — case-scrambled CREATE ... IF NOT EXISTS is a no-op on an existing name and creates a new one
+statement ok
+create SEMANTIC view IF not EXISTS dcf_c1 AS TABLES (t AS dcf_orders PRIMARY KEY (id)) DIMENSIONS (t.region AS region) METRICS (t.revenue AS SUM(amount));
+
+query T nosort
+SELECT line FROM dcf_ddl('dcf_c1') WHERE line LIKE '    t.%';
+----
+    t.status AS status
+    t.revenue AS SUM(amount)
+
+statement ok
+CREATE semantic VIEW if NOT exists dcf_c2 AS TABLES (t AS dcf_orders PRIMARY KEY (id)) DIMENSIONS (t.region AS region);
+
+query T nosort
+SELECT * FROM dcf_ddl('dcf_c2');
+----
+CREATE OR REPLACE SEMANTIC VIEW dcf_c2 AS
+TABLES (
+    t AS dcf_orders PRIMARY KEY (id)
+)
+DIMENSIONS (
+    t.region AS region
+)
+
+# --- DDL prefix detection: DESCRIBE / DESC ---
+
+# F-005: parse_proptest.rs::detect_describe_case_insensitive, ::rewrite_name_only_forms_carry_name (DESCRIBE); detect.rs::describe_full_spelling_still_maps_to_describe — case-scrambled DESCRIBE SEMANTIC VIEW returns the view's rows
+query TTTTT nosort
+DeScRiBe SeMaNtIc ViEw dcf_c2;
+----
+TABLE	dcf_orders	(empty)	BASE_TABLE_DATABASE_NAME	memory
+TABLE	dcf_orders	(empty)	BASE_TABLE_SCHEMA_NAME	main
+TABLE	dcf_orders	(empty)	BASE_TABLE_NAME	dcf_orders
+TABLE	dcf_orders	(empty)	PRIMARY_KEY	["id"]
+DIMENSION	region	dcf_orders	TABLE	dcf_orders
+DIMENSION	region	dcf_orders	EXPRESSION	region
+DIMENSION	region	dcf_orders	DATA_TYPE	VARCHAR
+
+# F-006: detect.rs::desc_abbreviation_maps_to_describe — DESC SEMANTIC VIEW is DESCRIBE, case-insensitively and with runs of whitespace between the keywords
+query TTTTT nosort
+DESC SEMANTIC VIEW dcf_c2;
+----
+TABLE	dcf_orders	(empty)	BASE_TABLE_DATABASE_NAME	memory
+TABLE	dcf_orders	(empty)	BASE_TABLE_SCHEMA_NAME	main
+TABLE	dcf_orders	(empty)	BASE_TABLE_NAME	dcf_orders
+TABLE	dcf_orders	(empty)	PRIMARY_KEY	["id"]
+DIMENSION	region	dcf_orders	TABLE	dcf_orders
+DIMENSION	region	dcf_orders	EXPRESSION	region
+DIMENSION	region	dcf_orders	DATA_TYPE	VARCHAR
+
+query TTTTT nosort
+desc   semantic   view dcf_c2;
+----
+TABLE	dcf_orders	(empty)	BASE_TABLE_DATABASE_NAME	memory
+TABLE	dcf_orders	(empty)	BASE_TABLE_SCHEMA_NAME	main
+TABLE	dcf_orders	(empty)	BASE_TABLE_NAME	dcf_orders
+TABLE	dcf_orders	(empty)	PRIMARY_KEY	["id"]
+DIMENSION	region	dcf_orders	TABLE	dcf_orders
+DIMENSION	region	dcf_orders	EXPRESSION	region
+DIMENSION	region	dcf_orders	DATA_TYPE	VARCHAR
+
+# F-007: detect.rs::desc_requires_word_boundary — DESCXYZ is neither DESC nor DESCRIBE [syntax]
+statement error
+DESCXYZ SEMANTIC VIEW dcf_c2;
+----
+
+# --- DDL prefix detection: SHOW SEMANTIC VIEWS ---
+
+# F-008: parse_proptest.rs::detect_show_case_insensitive, ::rewrite_show_views_has_no_target_name — case-scrambled SHOW SEMANTIC VIEWS takes no name and lists every view
+query TTTTTT nosort
+sHoW sEmAnTiC vIeWs;
+----
+<REGEX>:.+	dcf_c1	SEMANTIC_VIEW	memory	main	(empty)
+<REGEX>:.+	dcf_c2	SEMANTIC_VIEW	memory	main	(empty)
+
+# --- DDL prefix detection: DROP / DROP IF EXISTS ---
+
+# F-009: parse_proptest.rs::detect_drop_if_exists_case_insensitive, ::rewrite_name_only_forms_carry_name (DROP IF EXISTS) — case-scrambled DROP SEMANTIC VIEW IF EXISTS drops an existing view and is a no-op on a missing one
+statement ok
+dRoP SeMaNtIc vIeW iF eXiStS dcf_c2;
+
+statement ok
+Drop Semantic View If Exists dcf_c2;
+
+query T
+SELECT name FROM list_semantic_views();
+----
+dcf_c1
+
+# F-010: parse_proptest.rs::detect_drop_case_insensitive, ::rewrite_name_only_forms_carry_name (DROP) — case-scrambled DROP SEMANTIC VIEW drops the named view
+statement ok
+DROP semantic VIEW dcf_c1;
+
+query I
+SELECT count(*) FROM list_semantic_views();
+----
+0
+
+# --- DDL prefix detection: leading whitespace and trailing semicolons ---
+
+# F-011: parse_proptest.rs::detect_with_leading_whitespace, ::valid_ddl_with_whitespace_succeeds — spaces and tabs before the prefix do not hide the statement (CREATE, SHOW, DESCRIBE, DROP IF EXISTS)
+statement ok
+	  	CREATE SEMANTIC VIEW dcf_ws1 AS TABLES (t AS dcf_orders PRIMARY KEY (id)) DIMENSIONS (t.region AS region) METRICS (t.revenue AS SUM(amount));
+
+query T nosort
+SELECT * FROM dcf_ddl('dcf_ws1');
+----
+CREATE OR REPLACE SEMANTIC VIEW dcf_ws1 AS
+TABLES (
+    t AS dcf_orders PRIMARY KEY (id)
+)
+DIMENSIONS (
+    t.region AS region
+)
+METRICS (
+    t.revenue AS SUM(amount)
+)
+
+query TTTTTT nosort
+          SHOW SEMANTIC VIEWS;
+----
+<REGEX>:.+	dcf_ws1	SEMANTIC_VIEW	memory	main	(empty)
+
+query TTTTT nosort
+		DESCRIBE SEMANTIC VIEW dcf_ws1;
+----
+TABLE	dcf_orders	(empty)	BASE_TABLE_DATABASE_NAME	memory
+TABLE	dcf_orders	(empty)	BASE_TABLE_SCHEMA_NAME	main
+TABLE	dcf_orders	(empty)	BASE_TABLE_NAME	dcf_orders
+TABLE	dcf_orders	(empty)	PRIMARY_KEY	["id"]
+DIMENSION	region	dcf_orders	TABLE	dcf_orders
+DIMENSION	region	dcf_orders	EXPRESSION	region
+DIMENSION	region	dcf_orders	DATA_TYPE	VARCHAR
+METRIC	revenue	dcf_orders	TABLE	dcf_orders
+METRIC	revenue	dcf_orders	EXPRESSION	SUM(amount)
+METRIC	revenue	dcf_orders	DATA_TYPE	BIGINT
+METRIC	revenue	dcf_orders	ACCESS_MODIFIER	PUBLIC
+
+statement ok
+ 	 DROP SEMANTIC VIEW IF EXISTS dcf_ws1;
+
+query I
+SELECT count(*) FROM list_semantic_views();
+----
+0
+
+# F-012: parse_proptest.rs::detect_with_trailing_semicolons; ffi.rs::looks_multi_statement_ignores_trailing_semicolons — one to three trailing ';' (CREATE, DESCRIBE, SHOW, DROP) leave a single statement
+statement ok
+CREATE SEMANTIC VIEW dcf_semi AS TABLES (t AS dcf_orders PRIMARY KEY (id)) DIMENSIONS (t.region AS region);;;
+
+query T nosort
+SELECT * FROM dcf_ddl('dcf_semi');
+----
+CREATE OR REPLACE SEMANTIC VIEW dcf_semi AS
+TABLES (
+    t AS dcf_orders PRIMARY KEY (id)
+)
+DIMENSIONS (
+    t.region AS region
+)
+
+query TTTTT nosort
+DESCRIBE SEMANTIC VIEW dcf_semi;;
+----
+TABLE	dcf_orders	(empty)	BASE_TABLE_DATABASE_NAME	memory
+TABLE	dcf_orders	(empty)	BASE_TABLE_SCHEMA_NAME	main
+TABLE	dcf_orders	(empty)	BASE_TABLE_NAME	dcf_orders
+TABLE	dcf_orders	(empty)	PRIMARY_KEY	["id"]
+DIMENSION	region	dcf_orders	TABLE	dcf_orders
+DIMENSION	region	dcf_orders	EXPRESSION	region
+DIMENSION	region	dcf_orders	DATA_TYPE	VARCHAR
+
+query TTTTTT nosort
+SHOW SEMANTIC VIEWS;;;
+----
+<REGEX>:.+	dcf_semi	SEMANTIC_VIEW	memory	main	(empty)
+
+statement ok
+DROP SEMANTIC VIEW dcf_semi;  
+
+query I
+SELECT count(*) FROM list_semantic_views();
+----
+0
+
+# F-013: ffi.rs::looks_multi_statement_ignores_trailing_semicolons — PRE-EXISTING (TECH-DEBT #98): DuckDB accepts an empty statement between trailing semicolons (`SELECT 1; ;`), and the Rust helper treats `; ;` as "not multi-statement", but a semantic-view DDL ending `; ;` is refused with a misleading "parser_override is not active" message (the override is active) and is not executed
+statement ok
+SELECT 1; ;
+
+statement ok
+CREATE SEMANTIC VIEW dcf_semi2 AS TABLES (t AS dcf_orders PRIMARY KEY (id)) DIMENSIONS (t.region AS region);
+
+statement error
+DROP SEMANTIC VIEW dcf_semi2; ;
+----
+parser_override is not active
+
+query T
+SELECT name FROM list_semantic_views();
+----
+dcf_semi2
+
+statement ok
+DROP SEMANTIC VIEW dcf_semi2;
+
+# --- DDL prefix detection: whitespace between the prefix keywords ---
+# (parse_proptest's generator also draws `\r`; the runner strips CR from the
+# file, so that axis is unported -- see the case map.)
+
+# F-014: parse_proptest.rs::prefix_whitespace_detection (CREATE), ::prefix_whitespace_rewrite_roundtrip (CREATE) — tabs between CREATE / SEMANTIC / VIEW
+statement ok
+CREATE	SEMANTIC		VIEW dcf_pw1 AS TABLES (t AS dcf_orders PRIMARY KEY (id)) DIMENSIONS (t.region AS region) METRICS (t.revenue AS SUM(amount));
+
+query T nosort
+SELECT * FROM dcf_ddl('dcf_pw1');
+----
+CREATE OR REPLACE SEMANTIC VIEW dcf_pw1 AS
+TABLES (
+    t AS dcf_orders PRIMARY KEY (id)
+)
+DIMENSIONS (
+    t.region AS region
+)
+METRICS (
+    t.revenue AS SUM(amount)
+)
+
+# F-015: parse_proptest.rs::prefix_whitespace_detection (CREATE OR REPLACE), ::prefix_whitespace_rewrite_roundtrip (CREATE OR REPLACE) — a newline between every prefix keyword
+statement ok
+CREATE
+OR
+REPLACE
+SEMANTIC
+VIEW dcf_pw1 AS TABLES (t AS dcf_orders PRIMARY KEY (id)) DIMENSIONS (t.status AS status) METRICS (t.revenue AS SUM(amount));
+
+query T nosort
+SELECT line FROM dcf_ddl('dcf_pw1') WHERE line LIKE '    t.%';
+----
+    t.status AS status
+    t.revenue AS SUM(amount)
+
+# F-016: parse_proptest.rs::prefix_whitespace_detection (CREATE IF NOT EXISTS), ::prefix_whitespace_rewrite_roundtrip (CREATE IF NOT EXISTS) — mixed space / tab / newline runs between the six prefix keywords
+statement ok
+CREATE 	
+SEMANTIC VIEW	IF  NOT
+	EXISTS dcf_pw2 AS TABLES (t AS dcf_orders PRIMARY KEY (id)) DIMENSIONS (t.region AS region) METRICS (t.revenue AS SUM(amount));
+
+query T nosort
+SELECT * FROM dcf_ddl('dcf_pw2');
+----
+CREATE OR REPLACE SEMANTIC VIEW dcf_pw2 AS
+TABLES (
+    t AS dcf_orders PRIMARY KEY (id)
+)
+DIMENSIONS (
+    t.region AS region
+)
+METRICS (
+    t.revenue AS SUM(amount)
+)
+
+# F-017: parse_proptest.rs::prefix_whitespace_detection (DESCRIBE, SHOW) — tab / newline runs inside the DESCRIBE SEMANTIC VIEW and SHOW SEMANTIC VIEWS prefixes
+query TTTTT nosort
+DESCRIBE	
+SEMANTIC	VIEW dcf_pw2;
+----
+TABLE	dcf_orders	(empty)	BASE_TABLE_DATABASE_NAME	memory
+TABLE	dcf_orders	(empty)	BASE_TABLE_SCHEMA_NAME	main
+TABLE	dcf_orders	(empty)	BASE_TABLE_NAME	dcf_orders
+TABLE	dcf_orders	(empty)	PRIMARY_KEY	["id"]
+DIMENSION	region	dcf_orders	TABLE	dcf_orders
+DIMENSION	region	dcf_orders	EXPRESSION	region
+DIMENSION	region	dcf_orders	DATA_TYPE	VARCHAR
+METRIC	revenue	dcf_orders	TABLE	dcf_orders
+METRIC	revenue	dcf_orders	EXPRESSION	SUM(amount)
+METRIC	revenue	dcf_orders	DATA_TYPE	BIGINT
+METRIC	revenue	dcf_orders	ACCESS_MODIFIER	PUBLIC
+
+query TTTTTT nosort
+SHOW
+	SEMANTIC  VIEWS;
+----
+<REGEX>:.+	dcf_pw1	SEMANTIC_VIEW	memory	main	(empty)
+<REGEX>:.+	dcf_pw2	SEMANTIC_VIEW	memory	main	(empty)
+
+# F-018: parse_proptest.rs::prefix_whitespace_detection (DROP IF EXISTS, DROP) — tab / newline runs inside the DROP prefixes
+statement ok
+DROP
+ SEMANTIC VIEW IF	EXISTS dcf_pw1;
+
+statement ok
+DROP		SEMANTIC	VIEW dcf_pw2;
+
+query I
+SELECT count(*) FROM list_semantic_views();
+----
+0
+
+# --- Not ours: ordinary SQL passes through untouched ---
+
+# F-019: parse_proptest.rs::detect_non_ddl_returns_none, ::detect_semantic_view_ddl_returns_not_ours, ::near_miss_no_false_positives — SELECT / INSERT / UPDATE / DELETE / ALTER TABLE / CREATE TABLE / CREATE VIEW / BEGIN / COMMIT / ROLLBACK are neither detected nor near-missed
+statement ok
+BEGIN TRANSACTION;
+
+statement ok
+INSERT INTO dcf_orders VALUES (3, 'east', 30, 'open', 1);
+
+statement ok
+UPDATE dcf_orders SET amount = 31 WHERE id = 3;
+
+statement ok
+DELETE FROM dcf_orders WHERE id = 3;
+
+statement ok
+ALTER TABLE dcf_t ADD COLUMN x INT;
+
+statement ok
+CREATE TABLE dcf_plain (id INT);
+
+statement ok
+CREATE VIEW dcf_plain_v AS SELECT 1 AS one;
+
+statement ok
+COMMIT;
+
+statement ok
+BEGIN;
+
+statement ok
+ROLLBACK;
+
+query IITTI rowsort
+SELECT * FROM dcf_orders;
+----
+1	north	10	open	1
+2	south	20	closed	2
+
+query I
+SELECT one FROM dcf_plain_v;
+----
+1
+
+# --- Near-miss prefixes ---
+
+# F-020: parse_proptest.rs::near_miss_detects_transposition — transposed prefix keywords (cretae / craete / dreop / descrbe / shwo) are rejected with a suggestion of the statement meant, as near misses of F-001 / F-010 / F-005 / F-008 [text]
+statement error
+cretae semantic view dcf_nm AS TABLES (t AS dcf_orders PRIMARY KEY (id)) DIMENSIONS (t.region AS region);
+----
+Did you mean 'CREATE SEMANTIC VIEW'?
+
+statement error
+craete semantic view dcf_nm AS TABLES (t AS dcf_orders PRIMARY KEY (id)) DIMENSIONS (t.region AS region);
+----
+Did you mean 'CREATE SEMANTIC VIEW'?
+
+statement error
+dreop semantic view dcf_nm;
+----
+Did you mean 'DROP SEMANTIC VIEW'?
+
+statement error
+descrbe semantic view dcf_nm;
+----
+Did you mean 'DESCRIBE SEMANTIC VIEW'?
+
+statement error
+shwo semantic views;
+----
+Did you mean 'SHOW SEMANTIC VIEWS'?
+
+# F-021: parse_proptest.rs::near_miss_position_at_start — a near miss after leading spaces is still rejected with the suggestion (caret position not asserted) [text]
+statement error
+          cretae semantic view dcf_nm AS TABLES (t AS dcf_orders PRIMARY KEY (id)) DIMENSIONS (t.region AS region);
+----
+Did you mean 'CREATE SEMANTIC VIEW'?
+
+# F-022: parse_proptest.rs::test_unicode_homoglyph — a Cyrillic С (U+0421) in place of the Latin C is not the CREATE SEMANTIC VIEW prefix; near miss of F-001 [syntax]
+statement error
+СREATE SEMANTIC VIEW dcf_nm AS TABLES (t AS dcf_orders PRIMARY KEY (id)) DIMENSIONS (t.region AS region);
+----
+
+# F-023: parse_proptest.rs::test_large_input_no_panic — a 1 MB statement of 'A's (via query(), see header) is not ours and fails as an ordinary syntax error; the connection stays usable. The <50ms budget is not portable. [syntax]
+statement error
+SELECT * FROM query(repeat('A', 1000000));
+----
+
+query I
+SELECT 1;
+----
+1
+
+query I
+SELECT count(*) FROM list_semantic_views();
+----
+0
+
+# --- View-name slot ---
+
+# F-024: parse_proptest.rs::rewrite_name_only_forms_carry_name, ::rewrite_create_forms — generator-edge bare names: a leading underscore and the 30-character maximum, through CREATE / DESCRIBE / DROP IF EXISTS / DROP
+statement ok
+CREATE SEMANTIC VIEW _dcf_u AS TABLES (t AS dcf_orders PRIMARY KEY (id)) DIMENSIONS (t.region AS region);
+
+statement ok
+CREATE SEMANTIC VIEW dcf_abcdefghijklmnopqrstuvwxyz AS TABLES (t AS dcf_orders PRIMARY KEY (id)) DIMENSIONS (t.region AS region);
+
+query T nosort
+SELECT * FROM dcf_ddl('_dcf_u');
+----
+CREATE OR REPLACE SEMANTIC VIEW _dcf_u AS
+TABLES (
+    t AS dcf_orders PRIMARY KEY (id)
+)
+DIMENSIONS (
+    t.region AS region
+)
+
+query T nosort
+SELECT line FROM dcf_ddl('dcf_abcdefghijklmnopqrstuvwxyz') LIMIT 1;
+----
+CREATE OR REPLACE SEMANTIC VIEW dcf_abcdefghijklmnopqrstuvwxyz AS
+
+query TTTTT nosort
+DESCRIBE SEMANTIC VIEW _dcf_u;
+----
+TABLE	dcf_orders	(empty)	BASE_TABLE_DATABASE_NAME	memory
+TABLE	dcf_orders	(empty)	BASE_TABLE_SCHEMA_NAME	main
+TABLE	dcf_orders	(empty)	BASE_TABLE_NAME	dcf_orders
+TABLE	dcf_orders	(empty)	PRIMARY_KEY	["id"]
+DIMENSION	region	dcf_orders	TABLE	dcf_orders
+DIMENSION	region	dcf_orders	EXPRESSION	region
+DIMENSION	region	dcf_orders	DATA_TYPE	VARCHAR
+
+statement ok
+DROP SEMANTIC VIEW IF EXISTS dcf_abcdefghijklmnopqrstuvwxyz;
+
+statement ok
+DROP SEMANTIC VIEW _dcf_u;
+
+query I
+SELECT count(*) FROM list_semantic_views();
+----
+0
+
+# F-025: parse_proptest.rs::rewrite_unquoted_name_case — an unquoted mixed-case name folds to lower case on CREATE, and DESCRIBE / DROP find it under any ASCII case [text]
+statement ok
+CREATE SEMANTIC VIEW Dcf_MixedCase AS TABLES (t AS dcf_orders PRIMARY KEY (id)) DIMENSIONS (t.region AS region);
+
+query T
+SELECT name FROM list_semantic_views();
+----
+dcf_mixedcase
+
+query I
+SELECT count(*) FROM describe_semantic_view('DCF_MIXEDCASE');
+----
+7
+
+query TTTTT nosort
+DESCRIBE SEMANTIC VIEW DCF_MIXEDCASE;
+----
+TABLE	dcf_orders	(empty)	BASE_TABLE_DATABASE_NAME	memory
+TABLE	dcf_orders	(empty)	BASE_TABLE_SCHEMA_NAME	main
+TABLE	dcf_orders	(empty)	BASE_TABLE_NAME	dcf_orders
+TABLE	dcf_orders	(empty)	PRIMARY_KEY	["id"]
+DIMENSION	region	dcf_orders	TABLE	dcf_orders
+DIMENSION	region	dcf_orders	EXPRESSION	region
+DIMENSION	region	dcf_orders	DATA_TYPE	VARCHAR
+
+statement ok
+DROP SEMANTIC VIEW dCf_mIxEdCaSe;
+
+query I
+SELECT count(*) FROM list_semantic_views();
+----
+0
+
+# F-026: parse_proptest.rs::rewrite_quoted_hostile_names (whitespace / punctuation / uppercase arm) — a quoted name with spaces, a comma, parens, a dot and a hyphen is one name; ASCII case folds even inside quotes, and GET_DDL re-quotes it [text]
+statement ok
+CREATE SEMANTIC VIEW "Dcf Hostile, (x).y-z" AS TABLES (t AS dcf_orders PRIMARY KEY (id)) DIMENSIONS (t.region AS region);
+
+query TTT
+SELECT name, database_name, schema_name FROM list_semantic_views();
+----
+dcf hostile, (x).y-z	memory	main
+
+query T nosort
+SELECT * FROM dcf_ddl('"dcf hostile, (x).y-z"');
+----
+CREATE OR REPLACE SEMANTIC VIEW "dcf hostile, (x).y-z" AS
+TABLES (
+    t AS dcf_orders PRIMARY KEY (id)
+)
+DIMENSIONS (
+    t.region AS region
+)
+
+query TTTTT nosort
+DESCRIBE SEMANTIC VIEW "DCF HOSTILE, (X).Y-Z";
+----
+TABLE	dcf_orders	(empty)	BASE_TABLE_DATABASE_NAME	memory
+TABLE	dcf_orders	(empty)	BASE_TABLE_SCHEMA_NAME	main
+TABLE	dcf_orders	(empty)	BASE_TABLE_NAME	dcf_orders
+TABLE	dcf_orders	(empty)	PRIMARY_KEY	["id"]
+DIMENSION	region	dcf_orders	TABLE	dcf_orders
+DIMENSION	region	dcf_orders	EXPRESSION	region
+DIMENSION	region	dcf_orders	DATA_TYPE	VARCHAR
+
+statement ok
+DROP SEMANTIC VIEW "dcf hostile, (X).y-z";
+
+query I
+SELECT count(*) FROM list_semantic_views();
+----
+0
+
+# F-027: parse_proptest.rs::rewrite_quoted_hostile_names (non-ASCII arm) — a quoted non-ASCII name is stored without mojibake; only ASCII folds, so an upper-case É does not find é [text]
+statement ok
+CREATE SEMANTIC VIEW "dcf_wéird 東京☕" AS TABLES (t AS dcf_orders PRIMARY KEY (id)) DIMENSIONS (t.region AS region);
+
+query T
+SELECT name FROM list_semantic_views();
+----
+dcf_wéird 東京☕
+
+query T nosort
+SELECT line FROM dcf_ddl('"dcf_wéird 東京☕"') LIMIT 1;
+----
+CREATE OR REPLACE SEMANTIC VIEW "dcf_wéird 東京☕" AS
+
+statement error
+DROP SEMANTIC VIEW "DCF_WÉIRD 東京☕";
+----
+does not exist
+
+statement ok
+DROP SEMANTIC VIEW IF EXISTS "Dcf_wéird 東京☕";
+
+query I
+SELECT count(*) FROM list_semantic_views();
+----
+0
+
+# F-028: parse_proptest.rs::rewrite_quoted_hostile_names (keyword / grammar-colliding arm) — quoted names that spell SELECT, a DDL prefix, and an annotation clause are plain names in every name slot. GET_DDL leaves `select` unquoted (re-parseable today because the name slot takes any word) [text]
+statement ok
+CREATE SEMANTIC VIEW "SELECT" AS TABLES (t AS dcf_orders PRIMARY KEY (id)) DIMENSIONS (t.region AS region);
+
+statement ok
+CREATE SEMANTIC VIEW "drop semantic view" AS TABLES (t AS dcf_orders PRIMARY KEY (id)) DIMENSIONS (t.region AS region);
+
+statement ok
+CREATE SEMANTIC VIEW "PRIMARY KEY (id)" AS TABLES (t AS dcf_orders PRIMARY KEY (id)) DIMENSIONS (t.region AS region);
+
+query T nosort
+SELECT name FROM list_semantic_views() ORDER BY name;
+----
+drop semantic view
+primary key (id)
+select
+
+query T nosort
+SELECT * FROM dcf_ddl('"select"');
+----
+CREATE OR REPLACE SEMANTIC VIEW select AS
+TABLES (
+    t AS dcf_orders PRIMARY KEY (id)
+)
+DIMENSIONS (
+    t.region AS region
+)
+
+query T nosort
+SELECT line FROM dcf_ddl('"primary key (id)"') LIMIT 1;
+----
+CREATE OR REPLACE SEMANTIC VIEW "primary key (id)" AS
+
+query I
+SELECT count(*) FROM describe_semantic_view('"PRIMARY KEY (ID)"');
+----
+7
+
+query TTTTT nosort
+DESCRIBE SEMANTIC VIEW "PRIMARY KEY (ID)";
+----
+TABLE	dcf_orders	(empty)	BASE_TABLE_DATABASE_NAME	memory
+TABLE	dcf_orders	(empty)	BASE_TABLE_SCHEMA_NAME	main
+TABLE	dcf_orders	(empty)	BASE_TABLE_NAME	dcf_orders
+TABLE	dcf_orders	(empty)	PRIMARY_KEY	["id"]
+DIMENSION	region	dcf_orders	TABLE	dcf_orders
+DIMENSION	region	dcf_orders	EXPRESSION	region
+DIMENSION	region	dcf_orders	DATA_TYPE	VARCHAR
+
+statement ok
+DROP SEMANTIC VIEW IF EXISTS "Drop Semantic View";
+
+statement ok
+DROP SEMANTIC VIEW "Select";
+
+statement ok
+DROP SEMANTIC VIEW "primary key (id)";
+
+query I
+SELECT count(*) FROM list_semantic_views();
+----
+0
+
+# F-029: parse_proptest.rs::rewrite_quoted_hostile_names (embedded-quote arm) — a doubled "" inside a quoted name is one literal quote; DESCRIBE finds it under another case, GET_DDL re-doubles it, DROP removes it [text]
+statement ok
+CREATE SEMANTIC VIEW "we""ird" AS TABLES (t AS dcf_orders PRIMARY KEY (id)) DIMENSIONS (t.region AS region);
+
+query T
+SELECT name FROM list_semantic_views();
+----
+we"ird
+
+query T nosort
+SELECT line FROM dcf_ddl('"we""ird"') LIMIT 1;
+----
+CREATE OR REPLACE SEMANTIC VIEW "we""ird" AS
+
+query TTTTT nosort
+DESCRIBE SEMANTIC VIEW "We""IRD";
+----
+TABLE	dcf_orders	(empty)	BASE_TABLE_DATABASE_NAME	memory
+TABLE	dcf_orders	(empty)	BASE_TABLE_SCHEMA_NAME	main
+TABLE	dcf_orders	(empty)	BASE_TABLE_NAME	dcf_orders
+TABLE	dcf_orders	(empty)	PRIMARY_KEY	["id"]
+DIMENSION	region	dcf_orders	TABLE	dcf_orders
+DIMENSION	region	dcf_orders	EXPRESSION	region
+DIMENSION	region	dcf_orders	DATA_TYPE	VARCHAR
+
+statement ok
+DROP SEMANTIC VIEW "WE""ird";
+
+query I
+SELECT count(*) FROM list_semantic_views();
+----
+0
+
+# --- View-name slot: qualified and quoted qualifiers (quoted_idents_regression) ---
+
+statement ok
+CREATE SCHEMA dcf_s;
+
+statement ok
+ATTACH ':memory:' AS dcf_db;
+
+statement ok
+CREATE SCHEMA dcf_db.dcf_s;
+
+# F-030: quoted_idents_regression.rs::fully_quoted_fqn_normalises_to_bare_name — "memory"."main"."orders_sv" stores the bare name orders_sv in database memory, schema main; the qualifier picks the target and is not glued into the name
+statement ok
+CREATE SEMANTIC VIEW "memory"."main"."orders_sv" AS TABLES (o AS dcf_orders PRIMARY KEY (id)) DIMENSIONS (o.r AS o.region) METRICS (o.t AS SUM(o.amount));
+
+query TTT
+SELECT name, database_name, schema_name FROM list_semantic_views();
+----
+orders_sv	memory	main
+
+query T nosort
+SELECT * FROM dcf_ddl('orders_sv');
+----
+CREATE OR REPLACE SEMANTIC VIEW orders_sv AS
+TABLES (
+    o AS dcf_orders PRIMARY KEY (id)
+)
+DIMENSIONS (
+    o.r AS o.region
+)
+METRICS (
+    o.t AS SUM(o.amount)
+)
+
+# F-031: quoted_idents_regression.rs::quoted_fqn_short_parts_normalise_to_bare_name — CREATE OR REPLACE "memory"."dcf_s"."v" lands in schema dcf_s under the bare name v; the same shape naming another (attached) database is refused by the single-catalog guard and leaves nothing behind
+statement ok
+CREATE OR REPLACE SEMANTIC VIEW "memory"."dcf_s"."v" AS TABLES (o AS main.dcf_orders PRIMARY KEY (id)) DIMENSIONS (o.r AS o.region) METRICS (o.t AS SUM(o.amount));
+
+query T nosort
+SELECT line FROM dcf_ddl('dcf_s.v') LIMIT 1;
+----
+CREATE OR REPLACE SEMANTIC VIEW v AS
+
+query T
+SELECT get_ddl('SEMANTIC_VIEW', 'dcf_s.v', true) LIKE 'CREATE OR REPLACE SEMANTIC VIEW dcf_s.v AS%';
+----
+true
+
+statement error
+CREATE OR REPLACE SEMANTIC VIEW "dcf_db"."dcf_s"."v" AS TABLES (o AS main.dcf_orders PRIMARY KEY (id)) DIMENSIONS (o.r AS o.region) METRICS (o.t AS SUM(o.amount));
+----
+single-catalog
+
+# F-032: quoted_idents_regression.rs::mixed_quoting_normalises_to_bare_name — mixed quoting memory."dcf_s".v2 resolves part by part; the same mix naming another database is refused
+statement ok
+CREATE SEMANTIC VIEW memory."dcf_s".v2 AS TABLES (o AS main.dcf_orders PRIMARY KEY (id)) DIMENSIONS (o.r AS o.region) METRICS (o.t AS SUM(o.amount));
+
+statement error
+CREATE SEMANTIC VIEW dcf_db."dcf_s".v3 AS TABLES (o AS main.dcf_orders PRIMARY KEY (id)) DIMENSIONS (o.r AS o.region) METRICS (o.t AS SUM(o.amount));
+----
+single-catalog
+
+query TTT nosort
+SELECT name, database_name, schema_name FROM list_semantic_views();
+----
+v	memory	dcf_s
+v2	memory	dcf_s
+orders_sv	memory	main
+
+statement ok
+DROP SEMANTIC VIEW dcf_s.v;
+
+statement ok
+DROP SEMANTIC VIEW dcf_s.v2;
+
+statement ok
+DROP SEMANTIC VIEW orders_sv;
+
+# --- View-name slot: a ';' in the name position (test_semicolon_in_name) ---
+
+# F-033: parse_proptest.rs::test_semicolon_in_name (CREATE pair) — the control parses; `x;injection` in the name slot is rejected, not absorbed into the name [syntax]
+statement ok
+CREATE SEMANTIC VIEW dcf_x AS TABLES (dcf_t) DIMENSIONS (dcf_t.a AS dcf_t.a);
+
+query T nosort
+SELECT * FROM dcf_ddl('dcf_x');
+----
+CREATE OR REPLACE SEMANTIC VIEW dcf_x AS
+TABLES (
+    dcf_t AS dcf_t
+)
+DIMENSIONS (
+    dcf_t.a AS dcf_t.a
+)
+
+# The rejected name is not in the catalog: if the name were cut at `;`, `dcf_x2`
+# would be created (and `dcf_x` would fail with "already exists" either way).
+statement error
+CREATE SEMANTIC VIEW dcf_x2;injection AS TABLES (dcf_t) DIMENSIONS (dcf_t.a AS dcf_t.a);
+----
+
+query I
+SELECT count(*) FROM list_semantic_views() WHERE name = 'dcf_x2';
+----
+0
+
+# F-034: parse_proptest.rs::test_semicolon_in_name (DESCRIBE pair) [syntax]
+query I
+SELECT count(*) FROM describe_semantic_view('dcf_x');
+----
+6
+
+statement ok
+DESCRIBE SEMANTIC VIEW dcf_x;
+
+statement error
+DESCRIBE SEMANTIC VIEW dcf_x;injection;
+----
+
+# F-035: parse_proptest.rs::test_semicolon_in_name (ALTER pair) — the rejected ALTER leaves the name as the accepted one set it [syntax]
+statement ok
+ALTER SEMANTIC VIEW dcf_x RENAME TO dcf_y;
+
+statement error
+ALTER SEMANTIC VIEW dcf_y;injection RENAME TO dcf_x;
+----
+
+query T
+SELECT name FROM list_semantic_views();
+----
+dcf_y
+
+# F-036: parse_proptest.rs::test_semicolon_in_name (DROP pair) — the rejected DROP drops nothing [syntax]
+statement error
+DROP SEMANTIC VIEW dcf_y;injection;
+----
+
+query T
+SELECT name FROM list_semantic_views();
+----
+dcf_y
+
+statement ok
+DROP SEMANTIC VIEW dcf_y;
+
+query I
+SELECT count(*) FROM list_semantic_views();
+----
+0
+
+# F-037: parse_proptest.rs::test_semicolon_in_name (SHOW pair) [syntax]
+statement ok
+SHOW SEMANTIC VIEWS;
+
+statement error
+SHOW SEMANTIC VIEWS;injection;
+----
+
+# F-038: parse_proptest.rs::test_semicolon_in_name (legacy named-argument CREATE form) — `x;injection (tables := [], dimensions := [])` is rejected (it lacks AS too) [syntax]
+statement error
+CREATE SEMANTIC VIEW dcf_x;injection (tables := [], dimensions := []);
+----
+
+# F-039: parse_proptest.rs::test_null_byte_in_name, ::test_control_char_in_name — a NUL or a 0x01 byte in the name slot (via query(), see header) is rejected cleanly; control: the same DESCRIBE without the byte succeeds. The CREATE name slot cannot be driven this way (query() takes only SELECT-shaped statements).
+statement ok
+CREATE SEMANTIC VIEW dcf_x AS TABLES (dcf_t) DIMENSIONS (dcf_t.a AS dcf_t.a);
+
+query I
+SELECT count(*) FROM query('DESCRIBE SEMANTIC VIEW dcf_x');
+----
+6
+
+statement error
+SELECT count(*) FROM query('DESCRIBE SEMANTIC VIEW dcf_x' || chr(0) || 'bad');
+----
+null byte
+
+statement error
+SELECT count(*) FROM query('DESCRIBE SEMANTIC VIEW dcf_x' || chr(1) || 'bad');
+----
+does not exist
+
+statement ok
+DROP SEMANTIC VIEW dcf_x;
+
+# --- CREATE body: missing pieces and clause-keyword typos (carets not asserted) ---
+
+# F-040: parse_proptest.rs::position_invariant_paren_body_rejected — the legacy parenthesised body (no AS) after leading spaces is rejected; near miss of F-011 [syntax]
+statement error
+          CREATE SEMANTIC VIEW dcf_p (tbles := []);
+----
+
+# F-041: parse_proptest.rs::position_invariant_missing_as — a CREATE that stops after the view name is rejected; near miss of F-011 [syntax]
+statement error
+   CREATE SEMANTIC VIEW dcf_p;
+----
+
+# F-042: parse_proptest.rs::position_invariant_missing_name_drop — DROP SEMANTIC VIEW with no name after leading spaces is rejected; near miss of F-010 [syntax]
+statement error
+        DROP SEMANTIC VIEW;
+----
+
+# F-043: parse_proptest.rs::as_body_position_invariant_clause_typo, ::parse_error_position_is_byte_offset_into_user_input_smoke, ::position_byte_offset_preserved_for_arbitrary_prefix — control parses; TABLSE for TABLES is rejected bare, after a space/newline/tab prefix, and after a `--` line comment (caret offsets not asserted) [syntax]
+statement ok
+CREATE SEMANTIC VIEW dcf_v AS TABLES (t AS dcf_tr PRIMARY KEY (id)) DIMENSIONS (t.r AS r) METRICS (t.m AS SUM(1));
+
+query T nosort
+SELECT * FROM dcf_ddl('dcf_v');
+----
+CREATE OR REPLACE SEMANTIC VIEW dcf_v AS
+TABLES (
+    t AS dcf_tr PRIMARY KEY (id)
+)
+DIMENSIONS (
+    t.r AS r
+)
+METRICS (
+    t.m AS SUM(1)
+)
+
+statement ok
+DROP SEMANTIC VIEW dcf_v;
+
+statement error
+CREATE SEMANTIC VIEW dcf_v AS TABLSE (t AS dcf_tr PRIMARY KEY (id)) DIMENSIONS (t.r AS r) METRICS (t.m AS SUM(1));
+----
+
+statement error
+   
+	CREATE SEMANTIC VIEW dcf_v AS TABLSE (t AS dcf_tr PRIMARY KEY (id)) DIMENSIONS (t.r AS r) METRICS (t.m AS SUM(1));
+----
+
+statement error
+-- a comment
+CREATE SEMANTIC VIEW dcf_v AS TABLSE (t AS dcf_tr PRIMARY KEY (id)) DIMENSIONS (t.r AS r) METRICS (t.m AS SUM(1));
+----
+
+query I
+SELECT count(*) FROM list_semantic_views();
+----
+0
+
+# --- CREATE body: whitespace and keyword case inside the body ---
+
+# F-044: parse_proptest.rs::as_body_accepts_any_inter_token_whitespace — tab, newline, and mixed runs between every body token parse to the same canonical definition (a separator that is an empty line cannot be written in a .test statement; `\n\t\n` stands in for it)
+statement ok
+CREATE SEMANTIC VIEW dcf_bw1 AS TABLES	(t	AS	dcf_orders	PRIMARY	KEY	(id))	DIMENSIONS	(t.region	AS	region)	METRICS	(t.rev	AS	SUM(amount));
+
+statement ok
+CREATE SEMANTIC VIEW dcf_bw2 AS TABLES
+(t
+AS
+dcf_orders
+PRIMARY
+KEY
+(id))
+DIMENSIONS
+(t.region
+AS
+region)
+METRICS
+(t.rev
+AS
+SUM(amount));
+
+statement ok
+CREATE SEMANTIC VIEW dcf_bw3 AS TABLES	
+ (t	
+ AS	
+ dcf_orders	
+ PRIMARY	
+ KEY	
+ (id))	
+ DIMENSIONS	
+ (t.region	
+ AS	
+ region)	
+ METRICS	
+ (t.rev	
+ AS	
+ SUM(amount));
+
+statement ok
+CREATE SEMANTIC VIEW dcf_bw4 AS TABLES
+	
+(t AS dcf_orders PRIMARY KEY (id))
+	
+DIMENSIONS
+	
+(t.region AS region)
+	
+METRICS
+	
+(t.rev AS SUM(amount));
+
+query T nosort
+SELECT * FROM dcf_ddl('dcf_bw1');
+----
+CREATE OR REPLACE SEMANTIC VIEW dcf_bw1 AS
+TABLES (
+    t AS dcf_orders PRIMARY KEY (id)
+)
+DIMENSIONS (
+    t.region AS region
+)
+METRICS (
+    t.rev AS SUM(amount)
+)
+
+query T nosort
+SELECT * FROM dcf_ddl('dcf_bw2');
+----
+CREATE OR REPLACE SEMANTIC VIEW dcf_bw2 AS
+TABLES (
+    t AS dcf_orders PRIMARY KEY (id)
+)
+DIMENSIONS (
+    t.region AS region
+)
+METRICS (
+    t.rev AS SUM(amount)
+)
+
+query T nosort
+SELECT * FROM dcf_ddl('dcf_bw3');
+----
+CREATE OR REPLACE SEMANTIC VIEW dcf_bw3 AS
+TABLES (
+    t AS dcf_orders PRIMARY KEY (id)
+)
+DIMENSIONS (
+    t.region AS region
+)
+METRICS (
+    t.rev AS SUM(amount)
+)
+
+query T nosort
+SELECT * FROM dcf_ddl('dcf_bw4');
+----
+CREATE OR REPLACE SEMANTIC VIEW dcf_bw4 AS
+TABLES (
+    t AS dcf_orders PRIMARY KEY (id)
+)
+DIMENSIONS (
+    t.region AS region
+)
+METRICS (
+    t.rev AS SUM(amount)
+)
+
+# F-045: parse_proptest.rs::as_body_clause_keywords_case_insensitive — lower / Title / upper case clause keywords in any combination; GET_DDL renders them upper case
+statement ok
+CREATE SEMANTIC VIEW dcf_kc1 AS tables (t AS dcf_orders PRIMARY KEY (id)) Dimensions (t.region AS region) METRICS (t.rev AS SUM(amount));
+
+statement ok
+CREATE SEMANTIC VIEW dcf_kc2 AS Tables (t AS dcf_orders PRIMARY KEY (id)) dimensions (t.region AS region) Metrics (t.rev AS SUM(amount));
+
+query T nosort
+SELECT * FROM dcf_ddl('dcf_kc1');
+----
+CREATE OR REPLACE SEMANTIC VIEW dcf_kc1 AS
+TABLES (
+    t AS dcf_orders PRIMARY KEY (id)
+)
+DIMENSIONS (
+    t.region AS region
+)
+METRICS (
+    t.rev AS SUM(amount)
+)
+
+query T nosort
+SELECT * FROM dcf_ddl('dcf_kc2');
+----
+CREATE OR REPLACE SEMANTIC VIEW dcf_kc2 AS
+TABLES (
+    t AS dcf_orders PRIMARY KEY (id)
+)
+DIMENSIONS (
+    t.region AS region
+)
+METRICS (
+    t.rev AS SUM(amount)
+)
+
+# F-046: crlf_body_frontdoor.rs::crlf_body_parses_identically_to_lf (LF twin only; the CRLF half is unportable, see header) — a one-entry-per-line body with RELATIONSHIPS parses to region / name / revenue with their expressions intact
+statement ok
+CREATE OR REPLACE SEMANTIC VIEW crlf_view AS
+TABLES (
+    o AS dcf_orders PRIMARY KEY (id),
+    c AS dcf_customers PRIMARY KEY (id)
+)
+RELATIONSHIPS (
+    o_to_c AS o(customer_id) REFERENCES c
+)
+DIMENSIONS (
+    o.region AS o.region,
+    c.name AS c.name
+)
+METRICS (
+    o.revenue AS SUM(o.amount)
+)
+
+query T nosort
+SELECT * FROM dcf_ddl('crlf_view');
+----
+CREATE OR REPLACE SEMANTIC VIEW crlf_view AS
+TABLES (
+    o AS dcf_orders PRIMARY KEY (id),
+    c AS dcf_customers PRIMARY KEY (id)
+)
+RELATIONSHIPS (
+    o_to_c AS o(customer_id) REFERENCES c
+)
+DIMENSIONS (
+    o.region AS o.region,
+    c.name AS c.name
+)
+METRICS (
+    o.revenue AS SUM(o.amount)
+)
+
+# F-047: crlf_body_frontdoor.rs::crlf_body_error_caret_counts_cr_bytes (LF twin only) — control: one DIMENSIONS clause parses; a second DIMENSIONS clause is a duplicate clause keyword and is rejected (caret not asserted) [syntax]
+statement ok
+CREATE OR REPLACE SEMANTIC VIEW crlf_dup AS
+TABLES (o AS dcf_orders PRIMARY KEY (id))
+DIMENSIONS (o.region AS o.region)
+METRICS (o.revenue AS SUM(o.amount))
+
+statement error
+CREATE OR REPLACE SEMANTIC VIEW crlf_dup AS
+TABLES (o AS dcf_orders PRIMARY KEY (id))
+DIMENSIONS (o.region AS o.region)
+DIMENSIONS (o.status AS o.status)
+METRICS (o.revenue AS SUM(o.amount))
+----
+
+query T nosort
+SELECT line FROM dcf_ddl('crlf_dup') WHERE line LIKE '    o.%';
+----
+    o.region AS o.region
+    o.revenue AS SUM(o.amount)

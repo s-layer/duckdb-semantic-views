@@ -1,0 +1,1655 @@
+require semantic_views
+
+# DDL accept/reject corpus, slice C, part b2 of 2 (ddl_corpus_body_b1.test is the
+# other part). Ports, as SQL-level rows against the real extension, the cases
+# encoded by these Rust unit tests, which go away with the hand-written scanners
+# in Phase 3 of the PEG parser epic (.planning/PEG-PARSER-EPIC.md):
+#
+#   src/body_parser/mod.rs         mod tests, from `references_multi_column_list`
+#                                  to the end of the file
+#   src/body_parser/annotations.rs src/body_parser/clause_bounds.rs
+#   src/body_parser/cursor.rs      src/body_parser/lexer.rs
+#   src/body_parser/window.rs
+#
+# Case map (Rust test -> row id): _notes/phase3-corpus/map-C.md
+#
+# Conventions: `# C-NNN:` names each row and the Rust test(s) it ports.
+# Accept rows pin the stored definition through GET_DDL (dcc_ddl) and, where
+# GET_DDL does not show a parsed field, DESCRIBE / SHOW / YAML. Reject rows are
+# near misses of an accepted statement earlier in this file; [syntax] rejects do
+# not pin wording (it will change under the grammar): their `----` block is
+# left EMPTY, which this runner accepts as "any error" (it refuses a
+# `statement error` with no `----` at all). Semantic rejects pin a stable
+# message substring. [text] marks today's text-preservation / identifier-
+# quoting contract that a grammar might plausibly change.
+
+# --- fixtures ---
+
+statement ok
+CREATE TABLE dcc_orders (id INTEGER, region VARCHAR, amount INTEGER, cost INTEGER, cust_id INTEGER, created_at DATE, qty INTEGER, price DOUBLE, discount DOUBLE, tax_rate DOUBLE, email VARCHAR, first_name VARCHAR, last_name VARCHAR, comment_count INTEGER, o_id INTEGER, o_seq INTEGER, o_cust_id INTEGER, store INTEGER, sale_date DATE, code INTEGER, c2 INTEGER, labels VARCHAR);
+
+statement ok
+CREATE TABLE dcc_customers (id INTEGER, c_id INTEGER, name VARCHAR, code INTEGER, c2 INTEGER);
+
+statement ok
+CREATE TABLE dcc_fact (id INTEGER, email VARCHAR, x INTEGER);
+
+statement ok
+CREATE TABLE dcc_flights (id INTEGER, dep_id INTEGER, arr_id INTEGER, x INTEGER);
+
+statement ok
+CREATE TABLE dcc_airports (id INTEGER, name VARCHAR);
+
+statement ok
+CREATE TABLE dcc_accounts (id INTEGER, date DATE, account_id INTEGER, amount INTEGER);
+
+statement ok
+CREATE TABLE dcc_line_items (id INTEGER, amount INTEGER, unit_cost INTEGER);
+
+statement ok
+CREATE TABLE dcc_priv (id INTEGER, value INTEGER);
+
+statement ok
+CREATE TABLE "dcc my orders" (id INTEGER, region VARCHAR);
+
+statement ok
+CREATE TABLE "dcc PRIMARY KEY (id)" (id INTEGER, "UNIQUE" INTEGER, "x)y" INTEGER, region VARCHAR);
+
+statement ok
+CREATE SCHEMA "dcc a""b";
+
+statement ok
+CREATE TABLE "dcc a""b"."c d" (id INTEGER, "x)y" INTEGER, region VARCHAR);
+
+statement ok
+CREATE TABLE "dcc 東京 table" (id INTEGER, region VARCHAR);
+
+statement ok
+CREATE MACRO dcc_ddl(v) AS TABLE SELECT unnest(string_split(rtrim(get_ddl('SEMANTIC_VIEW', v), chr(10)), chr(10))) AS line;
+
+# Structured view of the stored model (window_spec etc.), for fields GET_DDL
+# only shows re-rendered.
+
+statement ok
+CREATE MACRO dcc_yaml(v) AS TABLE SELECT unnest(string_split(rtrim(read_yaml_from_semantic_view(v), chr(10)), chr(10))) AS line;
+
+# --- METRICS: window OVER clause ---
+
+# C-080: body_parser/mod.rs::parse_metrics_window_over_basic, body_parser/window.rs::a_plain_window_metric_still_parses — AVG(total_qty) OVER (PARTITION BY EXCLUDING d1, d2 ORDER BY d1): function AVG, inner total_qty, no extra args, excluding [d1, d2], ORDER BY d1 ASC NULLS LAST, no frame
+# GET_DDL re-renders a window metric FROM its parsed spec (note the added
+# NULLS LAST); the YAML lines show the spec fields. total_qty has no window_spec
+# and no WINDOW_SPEC row.
+statement ok
+CREATE SEMANTIC VIEW dcc_c080 AS TABLES (o AS dcc_orders PRIMARY KEY (id)) DIMENSIONS (o.d1 AS o.created_at, o.d2 AS o.store) METRICS (o.total_qty AS SUM(o.qty), o.avg_qty AS AVG(total_qty) OVER (PARTITION BY EXCLUDING d1, d2 ORDER BY d1));
+
+query T nosort
+SELECT * FROM dcc_ddl('dcc_c080');
+----
+CREATE OR REPLACE SEMANTIC VIEW dcc_c080 AS
+TABLES (
+    o AS dcc_orders PRIMARY KEY (id)
+)
+DIMENSIONS (
+    o.d1 AS o.created_at,
+    o.d2 AS o.store
+)
+METRICS (
+    o.total_qty AS SUM(o.qty),
+    o.avg_qty AS AVG(total_qty) OVER (PARTITION BY EXCLUDING d1, d2 ORDER BY d1 NULLS LAST)
+)
+
+query T nosort
+SELECT line FROM dcc_yaml('dcc_c080') WHERE line LIKE '    %' OR line LIKE '  window_spec:%' OR line LIKE '- name: %';
+----
+- name: d1
+- name: d2
+- name: total_qty
+- name: avg_qty
+  window_spec:
+    window_function: AVG
+    inner_metric: total_qty
+    excluding_dims:
+    - d1
+    - d2
+    order_by:
+    - expr: d1
+
+query TTTT rowsort
+SELECT object_kind, object_name, property, property_value FROM describe_semantic_view('dcc_c080') WHERE property = 'WINDOW_SPEC';
+----
+METRIC	avg_qty	WINDOW_SPEC	AVG(total_qty) OVER (PARTITION BY EXCLUDING d1, d2 ORDER BY d1 NULLS LAST)
+
+# C-081: body_parser/mod.rs::parse_metrics_window_over_with_frame_clause — a RANGE BETWEEN INTERVAL '6 days' PRECEDING AND CURRENT ROW frame is kept as the frame clause
+statement ok
+CREATE SEMANTIC VIEW dcc_c081 AS TABLES (o AS dcc_orders PRIMARY KEY (id)) DIMENSIONS (o.d1 AS o.created_at, o.d2 AS o.store) METRICS (o.total_qty AS SUM(o.qty), o.avg_qty AS AVG(total_qty) OVER (PARTITION BY EXCLUDING d1 ORDER BY d1 RANGE BETWEEN INTERVAL '6 days' PRECEDING AND CURRENT ROW));
+
+query T nosort
+SELECT * FROM dcc_ddl('dcc_c081');
+----
+CREATE OR REPLACE SEMANTIC VIEW dcc_c081 AS
+TABLES (
+    o AS dcc_orders PRIMARY KEY (id)
+)
+DIMENSIONS (
+    o.d1 AS o.created_at,
+    o.d2 AS o.store
+)
+METRICS (
+    o.total_qty AS SUM(o.qty),
+    o.avg_qty AS AVG(total_qty) OVER (PARTITION BY EXCLUDING d1 ORDER BY d1 NULLS LAST RANGE BETWEEN INTERVAL '6 days' PRECEDING AND CURRENT ROW)
+)
+
+query T nosort
+SELECT line FROM dcc_yaml('dcc_c081') WHERE line LIKE '    %' OR line LIKE '  window_spec:%' OR line LIKE '- name: %';
+----
+- name: d1
+- name: d2
+- name: total_qty
+- name: avg_qty
+  window_spec:
+    window_function: AVG
+    inner_metric: total_qty
+    excluding_dims:
+    - d1
+    order_by:
+    - expr: d1
+    frame_clause: RANGE BETWEEN INTERVAL '6 days' PRECEDING AND CURRENT ROW
+
+# C-082: body_parser/mod.rs::parse_metrics_window_lag_with_extra_args — LAG(total_qty, 30): inner metric total_qty, extra args [30]
+statement ok
+CREATE SEMANTIC VIEW dcc_c082 AS TABLES (o AS dcc_orders PRIMARY KEY (id)) DIMENSIONS (o.d1 AS o.created_at, o.d2 AS o.store) METRICS (o.total_qty AS SUM(o.qty), o.prev_qty AS LAG(total_qty, 30) OVER (PARTITION BY EXCLUDING d1 ORDER BY d1));
+
+query T nosort
+SELECT * FROM dcc_ddl('dcc_c082');
+----
+CREATE OR REPLACE SEMANTIC VIEW dcc_c082 AS
+TABLES (
+    o AS dcc_orders PRIMARY KEY (id)
+)
+DIMENSIONS (
+    o.d1 AS o.created_at,
+    o.d2 AS o.store
+)
+METRICS (
+    o.total_qty AS SUM(o.qty),
+    o.prev_qty AS LAG(total_qty, 30) OVER (PARTITION BY EXCLUDING d1 ORDER BY d1 NULLS LAST)
+)
+
+query T nosort
+SELECT line FROM dcc_yaml('dcc_c082') WHERE line LIKE '    %' OR line LIKE '  window_spec:%' OR line LIKE '- name: %';
+----
+- name: d1
+- name: d2
+- name: total_qty
+- name: prev_qty
+  window_spec:
+    window_function: LAG
+    inner_metric: total_qty
+    extra_args:
+    - '30'
+    excluding_dims:
+    - d1
+    order_by:
+    - expr: d1
+
+# C-083: body_parser/mod.rs::parse_metrics_window_over_on_derived_produces_error — near miss of C-080: OVER on a DERIVED (unqualified) metric is rejected
+statement error
+CREATE SEMANTIC VIEW dcc_c083 AS TABLES (o AS dcc_orders PRIMARY KEY (id)) DIMENSIONS (o.d1 AS o.created_at, o.d2 AS o.store) METRICS (o.total_qty AS SUM(o.qty), avg_ratio AS AVG(total_qty) OVER (PARTITION BY EXCLUDING d1, d2 ORDER BY d1));
+----
+OVER clause not allowed on derived metric
+
+# C-084: body_parser/mod.rs::parse_metrics_window_over_with_non_additive_by_produces_error — near miss of C-080: OVER combined with NON ADDITIVE BY is rejected
+statement error
+CREATE SEMANTIC VIEW dcc_c084 AS TABLES (o AS dcc_orders PRIMARY KEY (id)) DIMENSIONS (o.d1 AS o.created_at, o.d2 AS o.store) METRICS (o.total_qty AS SUM(o.qty), o.avg_qty NON ADDITIVE BY (d1) AS AVG(total_qty) OVER (PARTITION BY EXCLUDING d2 ORDER BY d1));
+----
+Cannot combine OVER clause with NON ADDITIVE BY
+
+# C-085: body_parser/mod.rs::parse_metrics_window_over_order_by_desc_nulls — window ORDER BY d1 DESC NULLS LAST keeps both modifiers
+statement ok
+CREATE SEMANTIC VIEW dcc_c085 AS TABLES (o AS dcc_orders PRIMARY KEY (id)) DIMENSIONS (o.d1 AS o.created_at, o.d2 AS o.store) METRICS (o.total_qty AS SUM(o.qty), o.avg_qty AS AVG(total_qty) OVER (PARTITION BY EXCLUDING d1 ORDER BY d1 DESC NULLS LAST));
+
+query T nosort
+SELECT * FROM dcc_ddl('dcc_c085');
+----
+CREATE OR REPLACE SEMANTIC VIEW dcc_c085 AS
+TABLES (
+    o AS dcc_orders PRIMARY KEY (id)
+)
+DIMENSIONS (
+    o.d1 AS o.created_at,
+    o.d2 AS o.store
+)
+METRICS (
+    o.total_qty AS SUM(o.qty),
+    o.avg_qty AS AVG(total_qty) OVER (PARTITION BY EXCLUDING d1 ORDER BY d1 DESC NULLS LAST)
+)
+
+# C-086: body_parser/mod.rs::parse_keyword_body_window_metric_integration, body_parser/mod.rs::parse_keyword_body_window_valid_refs_succeed — window metric over a declared inner metric, EXCLUDING region, ORDER BY month: all references resolve
+statement ok
+CREATE SEMANTIC VIEW dcc_c086 AS TABLES (o AS dcc_orders PRIMARY KEY (id)) DIMENSIONS (o.region AS o.region, o.month AS date_trunc('month', o.created_at)) METRICS (o.total_qty AS SUM(o.qty), o.avg_qty AS AVG(total_qty) OVER (PARTITION BY EXCLUDING region ORDER BY month));
+
+query T nosort
+SELECT * FROM dcc_ddl('dcc_c086');
+----
+CREATE OR REPLACE SEMANTIC VIEW dcc_c086 AS
+TABLES (
+    o AS dcc_orders PRIMARY KEY (id)
+)
+DIMENSIONS (
+    o.region AS o.region,
+    o.month AS date_trunc('month', o.created_at)
+)
+METRICS (
+    o.total_qty AS SUM(o.qty),
+    o.avg_qty AS AVG(total_qty) OVER (PARTITION BY EXCLUDING region ORDER BY month NULLS LAST)
+)
+
+# C-087: body_parser/mod.rs::parse_keyword_body_window_excluding_invalid_dim_error — near miss of C-086: an undeclared EXCLUDING dimension is rejected, naming it
+statement error
+CREATE SEMANTIC VIEW dcc_c087 AS TABLES (o AS dcc_orders PRIMARY KEY (id)) DIMENSIONS (o.region AS o.region, o.month AS date_trunc('month', o.created_at)) METRICS (o.total_qty AS SUM(o.qty), o.avg_qty AS AVG(total_qty) OVER (PARTITION BY EXCLUDING nonexistent ORDER BY month));
+----
+EXCLUDING dimension 'nonexistent'
+
+# C-088: body_parser/mod.rs::parse_keyword_body_window_inner_metric_invalid_error — near miss of C-086: an undeclared inner metric is rejected, naming it
+statement error
+CREATE SEMANTIC VIEW dcc_c088 AS TABLES (o AS dcc_orders PRIMARY KEY (id)) DIMENSIONS (o.region AS o.region, o.month AS date_trunc('month', o.created_at)) METRICS (o.total_qty AS SUM(o.qty), o.avg_qty AS AVG(nonexistent_metric) OVER (PARTITION BY EXCLUDING region ORDER BY month));
+----
+inner metric 'nonexistent_metric'
+
+# C-089: body_parser/mod.rs::parse_keyword_body_window_order_by_invalid_dim_error — near miss of C-086: an undeclared ORDER BY dimension is rejected, naming it
+statement error
+CREATE SEMANTIC VIEW dcc_c089 AS TABLES (o AS dcc_orders PRIMARY KEY (id)) DIMENSIONS (o.region AS o.region, o.month AS date_trunc('month', o.created_at)) METRICS (o.total_qty AS SUM(o.qty), o.avg_qty AS AVG(total_qty) OVER (PARTITION BY EXCLUDING region ORDER BY bad_dim));
+----
+ORDER BY dimension 'bad_dim'
+
+# EXP-12 / PARSE-8: a QUOTED reference in each window slot names the same
+# identifier as its unquoted declaration (DuckDB rule: case-insensitive even when
+# quoted). Controls: quoting an unknown name still fails.
+
+# C-090: body_parser/mod.rs::parse_keyword_body_window_quoted_inner_metric_accepted — inner metric written "total_qty" resolves to total_qty [text]
+statement ok
+CREATE SEMANTIC VIEW dcc_c090 AS TABLES (o AS dcc_orders PRIMARY KEY (id)) DIMENSIONS (o.region AS o.region) METRICS (o.total_qty AS SUM(o.qty), o.avg_qty AS AVG("total_qty") OVER (PARTITION BY EXCLUDING region));
+
+query T nosort
+SELECT * FROM dcc_ddl('dcc_c090');
+----
+CREATE OR REPLACE SEMANTIC VIEW dcc_c090 AS
+TABLES (
+    o AS dcc_orders PRIMARY KEY (id)
+)
+DIMENSIONS (
+    o.region AS o.region
+)
+METRICS (
+    o.total_qty AS SUM(o.qty),
+    o.avg_qty AS AVG("total_qty") OVER (PARTITION BY EXCLUDING region)
+)
+
+# C-091: body_parser/mod.rs::parse_keyword_body_window_quoted_case_varied_inner_metric_accepted — inner metric written "Total_Qty" resolves to total_qty [text]
+statement ok
+CREATE SEMANTIC VIEW dcc_c091 AS TABLES (o AS dcc_orders PRIMARY KEY (id)) DIMENSIONS (o.region AS o.region) METRICS (o.total_qty AS SUM(o.qty), o.avg_qty AS AVG("Total_Qty") OVER (PARTITION BY EXCLUDING region));
+
+query T nosort
+SELECT * FROM dcc_ddl('dcc_c091');
+----
+CREATE OR REPLACE SEMANTIC VIEW dcc_c091 AS
+TABLES (
+    o AS dcc_orders PRIMARY KEY (id)
+)
+DIMENSIONS (
+    o.region AS o.region
+)
+METRICS (
+    o.total_qty AS SUM(o.qty),
+    o.avg_qty AS AVG("Total_Qty") OVER (PARTITION BY EXCLUDING region)
+)
+
+# C-092: body_parser/mod.rs::parse_keyword_body_window_quoted_order_by_dim_accepted — ORDER BY "region" resolves to the region dimension [text]
+statement ok
+CREATE SEMANTIC VIEW dcc_c092 AS TABLES (o AS dcc_orders PRIMARY KEY (id)) DIMENSIONS (o.region AS o.region) METRICS (o.total_qty AS SUM(o.qty), o.avg_qty AS AVG(total_qty) OVER (PARTITION BY EXCLUDING region ORDER BY "region"));
+
+query T nosort
+SELECT * FROM dcc_ddl('dcc_c092');
+----
+CREATE OR REPLACE SEMANTIC VIEW dcc_c092 AS
+TABLES (
+    o AS dcc_orders PRIMARY KEY (id)
+)
+DIMENSIONS (
+    o.region AS o.region
+)
+METRICS (
+    o.total_qty AS SUM(o.qty),
+    o.avg_qty AS AVG(total_qty) OVER (PARTITION BY EXCLUDING region ORDER BY "region" NULLS LAST)
+)
+
+# C-093: body_parser/mod.rs::parse_keyword_body_window_quoted_unknown_inner_metric_still_rejected — near miss of C-090: inner metric "nope" is still rejected in the inner-metric slot
+statement error
+CREATE SEMANTIC VIEW dcc_c093 AS TABLES (o AS dcc_orders PRIMARY KEY (id)) DIMENSIONS (o.region AS o.region) METRICS (o.total_qty AS SUM(o.qty), o.avg_qty AS AVG("nope") OVER (PARTITION BY EXCLUDING region));
+----
+inner metric
+
+# C-094: body_parser/mod.rs::parse_keyword_body_window_quoted_excluding_dim_accepted — PARTITION BY EXCLUDING "Region" resolves to the region dimension [text]
+statement ok
+CREATE SEMANTIC VIEW dcc_c094 AS TABLES (o AS dcc_orders PRIMARY KEY (id)) DIMENSIONS (o.region AS o.region) METRICS (o.total_qty AS SUM(o.qty), o.avg_qty AS AVG(total_qty) OVER (PARTITION BY EXCLUDING "Region"));
+
+query T nosort
+SELECT * FROM dcc_ddl('dcc_c094');
+----
+CREATE OR REPLACE SEMANTIC VIEW dcc_c094 AS
+TABLES (
+    o AS dcc_orders PRIMARY KEY (id)
+)
+DIMENSIONS (
+    o.region AS o.region
+)
+METRICS (
+    o.total_qty AS SUM(o.qty),
+    o.avg_qty AS AVG(total_qty) OVER (PARTITION BY EXCLUDING "Region")
+)
+
+# C-095: body_parser/mod.rs::parse_keyword_body_window_quoted_partition_dim_accepted — PARTITION BY "Region" resolves to the region dimension [text]
+statement ok
+CREATE SEMANTIC VIEW dcc_c095 AS TABLES (o AS dcc_orders PRIMARY KEY (id)) DIMENSIONS (o.region AS o.region) METRICS (o.total_qty AS SUM(o.qty), o.avg_qty AS AVG(total_qty) OVER (PARTITION BY "Region"));
+
+query T nosort
+SELECT * FROM dcc_ddl('dcc_c095');
+----
+CREATE OR REPLACE SEMANTIC VIEW dcc_c095 AS
+TABLES (
+    o AS dcc_orders PRIMARY KEY (id)
+)
+DIMENSIONS (
+    o.region AS o.region
+)
+METRICS (
+    o.total_qty AS SUM(o.qty),
+    o.avg_qty AS AVG(total_qty) OVER (PARTITION BY "Region")
+)
+
+# C-096: body_parser/mod.rs::parse_keyword_body_quoted_unknown_names_still_rejected_at_every_site — near miss of C-094: EXCLUDING "nope" is rejected (not found)
+statement error
+CREATE SEMANTIC VIEW dcc_c096 AS TABLES (o AS dcc_orders PRIMARY KEY (id)) DIMENSIONS (o.region AS o.region) METRICS (o.total_qty AS SUM(o.qty), o.avg_qty AS AVG(total_qty) OVER (PARTITION BY EXCLUDING "nope"));
+----
+not found
+
+# C-097: body_parser/mod.rs::parse_keyword_body_quoted_unknown_names_still_rejected_at_every_site — near miss of C-095: PARTITION BY "nope" is rejected (not found)
+statement error
+CREATE SEMANTIC VIEW dcc_c097 AS TABLES (o AS dcc_orders PRIMARY KEY (id)) DIMENSIONS (o.region AS o.region) METRICS (o.total_qty AS SUM(o.qty), o.avg_qty AS AVG(total_qty) OVER (PARTITION BY "nope"));
+----
+not found
+
+# Explicit PARTITION BY (as opposed to PARTITION BY EXCLUDING).
+
+# C-098: body_parser/mod.rs::parse_metrics_window_partition_by_explicit, body_parser/mod.rs::parse_keyword_body_window_partition_by_integration — PARTITION BY store ORDER BY date: partition [store], no excluding dims, ORDER BY date
+statement ok
+CREATE SEMANTIC VIEW dcc_c098 AS TABLES (o AS dcc_orders PRIMARY KEY (id)) DIMENSIONS (o.store AS o.store, o.date AS o.sale_date, o.region AS o.region) METRICS (o.total_qty AS SUM(o.qty), o.avg_qty AS AVG(total_qty) OVER (PARTITION BY store ORDER BY date));
+
+query T nosort
+SELECT * FROM dcc_ddl('dcc_c098');
+----
+CREATE OR REPLACE SEMANTIC VIEW dcc_c098 AS
+TABLES (
+    o AS dcc_orders PRIMARY KEY (id)
+)
+DIMENSIONS (
+    o.store AS o.store,
+    o.date AS o.sale_date,
+    o.region AS o.region
+)
+METRICS (
+    o.total_qty AS SUM(o.qty),
+    o.avg_qty AS AVG(total_qty) OVER (PARTITION BY store ORDER BY date NULLS LAST)
+)
+
+query T nosort
+SELECT line FROM dcc_yaml('dcc_c098') WHERE line LIKE '    %' OR line LIKE '  window_spec:%' OR line LIKE '- name: %';
+----
+- name: store
+- name: date
+- name: region
+- name: total_qty
+- name: avg_qty
+  window_spec:
+    window_function: AVG
+    inner_metric: total_qty
+    partition_dims:
+    - store
+    order_by:
+    - expr: date
+
+# C-099: body_parser/mod.rs::parse_metrics_window_partition_by_multiple_dims — PARTITION BY store, region ORDER BY date DESC NULLS FIRST
+statement ok
+CREATE SEMANTIC VIEW dcc_c099 AS TABLES (o AS dcc_orders PRIMARY KEY (id)) DIMENSIONS (o.store AS o.store, o.date AS o.sale_date, o.region AS o.region) METRICS (o.total_qty AS SUM(o.qty), o.avg_qty AS AVG(total_qty) OVER (PARTITION BY store, region ORDER BY date DESC NULLS FIRST));
+
+query T nosort
+SELECT * FROM dcc_ddl('dcc_c099');
+----
+CREATE OR REPLACE SEMANTIC VIEW dcc_c099 AS
+TABLES (
+    o AS dcc_orders PRIMARY KEY (id)
+)
+DIMENSIONS (
+    o.store AS o.store,
+    o.date AS o.sale_date,
+    o.region AS o.region
+)
+METRICS (
+    o.total_qty AS SUM(o.qty),
+    o.avg_qty AS AVG(total_qty) OVER (PARTITION BY store, region ORDER BY date DESC NULLS FIRST)
+)
+
+query T nosort
+SELECT line FROM dcc_yaml('dcc_c099') WHERE line LIKE '    %' OR line LIKE '  window_spec:%' OR line LIKE '- name: %';
+----
+- name: store
+- name: date
+- name: region
+- name: total_qty
+- name: avg_qty
+  window_spec:
+    window_function: AVG
+    inner_metric: total_qty
+    partition_dims:
+    - store
+    - region
+    order_by:
+    - expr: date
+      order: Desc
+      nulls: First
+
+# C-100: body_parser/mod.rs::parse_metrics_window_partition_by_no_order — PARTITION BY store with no ORDER BY
+statement ok
+CREATE SEMANTIC VIEW dcc_c100 AS TABLES (o AS dcc_orders PRIMARY KEY (id)) DIMENSIONS (o.store AS o.store, o.date AS o.sale_date, o.region AS o.region) METRICS (o.total_qty AS SUM(o.qty), o.avg_qty AS AVG(total_qty) OVER (PARTITION BY store));
+
+query T nosort
+SELECT * FROM dcc_ddl('dcc_c100');
+----
+CREATE OR REPLACE SEMANTIC VIEW dcc_c100 AS
+TABLES (
+    o AS dcc_orders PRIMARY KEY (id)
+)
+DIMENSIONS (
+    o.store AS o.store,
+    o.date AS o.sale_date,
+    o.region AS o.region
+)
+METRICS (
+    o.total_qty AS SUM(o.qty),
+    o.avg_qty AS AVG(total_qty) OVER (PARTITION BY store)
+)
+
+query T nosort
+SELECT line FROM dcc_yaml('dcc_c100') WHERE line LIKE '    %' OR line LIKE '  window_spec:%' OR line LIKE '- name: %';
+----
+- name: store
+- name: date
+- name: region
+- name: total_qty
+- name: avg_qty
+  window_spec:
+    window_function: AVG
+    inner_metric: total_qty
+    partition_dims:
+    - store
+
+# C-101: body_parser/mod.rs::parse_keyword_body_window_partition_by_invalid_dim_error — near miss of C-098: an undeclared PARTITION BY dimension is rejected, naming it
+statement error
+CREATE SEMANTIC VIEW dcc_c101 AS TABLES (o AS dcc_orders PRIMARY KEY (id)) DIMENSIONS (o.store AS o.store, o.date AS o.sale_date, o.region AS o.region) METRICS (o.total_qty AS SUM(o.qty), o.avg_qty AS AVG(total_qty) OVER (PARTITION BY nonexistent ORDER BY date));
+----
+PARTITION BY dimension 'nonexistent'
+
+# --- MATERIALIZATIONS clause ---
+
+# A materialization's TABLE is not resolved at CREATE, so the aggregate tables
+# need not exist.
+
+# C-102: body_parser/mod.rs::parse_materializations_clause_single_entry, body_parser/mod.rs::parse_keyword_body_with_materializations — one materialization: name daily_rev, TABLE daily_revenue_agg, DIMENSIONS (region), METRICS (revenue, order_count)
+statement ok
+CREATE SEMANTIC VIEW dcc_c102 AS TABLES (o AS dcc_orders PRIMARY KEY (id)) DIMENSIONS (o.region AS o.region, o.date_dim AS o.created_at) METRICS (o.revenue AS SUM(o.amount), o.order_count AS COUNT(*)) MATERIALIZATIONS (
+  daily_rev AS (
+    TABLE daily_revenue_agg,
+    DIMENSIONS (region),
+    METRICS (revenue, order_count)
+  )
+);
+
+query T nosort
+SELECT * FROM dcc_ddl('dcc_c102');
+----
+CREATE OR REPLACE SEMANTIC VIEW dcc_c102 AS
+TABLES (
+    o AS dcc_orders PRIMARY KEY (id)
+)
+DIMENSIONS (
+    o.region AS o.region,
+    o.date_dim AS o.created_at
+)
+METRICS (
+    o.revenue AS SUM(o.amount),
+    o.order_count AS COUNT(*)
+)
+MATERIALIZATIONS (
+    daily_rev AS (
+        TABLE daily_revenue_agg,
+        DIMENSIONS (region),
+        METRICS (revenue, order_count)
+    )
+)
+
+query TTTT rowsort
+SELECT name, "table", dimensions, metrics FROM show_semantic_materializations('dcc_c102');
+----
+daily_rev	daily_revenue_agg	["region"]	["revenue","order_count"]
+
+# C-103: body_parser/mod.rs::parse_materializations_clause_multiple_entries — two materializations, in order, each with its own table and lists
+statement ok
+CREATE SEMANTIC VIEW dcc_c103 AS TABLES (o AS dcc_orders PRIMARY KEY (id)) DIMENSIONS (o.region AS o.region, o.date_dim AS o.created_at) METRICS (o.revenue AS SUM(o.amount), o.order_count AS COUNT(*)) MATERIALIZATIONS (
+  daily_rev AS (
+    TABLE daily_agg,
+    DIMENSIONS (region),
+    METRICS (revenue)
+  ),
+  monthly_rev AS (
+    TABLE monthly_agg,
+    DIMENSIONS (region),
+    METRICS (revenue, order_count)
+  )
+);
+
+query TTTT rowsort
+SELECT name, "table", dimensions, metrics FROM show_semantic_materializations('dcc_c103');
+----
+daily_rev	daily_agg	["region"]	["revenue"]
+monthly_rev	monthly_agg	["region"]	["revenue","order_count"]
+
+# C-104: body_parser/mod.rs::parse_materializations_clause_dimensions_only — DIMENSIONS only (no METRICS sub-clause)
+statement ok
+CREATE SEMANTIC VIEW dcc_c104 AS TABLES (o AS dcc_orders PRIMARY KEY (id)) DIMENSIONS (o.region AS o.region, o.date_dim AS o.created_at) METRICS (o.revenue AS SUM(o.amount), o.order_count AS COUNT(*)) MATERIALIZATIONS (dims_only AS (TABLE t1, DIMENSIONS (region, date_dim)));
+
+query TTTT rowsort
+SELECT name, "table", dimensions, metrics FROM show_semantic_materializations('dcc_c104');
+----
+dims_only	t1	["region","date_dim"]	[]
+
+# C-105: body_parser/mod.rs::parse_materializations_clause_metrics_only — METRICS only (no DIMENSIONS sub-clause)
+statement ok
+CREATE SEMANTIC VIEW dcc_c105 AS TABLES (o AS dcc_orders PRIMARY KEY (id)) DIMENSIONS (o.region AS o.region, o.date_dim AS o.created_at) METRICS (o.revenue AS SUM(o.amount), o.order_count AS COUNT(*)) MATERIALIZATIONS (mets_only AS (TABLE t2, METRICS (revenue)));
+
+query TTTT rowsort
+SELECT name, "table", dimensions, metrics FROM show_semantic_materializations('dcc_c105');
+----
+mets_only	t2	[]	["revenue"]
+
+# C-106: body_parser/mod.rs::parse_materializations_clause_rejects_empty — near miss of C-104: a materialization with only TABLE (neither DIMENSIONS nor METRICS) is rejected
+statement error
+CREATE SEMANTIC VIEW dcc_c106 AS TABLES (o AS dcc_orders PRIMARY KEY (id)) DIMENSIONS (o.region AS o.region, o.date_dim AS o.created_at) METRICS (o.revenue AS SUM(o.amount), o.order_count AS COUNT(*)) MATERIALIZATIONS (empty_mat AS (TABLE t1));
+----
+must specify at least one of DIMENSIONS or METRICS
+
+# C-107: body_parser/mod.rs::parse_materializations_junk_before_first_subclause_rejected — near miss of C-104: junk before the first sub-clause is rejected [syntax]
+statement error
+CREATE SEMANTIC VIEW dcc_c107 AS TABLES (o AS dcc_orders PRIMARY KEY (id)) DIMENSIONS (o.region AS o.region, o.date_dim AS o.created_at) METRICS (o.revenue AS SUM(o.amount), o.order_count AS COUNT(*)) MATERIALIZATIONS (dims_only AS (junk TABLE t1, DIMENSIONS (region, date_dim)));
+----
+
+# C-108: body_parser/mod.rs::parse_materializations_duplicate_table_rejected — near miss of C-104: a duplicate TABLE sub-clause is rejected (not last-wins) [syntax]
+statement error
+CREATE SEMANTIC VIEW dcc_c108 AS TABLES (o AS dcc_orders PRIMARY KEY (id)) DIMENSIONS (o.region AS o.region, o.date_dim AS o.created_at) METRICS (o.revenue AS SUM(o.amount), o.order_count AS COUNT(*)) MATERIALIZATIONS (dims_only AS (TABLE t1, TABLE u, DIMENSIONS (region, date_dim)));
+----
+
+# C-109: body_parser/mod.rs::parse_materializations_duplicate_dimensions_rejected — near miss of C-104: a duplicate DIMENSIONS sub-clause is rejected (not last-wins) [syntax]
+statement error
+CREATE SEMANTIC VIEW dcc_c109 AS TABLES (o AS dcc_orders PRIMARY KEY (id)) DIMENSIONS (o.region AS o.region, o.date_dim AS o.created_at) METRICS (o.revenue AS SUM(o.amount), o.order_count AS COUNT(*)) MATERIALIZATIONS (dims_only AS (TABLE t1, DIMENSIONS (region), DIMENSIONS (date_dim)));
+----
+
+# C-110: body_parser/mod.rs::parse_materializations_junk_after_list_rejected — near miss of C-104: junk after a sub-clause list is rejected [syntax]
+statement error
+CREATE SEMANTIC VIEW dcc_c110 AS TABLES (o AS dcc_orders PRIMARY KEY (id)) DIMENSIONS (o.region AS o.region, o.date_dim AS o.created_at) METRICS (o.revenue AS SUM(o.amount), o.order_count AS COUNT(*)) MATERIALIZATIONS (dims_only AS (TABLE t1, DIMENSIONS (region, date_dim) junk));
+----
+
+# C-111: body_parser/mod.rs::parse_keyword_body_materializations_before_metrics_rejected — near miss of C-104: MATERIALIZATIONS written before METRICS is rejected as out of order [syntax]
+statement error
+CREATE SEMANTIC VIEW dcc_c111 AS TABLES (o AS dcc_orders PRIMARY KEY (id)) DIMENSIONS (o.region AS o.region, o.date_dim AS o.created_at) MATERIALIZATIONS (dims_only AS (TABLE t1, DIMENSIONS (region, date_dim))) METRICS (o.revenue AS SUM(o.amount), o.order_count AS COUNT(*));
+----
+
+# C-112: body_parser/mod.rs::parse_keyword_body_materialization_bad_dim_ref — near miss of C-102: an undeclared materialization dimension is rejected, naming it
+statement error
+CREATE SEMANTIC VIEW dcc_c112 AS TABLES (o AS dcc_orders PRIMARY KEY (id)) DIMENSIONS (o.region AS o.region, o.date_dim AS o.created_at) METRICS (o.revenue AS SUM(o.amount), o.order_count AS COUNT(*)) MATERIALIZATIONS (daily_rev AS (TABLE daily_revenue_agg, DIMENSIONS (nonexistent_dim), METRICS (revenue, order_count)));
+----
+dimension 'nonexistent_dim' not found
+
+# C-113: body_parser/mod.rs::parse_keyword_body_materialization_bad_dim_ref_with_suggestion — near miss of C-102: a misspelt materialization dimension `regin` is rejected with a suggestion of `region`
+statement error
+CREATE SEMANTIC VIEW dcc_c113 AS TABLES (o AS dcc_orders PRIMARY KEY (id)) DIMENSIONS (o.region AS o.region, o.date_dim AS o.created_at) METRICS (o.revenue AS SUM(o.amount), o.order_count AS COUNT(*)) MATERIALIZATIONS (daily_rev AS (TABLE daily_revenue_agg, DIMENSIONS (regin), METRICS (revenue, order_count)));
+----
+dimension 'regin' not found in semantic view dimensions. Did you mean 'region'?
+
+# C-114: body_parser/mod.rs::parse_keyword_body_materialization_bad_metric_ref — near miss of C-102: an undeclared materialization metric is rejected, naming it
+statement error
+CREATE SEMANTIC VIEW dcc_c114 AS TABLES (o AS dcc_orders PRIMARY KEY (id)) DIMENSIONS (o.region AS o.region, o.date_dim AS o.created_at) METRICS (o.revenue AS SUM(o.amount), o.order_count AS COUNT(*)) MATERIALIZATIONS (daily_rev AS (TABLE daily_revenue_agg, DIMENSIONS (region), METRICS (nonexistent_metric)));
+----
+metric 'nonexistent_metric' not found
+
+# C-115: body_parser/mod.rs::parse_keyword_body_materialization_duplicate_name — near miss of C-103: two materializations with the same name are rejected
+statement error
+CREATE SEMANTIC VIEW dcc_c115 AS TABLES (o AS dcc_orders PRIMARY KEY (id)) DIMENSIONS (o.region AS o.region, o.date_dim AS o.created_at) METRICS (o.revenue AS SUM(o.amount), o.order_count AS COUNT(*)) MATERIALIZATIONS (same_name AS (TABLE t1, DIMENSIONS (region)), same_name AS (TABLE t2, METRICS (revenue)));
+----
+Duplicate materialization name 'same_name'
+
+# C-116: body_parser/mod.rs::parse_materializations_qualified_table_name — a three-part TABLE name catalog.schema.daily_revenue_agg is stored whole
+statement ok
+CREATE SEMANTIC VIEW dcc_c116 AS TABLES (o AS dcc_orders PRIMARY KEY (id)) DIMENSIONS (o.region AS o.region, o.date_dim AS o.created_at) METRICS (o.revenue AS SUM(o.amount), o.order_count AS COUNT(*)) MATERIALIZATIONS (qual_mat AS (TABLE catalog.schema.daily_revenue_agg, DIMENSIONS (region), METRICS (revenue)));
+
+query TTTT rowsort
+SELECT name, "table", dimensions, metrics FROM show_semantic_materializations('dcc_c116');
+----
+qual_mat	catalog.schema.daily_revenue_agg	["region"]	["revenue"]
+
+# C-117: body_parser/mod.rs::parse_keyword_body_materialization_quoted_dimension_accepted — a materialization dimension written "Region" resolves to the region dimension; stored as written [text]
+statement ok
+CREATE SEMANTIC VIEW dcc_c117 AS TABLES (o AS dcc_orders PRIMARY KEY (id)) DIMENSIONS (o.region AS o.region) METRICS (o.total_qty AS SUM(o.qty)) MATERIALIZATIONS (m AS (TABLE mt, DIMENSIONS ("Region"), METRICS (total_qty)));
+
+query TTTT rowsort
+SELECT name, "table", dimensions, metrics FROM show_semantic_materializations('dcc_c117');
+----
+m	mt	["\"Region\""]	["total_qty"]
+
+# C-118: body_parser/mod.rs::parse_keyword_body_materialization_quoted_metric_accepted — a materialization metric written "Total_Qty" resolves to the total_qty metric; stored as written [text]
+statement ok
+CREATE SEMANTIC VIEW dcc_c118 AS TABLES (o AS dcc_orders PRIMARY KEY (id)) DIMENSIONS (o.region AS o.region) METRICS (o.total_qty AS SUM(o.qty)) MATERIALIZATIONS (m AS (TABLE mt, DIMENSIONS (region), METRICS ("Total_Qty")));
+
+query TTTT rowsort
+SELECT name, "table", dimensions, metrics FROM show_semantic_materializations('dcc_c118');
+----
+m	mt	["region"]	["\"Total_Qty\""]
+
+# C-119: body_parser/mod.rs::parse_keyword_body_quoted_unknown_names_still_rejected_at_every_site — near miss of C-117: materialization dimension "nope" is rejected (not found)
+statement error
+CREATE SEMANTIC VIEW dcc_c119 AS TABLES (o AS dcc_orders PRIMARY KEY (id)) DIMENSIONS (o.region AS o.region) METRICS (o.total_qty AS SUM(o.qty)) MATERIALIZATIONS (m AS (TABLE mt, DIMENSIONS ("nope"), METRICS (total_qty)));
+----
+not found
+
+# C-120: body_parser/mod.rs::parse_keyword_body_quoted_unknown_names_still_rejected_at_every_site — near miss of C-118: materialization metric "nope" is rejected (not found)
+statement error
+CREATE SEMANTIC VIEW dcc_c120 AS TABLES (o AS dcc_orders PRIMARY KEY (id)) DIMENSIONS (o.region AS o.region) METRICS (o.total_qty AS SUM(o.qty)) MATERIALIZATIONS (m AS (TABLE mt, DIMENSIONS (region), METRICS ("nope")));
+----
+not found
+
+# C-121: body_parser/cursor.rs::find_all_kw_depth0_tiles_and_ignores_nested_and_quoted — sub-clause keywords are found only at depth 0: a dimension NAMED `metrics` and one named "TABLE" inside DIMENSIONS (...) are names, not sub-clauses [text]
+statement ok
+CREATE SEMANTIC VIEW dcc_c121 AS TABLES (o AS dcc_orders PRIMARY KEY (id)) DIMENSIONS (o.metrics AS o.region, o."TABLE" AS o.store) METRICS (o.total AS SUM(o.amount)) MATERIALIZATIONS (m AS (TABLE t, DIMENSIONS (metrics, "TABLE"), METRICS (total)));
+
+query TTTT rowsort
+SELECT name, "table", dimensions, metrics FROM show_semantic_materializations('dcc_c121');
+----
+m	t	["metrics","\"TABLE\""]	["total"]
+
+# --- F-7: the TABLES alias is optional ---
+
+# C-122: body_parser/mod.rs::f7_tables_bare_name_defaults_alias — a bare table name defaults the alias to the table name
+statement ok
+CREATE SEMANTIC VIEW dcc_c122 AS TABLES (dcc_orders PRIMARY KEY (id)) DIMENSIONS (dcc_orders.region AS dcc_orders.region);
+
+query T nosort
+SELECT * FROM dcc_ddl('dcc_c122');
+----
+CREATE OR REPLACE SEMANTIC VIEW dcc_c122 AS
+TABLES (
+    dcc_orders AS dcc_orders PRIMARY KEY (id)
+)
+DIMENSIONS (
+    dcc_orders.region AS dcc_orders.region
+)
+
+# C-123: body_parser/mod.rs::f7_tables_bare_name_no_constraint — a bare table name with no constraint at all
+statement ok
+CREATE SEMANTIC VIEW dcc_c123 AS TABLES (dcc_fact) DIMENSIONS (dcc_fact.x AS dcc_fact.x);
+
+query T nosort
+SELECT * FROM dcc_ddl('dcc_c123');
+----
+CREATE OR REPLACE SEMANTIC VIEW dcc_c123 AS
+TABLES (
+    dcc_fact AS dcc_fact
+)
+DIMENSIONS (
+    dcc_fact.x AS dcc_fact.x
+)
+
+# C-124: body_parser/mod.rs::f7_tables_quoted_bare_name, body_parser/lexer.rs::quoted_ident_keeps_quotes_and_inner_bytes — a quoted bare name "dcc my orders" is captured whole (quotes kept) and defaults the alias [text]
+statement ok
+CREATE SEMANTIC VIEW dcc_c124 AS TABLES ("dcc my orders" PRIMARY KEY (id)) DIMENSIONS ("dcc my orders".region AS "dcc my orders".region);
+
+query T nosort
+SELECT * FROM dcc_ddl('dcc_c124');
+----
+CREATE OR REPLACE SEMANTIC VIEW dcc_c124 AS
+TABLES (
+    "dcc my orders" AS "dcc my orders" PRIMARY KEY (id)
+)
+DIMENSIONS (
+    "dcc my orders".region AS "dcc my orders".region
+)
+
+# C-125: body_parser/mod.rs::f7_alias_less_qualified_name_uses_last_component — alias-less `main.dcc_orders` defaults the alias to the LAST component; the table keeps the qualified form
+statement ok
+CREATE SEMANTIC VIEW dcc_c125 AS TABLES (main.dcc_orders PRIMARY KEY (id)) DIMENSIONS (dcc_orders.region AS dcc_orders.region);
+
+query T nosort
+SELECT * FROM dcc_ddl('dcc_c125');
+----
+CREATE OR REPLACE SEMANTIC VIEW dcc_c125 AS
+TABLES (
+    dcc_orders AS main.dcc_orders PRIMARY KEY (id)
+)
+DIMENSIONS (
+    dcc_orders.region AS dcc_orders.region
+)
+
+# C-126: body_parser/mod.rs::f7_alias_less_qualified_name_uses_last_component — alias-less `main."dcc my orders"`: the quoted last component (quotes kept) is the alias [text]
+statement ok
+CREATE SEMANTIC VIEW dcc_c126 AS TABLES (main."dcc my orders" PRIMARY KEY (id)) DIMENSIONS ("dcc my orders".region AS "dcc my orders".region);
+
+query T nosort
+SELECT * FROM dcc_ddl('dcc_c126');
+----
+CREATE OR REPLACE SEMANTIC VIEW dcc_c126 AS
+TABLES (
+    "dcc my orders" AS main."dcc my orders" PRIMARY KEY (id)
+)
+DIMENSIONS (
+    "dcc my orders".region AS "dcc my orders".region
+)
+
+# --- F-9 / F-11: a name slot is one non-empty identifier ---
+
+# C-127: body_parser/mod.rs::f9_quoted_name_with_space_still_valid — a quoted member name with a space ("order date") is ONE identifier; also the accepted base for C-128..C-133 [text]
+statement ok
+CREATE SEMANTIC VIEW dcc_c127 AS TABLES (o AS dcc_orders PRIMARY KEY (id), c AS dcc_customers PRIMARY KEY (id)) RELATIONSHIPS (foo AS o(cust_id) REFERENCES c) DIMENSIONS (o."order date" AS o.created_at, o.d AS o.region) METRICS (o.revenue AS SUM(o.amount), total AS revenue + 1);
+
+query T nosort
+SELECT * FROM dcc_ddl('dcc_c127');
+----
+CREATE OR REPLACE SEMANTIC VIEW dcc_c127 AS
+TABLES (
+    o AS dcc_orders PRIMARY KEY (id),
+    c AS dcc_customers PRIMARY KEY (id)
+)
+RELATIONSHIPS (
+    foo AS o(cust_id) REFERENCES c
+)
+DIMENSIONS (
+    o."order date" AS o.created_at,
+    o.d AS o.region
+)
+METRICS (
+    o.revenue AS SUM(o.amount),
+    total AS revenue + 1
+)
+
+# C-128: body_parser/mod.rs::f9_dimension_multi_token_name_rejected — near miss of C-127: dimension name `d junk` is two tokens [syntax]
+statement error
+CREATE SEMANTIC VIEW dcc_c128 AS TABLES (o AS dcc_orders PRIMARY KEY (id), c AS dcc_customers PRIMARY KEY (id)) RELATIONSHIPS (foo AS o(cust_id) REFERENCES c) DIMENSIONS (o."order date" AS o.created_at, o.d junk AS o.region) METRICS (o.revenue AS SUM(o.amount), total AS revenue + 1);
+----
+
+# C-129: body_parser/mod.rs::f9_metric_multi_token_name_rejected — near miss of C-127: metric name `revenue junk` is two tokens [syntax]
+statement error
+CREATE SEMANTIC VIEW dcc_c129 AS TABLES (o AS dcc_orders PRIMARY KEY (id), c AS dcc_customers PRIMARY KEY (id)) RELATIONSHIPS (foo AS o(cust_id) REFERENCES c) DIMENSIONS (o."order date" AS o.created_at, o.d AS o.region) METRICS (o.revenue junk AS SUM(o.amount), total AS revenue + 1);
+----
+
+# C-130: body_parser/mod.rs::f9_derived_metric_multi_token_name_rejected — near miss of C-127: derived metric name `total junk` is two tokens [syntax]
+statement error
+CREATE SEMANTIC VIEW dcc_c130 AS TABLES (o AS dcc_orders PRIMARY KEY (id), c AS dcc_customers PRIMARY KEY (id)) RELATIONSHIPS (foo AS o(cust_id) REFERENCES c) DIMENSIONS (o."order date" AS o.created_at, o.d AS o.region) METRICS (o.revenue AS SUM(o.amount), total junk AS revenue + 1);
+----
+
+# C-131: body_parser/mod.rs::f9_relationship_multi_token_name_rejected — near miss of C-127: relationship name `foo bar` is two tokens [syntax]
+statement error
+CREATE SEMANTIC VIEW dcc_c131 AS TABLES (o AS dcc_orders PRIMARY KEY (id), c AS dcc_customers PRIMARY KEY (id)) RELATIONSHIPS (foo bar AS o(cust_id) REFERENCES c) DIMENSIONS (o."order date" AS o.created_at, o.d AS o.region) METRICS (o.revenue AS SUM(o.amount), total AS revenue + 1);
+----
+
+# C-132: body_parser/mod.rs::f11_empty_quoted_table_alias_rejected — near miss of C-127: an empty quoted identifier `""` as a TABLES alias is rejected
+# Today the rejection comes from DuckDB's own tokenizer (zero-length delimited
+# identifier) before the extension's F-11 check is reached. The empty alias is
+# the customers table's, and RELATIONSHIPS refers to it as `""`, so with `""`
+# accepted the statement would succeed: renaming that alias to `cc` does.
+statement error
+CREATE SEMANTIC VIEW dcc_c132 AS TABLES (o AS dcc_orders PRIMARY KEY (id), "" AS dcc_customers PRIMARY KEY (id)) RELATIONSHIPS (foo AS o(cust_id) REFERENCES "") DIMENSIONS (o."order date" AS o.created_at, o.d AS o.region) METRICS (o.revenue AS SUM(o.amount), total AS revenue + 1);
+----
+zero-length delimited identifier
+
+# C-133: body_parser/mod.rs::f11_empty_quoted_dimension_alias_rejected — near miss of C-127: an empty quoted identifier `""` as a dimension qualifier is rejected
+# The message is pinned: an accepted `""` would fail too, as an unknown alias.
+statement error
+CREATE SEMANTIC VIEW dcc_c133 AS TABLES (o AS dcc_orders PRIMARY KEY (id), c AS dcc_customers PRIMARY KEY (id)) RELATIONSHIPS (foo AS o(cust_id) REFERENCES c) DIMENSIONS (o."order date" AS o.created_at, "".d AS o.region) METRICS (o.revenue AS SUM(o.amount), total AS revenue + 1);
+----
+zero-length delimited identifier
+
+# --- F-12: PUBLIC on dimensions; `=` optional in WITH SYNONYMS ---
+
+# C-134: body_parser/mod.rs::f12_public_on_dimension_accepted — `PUBLIC o.region` is accepted on a DIMENSION (and not rendered: PUBLIC is the default)
+statement ok
+CREATE SEMANTIC VIEW dcc_c134 AS TABLES (o AS dcc_orders PRIMARY KEY (id)) DIMENSIONS (PUBLIC o.region AS o.region);
+
+query T nosort
+SELECT * FROM dcc_ddl('dcc_c134');
+----
+CREATE OR REPLACE SEMANTIC VIEW dcc_c134 AS
+TABLES (
+    o AS dcc_orders PRIMARY KEY (id)
+)
+DIMENSIONS (
+    o.region AS o.region
+)
+
+# C-135: body_parser/mod.rs::f12_with_synonyms_without_equals_accepted — `WITH SYNONYMS ('territory', 'area')` without `=` (Snowflake form); GET_DDL renders it with `=`
+statement ok
+CREATE SEMANTIC VIEW dcc_c135 AS TABLES (o AS dcc_orders PRIMARY KEY (id)) DIMENSIONS (o.region AS o.region) METRICS (o.rev AS SUM(o.amount) WITH SYNONYMS ('territory', 'area'));
+
+query T nosort
+SELECT * FROM dcc_ddl('dcc_c135');
+----
+CREATE OR REPLACE SEMANTIC VIEW dcc_c135 AS
+TABLES (
+    o AS dcc_orders PRIMARY KEY (id)
+)
+DIMENSIONS (
+    o.region AS o.region
+)
+METRICS (
+    o.rev AS SUM(o.amount) WITH SYNONYMS = ('territory', 'area')
+)
+
+query TTTT rowsort
+SELECT object_kind, object_name, property, property_value FROM describe_semantic_view('dcc_c135') WHERE property IN ('EXPRESSION', 'SYNONYMS') AND object_kind = 'METRIC';
+----
+METRIC	rev	EXPRESSION	SUM(o.amount)
+METRIC	rev	SYNONYMS	["territory","area"]
+
+# --- F-14: the qualifier dot is the one before the entry AS ---
+
+# C-136: body_parser/mod.rs::f14_qualified_entry_with_dotted_expression_still_parses — `o.region AS upper(o.region)`: qualifier o, name region, expr upper(o.region)
+statement ok
+CREATE SEMANTIC VIEW dcc_c136 AS TABLES (o AS dcc_orders PRIMARY KEY (id)) DIMENSIONS (o.region AS upper(o.region));
+
+query T nosort
+SELECT * FROM dcc_ddl('dcc_c136');
+----
+CREATE OR REPLACE SEMANTIC VIEW dcc_c136 AS
+TABLES (
+    o AS dcc_orders PRIMARY KEY (id)
+)
+DIMENSIONS (
+    o.region AS upper(o.region)
+)
+
+# C-137: body_parser/mod.rs::f14_unqualified_name_reports_qualifier_not_missing_as — near miss of C-136: `region AS upper(o.region)` is rejected as an unqualified entry (the dot in the expression is not the qualifier) [syntax]
+statement error
+CREATE SEMANTIC VIEW dcc_c137 AS TABLES (o AS dcc_orders PRIMARY KEY (id)) DIMENSIONS (region AS upper(o.region));
+----
+
+# --- F-6: trailing view-level COMMENT ---
+
+# C-138: body_parser/mod.rs::f6_trailing_view_comment_extracted — a trailing `COMMENT = 'My view'` after the last clause is the view comment; clauses intact
+statement ok
+CREATE SEMANTIC VIEW dcc_c138 AS TABLES (o AS dcc_orders PRIMARY KEY (id)) DIMENSIONS (o.region AS o.region) METRICS (o.rev AS SUM(o.amount)) COMMENT = 'My view';
+
+query T nosort
+SELECT * FROM dcc_ddl('dcc_c138');
+----
+CREATE OR REPLACE SEMANTIC VIEW dcc_c138 COMMENT = 'My view' AS
+TABLES (
+    o AS dcc_orders PRIMARY KEY (id)
+)
+DIMENSIONS (
+    o.region AS o.region
+)
+METRICS (
+    o.rev AS SUM(o.amount)
+)
+
+query T nosort
+SELECT comment FROM list_semantic_views() WHERE name = 'dcc_c138';
+----
+My view
+
+# C-139: body_parser/mod.rs::f6_entry_level_comment_not_mistaken_for_view_comment — a COMMENT on the last metric (inside the clause) is the metric comment, not the view comment
+statement ok
+CREATE SEMANTIC VIEW dcc_c139 AS TABLES (o AS dcc_orders PRIMARY KEY (id)) METRICS (o.rev AS SUM(o.amount) COMMENT = 'metric note');
+
+query T nosort
+SELECT * FROM dcc_ddl('dcc_c139');
+----
+CREATE OR REPLACE SEMANTIC VIEW dcc_c139 AS
+TABLES (
+    o AS dcc_orders PRIMARY KEY (id)
+)
+METRICS (
+    o.rev AS SUM(o.amount) COMMENT = 'metric note'
+)
+
+query T nosort
+SELECT comment FROM list_semantic_views() WHERE name = 'dcc_c139';
+----
+(empty)
+
+# C-140: body_parser/mod.rs::f6_view_level_synonyms_rejected — near miss of C-138: WITH SYNONYMS after the view-level COMMENT is rejected [syntax]
+statement error
+CREATE SEMANTIC VIEW dcc_c140 AS TABLES (o AS dcc_orders PRIMARY KEY (id)) DIMENSIONS (o.region AS o.region) METRICS (o.rev AS SUM(o.amount)) COMMENT = 'My view' WITH SYNONYMS = ('v');
+----
+
+# --- LABELS = (FILTER) annotation (annotations.rs) ---
+
+# C-141: body_parser/annotations.rs::labels_filter_sets_the_flag_and_is_stripped_from_the_expression, body_parser/annotations.rs::absent_labels_leaves_the_flag_false — LABELS = (FILTER) marks the member a filter and is stripped from the stored expression; a member without it has no LABELS row
+statement ok
+CREATE SEMANTIC VIEW dcc_c141 AS TABLES (o AS dcc_orders PRIMARY KEY (id)) DIMENSIONS (o.is_big AS o.amount > 100 LABELS = (FILTER), o.big_plain AS o.amount > 100);
+
+query T nosort
+SELECT * FROM dcc_ddl('dcc_c141');
+----
+CREATE OR REPLACE SEMANTIC VIEW dcc_c141 AS
+TABLES (
+    o AS dcc_orders PRIMARY KEY (id)
+)
+DIMENSIONS (
+    o.is_big AS o.amount > 100 LABELS = (FILTER),
+    o.big_plain AS o.amount > 100
+)
+
+query TTTT rowsort
+SELECT object_kind, object_name, property, property_value FROM describe_semantic_view('dcc_c141') WHERE property IN ('EXPRESSION', 'LABELS');
+----
+DIMENSION	big_plain	EXPRESSION	o.amount > 100
+DIMENSION	is_big	EXPRESSION	o.amount > 100
+DIMENSION	is_big	LABELS	["FILTER"]
+
+# C-142: body_parser/annotations.rs::labels_is_case_insensitive_and_the_equals_is_optional — `labels = (filter)`, `LABELS (FILTER)` and `Labels(Filter)` all set the flag; GET_DDL renders the canonical form
+statement ok
+CREATE SEMANTIC VIEW dcc_c142 AS TABLES (o AS dcc_orders PRIMARY KEY (id)) DIMENSIONS (o.a AS o.amount > 1 LABELS = (FILTER), o.b AS o.amount > 2 labels = (filter), o.c AS o.amount > 3 LABELS (FILTER), o.d AS o.amount > 4 Labels(Filter));
+
+query T nosort
+SELECT * FROM dcc_ddl('dcc_c142');
+----
+CREATE OR REPLACE SEMANTIC VIEW dcc_c142 AS
+TABLES (
+    o AS dcc_orders PRIMARY KEY (id)
+)
+DIMENSIONS (
+    o.a AS o.amount > 1 LABELS = (FILTER),
+    o.b AS o.amount > 2 LABELS = (FILTER),
+    o.c AS o.amount > 3 LABELS = (FILTER),
+    o.d AS o.amount > 4 LABELS = (FILTER)
+)
+
+query TTTT rowsort
+SELECT object_kind, object_name, property, property_value FROM describe_semantic_view('dcc_c142') WHERE property = 'LABELS';
+----
+DIMENSION	a	LABELS	["FILTER"]
+DIMENSION	b	LABELS	["FILTER"]
+DIMENSION	c	LABELS	["FILTER"]
+DIMENSION	d	LABELS	["FILTER"]
+
+# C-143: body_parser/annotations.rs::labels_composes_with_comment_and_synonyms_in_any_order — LABELS composes with COMMENT and WITH SYNONYMS in any of three orders; each member stores all three
+statement ok
+CREATE SEMANTIC VIEW dcc_c143 AS TABLES (o AS dcc_orders PRIMARY KEY (id)) DIMENSIONS (o.a AS o.amount > 1 LABELS = (FILTER) COMMENT = 'c' WITH SYNONYMS = ('s'), o.b AS o.amount > 1 COMMENT = 'c' LABELS = (FILTER) WITH SYNONYMS = ('s'), o.e AS o.amount > 1 WITH SYNONYMS = ('s') COMMENT = 'c' LABELS = (FILTER));
+
+query T nosort
+SELECT * FROM dcc_ddl('dcc_c143');
+----
+CREATE OR REPLACE SEMANTIC VIEW dcc_c143 AS
+TABLES (
+    o AS dcc_orders PRIMARY KEY (id)
+)
+DIMENSIONS (
+    o.a AS o.amount > 1 COMMENT = 'c' WITH SYNONYMS = ('s') LABELS = (FILTER),
+    o.b AS o.amount > 1 COMMENT = 'c' WITH SYNONYMS = ('s') LABELS = (FILTER),
+    o.e AS o.amount > 1 COMMENT = 'c' WITH SYNONYMS = ('s') LABELS = (FILTER)
+)
+
+query TTTT rowsort
+SELECT object_kind, object_name, property, property_value FROM describe_semantic_view('dcc_c143') WHERE property IN ('EXPRESSION', 'COMMENT', 'SYNONYMS', 'LABELS');
+----
+DIMENSION	a	COMMENT	c
+DIMENSION	a	EXPRESSION	o.amount > 1
+DIMENSION	a	LABELS	["FILTER"]
+DIMENSION	a	SYNONYMS	["s"]
+DIMENSION	b	COMMENT	c
+DIMENSION	b	EXPRESSION	o.amount > 1
+DIMENSION	b	LABELS	["FILTER"]
+DIMENSION	b	SYNONYMS	["s"]
+DIMENSION	e	COMMENT	c
+DIMENSION	e	EXPRESSION	o.amount > 1
+DIMENSION	e	LABELS	["FILTER"]
+DIMENSION	e	SYNONYMS	["s"]
+
+# C-144: body_parser/annotations.rs::an_unsupported_label_is_rejected_rather_than_ignored — near miss of C-141: LABELS = (TAG) is rejected, not silently dropped
+statement error
+CREATE SEMANTIC VIEW dcc_c144 AS TABLES (o AS dcc_orders PRIMARY KEY (id)) DIMENSIONS (o.is_big AS o.amount > 100 LABELS = (TAG), o.big_plain AS o.amount > 100);
+----
+Unsupported label 'TAG'
+
+# C-145: body_parser/annotations.rs::an_empty_label_list_is_rejected — near miss of C-141: an empty LABELS = () list is rejected [syntax]
+statement error
+CREATE SEMANTIC VIEW dcc_c145 AS TABLES (o AS dcc_orders PRIMARY KEY (id)) DIMENSIONS (o.is_big AS o.amount > 100 LABELS = (), o.big_plain AS o.amount > 100);
+----
+
+# C-146: body_parser/annotations.rs::a_duplicate_labels_clause_is_rejected — near miss of C-141: a second LABELS annotation on one member is rejected [syntax]
+statement error
+CREATE SEMANTIC VIEW dcc_c146 AS TABLES (o AS dcc_orders PRIMARY KEY (id)) DIMENSIONS (o.is_big AS o.amount > 100 LABELS = (FILTER) LABELS = (FILTER), o.big_plain AS o.amount > 100);
+----
+
+# C-147: body_parser/annotations.rs::labels_as_a_quoted_column_name_is_not_an_annotation — a quoted column named "labels" stays part of the expression; no LABELS row [text]
+statement ok
+CREATE SEMANTIC VIEW dcc_c147 AS TABLES (o AS dcc_orders PRIMARY KEY (id)) DIMENSIONS (o.has_labels AS o."labels" IS NOT NULL);
+
+query T nosort
+SELECT * FROM dcc_ddl('dcc_c147');
+----
+CREATE OR REPLACE SEMANTIC VIEW dcc_c147 AS
+TABLES (
+    o AS dcc_orders PRIMARY KEY (id)
+)
+DIMENSIONS (
+    o.has_labels AS o."labels" IS NOT NULL
+)
+
+query TTTT rowsort
+SELECT object_kind, object_name, property, property_value FROM describe_semantic_view('dcc_c147') WHERE property = 'LABELS';
+----
+
+# --- clause scanner: unexpected characters and clause order (clause_bounds.rs) ---
+
+# C-148: body_parser/clause_bounds.rs::all_two_clause_order_inversions_rejected_with_caret, body_parser/cursor.rs::find_kw_pair_only_matches_adjacent_words — all six clauses in the canonical order (the accepted base for C-149..C-170)
+statement ok
+CREATE SEMANTIC VIEW dcc_c148 AS
+TABLES (o AS dcc_orders PRIMARY KEY (id), c AS dcc_customers PRIMARY KEY (id))
+RELATIONSHIPS (o_to_c AS o(cust_id) REFERENCES c)
+FACTS (o.net AS o.amount - o.cost)
+DIMENSIONS (o.region AS o.region)
+METRICS (o.rev AS SUM(o.amount))
+MATERIALIZATIONS (mat AS (TABLE dcc_mat, DIMENSIONS (region), METRICS (rev)));
+
+query T nosort
+SELECT * FROM dcc_ddl('dcc_c148');
+----
+CREATE OR REPLACE SEMANTIC VIEW dcc_c148 AS
+TABLES (
+    o AS dcc_orders PRIMARY KEY (id),
+    c AS dcc_customers PRIMARY KEY (id)
+)
+RELATIONSHIPS (
+    o_to_c AS o(cust_id) REFERENCES c
+)
+FACTS (
+    o.net AS o.amount - o.cost
+)
+DIMENSIONS (
+    o.region AS o.region
+)
+METRICS (
+    o.rev AS SUM(o.amount)
+)
+MATERIALIZATIONS (
+    mat AS (
+        TABLE dcc_mat,
+        DIMENSIONS (region),
+        METRICS (rev)
+    )
+)
+
+# C-149: body_parser/clause_bounds.rs::unexpected_multibyte_char_reported_verbatim — near miss of C-148: a multibyte character (★) where a clause keyword is expected is rejected [syntax]
+# The Rust test pins that the message shows the real character, not a UTF-8
+# lead byte; that is error wording, which this corpus does not pin for syntax
+# errors (rule 4).
+statement error
+CREATE SEMANTIC VIEW dcc_c149 AS
+★ TABLES (o AS dcc_orders PRIMARY KEY (id), c AS dcc_customers PRIMARY KEY (id))
+RELATIONSHIPS (o_to_c AS o(cust_id) REFERENCES c)
+FACTS (o.net AS o.amount - o.cost)
+DIMENSIONS (o.region AS o.region)
+METRICS (o.rev AS SUM(o.amount))
+MATERIALIZATIONS (mat AS (TABLE dcc_mat, DIMENSIONS (region), METRICS (rev)));
+----
+
+# C-150: body_parser/clause_bounds.rs::expected_paren_multibyte_char_reported_verbatim — near miss of C-148: a multibyte character where the TABLES `(` is expected is rejected [syntax]
+statement error
+CREATE SEMANTIC VIEW dcc_c150 AS
+TABLES ★ (o AS dcc_orders PRIMARY KEY (id), c AS dcc_customers PRIMARY KEY (id))
+RELATIONSHIPS (o_to_c AS o(cust_id) REFERENCES c)
+FACTS (o.net AS o.amount - o.cost)
+DIMENSIONS (o.region AS o.region)
+METRICS (o.rev AS SUM(o.amount))
+MATERIALIZATIONS (mat AS (TABLE dcc_mat, DIMENSIONS (region), METRICS (rev)));
+----
+
+# C-151: body_parser/clause_bounds.rs::unexpected_ascii_char_reported, body_parser/clause_bounds.rs::keyword_list_errors_include_materializations — near miss of C-148: an ASCII `#` before a clause keyword is rejected (kept mid-line: the runner treats a line starting with # as a comment) [syntax]
+statement error
+CREATE SEMANTIC VIEW dcc_c151 AS
+TABLES (o AS dcc_orders PRIMARY KEY (id), c AS dcc_customers PRIMARY KEY (id)) # RELATIONSHIPS (o_to_c AS o(cust_id) REFERENCES c)
+FACTS (o.net AS o.amount - o.cost)
+DIMENSIONS (o.region AS o.region)
+METRICS (o.rev AS SUM(o.amount))
+MATERIALIZATIONS (mat AS (TABLE dcc_mat, DIMENSIONS (region), METRICS (rev)));
+----
+
+# C-152: body_parser/clause_bounds.rs::keyword_list_errors_include_materializations — near miss of C-148: an unknown clause keyword ZZZQQQ (no close spelling) is rejected [syntax]
+statement error
+CREATE SEMANTIC VIEW dcc_c152 AS
+TABLES (o AS dcc_orders PRIMARY KEY (id), c AS dcc_customers PRIMARY KEY (id))
+ZZZQQQ (x)
+RELATIONSHIPS (o_to_c AS o(cust_id) REFERENCES c)
+FACTS (o.net AS o.amount - o.cost)
+DIMENSIONS (o.region AS o.region)
+METRICS (o.rev AS SUM(o.amount))
+MATERIALIZATIONS (mat AS (TABLE dcc_mat, DIMENSIONS (region), METRICS (rev)));
+----
+
+# T-7: every 2-clause inversion (a clause written before one that must precede
+# it) is rejected as out of order. Each row swaps exactly one pair of C-148's
+# clauses.
+
+# C-153: body_parser/clause_bounds.rs::all_two_clause_order_inversions_rejected_with_caret — near miss of C-148: RELATIONSHIPS written before TABLES [syntax]
+statement error
+CREATE SEMANTIC VIEW dcc_c153 AS
+RELATIONSHIPS (o_to_c AS o(cust_id) REFERENCES c)
+TABLES (o AS dcc_orders PRIMARY KEY (id), c AS dcc_customers PRIMARY KEY (id))
+FACTS (o.net AS o.amount - o.cost)
+DIMENSIONS (o.region AS o.region)
+METRICS (o.rev AS SUM(o.amount))
+MATERIALIZATIONS (mat AS (TABLE dcc_mat, DIMENSIONS (region), METRICS (rev)));
+----
+
+# C-154: body_parser/clause_bounds.rs::all_two_clause_order_inversions_rejected_with_caret — near miss of C-148: FACTS written before TABLES [syntax]
+statement error
+CREATE SEMANTIC VIEW dcc_c154 AS
+FACTS (o.net AS o.amount - o.cost)
+RELATIONSHIPS (o_to_c AS o(cust_id) REFERENCES c)
+TABLES (o AS dcc_orders PRIMARY KEY (id), c AS dcc_customers PRIMARY KEY (id))
+DIMENSIONS (o.region AS o.region)
+METRICS (o.rev AS SUM(o.amount))
+MATERIALIZATIONS (mat AS (TABLE dcc_mat, DIMENSIONS (region), METRICS (rev)));
+----
+
+# C-155: body_parser/clause_bounds.rs::all_two_clause_order_inversions_rejected_with_caret — near miss of C-148: DIMENSIONS written before TABLES [syntax]
+statement error
+CREATE SEMANTIC VIEW dcc_c155 AS
+DIMENSIONS (o.region AS o.region)
+RELATIONSHIPS (o_to_c AS o(cust_id) REFERENCES c)
+FACTS (o.net AS o.amount - o.cost)
+TABLES (o AS dcc_orders PRIMARY KEY (id), c AS dcc_customers PRIMARY KEY (id))
+METRICS (o.rev AS SUM(o.amount))
+MATERIALIZATIONS (mat AS (TABLE dcc_mat, DIMENSIONS (region), METRICS (rev)));
+----
+
+# C-156: body_parser/clause_bounds.rs::all_two_clause_order_inversions_rejected_with_caret — near miss of C-148: METRICS written before TABLES [syntax]
+statement error
+CREATE SEMANTIC VIEW dcc_c156 AS
+METRICS (o.rev AS SUM(o.amount))
+RELATIONSHIPS (o_to_c AS o(cust_id) REFERENCES c)
+FACTS (o.net AS o.amount - o.cost)
+DIMENSIONS (o.region AS o.region)
+TABLES (o AS dcc_orders PRIMARY KEY (id), c AS dcc_customers PRIMARY KEY (id))
+MATERIALIZATIONS (mat AS (TABLE dcc_mat, DIMENSIONS (region), METRICS (rev)));
+----
+
+# C-157: body_parser/clause_bounds.rs::all_two_clause_order_inversions_rejected_with_caret — near miss of C-148: MATERIALIZATIONS written before TABLES [syntax]
+statement error
+CREATE SEMANTIC VIEW dcc_c157 AS
+MATERIALIZATIONS (mat AS (TABLE dcc_mat, DIMENSIONS (region), METRICS (rev)))
+RELATIONSHIPS (o_to_c AS o(cust_id) REFERENCES c)
+FACTS (o.net AS o.amount - o.cost)
+DIMENSIONS (o.region AS o.region)
+METRICS (o.rev AS SUM(o.amount))
+TABLES (o AS dcc_orders PRIMARY KEY (id), c AS dcc_customers PRIMARY KEY (id));
+----
+
+# C-158: body_parser/clause_bounds.rs::all_two_clause_order_inversions_rejected_with_caret — near miss of C-148: FACTS written before RELATIONSHIPS [syntax]
+statement error
+CREATE SEMANTIC VIEW dcc_c158 AS
+TABLES (o AS dcc_orders PRIMARY KEY (id), c AS dcc_customers PRIMARY KEY (id))
+FACTS (o.net AS o.amount - o.cost)
+RELATIONSHIPS (o_to_c AS o(cust_id) REFERENCES c)
+DIMENSIONS (o.region AS o.region)
+METRICS (o.rev AS SUM(o.amount))
+MATERIALIZATIONS (mat AS (TABLE dcc_mat, DIMENSIONS (region), METRICS (rev)));
+----
+
+# C-159: body_parser/clause_bounds.rs::all_two_clause_order_inversions_rejected_with_caret — near miss of C-148: DIMENSIONS written before RELATIONSHIPS [syntax]
+statement error
+CREATE SEMANTIC VIEW dcc_c159 AS
+TABLES (o AS dcc_orders PRIMARY KEY (id), c AS dcc_customers PRIMARY KEY (id))
+DIMENSIONS (o.region AS o.region)
+FACTS (o.net AS o.amount - o.cost)
+RELATIONSHIPS (o_to_c AS o(cust_id) REFERENCES c)
+METRICS (o.rev AS SUM(o.amount))
+MATERIALIZATIONS (mat AS (TABLE dcc_mat, DIMENSIONS (region), METRICS (rev)));
+----
+
+# C-160: body_parser/clause_bounds.rs::all_two_clause_order_inversions_rejected_with_caret — near miss of C-148: METRICS written before RELATIONSHIPS [syntax]
+statement error
+CREATE SEMANTIC VIEW dcc_c160 AS
+TABLES (o AS dcc_orders PRIMARY KEY (id), c AS dcc_customers PRIMARY KEY (id))
+METRICS (o.rev AS SUM(o.amount))
+FACTS (o.net AS o.amount - o.cost)
+DIMENSIONS (o.region AS o.region)
+RELATIONSHIPS (o_to_c AS o(cust_id) REFERENCES c)
+MATERIALIZATIONS (mat AS (TABLE dcc_mat, DIMENSIONS (region), METRICS (rev)));
+----
+
+# C-161: body_parser/clause_bounds.rs::all_two_clause_order_inversions_rejected_with_caret — near miss of C-148: MATERIALIZATIONS written before RELATIONSHIPS [syntax]
+statement error
+CREATE SEMANTIC VIEW dcc_c161 AS
+TABLES (o AS dcc_orders PRIMARY KEY (id), c AS dcc_customers PRIMARY KEY (id))
+MATERIALIZATIONS (mat AS (TABLE dcc_mat, DIMENSIONS (region), METRICS (rev)))
+FACTS (o.net AS o.amount - o.cost)
+DIMENSIONS (o.region AS o.region)
+METRICS (o.rev AS SUM(o.amount))
+RELATIONSHIPS (o_to_c AS o(cust_id) REFERENCES c);
+----
+
+# C-162: body_parser/clause_bounds.rs::all_two_clause_order_inversions_rejected_with_caret — near miss of C-148: DIMENSIONS written before FACTS [syntax]
+statement error
+CREATE SEMANTIC VIEW dcc_c162 AS
+TABLES (o AS dcc_orders PRIMARY KEY (id), c AS dcc_customers PRIMARY KEY (id))
+RELATIONSHIPS (o_to_c AS o(cust_id) REFERENCES c)
+DIMENSIONS (o.region AS o.region)
+FACTS (o.net AS o.amount - o.cost)
+METRICS (o.rev AS SUM(o.amount))
+MATERIALIZATIONS (mat AS (TABLE dcc_mat, DIMENSIONS (region), METRICS (rev)));
+----
+
+# C-163: body_parser/clause_bounds.rs::all_two_clause_order_inversions_rejected_with_caret — near miss of C-148: METRICS written before FACTS [syntax]
+statement error
+CREATE SEMANTIC VIEW dcc_c163 AS
+TABLES (o AS dcc_orders PRIMARY KEY (id), c AS dcc_customers PRIMARY KEY (id))
+RELATIONSHIPS (o_to_c AS o(cust_id) REFERENCES c)
+METRICS (o.rev AS SUM(o.amount))
+DIMENSIONS (o.region AS o.region)
+FACTS (o.net AS o.amount - o.cost)
+MATERIALIZATIONS (mat AS (TABLE dcc_mat, DIMENSIONS (region), METRICS (rev)));
+----
+
+# C-164: body_parser/clause_bounds.rs::all_two_clause_order_inversions_rejected_with_caret — near miss of C-148: MATERIALIZATIONS written before FACTS [syntax]
+statement error
+CREATE SEMANTIC VIEW dcc_c164 AS
+TABLES (o AS dcc_orders PRIMARY KEY (id), c AS dcc_customers PRIMARY KEY (id))
+RELATIONSHIPS (o_to_c AS o(cust_id) REFERENCES c)
+MATERIALIZATIONS (mat AS (TABLE dcc_mat, DIMENSIONS (region), METRICS (rev)))
+DIMENSIONS (o.region AS o.region)
+METRICS (o.rev AS SUM(o.amount))
+FACTS (o.net AS o.amount - o.cost);
+----
+
+# C-165: body_parser/clause_bounds.rs::all_two_clause_order_inversions_rejected_with_caret, body_parser/clause_bounds.rs::out_of_order_caret_honours_base_offset — near miss of C-148: METRICS written before DIMENSIONS [syntax]
+statement error
+CREATE SEMANTIC VIEW dcc_c165 AS
+TABLES (o AS dcc_orders PRIMARY KEY (id), c AS dcc_customers PRIMARY KEY (id))
+RELATIONSHIPS (o_to_c AS o(cust_id) REFERENCES c)
+FACTS (o.net AS o.amount - o.cost)
+METRICS (o.rev AS SUM(o.amount))
+DIMENSIONS (o.region AS o.region)
+MATERIALIZATIONS (mat AS (TABLE dcc_mat, DIMENSIONS (region), METRICS (rev)));
+----
+
+# C-166: body_parser/clause_bounds.rs::all_two_clause_order_inversions_rejected_with_caret — near miss of C-148: MATERIALIZATIONS written before DIMENSIONS [syntax]
+statement error
+CREATE SEMANTIC VIEW dcc_c166 AS
+TABLES (o AS dcc_orders PRIMARY KEY (id), c AS dcc_customers PRIMARY KEY (id))
+RELATIONSHIPS (o_to_c AS o(cust_id) REFERENCES c)
+FACTS (o.net AS o.amount - o.cost)
+MATERIALIZATIONS (mat AS (TABLE dcc_mat, DIMENSIONS (region), METRICS (rev)))
+METRICS (o.rev AS SUM(o.amount))
+DIMENSIONS (o.region AS o.region);
+----
+
+# C-167: body_parser/clause_bounds.rs::all_two_clause_order_inversions_rejected_with_caret — near miss of C-148: MATERIALIZATIONS written before METRICS [syntax]
+statement error
+CREATE SEMANTIC VIEW dcc_c167 AS
+TABLES (o AS dcc_orders PRIMARY KEY (id), c AS dcc_customers PRIMARY KEY (id))
+RELATIONSHIPS (o_to_c AS o(cust_id) REFERENCES c)
+FACTS (o.net AS o.amount - o.cost)
+DIMENSIONS (o.region AS o.region)
+MATERIALIZATIONS (mat AS (TABLE dcc_mat, DIMENSIONS (region), METRICS (rev)))
+METRICS (o.rev AS SUM(o.amount));
+----
+
+# --- token cursor: keyword pairs/runs, paren lists, unterminated regions (cursor.rs) ---
+
+# C-168: body_parser/cursor.rs::find_kw_pair_only_matches_adjacent_words — near miss of C-148: `PRIMARY , KEY (id)` is not the PRIMARY KEY pair [syntax]
+statement error
+CREATE SEMANTIC VIEW dcc_c168 AS
+TABLES (o AS dcc_orders PRIMARY , KEY (id), c AS dcc_customers PRIMARY KEY (id))
+RELATIONSHIPS (o_to_c AS o(cust_id) REFERENCES c)
+FACTS (o.net AS o.amount - o.cost)
+DIMENSIONS (o.region AS o.region)
+METRICS (o.rev AS SUM(o.amount))
+MATERIALIZATIONS (mat AS (TABLE dcc_mat, DIMENSIONS (region), METRICS (rev)));
+----
+
+# C-169: body_parser/cursor.rs::take_parens_not_a_paren_is_none — near miss of C-148: `PRIMARY KEY id` (no paren list) is rejected [syntax]
+statement error
+CREATE SEMANTIC VIEW dcc_c169 AS
+TABLES (o AS dcc_orders PRIMARY KEY id, c AS dcc_customers PRIMARY KEY (id))
+RELATIONSHIPS (o_to_c AS o(cust_id) REFERENCES c)
+FACTS (o.net AS o.amount - o.cost)
+DIMENSIONS (o.region AS o.region)
+METRICS (o.rev AS SUM(o.amount))
+MATERIALIZATIONS (mat AS (TABLE dcc_mat, DIMENSIONS (region), METRICS (rev)));
+----
+
+# C-170: body_parser/cursor.rs::take_parens_unclosed_is_none — near miss of C-148: a TABLES list whose `(` never closes is rejected [syntax]
+statement error
+CREATE SEMANTIC VIEW dcc_c170 AS
+TABLES (o AS dcc_orders PRIMARY KEY (id), c AS dcc_customers PRIMARY KEY (id)
+RELATIONSHIPS (o_to_c AS o(cust_id) REFERENCES c)
+FACTS (o.net AS o.amount - o.cost)
+DIMENSIONS (o.region AS o.region)
+METRICS (o.rev AS SUM(o.amount))
+MATERIALIZATIONS (mat AS (TABLE dcc_mat, DIMENSIONS (region), METRICS (rev)));
+----
+
+# C-171: body_parser/cursor.rs::find_kw_seq_matches_consecutive_words — lowercase `non additive by` (after a USING list) is the NON ADDITIVE BY keyword run
+statement ok
+CREATE SEMANTIC VIEW dcc_c171 AS TABLES (a AS dcc_accounts PRIMARY KEY (id), d AS dcc_customers PRIMARY KEY (id)) RELATIONSHIPS (rel1 AS a(account_id) REFERENCES d) DIMENSIONS (a.d1 AS a.date) METRICS (a.bal USING (rel1) non additive by (d1) AS SUM(a.amount));
+
+query T nosort
+SELECT * FROM dcc_ddl('dcc_c171');
+----
+CREATE OR REPLACE SEMANTIC VIEW dcc_c171 AS
+TABLES (
+    a AS dcc_accounts PRIMARY KEY (id),
+    d AS dcc_customers PRIMARY KEY (id)
+)
+RELATIONSHIPS (
+    rel1 AS a(account_id) REFERENCES d
+)
+DIMENSIONS (
+    a.d1 AS a.date
+)
+METRICS (
+    a.bal USING (rel1) NON ADDITIVE BY (d1 NULLS LAST) AS SUM(a.amount)
+)
+
+# C-172: body_parser/cursor.rs::find_kw_seq_matches_consecutive_words — near miss of C-171: `non additive junk by` is not the keyword run [syntax]
+statement error
+CREATE SEMANTIC VIEW dcc_c172 AS TABLES (a AS dcc_accounts PRIMARY KEY (id), d AS dcc_customers PRIMARY KEY (id)) RELATIONSHIPS (rel1 AS a(account_id) REFERENCES d) DIMENSIONS (a.d1 AS a.date) METRICS (a.bal USING (rel1) non additive junk by (d1) AS SUM(a.amount));
+----
+
+# C-173: body_parser/cursor.rs::find_kw_seq_matches_consecutive_words — near miss of C-171: a QUOTED "non" is not a keyword, so there is no keyword run [syntax]
+statement error
+CREATE SEMANTIC VIEW dcc_c173 AS TABLES (a AS dcc_accounts PRIMARY KEY (id), d AS dcc_customers PRIMARY KEY (id)) RELATIONSHIPS (rel1 AS a(account_id) REFERENCES d) DIMENSIONS (a.d1 AS a.date) METRICS (a.bal USING (rel1) "non" additive by (d1) AS SUM(a.amount));
+----
+
+# C-174: body_parser/cursor.rs::find_kw_seq_depth0_ignores_nested_run — near miss of C-171: a NON ADDITIVE BY run NESTED in the USING list is inert; the depth-0 run is the clause and the nested text is one USING item
+statement error
+CREATE SEMANTIC VIEW dcc_c174 AS TABLES (a AS dcc_accounts PRIMARY KEY (id), d AS dcc_customers PRIMARY KEY (id)) RELATIONSHIPS (rel1 AS a(account_id) REFERENCES d) DIMENSIONS (a.d1 AS a.date) METRICS (a.bal USING (NON ADDITIVE BY) non additive by (d1) AS SUM(a.amount));
+----
+unknown relationship 'NON ADDITIVE BY' in USING clause
+
+# --- lexer: quoted identifiers, strings, dollar quotes, escape strings (lexer.rs, cursor.rs) ---
+
+# C-175: body_parser/lexer.rs::keyword_inside_quoted_ident_is_one_token,
+#   body_parser/lexer.rs::string_literal_with_escape_and_keywords,
+#   body_parser/lexer.rs::well_formed_over_hostile_inputs,
+#   body_parser/cursor.rs::find_kw_skips_quoted_and_strings,
+#   body_parser/cursor.rs::take_parens_is_quote_and_nest_aware
+#   — keywords and `)` inside quoted identifiers and strings are inert: table "dcc PRIMARY KEY (id)", PK ("x)y"), UNIQUE ("UNIQUE"), COMMENT with UNIQUE and a doubled quote [text]
+# PRE-EXISTING (TECH-DEBT #96): DESCRIBE's BASE_TABLE_NAME (and the TABLE object_name) keep the
+# identifier's double quotes; Snowflake reports the bare name.
+statement ok
+CREATE SEMANTIC VIEW dcc_c175 AS TABLES (o AS "dcc PRIMARY KEY (id)" PRIMARY KEY ("x)y") UNIQUE ("UNIQUE") COMMENT = 'a UNIQUE ''x'' mention') DIMENSIONS (o.region AS o.region);
+
+query T nosort
+SELECT * FROM dcc_ddl('dcc_c175');
+----
+CREATE OR REPLACE SEMANTIC VIEW dcc_c175 AS
+TABLES (
+    o AS "dcc PRIMARY KEY (id)" PRIMARY KEY ("x)y") UNIQUE ("UNIQUE") COMMENT = 'a UNIQUE ''x'' mention'
+)
+DIMENSIONS (
+    o.region AS o.region
+)
+
+query TTTT rowsort
+SELECT object_kind, object_name, property, property_value FROM describe_semantic_view('dcc_c175') WHERE object_kind = 'TABLE' AND property IN ('BASE_TABLE_NAME', 'PRIMARY_KEY', 'COMMENT');
+----
+TABLE	"dcc PRIMARY KEY (id)"	BASE_TABLE_NAME	"dcc PRIMARY KEY (id)"
+TABLE	"dcc PRIMARY KEY (id)"	COMMENT	a UNIQUE 'x' mention
+TABLE	"dcc PRIMARY KEY (id)"	PRIMARY_KEY	["\"x)y\""]
+
+# C-176: body_parser/lexer.rs::quoted_ident_doubled_quote_escape,
+#   body_parser/lexer.rs::well_formed_over_hostile_inputs,
+#   body_parser/lexer.rs::tiling_holds_over_hostile_alphabet
+#   — `""` inside a quoted identifier is an escaped quote, not a close: schema "dcc a""b", member "a""b", UNIQUE ("x)y") [text]
+# PRE-EXISTING (TECH-DEBT #96): for a schema-qualified table DESCRIBE reports
+# BASE_TABLE_SCHEMA_NAME = main and puts the whole qualified, quoted text in
+# BASE_TABLE_NAME; the table actually lives in schema `dcc a"b`.
+statement ok
+CREATE SEMANTIC VIEW dcc_c176 AS TABLES (q AS "dcc a""b"."c d" PRIMARY KEY (id) UNIQUE ("x)y")) DIMENSIONS (q."a""b" AS q.region);
+
+query T nosort
+SELECT * FROM dcc_ddl('dcc_c176');
+----
+CREATE OR REPLACE SEMANTIC VIEW dcc_c176 AS
+TABLES (
+    q AS "dcc a""b"."c d" PRIMARY KEY (id) UNIQUE ("x)y")
+)
+DIMENSIONS (
+    q."a""b" AS q.region
+)
+
+query TTTT rowsort
+SELECT object_kind, object_name, property, property_value FROM describe_semantic_view('dcc_c176') WHERE property IN ('BASE_TABLE_SCHEMA_NAME', 'BASE_TABLE_NAME', 'EXPRESSION');
+----
+DIMENSION	"a""b"	EXPRESSION	q.region
+TABLE	"dcc a""b"."c d"	BASE_TABLE_NAME	"dcc a""b"."c d"
+TABLE	"dcc a""b"."c d"	BASE_TABLE_SCHEMA_NAME	main
+
+# C-177: body_parser/lexer.rs::dollar_string_is_one_opaque_token,
+#   body_parser/lexer.rs::tagged_dollar_string_closes_on_matching_tag_only,
+#   body_parser/lexer.rs::escape_string_with_backslash_escaped_quote_is_terminated,
+#   body_parser/lexer.rs::escape_string_with_escaped_backslash_is_terminated,
+#   body_parser/lexer.rs::typed_literal_is_not_an_escape_string,
+#   body_parser/lexer.rs::well_formed_over_hostile_inputs,
+#   body_parser/lexer.rs::every_token_span_is_sliceable
+#   — string-literal expressions stored verbatim: $t$x $z$ y$t$, e'\'' (terminated), e'\\', DATE'2020-01-01', 'a\', $$a) b, AS c$$ (the last is the slot C-178..C-183 vary) [text]
+statement ok
+CREATE SEMANTIC VIEW dcc_c177 AS TABLES (o AS dcc_orders PRIMARY KEY (id)) DIMENSIONS (o.tag AS $t$x $z$ y$t$, o.esc AS e'\'', o.esc2 AS e'\\', o.typed AS DATE'2020-01-01', o.plain AS 'a\', o.dol AS $$a) b, AS c$$);
+
+query T nosort
+SELECT * FROM dcc_ddl('dcc_c177');
+----
+CREATE OR REPLACE SEMANTIC VIEW dcc_c177 AS
+TABLES (
+    o AS dcc_orders PRIMARY KEY (id)
+)
+DIMENSIONS (
+    o.tag AS $t$x $z$ y$t$,
+    o.esc AS e'\'',
+    o.esc2 AS e'\\',
+    o.typed AS DATE'2020-01-01',
+    o.plain AS 'a\',
+    o.dol AS $$a) b, AS c$$
+)
+
+query TTTT rowsort
+SELECT object_kind, object_name, property, property_value FROM describe_semantic_view('dcc_c177') WHERE property IN ('EXPRESSION', 'DATA_TYPE');
+----
+DIMENSION	dol	DATA_TYPE	VARCHAR
+DIMENSION	dol	EXPRESSION	$$a) b, AS c$$
+DIMENSION	esc	DATA_TYPE	VARCHAR
+DIMENSION	esc	EXPRESSION	e'\''
+DIMENSION	esc2	DATA_TYPE	VARCHAR
+DIMENSION	esc2	EXPRESSION	e'\\'
+DIMENSION	plain	DATA_TYPE	VARCHAR
+DIMENSION	plain	EXPRESSION	'a\'
+DIMENSION	tag	DATA_TYPE	VARCHAR
+DIMENSION	tag	EXPRESSION	$t$x $z$ y$t$
+DIMENSION	typed	DATA_TYPE	DATE
+DIMENSION	typed	EXPRESSION	DATE'2020-01-01'
+
+# C-178: body_parser/lexer.rs::unterminated_quote_and_string,
+#   body_parser/lexer.rs::well_formed_over_hostile_inputs,
+#   body_parser/lexer.rs::tiling_holds_over_hostile_alphabet,
+#   body_parser/cursor.rs::unterminated_tail_reports_open_quote_kind
+#   — near miss of C-177: an unterminated quoted identifier `"b c` swallows the rest of the body [syntax]
+statement error
+CREATE SEMANTIC VIEW dcc_c178 AS TABLES (o AS dcc_orders PRIMARY KEY (id)) DIMENSIONS (o.tag AS $t$x $z$ y$t$, o.esc AS e'\'', o.esc2 AS e'\\', o.typed AS DATE'2020-01-01', o.plain AS 'a\', o.dol AS "b c);
+----
+
+# C-179: body_parser/lexer.rs::unterminated_quote_and_string, body_parser/cursor.rs::unterminated_tail_reports_open_quote_kind — near miss of C-177: an unterminated string literal `'b c` swallows the rest of the body [syntax]
+statement error
+CREATE SEMANTIC VIEW dcc_c179 AS TABLES (o AS dcc_orders PRIMARY KEY (id)) DIMENSIONS (o.tag AS $t$x $z$ y$t$, o.esc AS e'\'', o.esc2 AS e'\\', o.typed AS DATE'2020-01-01', o.plain AS 'a\', o.dol AS 'b c);
+----
+
+# C-180: body_parser/lexer.rs::unterminated_dollar_string_spans_to_eof, body_parser/cursor.rs::unterminated_tail_reports_open_quote_kind — near miss of C-177: an unterminated dollar-quoted string `$$b c` swallows the rest of the body [syntax]
+statement error
+CREATE SEMANTIC VIEW dcc_c180 AS TABLES (o AS dcc_orders PRIMARY KEY (id)) DIMENSIONS (o.tag AS $t$x $z$ y$t$, o.esc AS e'\'', o.esc2 AS e'\\', o.typed AS DATE'2020-01-01', o.plain AS 'a\', o.dol AS $$b c);
+----
+
+# C-181: body_parser/lexer.rs::unterminated_quote_and_string — near miss of C-176: member name `"a""b` (doubled quote, then no close) is still unterminated [syntax]
+statement error
+CREATE SEMANTIC VIEW dcc_c181 AS TABLES (q AS "dcc a""b"."c d" PRIMARY KEY (id) UNIQUE ("x)y")) DIMENSIONS (q."a""b AS q.region);
+----
+
+# C-182: body_parser/lexer.rs::unterminated_escape_string_ending_in_a_backslash_stays_in_bounds, body_parser/lexer.rs::every_token_span_is_sliceable — near miss of C-177: an escape string whose last byte is the backslash (`e'\`) is rejected cleanly (no out-of-bounds span) [syntax]
+statement error
+CREATE SEMANTIC VIEW dcc_c182 AS TABLES (o AS dcc_orders PRIMARY KEY (id)) DIMENSIONS (o.tag AS $t$x $z$ y$t$, o.esc AS e'\'', o.esc2 AS e'\\', o.typed AS DATE'2020-01-01', o.plain AS 'a\', o.dol AS e'\);
+----
+
+# C-183: body_parser/lexer.rs::escape_string_with_escaped_final_quote_is_unterminated_and_in_bounds, body_parser/lexer.rs::every_token_span_is_sliceable — near miss of C-177: in `e'\'` the backslash escapes the closing quote, so the literal is unterminated [syntax]
+statement error
+CREATE SEMANTIC VIEW dcc_c183 AS TABLES (o AS dcc_orders PRIMARY KEY (id)) DIMENSIONS (o.tag AS $t$x $z$ y$t$, o.esc AS e'\'', o.esc2 AS e'\\', o.typed AS DATE'2020-01-01', o.plain AS 'a\', o.dol AS e'\');
+----
+
+# C-184: body_parser/lexer.rs::non_ascii_is_one_bare_ident_no_midcodepoint_span,
+#   body_parser/lexer.rs::well_formed_over_hostile_inputs,
+#   body_parser/lexer.rs::tiling_holds_over_arbitrary_unicode
+#   — non-ASCII bare identifiers (alias café, member café東京) are single tokens; quoted "dcc 東京 table" kept whole [text]
+# PRE-EXISTING (TECH-DEBT #96): DESCRIBE reports BASE_TABLE_NAME and the dimension's TABLE with the quotes kept.
+statement ok
+CREATE SEMANTIC VIEW dcc_c184 AS TABLES (café AS "dcc 東京 table" PRIMARY KEY (id)) DIMENSIONS (café.café東京 AS café.region);
+
+query T nosort
+SELECT * FROM dcc_ddl('dcc_c184');
+----
+CREATE OR REPLACE SEMANTIC VIEW dcc_c184 AS
+TABLES (
+    café AS "dcc 東京 table" PRIMARY KEY (id)
+)
+DIMENSIONS (
+    café.café東京 AS café.region
+)
+
+query TTTT rowsort
+SELECT object_kind, object_name, property, property_value FROM describe_semantic_view('dcc_c184') WHERE property IN ('BASE_TABLE_NAME', 'TABLE', 'EXPRESSION');
+----
+DIMENSION	café東京	EXPRESSION	café.region
+DIMENSION	café東京	TABLE	"dcc 東京 table"
+TABLE	"dcc 東京 table"	BASE_TABLE_NAME	"dcc 東京 table"
+
+# C-185: body_parser/lexer.rs::lone_dollar_and_positional_param_are_symbols, body_parser/lexer.rs::well_formed_over_hostile_inputs — `$1` lexes as a positional parameter (not a dollar-quote tag) and is stored as the expression
+# PRE-EXISTING (TECH-DEBT #95): a positional parameter is accepted in a stored dimension
+# expression (DATA_TYPE is empty) and every query selecting it fails at bind
+# ('Values were not provided for the following parameters: 1').
+statement ok
+CREATE SEMANTIC VIEW dcc_c185 AS TABLES (o AS dcc_orders PRIMARY KEY (id)) DIMENSIONS (o.p AS $1, o.region AS o.region);
+
+query T nosort
+SELECT * FROM dcc_ddl('dcc_c185');
+----
+CREATE OR REPLACE SEMANTIC VIEW dcc_c185 AS
+TABLES (
+    o AS dcc_orders PRIMARY KEY (id)
+)
+DIMENSIONS (
+    o.p AS $1,
+    o.region AS o.region
+)
+
+query TTTT rowsort
+SELECT object_kind, object_name, property, property_value FROM describe_semantic_view('dcc_c185') WHERE object_name = 'p' AND property IN ('EXPRESSION', 'DATA_TYPE');
+----
+DIMENSION	p	DATA_TYPE	(empty)
+DIMENSION	p	EXPRESSION	$1
+
+# --- window metric shape: FUNC(args) OVER (...) only (window.rs) ---
+
+# C-186: body_parser/window.rs::qualified_quoted_and_spaced_function_names_still_parse — function part may be qualified (main.avg), quoted ("my func"), spaced before its args (AVG (w)) or take extra args (lead(w, 1)) [text]
+# ("my func" does not exist: CREATE does not bind window functions.)
+statement ok
+CREATE SEMANTIC VIEW dcc_c186 AS TABLES (o AS dcc_orders PRIMARY KEY (id)) DIMENSIONS (o.d AS o.region, o.t AS o.created_at) METRICS (o.w AS SUM(o.qty), o.a AS main.avg(w) OVER (PARTITION BY d), o.b AS "my func"(w) OVER (PARTITION BY d), o.c AS AVG (w) OVER (PARTITION BY d), o.e AS lead(w, 1) OVER (PARTITION BY d ORDER BY t));
+
+query T nosort
+SELECT * FROM dcc_ddl('dcc_c186');
+----
+CREATE OR REPLACE SEMANTIC VIEW dcc_c186 AS
+TABLES (
+    o AS dcc_orders PRIMARY KEY (id)
+)
+DIMENSIONS (
+    o.d AS o.region,
+    o.t AS o.created_at
+)
+METRICS (
+    o.w AS SUM(o.qty),
+    o.a AS main.avg(w) OVER (PARTITION BY d),
+    o.b AS "my func"(w) OVER (PARTITION BY d),
+    o.c AS AVG(w) OVER (PARTITION BY d),
+    o.e AS lead(w, 1) OVER (PARTITION BY d ORDER BY t NULLS LAST)
+)
+
+query T nosort
+SELECT line FROM dcc_yaml('dcc_c186') WHERE line LIKE '    window_function:%';
+----
+    window_function: main.avg
+    window_function: '"my func"'
+    window_function: AVG
+    window_function: lead
+
+# C-187: body_parser/window.rs::trailing_arithmetic_after_the_over_clause_is_rejected — near miss of C-186: `+ 100` after the OVER (...) is rejected rather than silently dropped
+statement error
+CREATE SEMANTIC VIEW dcc_c187 AS TABLES (o AS dcc_orders PRIMARY KEY (id)) DIMENSIONS (o.d AS o.region, o.t AS o.created_at) METRICS (o.w AS SUM(o.qty), o.a AS main.avg(w) OVER (PARTITION BY d), o.b AS "my func"(w) OVER (PARTITION BY d), o.c AS AVG (w) OVER (PARTITION BY d) + 100, o.e AS lead(w, 1) OVER (PARTITION BY d ORDER BY t));
+----
+Unexpected text '+ 100' after the OVER clause
+
+# C-188: body_parser/window.rs::an_expression_prefix_before_the_window_function_is_rejected — near miss of C-186: an expression prefix `1 + AVG(w)` before OVER is rejected
+statement error
+CREATE SEMANTIC VIEW dcc_c188 AS TABLES (o AS dcc_orders PRIMARY KEY (id)) DIMENSIONS (o.d AS o.region, o.t AS o.created_at) METRICS (o.w AS SUM(o.qty), o.a AS main.avg(w) OVER (PARTITION BY d), o.b AS "my func"(w) OVER (PARTITION BY d), o.c AS 1 + AVG (w) OVER (PARTITION BY d), o.e AS lead(w, 1) OVER (PARTITION BY d ORDER BY t));
+----
+must be a plain function call
+
+# C-189: body_parser/window.rs::a_second_over_term_is_rejected — near miss of C-186: a second FUNC(...) OVER (...) term is rejected, naming it
+statement error
+CREATE SEMANTIC VIEW dcc_c189 AS TABLES (o AS dcc_orders PRIMARY KEY (id)) DIMENSIONS (o.d AS o.region, o.t AS o.created_at) METRICS (o.w AS SUM(o.qty), o.a AS main.avg(w) OVER (PARTITION BY d), o.b AS "my func"(w) OVER (PARTITION BY d), o.c AS AVG (w) OVER (PARTITION BY d) - SUM(w) OVER (PARTITION BY d), o.e AS lead(w, 1) OVER (PARTITION BY d ORDER BY t));
+----
+Unexpected text '- SUM(w) OVER (PARTITION BY d)' after the OVER clause
+
+# C-190: body_parser/window.rs::an_expression_without_over_is_untouched — a non-window expression `SUM(o.amount) - SUM(o.cost) + 100` is stored untouched, with no window spec
+statement ok
+CREATE SEMANTIC VIEW dcc_c190 AS TABLES (o AS dcc_orders PRIMARY KEY (id)) DIMENSIONS (o.d AS o.region, o.t AS o.created_at) METRICS (o.w AS SUM(o.qty), o.m AS SUM(o.amount) - SUM(o.cost) + 100);
+
+query T nosort
+SELECT * FROM dcc_ddl('dcc_c190');
+----
+CREATE OR REPLACE SEMANTIC VIEW dcc_c190 AS
+TABLES (
+    o AS dcc_orders PRIMARY KEY (id)
+)
+DIMENSIONS (
+    o.d AS o.region,
+    o.t AS o.created_at
+)
+METRICS (
+    o.w AS SUM(o.qty),
+    o.m AS SUM(o.amount) - SUM(o.cost) + 100
+)
+
+query TTTT rowsort
+SELECT object_kind, object_name, property, property_value FROM describe_semantic_view('dcc_c190') WHERE object_name = 'm' AND property IN ('EXPRESSION', 'WINDOW_SPEC');
+----
+METRIC	m	EXPRESSION	SUM(o.amount) - SUM(o.cost) + 100
+
+# C-191: body_parser/window.rs::a_window_function_without_arguments_is_still_rejected — near miss of C-186: a bare name with no argument list before OVER is rejected [syntax]
+statement error
+CREATE SEMANTIC VIEW dcc_c191 AS TABLES (o AS dcc_orders PRIMARY KEY (id)) DIMENSIONS (o.d AS o.region, o.t AS o.created_at) METRICS (o.w AS SUM(o.qty), o.a AS main.avg(w) OVER (PARTITION BY d), o.b AS "my func"(w) OVER (PARTITION BY d), o.c AS row_number OVER (PARTITION BY d), o.e AS lead(w, 1) OVER (PARTITION BY d ORDER BY t));
+----

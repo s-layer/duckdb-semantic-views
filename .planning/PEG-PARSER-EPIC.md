@@ -390,6 +390,53 @@ What changed from the plan:
   describes v0.5.4; rewrite it), and TECH-DEBT accepted-decision #8 ("statement
   rewrite approach").
 
+#### Phase 3 plan (2026-10-16)
+
+**PR sequence.** Each PR is stacked on the previous one until Phase 2 (#262) merges.
+
+1. **DDL corpus.** The parser's unit tests and proptests ported to sqllogictest rows
+   (`test/sql/ddl_corpus_*.test`, 708 rows) with a case map per source file under
+   `_notes/phase3-corpus/`. Green against today's parser override. This is the
+   coverage the later PRs are measured against.
+2. **Search path from the bind.** The read functions take the caller's search path
+   from their `ClientContext` instead of a `search_path :=` argument spliced into the
+   statement text. This fixes #19/#25 for the scalars and removes the text injection.
+   The parameter stays, reserved, so stored views keep binding.
+3. **Grammar productions behind a coexistence switch.** A `GrammarExtension` with
+   productions for CREATE (including `FROM YAML`), ALTER, DROP, DESCRIBE and every
+   SHOW form, activated per connection. The corpus runs against both
+   implementations while the switch exists.
+4. **Deletion.** The §3 delete list, the re-pointed round-trip proptests and fuzz
+   target, a DDL-text fuzz target (#60), the rewritten architecture note,
+   MAINTAINER.md and TECH-DEBT #8.
+5. **#77 docs.** SHOW / DESCRIBE as subqueries, restoring the removed examples.
+
+**Bridge design.** One generic C++ bridge, not a C++ transform per statement:
+
+- The C++ transform serialises the matched `ParseResult` subtree (rule name, type,
+  offset, length, leaf text) and calls into Rust.
+- Rust owns the transform from that tree to the `RewriteAction` IR, and lowers it
+  with `native_sql` exactly as today.
+- C++ re-parses the lowered SQL with the builtin parser and returns statements, a
+  `QueryNode` or a `TableRef`, or a `ParserException` with a `QueryLocation` for a
+  positioned semantic error.
+- Expression text is rebuilt from tokens. Comments inside an expression are lost
+  (D4); the default is to accept that, document it, and pin it with a round-trip
+  test.
+
+**Prototype (branch `claude/phase3-grammar`).** One production, `SHOW [TERSE]
+SEMANTIC VIEWS`, prepended to `DescribeStatement` and lowered through the existing
+Rust rewrite, works in the real extension on the alpha47600 engine: as a subquery,
+a CTE and a view body, with per-connection activation at LOAD and through an
+`ExtensionCallback`. The full SQL suite stays green with the grammar active.
+
+**Decisions taken for this phase.**
+
+- CREATE requires TABLES and at least one of DIMENSIONS or METRICS, for the AS body
+  and the YAML forms alike (Paul, 2026-10-16, Snowflake parity). The corpus rows that
+  pin today's acceptance become rejection tests.
+- D4 follows its recommendation unless Paul decides otherwise.
+
 ### Phase 4: `SEMANTIC_VIEW(...)` query construct and query-time expressions
 
 - The grammar rule on `InnerTableRef` is

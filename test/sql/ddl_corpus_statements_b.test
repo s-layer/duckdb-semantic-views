@@ -1,0 +1,704 @@
+# DDL accept/reject corpus — non-CREATE statements, part B (Phase 3 of the PEG epic).
+#
+# Ports the SHOW SEMANTIC VIEWS / DIMENSIONS / METRICS / FACTS / MATERIALIZATIONS
+# filter clauses (LIKE, IN, FOR METRIC, STARTS WITH, LIMIT), the quoted-name
+# slots and the IN SCHEMA / IN DATABASE / IN ACCOUNT scope cases from the
+# `#[test]`s in `src/parse/rewrite.rs` (`mod tests`). Part A is
+# `ddl_corpus_statements_a.test`.
+#
+# Every row carries an id `S-NNN`; the case map from Rust test to row id is
+# `_notes/phase3-corpus/map-S.md`. Row tags:
+#   [syntax]  a syntactic reject: no message is pinned (it will change under
+#             the grammar), only that the statement fails. The runner insists
+#             on a `----` line after `statement error`; an empty block after it
+#             accepts any error message.
+#   [text]    today's contract on something a grammar might plausibly change
+#             (case folding, quoting, whitespace).
+#
+# SHOW SEMANTIC VIEWS leads with a live `created_on` timestamp, matched by a
+# <REGEX> value; its rows come back sorted by schema then name, so those
+# queries are `nosort`.
+
+require semantic_views
+
+# --- fixtures ---
+
+statement ok
+CREATE TABLE dcs_orders (id INTEGER, region VARCHAR, cust VARCHAR, amount INTEGER);
+
+statement ok
+INSERT INTO dcs_orders VALUES (1, 'east', 'ann', 10), (2, 'west', 'bob', 20), (3, 'east', 'cat', 30);
+
+statement ok
+CREATE SCHEMA dcs_sch;
+
+statement ok
+CREATE TABLE dcs_sch.dcs_orders (id INTEGER, region VARCHAR, cust VARCHAR, amount INTEGER);
+
+statement ok
+CREATE MACRO dcs_ddl(v) AS TABLE SELECT unnest(string_split(rtrim(get_ddl('SEMANTIC_VIEW', v), chr(10)), chr(10))) AS line;
+
+# Catalog state: every semantic view, with its schema and comment.
+statement ok
+CREATE MACRO dcs_views() AS TABLE SELECT schema_name, name, comment FROM list_semantic_views();
+
+# --- SHOW filter clauses: LIKE / IN / FOR METRIC / STARTS WITH / LIMIT ---
+
+# `v` and `w` carry the members the SHOW SEMANTIC DIMENSIONS/METRICS/FACTS rows
+# filter; the other views exist for the SHOW SEMANTIC VIEWS name filters.
+
+statement ok
+CREATE SEMANTIC VIEW v AS TABLES (o AS dcs_orders PRIMARY KEY (id)) FACTS (o.raw_amount AS o.amount) DIMENSIONS (o.region AS o.region, o.customer AS o.cust, o.cust_tier AS CASE WHEN o.amount > 15 THEN 'big' ELSE 'small' END, o.cust_initial AS left(o.cust, 1)) METRICS (o.revenue AS SUM(o.amount), o.total_orders AS COUNT(*), o.total_amount AS SUM(o.amount), o.avg_amount AS AVG(o.amount));
+
+statement ok
+CREATE SEMANTIC VIEW w AS TABLES (o AS dcs_orders PRIMARY KEY (id)) FACTS (o.unit AS 1) DIMENSIONS (o.rev_bucket AS o.amount // 10, o.area AS o.region) METRICS (o.total_units AS SUM(1));
+
+statement ok
+CREATE SEMANTIC VIEW product_sv AS TABLES (o AS dcs_orders PRIMARY KEY (id)) DIMENSIONS (o.region AS o.region) METRICS (o.total AS SUM(o.amount));
+
+statement ok
+CREATE SEMANTIC VIEW sales_a AS TABLES (o AS dcs_orders PRIMARY KEY (id)) DIMENSIONS (o.region AS o.region) METRICS (o.total AS SUM(o.amount));
+
+statement ok
+CREATE SEMANTIC VIEW sales_b AS TABLES (o AS dcs_orders PRIMARY KEY (id)) DIMENSIONS (o.region AS o.region) METRICS (o.total AS SUM(o.amount));
+
+statement ok
+CREATE SEMANTIC VIEW dcs_sch.sch_sv AS TABLES (o AS dcs_orders PRIMARY KEY (id)) DIMENSIONS (o.region AS o.region) METRICS (o.total AS SUM(o.amount));
+
+# S-200: rewrite.rs::phase34_1_1_show_filter_tests::test_rewrite_show_dims_like_cross_view, test_build_filter_suffix_like_only — LIKE with no IN filters dimensions across every view
+query TTTTTTTT rowsort
+SHOW SEMANTIC DIMENSIONS LIKE '%rev%'
+----
+memory	main	w	dcs_orders	rev_bucket	INTEGER	[]	(empty)
+
+# S-201: rewrite.rs::phase34_1_1_show_filter_tests::test_rewrite_show_dims_like_in_starts_with_limit — LIKE, IN <view>, STARTS WITH and LIMIT compose (LIMIT cuts 3 matches to 2)
+query TTTTTTTT nosort
+SHOW SEMANTIC DIMENSIONS LIKE '%c%' IN v STARTS WITH 'cust' LIMIT 2
+----
+memory	main	v	dcs_orders	cust_initial	VARCHAR	[]	(empty)
+memory	main	v	dcs_orders	cust_tier	VARCHAR	[]	(empty)
+
+# S-202: rewrite.rs::phase34_1_1_show_filter_tests::test_rewrite_show_metrics_starts_with_limit, test_build_filter_suffix_starts_with_only — STARTS WITH then LIMIT 1 across views
+query TTTTTTTT nosort
+SHOW SEMANTIC METRICS STARTS WITH 'total' LIMIT 1
+----
+memory	main	product_sv	dcs_orders	total	BIGINT	[]	(empty)
+
+query TTTTTTTT rowsort
+SHOW SEMANTIC METRICS STARTS WITH 'total'
+----
+memory	dcs_sch	sch_sv	dcs_orders	total	BIGINT	[]	(empty)
+memory	main	product_sv	dcs_orders	total	BIGINT	[]	(empty)
+memory	main	sales_a	dcs_orders	total	BIGINT	[]	(empty)
+memory	main	sales_b	dcs_orders	total	BIGINT	[]	(empty)
+memory	main	v	dcs_orders	total_amount	BIGINT	[]	(empty)
+memory	main	v	dcs_orders	total_orders	BIGINT	[]	(empty)
+memory	main	w	dcs_orders	total_units	BIGINT	[]	(empty)
+
+# S-203: rewrite.rs::phase34_1_1_show_filter_tests::test_rewrite_show_facts_limit, test_build_filter_suffix_limit_only — LIMIT alone; LIMIT 1 below the two facts shows it takes effect
+query TTTTTTTT rowsort
+SHOW SEMANTIC FACTS LIMIT 10
+----
+memory	main	v	dcs_orders	raw_amount	INTEGER	[]	(empty)
+memory	main	w	dcs_orders	unit	INTEGER	[]	(empty)
+
+query TTTTTTTT nosort
+SHOW SEMANTIC FACTS LIMIT 1
+----
+memory	main	v	dcs_orders	raw_amount	INTEGER	[]	(empty)
+
+# S-204: rewrite.rs::phase34_1_1_show_filter_tests::test_rewrite_show_dims_for_metric_with_all_clauses — LIKE, IN, FOR METRIC, STARTS WITH, LIMIT all together
+# LIKE drops cust_initial, which would sort first, and LIMIT 1 drops customer.
+query TTTT nosort
+SHOW SEMANTIC DIMENSIONS LIKE '%r%' IN v FOR METRIC revenue STARTS WITH 'c' LIMIT 1
+----
+dcs_orders	cust_tier	VARCHAR	false
+
+# S-205: rewrite.rs::phase34_1_1_show_filter_tests::test_rewrite_show_case_insensitive — lower-case SHOW keywords and clauses
+query TTTTTTTT rowsort
+show semantic dimensions like '%r%' in v
+----
+memory	main	v	dcs_orders	cust_tier	VARCHAR	[]	(empty)
+memory	main	v	dcs_orders	customer	VARCHAR	[]	(empty)
+memory	main	v	dcs_orders	region	VARCHAR	[]	(empty)
+
+# S-206: rewrite.rs::test_for_metric_requires_boundaries, show_scope_other_commands_tests::for_metric_still_composes_with_a_view_name, show_name_slot_quoted_ident_tests::an_unquoted_view_and_metric_are_unchanged — IN <view> FOR METRIC <metric>
+query TTTT rowsort
+SHOW SEMANTIC DIMENSIONS IN v FOR METRIC revenue
+----
+dcs_orders	cust_initial	VARCHAR	false
+dcs_orders	cust_tier	VARCHAR	false
+dcs_orders	customer	VARCHAR	false
+dcs_orders	region	VARCHAR	false
+
+# S-207: rewrite.rs::phase34_1_1_show_filter_tests::test_rewrite_show_views_like — SHOW SEMANTIC VIEWS LIKE
+query TTTTTT nosort
+SHOW SEMANTIC VIEWS LIKE '%prod%'
+----
+<REGEX>:\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z	product_sv	SEMANTIC_VIEW	memory	main	(empty)
+
+# S-208: rewrite.rs::phase34_1_1_show_filter_tests::test_rewrite_show_views_starts_with_limit, test_starts_with_and_limit_require_boundaries — SHOW SEMANTIC VIEWS STARTS WITH ... LIMIT
+query TTTTTT nosort
+SHOW SEMANTIC VIEWS STARTS WITH 'sales' LIMIT 5
+----
+<REGEX>:\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z	sales_a	SEMANTIC_VIEW	memory	main	(empty)
+<REGEX>:\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z	sales_b	SEMANTIC_VIEW	memory	main	(empty)
+
+query TTTTTT nosort
+SHOW SEMANTIC VIEWS STARTS WITH 'sales' LIMIT 1
+----
+<REGEX>:\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z	sales_a	SEMANTIC_VIEW	memory	main	(empty)
+
+# S-209: rewrite.rs::phase34_1_1_show_filter_tests::test_rewrite_show_views_all_clauses, test_build_filter_suffix_all_three — LIKE, STARTS WITH and LIMIT on SHOW SEMANTIC VIEWS
+# LIKE drops sales_a and sales_b, STARTS WITH drops product_sv.
+query TTTTTT nosort
+SHOW SEMANTIC VIEWS LIKE '%c%' STARTS WITH 's'
+----
+<REGEX>:\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z	sch_sv	SEMANTIC_VIEW	memory	dcs_sch	(empty)
+
+# LIKE drops sch_sv, LIMIT drops sales_b.
+query TTTTTT nosort
+SHOW SEMANTIC VIEWS LIKE '%a%' STARTS WITH 's' LIMIT 1
+----
+<REGEX>:\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z	sales_a	SEMANTIC_VIEW	memory	main	(empty)
+
+# S-210: rewrite.rs::phase34_1_1_show_filter_tests::test_rewrite_show_views_in_schema, test_build_filter_suffix_in_schema, show_name_slot_quoted_ident_tests::an_unquoted_schema_name_is_unchanged, show_scope_qualified_name_tests::an_unqualified_schema_name_emits_no_database_predicate — IN SCHEMA keeps only that schema (`dcs_sch.sch_sv` is excluded)
+query TTTTTT nosort
+SHOW SEMANTIC VIEWS IN SCHEMA main
+----
+<REGEX>:\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z	product_sv	SEMANTIC_VIEW	memory	main	(empty)
+<REGEX>:\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z	sales_a	SEMANTIC_VIEW	memory	main	(empty)
+<REGEX>:\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z	sales_b	SEMANTIC_VIEW	memory	main	(empty)
+<REGEX>:\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z	v	SEMANTIC_VIEW	memory	main	(empty)
+<REGEX>:\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z	w	SEMANTIC_VIEW	memory	main	(empty)
+
+query TTTTTT nosort
+SHOW SEMANTIC VIEWS IN SCHEMA dcs_sch
+----
+<REGEX>:\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z	sch_sv	SEMANTIC_VIEW	memory	dcs_sch	(empty)
+
+# S-211: rewrite.rs::phase34_1_1_show_filter_tests::test_rewrite_show_views_in_database, test_build_filter_suffix_in_database — IN DATABASE
+query TTTTTT nosort
+SHOW SEMANTIC VIEWS IN DATABASE memory
+----
+<REGEX>:\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z	sch_sv	SEMANTIC_VIEW	memory	dcs_sch	(empty)
+<REGEX>:\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z	product_sv	SEMANTIC_VIEW	memory	main	(empty)
+<REGEX>:\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z	sales_a	SEMANTIC_VIEW	memory	main	(empty)
+<REGEX>:\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z	sales_b	SEMANTIC_VIEW	memory	main	(empty)
+<REGEX>:\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z	v	SEMANTIC_VIEW	memory	main	(empty)
+<REGEX>:\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z	w	SEMANTIC_VIEW	memory	main	(empty)
+
+# S-212: rewrite.rs::phase34_1_1_show_filter_tests::test_rewrite_show_terse — SHOW TERSE SEMANTIC VIEWS (no comment column)
+query TTTTT nosort
+SHOW TERSE SEMANTIC VIEWS
+----
+<REGEX>:\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z	sch_sv	SEMANTIC_VIEW	memory	dcs_sch
+<REGEX>:\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z	product_sv	SEMANTIC_VIEW	memory	main
+<REGEX>:\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z	sales_a	SEMANTIC_VIEW	memory	main
+<REGEX>:\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z	sales_b	SEMANTIC_VIEW	memory	main
+<REGEX>:\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z	v	SEMANTIC_VIEW	memory	main
+<REGEX>:\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z	w	SEMANTIC_VIEW	memory	main
+
+# S-213: rewrite.rs::phase34_1_1_show_filter_tests::test_rewrite_show_terse_like — SHOW TERSE ... LIKE
+query TTTTT nosort
+SHOW TERSE SEMANTIC VIEWS LIKE '%prod%'
+----
+<REGEX>:\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z	product_sv	SEMANTIC_VIEW	memory	main
+
+# S-214: rewrite.rs::phase34_1_1_show_filter_tests::test_rewrite_show_terse_in_schema — SHOW TERSE ... IN SCHEMA
+query TTTTT nosort
+SHOW TERSE SEMANTIC VIEWS IN SCHEMA dcs_sch
+----
+<REGEX>:\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z	sch_sv	SEMANTIC_VIEW	memory	dcs_sch
+
+# S-215: rewrite.rs::phase34_1_1_show_filter_tests::test_rewrite_show_views_in_schema_like, test_build_filter_suffix_like_and_schema — LIKE before IN SCHEMA
+query TTTTTT nosort
+SHOW SEMANTIC VIEWS LIKE '%s%' IN SCHEMA main
+----
+<REGEX>:\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z	product_sv	SEMANTIC_VIEW	memory	main	(empty)
+<REGEX>:\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z	sales_a	SEMANTIC_VIEW	memory	main	(empty)
+<REGEX>:\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z	sales_b	SEMANTIC_VIEW	memory	main	(empty)
+
+# S-216: rewrite.rs::phase34_1_1_show_filter_tests::test_build_filter_suffix_reescapes_quotes — a `''` in the LIKE pattern matches a name containing `'`
+statement ok
+CREATE SEMANTIC VIEW "o'brien_sv" AS TABLES (o AS dcs_orders PRIMARY KEY (id)) DIMENSIONS (o.region AS o.region) METRICS (o.total AS SUM(o.amount));
+
+query TTTTTT nosort
+SHOW SEMANTIC VIEWS LIKE 'O''Brien%'
+----
+<REGEX>:\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z	o'brien_sv	SEMANTIC_VIEW	memory	main	(empty)
+
+# S-217: rewrite.rs::phase34_1_1_show_filter_tests::test_show_views_like_non_ascii_pattern_roundtrips — a non-ASCII LIKE pattern round-trips
+statement ok
+CREATE SEMANTIC VIEW "café_sv" AS TABLES (o AS dcs_orders PRIMARY KEY (id)) DIMENSIONS (o.region AS o.region) METRICS (o.total AS SUM(o.amount));
+
+query TTTTTT nosort
+SHOW SEMANTIC VIEWS LIKE '%café%'
+----
+<REGEX>:\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z	café_sv	SEMANTIC_VIEW	memory	main	(empty)
+
+# S-218: rewrite.rs::detect_show_materializations, rewrite_show_materializations_all — SHOW SEMANTIC MATERIALIZATIONS across views
+statement ok
+CREATE SEMANTIC VIEW mat_v AS TABLES (o AS dcs_orders PRIMARY KEY (id)) DIMENSIONS (o.region AS o.region) METRICS (o.total AS SUM(o.amount)) MATERIALIZATIONS (agg AS (TABLE dcs_orders, DIMENSIONS (region), METRICS (total)));
+
+query TTTTTTT rowsort
+SHOW SEMANTIC MATERIALIZATIONS
+----
+memory	main	mat_v	agg	dcs_orders	["region"]	["total"]
+
+# S-219: rewrite.rs::detect_show_materializations_in_view, rewrite_show_materializations_in_view — SHOW SEMANTIC MATERIALIZATIONS IN <view>
+query TTTTTTT rowsort
+SHOW SEMANTIC MATERIALIZATIONS IN mat_v
+----
+memory	main	mat_v	agg	dcs_orders	["region"]	["total"]
+
+query TTTTTTT rowsort
+SHOW SEMANTIC MATERIALIZATIONS IN v
+----
+
+# S-220: rewrite.rs::phase34_1_1_show_filter_tests::test_rewrite_show_dims_like_after_in_error — LIKE after IN is out of clause order [syntax]
+statement error
+SHOW SEMANTIC DIMENSIONS IN v LIKE '%c%'
+----
+
+# S-221: rewrite.rs::phase34_1_1_show_filter_tests::test_rewrite_show_metrics_limit_non_numeric, parse_error_position_points_at_offending_token — a non-numeric LIMIT [syntax]
+statement error
+SHOW SEMANTIC METRICS LIMIT abc
+----
+
+statement error
+SHOW SEMANTIC VIEWS LIMIT abc
+----
+
+# S-222: rewrite.rs::phase34_1_1_show_filter_tests::test_rewrite_show_for_metric_on_metrics_error — FOR METRIC on SHOW SEMANTIC METRICS [syntax]
+statement error
+SHOW SEMANTIC METRICS IN v FOR METRIC revenue
+----
+
+# S-223: rewrite.rs::phase34_1_1_show_filter_tests::test_rewrite_show_views_for_metric_error — FOR METRIC on SHOW SEMANTIC VIEWS [syntax]
+statement error
+SHOW SEMANTIC VIEWS FOR METRIC revenue
+----
+
+# S-224: rewrite.rs::phase34_1_1_show_filter_tests::test_rewrite_show_views_in_requires_schema_or_database — SHOW SEMANTIC VIEWS IN <name> (no SCHEMA/DATABASE/ACCOUNT) [syntax]
+statement error
+SHOW SEMANTIC VIEWS IN some_view
+----
+
+# S-225: rewrite.rs::test_for_metric_requires_boundaries, parse_error_position_points_at_offending_token — `FOREIGN` is not the FOR clause [syntax]
+statement error
+SHOW SEMANTIC VIEWS FOREIGN
+----
+
+# S-226: rewrite.rs::test_for_metric_requires_boundaries — `FOR METRICS` is not `FOR METRIC` [syntax]
+statement error
+SHOW SEMANTIC DIMENSIONS IN v FOR METRICS revenue
+----
+
+# S-227: rewrite.rs::test_starts_with_and_limit_require_boundaries — `STARTSWITH`, `LIMIT5`, `WITH_x`, `WITHé` are not clause keywords [syntax]
+statement error
+SHOW SEMANTIC VIEWS STARTSWITH 'a'
+----
+
+statement error
+SHOW SEMANTIC VIEWS LIMIT5
+----
+
+statement error
+SHOW SEMANTIC VIEWS STARTS WITH_x 'a'
+----
+
+statement error
+SHOW SEMANTIC VIEWS STARTS WITHé 'a'
+----
+
+# S-228: rewrite.rs::phase34_1_1_show_filter_tests::test_show_views_non_ascii_trailing_tokens_error_not_panic — non-ASCII trailing tokens on every SHOW form are a clean error [syntax]
+statement error
+SHOW SEMANTIC VIEWS aΩΩ
+----
+
+statement error
+SHOW SEMANTIC VIEWS Ω
+----
+
+statement error
+SHOW SEMANTIC VIEWS ΩΩΩ
+----
+
+statement error
+SHOW SEMANTIC DIMENSIONS éé
+----
+
+statement error
+SHOW SEMANTIC METRICS 東京
+----
+
+statement error
+SHOW SEMANTIC FACTS ☕☕☕
+----
+
+# S-229: rewrite.rs::phase34_1_1_show_filter_tests::test_extract_quoted_string_unterminated, test_extract_quoted_string_no_opening_quote — an unterminated or unquoted LIKE pattern [syntax]
+statement error
+SHOW SEMANTIC VIEWS LIKE '%prod
+----
+
+statement error
+SHOW SEMANTIC VIEWS LIKE prod
+----
+
+# --- SHOW name slots: quoted names in IN SCHEMA / IN DATABASE / IN <view> / FOR METRIC ---
+
+statement ok
+CREATE SCHEMA "dcs my schema";
+
+statement ok
+CREATE SEMANTIC VIEW "dcs my schema".spaced_sv AS TABLES (o AS main.dcs_orders PRIMARY KEY (id)) DIMENSIONS (o.region AS o.region) METRICS (o.total AS SUM(o.amount));
+
+statement ok
+CREATE SEMANTIC VIEW "my view" AS TABLES (o AS dcs_orders PRIMARY KEY (id)) DIMENSIONS (o.region AS o.region) METRICS (o."my metric" AS SUM(o.amount));
+
+# S-230: rewrite.rs::show_name_slot_quoted_ident_tests::in_schema_accepts_a_quoted_name_containing_whitespace — IN SCHEMA "<name with space>"
+query TTTTTT nosort
+SHOW SEMANTIC VIEWS IN SCHEMA "dcs my schema"
+----
+<REGEX>:\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z	spaced_sv	SEMANTIC_VIEW	memory	dcs my schema	(empty)
+
+# S-231: rewrite.rs::show_name_slot_quoted_ident_tests::in_database_accepts_a_quoted_name_containing_whitespace — IN DATABASE "<name with space>" parses; no such database, so no rows
+query TTTTTT nosort
+SHOW SEMANTIC VIEWS IN DATABASE "my db"
+----
+
+# S-232: rewrite.rs::show_name_slot_quoted_ident_tests::in_view_accepts_a_quoted_name_containing_whitespace — IN "<view with space>"
+query TTTTTTTT rowsort
+SHOW SEMANTIC DIMENSIONS IN "my view"
+----
+memory	main	my view	dcs_orders	region	VARCHAR	[]	(empty)
+
+# S-233: rewrite.rs::show_name_slot_quoted_ident_tests::for_metric_accepts_a_quoted_name_containing_whitespace — FOR METRIC "<metric with space>"
+query TTTT rowsort
+SHOW SEMANTIC DIMENSIONS IN v FOR METRIC "revenue"
+----
+dcs_orders	cust_initial	VARCHAR	false
+dcs_orders	cust_tier	VARCHAR	false
+dcs_orders	customer	VARCHAR	false
+dcs_orders	region	VARCHAR	false
+
+query TTTT rowsort
+SHOW SEMANTIC DIMENSIONS IN "my view" FOR METRIC "my metric"
+----
+dcs_orders	region	VARCHAR	false
+
+# S-234: rewrite.rs::show_name_slot_quoted_ident_tests::a_quoted_view_name_containing_a_dot_keeps_its_quotes — IN "a.b" names the view literally called `a.b`, not view `b` [text]
+statement ok
+CREATE SEMANTIC VIEW "dcs_a.dcs_b" AS TABLES (o AS dcs_orders PRIMARY KEY (id)) DIMENSIONS (o.region AS o.region) METRICS (o.total AS SUM(o.amount));
+
+statement ok
+CREATE SEMANTIC VIEW dcs_b AS TABLES (o AS dcs_orders PRIMARY KEY (id)) DIMENSIONS (o.cust AS o.cust) METRICS (o.total AS SUM(o.amount));
+
+query TTTTTTTT rowsort
+SHOW SEMANTIC DIMENSIONS IN "dcs_a.dcs_b"
+----
+memory	main	dcs_a.dcs_b	dcs_orders	region	VARCHAR	[]	(empty)
+
+# S-235: rewrite.rs::show_name_slot_quoted_ident_tests::an_unquoted_dot_is_a_qualifier_but_a_quoted_one_is_not — an unquoted dot in IN <view> is a schema qualifier
+query TTTTTTTT rowsort
+SHOW SEMANTIC DIMENSIONS IN main.dcs_b
+----
+memory	main	dcs_b	dcs_orders	cust	VARCHAR	[]	(empty)
+
+# S-236: rewrite.rs::show_name_slot_quoted_ident_tests::in_schema_strips_quotes_before_emitting_the_literal — a quoted IN SCHEMA name ("dcs_sch") matches the bare schema name
+query TTTTTT nosort
+SHOW SEMANTIC VIEWS IN SCHEMA "dcs_sch"
+----
+<REGEX>:\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z	sch_sv	SEMANTIC_VIEW	memory	dcs_sch	(empty)
+
+# S-237: rewrite.rs::show_name_slot_quoted_ident_tests::in_database_strips_quotes_before_emitting_the_literal — IN DATABASE "memory" matches database `memory`
+query TTTTTT nosort
+SHOW SEMANTIC VIEWS LIKE 'sch%' IN DATABASE "memory"
+----
+<REGEX>:\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z	sch_sv	SEMANTIC_VIEW	memory	dcs_sch	(empty)
+
+# S-238: rewrite.rs::show_name_slot_quoted_ident_tests::a_doubled_quote_inside_a_quoted_schema_name_unescapes — `""` inside a quoted schema name is one `"` [text]
+statement ok
+CREATE SCHEMA "dcs_a""b";
+
+statement ok
+CREATE SEMANTIC VIEW "dcs_a""b".dq_sv AS TABLES (o AS main.dcs_orders PRIMARY KEY (id)) DIMENSIONS (o.region AS o.region) METRICS (o.total AS SUM(o.amount));
+
+query TTTTTT nosort
+SHOW SEMANTIC VIEWS IN SCHEMA "dcs_a""b"
+----
+<REGEX>:\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z	dq_sv	SEMANTIC_VIEW	memory	dcs_a"b	(empty)
+
+# S-239: rewrite.rs::show_name_slot_quoted_ident_tests::a_quoted_schema_name_may_contain_a_semicolon — `;` inside a quoted schema name
+statement ok
+CREATE SCHEMA "dcs_a;b";
+
+statement ok
+CREATE SEMANTIC VIEW "dcs_a;b".semi_sv AS TABLES (o AS main.dcs_orders PRIMARY KEY (id)) DIMENSIONS (o.region AS o.region) METRICS (o.total AS SUM(o.amount));
+
+query TTTTTT nosort
+SHOW SEMANTIC VIEWS IN SCHEMA "dcs_a;b"
+----
+<REGEX>:\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z	semi_sv	SEMANTIC_VIEW	memory	dcs_a;b	(empty)
+
+# S-240: rewrite.rs::show_name_slot_quoted_ident_tests::a_quoted_schema_name_survives_a_single_quote_escape — `'` inside a quoted schema name
+statement ok
+CREATE SCHEMA "dcs_O'Brien";
+
+statement ok
+CREATE SEMANTIC VIEW "dcs_O'Brien".ob_sv AS TABLES (o AS main.dcs_orders PRIMARY KEY (id)) DIMENSIONS (o.region AS o.region) METRICS (o.total AS SUM(o.amount));
+
+query TTTTTT nosort
+SHOW SEMANTIC VIEWS IN SCHEMA "dcs_O'Brien"
+----
+<REGEX>:\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z	ob_sv	SEMANTIC_VIEW	memory	dcs_O'Brien	(empty)
+
+# S-241: rewrite.rs::show_name_slot_quoted_ident_tests::a_quoted_schema_name_cannot_break_out_of_its_literal — a quoted schema name carrying `'; DROP TABLE ...; --` stays a name
+statement ok
+CREATE SCHEMA "dcs_a'; DROP TABLE dcs_orders; --";
+
+statement ok
+CREATE SEMANTIC VIEW "dcs_a'; DROP TABLE dcs_orders; --".bo_sv AS TABLES (o AS main.dcs_orders PRIMARY KEY (id)) DIMENSIONS (o.region AS o.region) METRICS (o.total AS SUM(o.amount));
+
+query TTTTTT nosort
+SHOW SEMANTIC VIEWS IN SCHEMA "dcs_a'; DROP TABLE dcs_orders; --"
+----
+<REGEX>:\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z	bo_sv	SEMANTIC_VIEW	memory	dcs_a'; DROP TABLE dcs_orders; --	(empty)
+
+query I
+SELECT count(*) FROM dcs_orders;
+----
+3
+
+# S-242: rewrite.rs::show_name_slot_quoted_ident_tests::a_quoted_name_still_composes_with_the_other_clauses — LIKE before and LIMIT after a quoted IN SCHEMA name
+query TTTTTT nosort
+SHOW SEMANTIC VIEWS LIKE '%s%' IN SCHEMA "dcs my schema" LIMIT 3
+----
+<REGEX>:\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z	spaced_sv	SEMANTIC_VIEW	memory	dcs my schema	(empty)
+
+# With two more views in the schema, LIKE drops plain_v (no `s`) and LIMIT 1 drops spaced_sv2, so both clauses are shown to take effect
+statement ok
+CREATE SEMANTIC VIEW "dcs my schema".plain_v AS TABLES (o AS main.dcs_orders PRIMARY KEY (id)) DIMENSIONS (o.region AS o.region);
+
+statement ok
+CREATE SEMANTIC VIEW "dcs my schema".spaced_sv2 AS TABLES (o AS main.dcs_orders PRIMARY KEY (id)) DIMENSIONS (o.region AS o.region);
+
+query TTTTTT nosort
+SHOW SEMANTIC VIEWS LIKE '%s%' IN SCHEMA "dcs my schema" LIMIT 1
+----
+<REGEX>:\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z	spaced_sv	SEMANTIC_VIEW	memory	dcs my schema	(empty)
+
+statement ok
+DROP SEMANTIC VIEW "dcs my schema".plain_v;
+
+statement ok
+DROP SEMANTIC VIEW "dcs my schema".spaced_sv2;
+
+# S-243: rewrite.rs::show_name_slot_quoted_ident_tests::an_unterminated_quote_in_a_schema_name_still_errors — IN SCHEMA "<unterminated> [syntax]
+statement error
+SHOW SEMANTIC VIEWS IN SCHEMA "oops
+----
+
+# --- SHOW scope names fold case on both sides ---
+
+statement ok
+CREATE SCHEMA dcs_fold;
+
+statement ok
+USE memory.DCS_FOLD;
+
+statement ok
+CREATE SEMANTIC VIEW fold_a AS TABLES (o AS main.dcs_orders PRIMARY KEY (id)) DIMENSIONS (o.region AS o.region) METRICS (o.total AS SUM(o.amount));
+
+statement ok
+USE memory.dcs_fold;
+
+statement ok
+CREATE SEMANTIC VIEW fold_b AS TABLES (o AS main.dcs_orders PRIMARY KEY (id)) DIMENSIONS (o.region AS o.region) METRICS (o.total AS SUM(o.amount));
+
+statement ok
+USE memory.main;
+
+# S-250: rewrite.rs::show_scope_case_folding_tests::in_schema_folds_case_on_both_sides — a mixed-case IN SCHEMA name finds views created under either spelling [text]
+query TTTTTT nosort
+SHOW SEMANTIC VIEWS IN SCHEMA Dcs_Fold
+----
+<REGEX>:\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z	fold_a	SEMANTIC_VIEW	memory	dcs_fold	(empty)
+<REGEX>:\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z	fold_b	SEMANTIC_VIEW	memory	dcs_fold	(empty)
+
+# S-251: rewrite.rs::show_scope_case_folding_tests::a_quoted_scope_name_folds_exactly_like_an_unquoted_one — the quoted spelling returns the same rows [text]
+query TTTTTT nosort
+SHOW SEMANTIC VIEWS IN SCHEMA "Dcs_Fold"
+----
+<REGEX>:\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z	fold_a	SEMANTIC_VIEW	memory	dcs_fold	(empty)
+<REGEX>:\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z	fold_b	SEMANTIC_VIEW	memory	dcs_fold	(empty)
+
+# S-252: rewrite.rs::show_scope_case_folding_tests::in_database_folds_case_on_both_sides — a mixed-case IN DATABASE name [text]
+query TTTTTT nosort
+SHOW SEMANTIC VIEWS LIKE 'fold%' IN DATABASE MeMoRy
+----
+<REGEX>:\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z	fold_a	SEMANTIC_VIEW	memory	dcs_fold	(empty)
+<REGEX>:\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z	fold_b	SEMANTIC_VIEW	memory	dcs_fold	(empty)
+
+# S-253: rewrite.rs::show_scope_case_folding_tests::the_fold_is_left_to_sql_rather_than_applied_in_rust — a non-ASCII schema name folds Unicode-aware (`É` matches `é`) [text]
+statement ok
+CREATE SCHEMA "dcs_schéma";
+
+statement ok
+CREATE SEMANTIC VIEW "dcs_schéma".acc_sv AS TABLES (o AS main.dcs_orders PRIMARY KEY (id)) DIMENSIONS (o.region AS o.region) METRICS (o.total AS SUM(o.amount));
+
+query TTTTTT nosort
+SHOW SEMANTIC VIEWS IN SCHEMA "DCS_SCHÉMA"
+----
+<REGEX>:\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z	acc_sv	SEMANTIC_VIEW	memory	dcs_schéma	(empty)
+
+# --- SHOW scope: qualified IN SCHEMA <db>.<schema> ---
+
+# S-260: rewrite.rs::show_scope_qualified_name_tests::a_qualified_schema_name_filters_on_database_and_schema — IN SCHEMA memory.dcs_sch
+query TTTTTT nosort
+SHOW SEMANTIC VIEWS IN SCHEMA memory.dcs_sch
+----
+<REGEX>:\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z	sch_sv	SEMANTIC_VIEW	memory	dcs_sch	(empty)
+
+# S-261: rewrite.rs::show_scope_qualified_name_tests::a_quoted_qualified_schema_name_splits_on_the_unquoted_dot — IN SCHEMA "memory"."dcs my schema"
+query TTTTTT nosort
+SHOW SEMANTIC VIEWS IN SCHEMA "memory"."dcs my schema"
+----
+<REGEX>:\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z	spaced_sv	SEMANTIC_VIEW	memory	dcs my schema	(empty)
+
+# S-262: rewrite.rs::show_scope_qualified_name_tests::a_quoted_dot_is_not_a_qualifier — IN SCHEMA "dcs_a.b" is one schema name [text]
+statement ok
+CREATE SCHEMA "dcs_a.b";
+
+statement ok
+CREATE SEMANTIC VIEW "dcs_a.b".dot_sv AS TABLES (o AS main.dcs_orders PRIMARY KEY (id)) DIMENSIONS (o.region AS o.region) METRICS (o.total AS SUM(o.amount));
+
+query TTTTTT nosort
+SHOW SEMANTIC VIEWS IN SCHEMA "dcs_a.b"
+----
+<REGEX>:\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z	dot_sv	SEMANTIC_VIEW	memory	dcs_a.b	(empty)
+
+# S-263: rewrite.rs::show_scope_qualified_name_tests::a_three_part_schema_name_is_rejected — IN SCHEMA a.b.c [text]
+statement error
+SHOW SEMANTIC VIEWS IN SCHEMA memory.main.extra
+----
+Invalid schema name 'memory.main.extra'
+
+# S-264: rewrite.rs::show_scope_qualified_name_tests::a_qualified_database_name_is_rejected — IN DATABASE a.b [text]
+statement error
+SHOW SEMANTIC VIEWS IN DATABASE memory.main
+----
+Invalid database name 'memory.main'
+
+# --- SHOW scope on DIMENSIONS / METRICS / FACTS, IN ACCOUNT, bare IN SCHEMA / IN DATABASE ---
+
+# S-270: rewrite.rs::show_scope_other_commands_tests::a_schema_named_startswith_is_not_the_starts_with_clause — a schema named `startswith` is a name, not STARTS WITH
+statement ok
+CREATE SCHEMA startswith;
+
+statement ok
+CREATE SEMANTIC VIEW startswith.sw_sv AS TABLES (o AS main.dcs_orders PRIMARY KEY (id)) DIMENSIONS (o.region AS o.region) METRICS (o.total AS SUM(o.amount));
+
+query TTTTTT nosort
+SHOW SEMANTIC VIEWS IN SCHEMA startswith
+----
+<REGEX>:\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z	sw_sv	SEMANTIC_VIEW	memory	startswith	(empty)
+
+# S-271: rewrite.rs::show_scope_other_commands_tests::a_real_starts_with_clause_after_a_bare_scope_still_parses — bare IN SCHEMA then STARTS WITH
+query TTTTTT nosort
+SHOW SEMANTIC VIEWS IN SCHEMA STARTS WITH 'sales'
+----
+<REGEX>:\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z	sales_a	SEMANTIC_VIEW	memory	main	(empty)
+<REGEX>:\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z	sales_b	SEMANTIC_VIEW	memory	main	(empty)
+
+# S-272: rewrite.rs::show_scope_other_commands_tests::in_schema_scopes_show_dimensions — SHOW SEMANTIC DIMENSIONS IN SCHEMA
+query TTTTTTTT rowsort
+SHOW SEMANTIC DIMENSIONS IN SCHEMA dcs_sch
+----
+memory	dcs_sch	sch_sv	dcs_orders	region	VARCHAR	[]	(empty)
+
+# S-273: rewrite.rs::show_scope_other_commands_tests::in_schema_scopes_show_metrics — SHOW SEMANTIC METRICS IN SCHEMA
+query TTTTTTTT rowsort
+SHOW SEMANTIC METRICS IN SCHEMA dcs_sch
+----
+memory	dcs_sch	sch_sv	dcs_orders	total	BIGINT	[]	(empty)
+
+# S-274: rewrite.rs::show_scope_other_commands_tests::in_schema_scopes_show_facts — SHOW SEMANTIC FACTS IN SCHEMA
+query TTTTTTTT rowsort
+SHOW SEMANTIC FACTS IN SCHEMA main
+----
+memory	main	v	dcs_orders	raw_amount	INTEGER	[]	(empty)
+memory	main	w	dcs_orders	unit	INTEGER	[]	(empty)
+
+query TTTTTTTT rowsort
+SHOW SEMANTIC FACTS IN SCHEMA dcs_sch
+----
+
+# S-275: rewrite.rs::show_scope_other_commands_tests::in_database_scopes_show_dimensions — SHOW SEMANTIC DIMENSIONS IN DATABASE
+query TTTTTTTT rowsort
+SHOW SEMANTIC DIMENSIONS LIKE 'rev%' IN DATABASE memory
+----
+memory	main	w	dcs_orders	rev_bucket	INTEGER	[]	(empty)
+
+# S-276: rewrite.rs::show_scope_other_commands_tests::a_qualified_schema_scopes_show_dimensions — SHOW SEMANTIC DIMENSIONS IN SCHEMA <db>.<schema>
+query TTTTTTTT rowsort
+SHOW SEMANTIC DIMENSIONS IN SCHEMA memory.dcs_sch
+----
+memory	dcs_sch	sch_sv	dcs_orders	region	VARCHAR	[]	(empty)
+
+# S-277: rewrite.rs::show_scope_other_commands_tests::in_account_emits_no_scope_predicate — IN ACCOUNT lists everything
+query TTTTTT nosort
+SHOW SEMANTIC VIEWS LIKE 'sales%' IN ACCOUNT
+----
+<REGEX>:\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z	sales_a	SEMANTIC_VIEW	memory	main	(empty)
+<REGEX>:\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z	sales_b	SEMANTIC_VIEW	memory	main	(empty)
+
+# S-278: rewrite.rs::show_scope_other_commands_tests::in_account_scopes_show_dimensions_too — SHOW SEMANTIC DIMENSIONS IN ACCOUNT
+query TTTTTTTT rowsort
+SHOW SEMANTIC DIMENSIONS LIKE 'rev%' IN ACCOUNT
+----
+memory	main	w	dcs_orders	rev_bucket	INTEGER	[]	(empty)
+
+# S-279: rewrite.rs::show_scope_other_commands_tests::a_bare_in_schema_scopes_to_the_current_schema — bare IN SCHEMA is the current schema
+statement ok
+USE memory.dcs_sch;
+
+query TTTTTT nosort
+SHOW SEMANTIC VIEWS IN SCHEMA
+----
+<REGEX>:\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z	sch_sv	SEMANTIC_VIEW	memory	dcs_sch	(empty)
+
+# S-280: rewrite.rs::show_scope_other_commands_tests::a_bare_in_schema_on_dimensions_is_the_scope_not_a_view_named_schema — bare IN SCHEMA on DIMENSIONS is the current schema, not a view called `schema`
+statement ok
+CREATE SEMANTIC VIEW memory.main."schema" AS TABLES (o AS dcs_orders PRIMARY KEY (id)) DIMENSIONS (o.schema_dim AS o.region) METRICS (o.total AS SUM(o.amount));
+
+query TTTTTTTT rowsort
+SHOW SEMANTIC DIMENSIONS IN SCHEMA
+----
+memory	dcs_sch	sch_sv	dcs_orders	region	VARCHAR	[]	(empty)
+
+statement ok
+USE memory.main;
+
+# S-281: rewrite.rs::show_scope_other_commands_tests::a_quoted_view_named_schema_is_still_reachable — quoting forces the view-name reading
+query TTTTTTTT rowsort
+SHOW SEMANTIC DIMENSIONS IN "schema"
+----
+memory	main	schema	dcs_orders	schema_dim	VARCHAR	[]	(empty)
+
+# S-282: rewrite.rs::show_scope_other_commands_tests::a_bare_in_database_scopes_to_the_current_database — bare IN DATABASE is the current database
+query TTTTTT nosort
+SHOW SEMANTIC VIEWS LIKE 'sch%' IN DATABASE
+----
+<REGEX>:\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z	sch_sv	SEMANTIC_VIEW	memory	dcs_sch	(empty)
+<REGEX>:\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z	schema	SEMANTIC_VIEW	memory	main	(empty)
+
+# S-283: rewrite.rs::show_scope_other_commands_tests::an_ordinary_view_name_still_selects_the_single_view_function — IN <ordinary view name>
+statement ok
+CREATE SEMANTIC VIEW orders_sv AS TABLES (o AS dcs_orders PRIMARY KEY (id)) DIMENSIONS (o.ordinary AS o.region) METRICS (o.total AS SUM(o.amount));
+
+query TTTTTTTT rowsort
+SHOW SEMANTIC DIMENSIONS IN orders_sv
+----
+memory	main	orders_sv	dcs_orders	ordinary	VARCHAR	[]	(empty)

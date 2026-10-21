@@ -581,6 +581,41 @@ Areas where test coverage is reduced compared to ideal, with justification.
 - **What ships:** the three IDs are in `[advisories] ignore` in `deny.toml`, with the reason on each. `unused-ignored-advisory = "deny"` makes `cargo deny check` fail once an ignore no longer matches anything in the lock, so a bump that drops zip 6 forces the ignores out in the same PR. Because the ignores match by advisory ID anywhere in the graph, `[bans] deny` also bans `zip` unless `libduckdb-sys` is what pulls it in, so a new crate that brings `zip` in fails the check instead of inheriting the ignores.
 - **What would finish it:** a `libduckdb-sys` release that takes `zip >= 9` (or drops it). On that bump, delete the three ignores, the `zip` ban and this entry. MAINTAINER.md says the same where it covers moving the `libduckdb-sys` pin. Re-check this entry sooner if a build ever sets `DUCKDB_DOWNLOAD_LIB`: the ignores would then hide a reachable path.
 
+### 98. ❌ Four oddities at the parser hook's front door — OPEN
+
+- **Origin:** 2026-10-16, the Phase 3 DDL corpus (rows F-013, S-014, S-391). Each row pins today's behaviour.
+- **What is wrong:**
+  - A DDL statement ending in `; ;` (`DROP SEMANTIC VIEW x; ;`) is refused with "parser_override is not active", which is untrue, and is not run. DuckDB accepts `SELECT 1; ;`. (`ddl_corpus_frontdoor_a.test`, F-013.)
+  - An unquoted view name containing an apostrophe (`it's_a_view`) is accepted and stored raw, though DuckDB's tokenizer reads `'s_a_view …` as a string literal. (`ddl_corpus_statements_a.test`, S-014.)
+  - An error message from the hook is cut at 1023 bytes (the 1024-byte C++ error buffer, truncated at a UTF-8 boundary), so a long one loses its tail. S-391's name is two-byte `é`s, so it stops at 1022. (`ddl_corpus_create_forms.test`, S-391.)
+  - The per-thread record of the last query outlives a query that parsed cleanly, so after `SELECT 1; /* ; DROP SEMANTIC VIEW x; */ SELECT 2`, a DDL on another connection with the override off reports "one statement per call" instead of "not active". Not pinnable in a `.test` (the runner's settings query masks it).
+- **What would finish it:** Phase 3 of the PEG epic replaces the hook with grammar productions, which take statement boundaries, identifiers and errors from DuckDB's own parser. Turn the corpus rows into the grammar's behaviour as each is retired.
+
+### 97. ❌ CREATE under a search path records an unqualified base table in the wrong schema — OPEN
+
+- **Origin:** 2026-10-16, the Phase 3 DDL corpus (row F-095, `ddl_corpus_frontdoor_c.test`).
+- **What is wrong:** under `SET search_path = 'b'`, `CREATE SEMANTIC VIEW … TABLES (o AS orders …)` records the table as `b.orders` even when DuckDB resolves `orders` on that path to `main.orders`. The CREATE succeeds and every query of the view then fails with "Table with name orders does not exist".
+- **What would finish it:** resolve the base table the way DuckDB's binder does (walk the path, take the first schema that has it) when stamping it at CREATE, test-first from F-095.
+
+### 96. ❌ DESCRIBE reports the wrong base table schema and name — OPEN
+
+- **Origin:** 2026-10-16, the Phase 3 DDL corpus (rows C-175, C-176 and C-184 in `ddl_corpus_body_b2.test`, F-090 and F-101 in `ddl_corpus_frontdoor_c.test`).
+- **What is wrong:** `BASE_TABLE_SCHEMA_NAME` is the view's schema, not the table's (`src/ddl/describe.rs`, `collect_table_rows` uses `def.schema_name`), and `BASE_TABLE_NAME` keeps the qualifier and quotes as written (`main.orders`, `"Orders"`). `SHOW SEMANTIC DIMENSIONS` repeats the qualified spelling in `table_name`.
+- **What would finish it:** split the stored table reference into its parts and report each unquoted, test-first from those rows.
+
+### 95. ❌ CREATE accepts an aggregate or a positional parameter as a dimension expression — OPEN
+
+- **Origin:** 2026-10-16, the Phase 3 DDL corpus (rows B-007 in `ddl_corpus_body_a1.test`, C-012 in `ddl_corpus_body_b1.test` and C-185 in `ddl_corpus_body_b2.test`).
+- **What is wrong:** `DIMENSIONS (o.d AS SUM(o.amount))` and `DIMENSIONS (o.p AS $1)` are both stored. Snowflake rejects an aggregate dimension; a parameter has no value at query time.
+- **What would finish it:** reject both at CREATE in the Phase 3 grammar transform, and turn those rows into rejection tests (B-007 keeps its split check with a `$1` the grammar still accepts).
+
+### 94. ❌ CREATE accepts a view with no tables, or with neither dimensions nor metrics — OPEN
+
+- **Origin:** 2026-10-16, the Phase 3 DDL corpus (rows B-049, B-050, B-052 and B-056 in `ddl_corpus_body_a1.test`, S-358 in `ddl_corpus_create_forms.test`).
+- **What is wrong:** four shapes create a view: `TABLES () DIMENSIONS ()` (B-056), an AS body with `DIMENSIONS () METRICS ()` (B-049) or with `METRICS ()` alone (B-052), and an empty YAML definition (S-358). None of them round-trips. GET_DDL of B-056 and S-358 fails ("Legacy definition format"), and GET_DDL of B-049 and B-052 renders a TABLES-only body that CREATE rejects (B-050). A TABLES-only AS body is already rejected at CREATE (S-359), which is what the decision below wants for all four.
+- **Decision:** reject both kinds at CREATE (no tables; neither dimensions nor metrics), for the AS body and the YAML forms alike: TABLES is required, and at least one of DIMENSIONS or METRICS (Paul, 2026-10-16, Snowflake parity).
+- **What would finish it:** the Phase 3 grammar transform enforces it, and the pinned rows become rejection tests.
+
 ### 93. ❌ The reference scanner is keyword-blind: a member named like a keyword in a position not yet taught is still spliced over it (COR-3) — OPEN
 
 - **Origin:** 2026-10-16, semolina's pre-release review (COR-3). `expr_tokens::scan_chains` treats every identifier chain not followed by `(` as a member reference, so a member named like a word in a keyword position of DuckDB's expression grammar was substituted over that word. A `where_clause` rendered from a `bytes` filter, `blob = '\x41'::BLOB`, on a view with a fact named `blob` reached DuckDB as `((blob)) = '\x41'::((blob))`, a parser error. The same splice hit fact inlining in dimension and metric expressions and reported phantom dependencies.

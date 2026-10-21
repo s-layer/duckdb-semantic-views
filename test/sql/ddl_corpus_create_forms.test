@@ -1,0 +1,1317 @@
+# DDL accept/reject corpus — CREATE forms (Phase 3 of the PEG epic).
+#
+# Ports the CREATE-side cases from the `#[test]`s in `src/parse/rewrite.rs`
+# (`mod tests`): CREATE / OR REPLACE / IF NOT EXISTS modes, the CREATE front
+# door (prefix near-misses, missing name or body), view-level COMMENT, view-name
+# capture, `FROM YAML` inline with dollar quoting, `FROM YAML FILE`, and the
+# relationship enrichment that runs at CREATE. The non-CREATE cases from the same
+# module live in `ddl_corpus_statements_a.test` / `ddl_corpus_statements_b.test`.
+#
+# Every row carries an id `S-NNN`; the case map from Rust test to row id is
+# `_notes/phase3-corpus/map-S.md`. Row tags:
+#   [syntax]  a syntactic reject: no message is pinned (it will change under
+#             the grammar), only that the statement fails. The runner insists
+#             on a `----` line after `statement error`; an empty block after it
+#             accepts any error message.
+#   [text]    today's contract on something a grammar might plausibly change
+#             (comments inside expressions, case folding, quoting).
+#
+# The `FROM YAML FILE` rows write their YAML fixtures to
+# `__TEST_DIR__/ddl_corpus_s_*.yaml` with COPY, as `peg_compat.test` does.
+
+require semantic_views
+
+# --- fixtures ---
+
+statement ok
+CREATE TABLE dcs_orders (id INTEGER, region VARCHAR, amount INTEGER, customer_id INTEGER, email VARCHAR);
+
+statement ok
+INSERT INTO dcs_orders VALUES (1, 'east', 10, 1, 'ann@x'), (2, 'west', 20, 1, 'bob@x'), (3, 'east', 30, 2, 'cat@x');
+
+statement ok
+CREATE TABLE dcs_customers (cust_id INTEGER, name VARCHAR, email VARCHAR, a INTEGER, b INTEGER);
+
+statement ok
+INSERT INTO dcs_customers VALUES (1, 'ann', 'ann@x', 1, 1), (2, 'bob', 'bob@x', 2, 2), (3, 'cat', 'cat@x', 3, 3);
+
+statement ok
+CREATE SCHEMA dcs_sch;
+
+statement ok
+CREATE MACRO dcs_ddl(v) AS TABLE SELECT unnest(string_split(rtrim(get_ddl('SEMANTIC_VIEW', v), chr(10)), chr(10))) AS line;
+
+# Catalog state: every semantic view, with its schema and comment.
+statement ok
+CREATE MACRO dcs_views() AS TABLE SELECT schema_name, name, comment FROM list_semantic_views();
+
+# --- CREATE / CREATE OR REPLACE / CREATE IF NOT EXISTS ---
+
+# S-300: rewrite.rs::phase25_parse_tests::as_body_create_rewrites_to_from_json, test_detect_create, test_ddl_kind_create, phase43_view_comment_tests::test_view_without_comment — plain CREATE stores the AS-body; no COMMENT is stored when none is given
+statement ok
+CREATE SEMANTIC VIEW v AS TABLES (t AS dcs_orders PRIMARY KEY (id)) DIMENSIONS (t.r AS t.region) METRICS (t.m AS SUM(1))
+
+query T nosort
+SELECT * FROM dcs_ddl('v');
+----
+CREATE OR REPLACE SEMANTIC VIEW v AS
+TABLES (
+    t AS dcs_orders PRIMARY KEY (id)
+)
+DIMENSIONS (
+    t.r AS t.region
+)
+METRICS (
+    t.m AS SUM(1)
+)
+
+# S-301: rewrite.rs::phase25_parse_tests::as_body_create_rewrites_to_from_json — plain CREATE is not OR REPLACE: a second CREATE of the same name fails and leaves the first
+statement error
+CREATE SEMANTIC VIEW v AS TABLES (t AS dcs_orders PRIMARY KEY (id)) DIMENSIONS (t.r2 AS t.region) METRICS (t.m2 AS SUM(2))
+----
+semantic view 'v' already exists
+
+query T nosort
+SELECT * FROM dcs_ddl('v') WHERE line LIKE '%t.r%' OR line LIKE '%t.m%';
+----
+    t.r AS t.region
+    t.m AS SUM(1)
+
+# S-302: rewrite.rs::phase25_parse_tests::as_body_create_or_replace_rewrites_to_from_json, test_detect_create_or_replace, test_ddl_kind_create_or_replace — CREATE OR REPLACE overwrites
+statement ok
+CREATE OR REPLACE SEMANTIC VIEW v AS TABLES (t AS dcs_orders PRIMARY KEY (id)) DIMENSIONS (t.r2 AS t.region) METRICS (t.m2 AS SUM(2))
+
+query T nosort
+SELECT * FROM dcs_ddl('v');
+----
+CREATE OR REPLACE SEMANTIC VIEW v AS
+TABLES (
+    t AS dcs_orders PRIMARY KEY (id)
+)
+DIMENSIONS (
+    t.r2 AS t.region
+)
+METRICS (
+    t.m2 AS SUM(2)
+)
+
+# S-303: rewrite.rs::phase25_parse_tests::as_body_create_if_not_exists_rewrites_to_from_json, test_detect_create_if_not_exists, test_ddl_kind_create_if_not_exists — IF NOT EXISTS is a no-op on an existing view and creates a missing one
+statement ok
+CREATE SEMANTIC VIEW IF NOT EXISTS v AS TABLES (t AS dcs_orders PRIMARY KEY (id)) DIMENSIONS (t.r3 AS t.region) METRICS (t.m3 AS SUM(3))
+
+query T nosort
+SELECT * FROM dcs_ddl('v') WHERE line LIKE '%t.r%' OR line LIKE '%t.m%';
+----
+    t.r2 AS t.region
+    t.m2 AS SUM(2)
+
+statement ok
+CREATE SEMANTIC VIEW IF NOT EXISTS v_new AS TABLES (t AS dcs_orders PRIMARY KEY (id)) DIMENSIONS (t.r3 AS t.region) METRICS (t.m3 AS SUM(3))
+
+query T nosort
+SELECT * FROM dcs_ddl('v_new');
+----
+CREATE OR REPLACE SEMANTIC VIEW v_new AS
+TABLES (
+    t AS dcs_orders PRIMARY KEY (id)
+)
+DIMENSIONS (
+    t.r3 AS t.region
+)
+METRICS (
+    t.m3 AS SUM(3)
+)
+
+statement ok
+DROP SEMANTIC VIEW v_new
+
+# S-304: rewrite.rs::test_detect_case_insensitive_all_forms, test_case_insensitive — CREATE keywords in any case
+statement ok
+create or replace semantic view v AS TABLES (t AS dcs_orders PRIMARY KEY (id)) DIMENSIONS (t.r AS t.region) METRICS (t.m AS SUM(1))
+
+statement ok
+create semantic view lc1 AS TABLES (t AS dcs_orders PRIMARY KEY (id)) DIMENSIONS (t.r AS t.region)
+
+statement ok
+Create Semantic View lc2 AS TABLES (t AS dcs_orders PRIMARY KEY (id)) DIMENSIONS (t.r AS t.region)
+
+statement ok
+CREATE semantic VIEW lc3 AS TABLES (t AS dcs_orders PRIMARY KEY (id)) DIMENSIONS (t.r AS t.region)
+
+query TTT nosort
+SELECT * FROM dcs_views();
+----
+main	lc1	(empty)
+main	lc2	(empty)
+main	lc3	(empty)
+main	v	(empty)
+
+query T nosort
+SELECT * FROM dcs_ddl('v');
+----
+CREATE OR REPLACE SEMANTIC VIEW v AS
+TABLES (
+    t AS dcs_orders PRIMARY KEY (id)
+)
+DIMENSIONS (
+    t.r AS t.region
+)
+METRICS (
+    t.m AS SUM(1)
+)
+
+# S-305: rewrite.rs::test_leading_whitespace, test_trailing_semicolon — leading whitespace and a trailing `;` (with or without a space before it) around CREATE
+statement ok
+  CREATE SEMANTIC VIEW ws1 AS TABLES (t AS dcs_orders PRIMARY KEY (id)) DIMENSIONS (t.r AS t.region)
+
+statement ok
+	CREATE SEMANTIC VIEW ws2 AS TABLES (t AS dcs_orders PRIMARY KEY (id)) DIMENSIONS (t.r AS t.region);
+
+statement ok
+CREATE SEMANTIC VIEW ws3 AS TABLES (t AS dcs_orders PRIMARY KEY (id)) DIMENSIONS (t.r AS t.region) ;
+
+query TTT nosort
+SELECT * FROM dcs_views() WHERE name LIKE 'ws%';
+----
+main	ws1	(empty)
+main	ws2	(empty)
+main	ws3	(empty)
+
+# S-306: rewrite.rs::detect_create_with_leading_block_comment — a leading block comment before CREATE
+statement ok
+/* hi */ CREATE SEMANTIC VIEW x AS TABLES (t AS dcs_orders PRIMARY KEY (id)) DIMENSIONS (t.xx AS t.id) METRICS (t.sy AS SUM(t.amount))
+
+query T nosort
+SELECT * FROM dcs_ddl('x');
+----
+CREATE OR REPLACE SEMANTIC VIEW x AS
+TABLES (
+    t AS dcs_orders PRIMARY KEY (id)
+)
+DIMENSIONS (
+    t.xx AS t.id
+)
+METRICS (
+    t.sy AS SUM(t.amount)
+)
+
+# S-307: rewrite.rs::detect_create_with_leading_line_comment, skip_lws_blanked_comment_is_whitespace — a leading line comment on its own line before CREATE
+statement ok
+-- hi
+CREATE SEMANTIC VIEW x2 AS TABLES (t AS dcs_orders PRIMARY KEY (id)) DIMENSIONS (t.xx AS t.id) METRICS (t.sy AS SUM(t.amount))
+
+query T nosort
+SELECT * FROM dcs_ddl('x2');
+----
+CREATE OR REPLACE SEMANTIC VIEW x2 AS
+TABLES (
+    t AS dcs_orders PRIMARY KEY (id)
+)
+DIMENSIONS (
+    t.xx AS t.id
+)
+METRICS (
+    t.sy AS SUM(t.amount)
+)
+
+# S-308: rewrite.rs::detect_create_or_replace_with_dbt_style_annotation — a dbt-style JSON annotation comment before CREATE OR REPLACE keeps the OR REPLACE mode
+statement ok
+/* {"app": "dbt", "node_id": "model.x"} */ CREATE OR REPLACE SEMANTIC VIEW x AS TABLES (t AS dcs_orders PRIMARY KEY (id)) DIMENSIONS (t.xx AS t.region) METRICS (t.sy AS SUM(t.id))
+
+query T nosort
+SELECT * FROM dcs_ddl('x');
+----
+CREATE OR REPLACE SEMANTIC VIEW x AS
+TABLES (
+    t AS dcs_orders PRIMARY KEY (id)
+)
+DIMENSIONS (
+    t.xx AS t.region
+)
+METRICS (
+    t.sy AS SUM(t.id)
+)
+
+statement ok
+DROP SEMANTIC VIEW lc1
+
+statement ok
+DROP SEMANTIC VIEW lc2
+
+statement ok
+DROP SEMANTIC VIEW lc3
+
+statement ok
+DROP SEMANTIC VIEW ws1
+
+statement ok
+DROP SEMANTIC VIEW ws2
+
+statement ok
+DROP SEMANTIC VIEW ws3
+
+statement ok
+DROP SEMANTIC VIEW x2
+
+# --- the CREATE front door: near-miss prefixes, missing name, missing or malformed body ---
+
+# S-310: rewrite.rs::sv_parse_function_rust_returns_1_for_near_miss — `CRETAE SEMANTIC VIEW` (transposed) [text]
+statement error
+CRETAE SEMANTIC VIEW v AS TABLES (t AS dcs_orders PRIMARY KEY (id)) DIMENSIONS (t.r AS t.region) METRICS (t.m AS SUM(1))
+----
+Did you mean 'CREATE SEMANTIC VIEW'?
+
+# S-311: rewrite.rs::test_near_miss_creat, test_near_miss_position_zero — `CREAT SEMANTIC VIEW` (dropped letter) [text]
+statement error
+CREAT SEMANTIC VIEW x (tables := [])
+----
+Did you mean 'CREATE SEMANTIC VIEW'?
+
+statement error
+CREAT SEMANTIC VIEW x ()
+----
+Did you mean 'CREATE SEMANTIC VIEW'?
+
+# S-312: rewrite.rs::test_too_short — `create semantic vie` [syntax]
+statement error
+create semantic vie
+----
+
+# S-313: rewrite.rs::test_exact_prefix_only, test_parse_error_position_structural — the bare prefix with no view name [syntax]
+statement error
+create semantic view
+----
+
+statement error
+CREATE SEMANTIC VIEW
+----
+
+# S-314: rewrite.rs::test_prefix_requires_trailing_word_boundary — `CREATE SEMANTIC VIEWfoo` is not CREATE SEMANTIC VIEW [syntax]
+statement error
+CREATE SEMANTIC VIEWfoo (TABLES (o AS dcs_orders))
+----
+
+# S-315: rewrite.rs::sv_parse_function_rust_returns_1_with_position_for_malformed_create, sv_parser_override_rust_returns_2_for_validation_failure — a misspelled clause keyword (`TABLSE`) [syntax]
+statement error
+CREATE SEMANTIC VIEW v_typo AS TABLSE (t AS dcs_orders PRIMARY KEY (id)) DIMENSIONS (t.r AS t.region) METRICS (t.m AS SUM(1))
+----
+
+# S-316: rewrite.rs::test_validate_and_rewrite_rejects_paren_body, phase25_parse_tests::old_paren_body_is_rejected, test_parse_error_position_paren_body_rejected, test_basic_detection — the retired parenthesised body is rejected [syntax]
+statement error
+CREATE SEMANTIC VIEW sales (tables := [...], dimensions := [...])
+----
+
+# `s316_paren` is not in the catalog, so the only reason for this to fail is the
+# retired body form (`x` exists by now, which would fail it either way).
+statement error
+CREATE SEMANTIC VIEW s316_paren (tables := [])
+----
+
+# S-317: rewrite.rs::test_error_message_mentions_from_yaml, test_error_message_mentions_from_yaml_file — neither AS nor FROM YAML after the name [text]
+statement error
+CREATE SEMANTIC VIEW v2 SOMETHING_ELSE
+----
+Expected 'AS' or 'FROM YAML' after view name
+
+# S-318: rewrite.rs::test_trailing_semicolon — a name and `;` but no body [syntax]
+statement error
+CREATE SEMANTIC VIEW test;
+----
+
+# S-319: the rejected CREATEs above created nothing and left `v` and `x` as they were
+query TTT nosort
+SELECT * FROM dcs_views();
+----
+main	v	(empty)
+main	x	(empty)
+
+# --- view-level COMMENT ---
+
+# S-320: rewrite.rs::phase43_view_comment_tests::test_view_comment_parsed — COMMENT = '...' before AS
+statement ok
+CREATE SEMANTIC VIEW my_view COMMENT = 'My view' AS TABLES (o AS dcs_orders PRIMARY KEY (id)) DIMENSIONS (o.region AS o.region) METRICS (o.rev AS SUM(o.amount))
+
+query T nosort
+SELECT * FROM dcs_ddl('my_view');
+----
+CREATE OR REPLACE SEMANTIC VIEW my_view COMMENT = 'My view' AS
+TABLES (
+    o AS dcs_orders PRIMARY KEY (id)
+)
+DIMENSIONS (
+    o.region AS o.region
+)
+METRICS (
+    o.rev AS SUM(o.amount)
+)
+
+# S-321: rewrite.rs::phase43_view_comment_tests::test_view_comment_escaped_quotes — `''` in the view COMMENT stores one `'`
+statement ok
+CREATE SEMANTIC VIEW my_view2 COMMENT = 'It''s great' AS TABLES (o AS dcs_orders PRIMARY KEY (id)) DIMENSIONS (o.region AS o.region) METRICS (o.rev AS SUM(o.amount))
+
+query TTT nosort
+SELECT * FROM dcs_views() WHERE name = 'my_view2';
+----
+main	my_view2	It's great
+
+query T nosort
+SELECT * FROM dcs_ddl('my_view2') LIMIT 1;
+----
+CREATE OR REPLACE SEMANTIC VIEW my_view2 COMMENT = 'It''s great' AS
+
+# S-322: rewrite.rs::phase43_view_comment_tests::test_view_comment_with_create_or_replace — OR REPLACE with a COMMENT replaces the comment too
+statement ok
+CREATE OR REPLACE SEMANTIC VIEW my_view COMMENT = 'Updated' AS TABLES (o AS dcs_orders PRIMARY KEY (id)) DIMENSIONS (o.region AS o.region) METRICS (o.rev AS SUM(o.amount))
+
+query TTT nosort
+SELECT * FROM dcs_views() WHERE name = 'my_view';
+----
+main	my_view	Updated
+
+# S-323: rewrite.rs::test_extract_view_comment_utf8_cyrillic — a Cyrillic view COMMENT
+statement ok
+CREATE SEMANTIC VIEW cm_ru COMMENT = 'Привет, мир' AS TABLES (o AS dcs_orders PRIMARY KEY (id)) DIMENSIONS (o.region AS o.region)
+
+query T nosort
+SELECT * FROM dcs_ddl('cm_ru') LIMIT 1;
+----
+CREATE OR REPLACE SEMANTIC VIEW cm_ru COMMENT = 'Привет, мир' AS
+
+# S-324: rewrite.rs::test_extract_view_comment_utf8_emoji_and_em_dash — emoji and em dash in the view COMMENT, followed by AS
+statement ok
+CREATE SEMANTIC VIEW cm_duck COMMENT = '🦆 — quack' AS TABLES (o AS dcs_orders PRIMARY KEY (id)) DIMENSIONS (o.region AS o.region)
+
+query T nosort
+SELECT * FROM dcs_ddl('cm_duck') LIMIT 1;
+----
+CREATE OR REPLACE SEMANTIC VIEW cm_duck COMMENT = '🦆 — quack' AS
+
+# S-325: rewrite.rs::test_extract_view_comment_utf8_escaped_quotes_around_nonascii — `''` escapes next to non-ASCII text in the view COMMENT
+statement ok
+CREATE SEMANTIC VIEW cm_cafe COMMENT = 'café ''noir''' AS TABLES (o AS dcs_orders PRIMARY KEY (id)) DIMENSIONS (o.region AS o.region)
+
+query TTT nosort
+SELECT * FROM dcs_views() WHERE name = 'cm_cafe';
+----
+main	cm_cafe	café 'noir'
+
+# --- comments inside the CREATE body ---
+
+# S-326: rewrite.rs::test_comment_inside_create_body_not_stored — a block comment after a dimension expression is not stored with it [text]
+statement ok
+CREATE SEMANTIC VIEW cb AS TABLES (o AS dcs_orders PRIMARY KEY (id)) DIMENSIONS (o.d AS o.region /* region code */)
+
+query T nosort
+SELECT * FROM dcs_ddl('cb');
+----
+CREATE OR REPLACE SEMANTIC VIEW cb AS
+TABLES (
+    o AS dcs_orders PRIMARY KEY (id)
+)
+DIMENSIONS (
+    o.d AS o.region
+)
+
+# --- view-name capture on CREATE: qualified and quoted names ---
+
+# S-330: rewrite.rs::phase64_quoted_ident_tests::create_with_quoted_fqn_captures_schema_and_bare_name, create_quoted_fqn_captures_bare_name — a quoted three-part name lands in that schema under the bare name
+statement ok
+CREATE SEMANTIC VIEW "memory"."dcs_sch"."orders_sv" AS TABLES (o AS main.dcs_orders PRIMARY KEY (id)) DIMENSIONS (o.region AS o.region) METRICS (o.total AS SUM(o.amount))
+
+query TTT nosort
+SELECT * FROM dcs_views() WHERE name LIKE 'orders%';
+----
+dcs_sch	orders_sv	(empty)
+
+# S-331: rewrite.rs::phase64_quoted_ident_tests::create_or_replace_with_quoted_fqn_captures_schema_and_bare_name — OR REPLACE with a quoted three-part name replaces that schema's view
+statement ok
+CREATE OR REPLACE SEMANTIC VIEW "memory"."dcs_sch"."orders_sv" AS TABLES (o AS main.dcs_orders PRIMARY KEY (id)) DIMENSIONS (o.replaced AS o.region) METRICS (o.total AS SUM(o.amount))
+
+query T nosort
+SELECT * FROM dcs_ddl('memory.dcs_sch.orders_sv') WHERE line LIKE '%o.region%';
+----
+    o.replaced AS o.region
+
+# S-332: rewrite.rs::phase64_quoted_ident_tests::create_if_not_exists_with_quoted_fqn_captures_schema_and_bare_name — IF NOT EXISTS with a quoted three-part name sees that schema's view and does nothing
+statement ok
+CREATE SEMANTIC VIEW IF NOT EXISTS "memory"."dcs_sch"."orders_sv" AS TABLES (o AS main.dcs_orders PRIMARY KEY (id)) DIMENSIONS (o.ignored AS o.region) METRICS (o.total AS SUM(o.amount))
+
+query T nosort
+SELECT * FROM dcs_ddl('memory.dcs_sch.orders_sv') WHERE line LIKE '%o.region%';
+----
+    o.replaced AS o.region
+
+# S-333: rewrite.rs::phase64_quoted_ident_tests::create_with_partial_quoting_captures_schema_and_bare_name — unquoted schema, quoted name: a second `orders_sv`, in `main`
+statement ok
+CREATE SEMANTIC VIEW main."orders_sv" AS TABLES (o AS dcs_orders PRIMARY KEY (id)) DIMENSIONS (o.region AS o.region) METRICS (o.total AS SUM(o.amount))
+
+query TTT nosort
+SELECT * FROM dcs_views() WHERE name LIKE 'orders%';
+----
+dcs_sch	orders_sv	(empty)
+main	orders_sv	(empty)
+
+# S-334: rewrite.rs::phase64_quoted_ident_tests::create_mixed_quoting_captures_bare_name — mixed quoting across three parts
+statement ok
+CREATE SEMANTIC VIEW memory."dcs_sch".orders_c AS TABLES (o AS main.dcs_orders PRIMARY KEY (id)) DIMENSIONS (o.region AS o.region) METRICS (o.total AS SUM(o.amount))
+
+query TTT nosort
+SELECT * FROM dcs_views() WHERE name LIKE 'orders%';
+----
+dcs_sch	orders_c	(empty)
+dcs_sch	orders_sv	(empty)
+main	orders_sv	(empty)
+
+# S-335: rewrite.rs::phase64_quoted_ident_tests::create_with_quoted_whitespace_name_extracts_intact — one quoted part with a space is the name, not a qualifier
+statement ok
+CREATE SEMANTIC VIEW "my view" AS TABLES (o AS dcs_orders PRIMARY KEY (id)) DIMENSIONS (o.region AS o.region) METRICS (o.total AS SUM(o.amount))
+
+query TTT nosort
+SELECT * FROM dcs_views() WHERE name = 'my view';
+----
+main	my view	(empty)
+
+query T nosort
+SELECT * FROM dcs_ddl('"my view"') LIMIT 1;
+----
+CREATE OR REPLACE SEMANTIC VIEW "my view" AS
+
+# S-336: rewrite.rs::phase64_quoted_ident_tests::create_with_quoted_fqn_captures_schema_and_bare_name — the database part is kept, not discarded: naming another database is refused
+statement error
+CREATE SEMANTIC VIEW "db"."sch"."orders_sv" AS TABLES (o AS dcs_orders PRIMARY KEY (id)) DIMENSIONS (o.region AS o.region) METRICS (o.total AS SUM(o.amount))
+----
+names database 'db', but semantic views are single-catalog
+
+# S-337: rewrite.rs::phase64_quoted_ident_tests::create_with_unterminated_quote_errors — an unterminated quoted CREATE name [syntax]
+statement error
+CREATE SEMANTIC VIEW "foo AS TABLES (o AS dcs_orders PRIMARY KEY (id)) DIMENSIONS (o.region AS o.region) METRICS (o.total AS SUM(o.amount))
+----
+
+# S-338: rewrite.rs::phase64_quoted_ident_tests::create_with_four_part_name_errors — a four-part name is not truncated to its last part [text]
+statement error
+CREATE SEMANTIC VIEW memory.dcs_sch.orders_sv.d AS TABLES (o AS dcs_orders PRIMARY KEY (id)) DIMENSIONS (o.region AS o.region) METRICS (o.total AS SUM(o.amount))
+----
+too many identifier parts
+
+query TTT nosort
+SELECT * FROM dcs_views() WHERE name LIKE 'orders%' OR name = 'd';
+----
+dcs_sch	orders_c	(empty)
+dcs_sch	orders_sv	(empty)
+main	orders_sv	(empty)
+
+# --- FROM YAML with a dollar-quoted body ---
+
+# S-340: rewrite.rs::test_from_yaml_detection_via_rewrite_ddl, test_yaml_rewrite_basic_create, test_validate_and_rewrite_yaml_inline_still_works, test_extract_dollar_quoted_untagged, test_extract_dollar_quoted_multiline — CREATE ... FROM YAML $$ <multi-line YAML> $$
+statement ok
+CREATE SEMANTIC VIEW yaml_test FROM YAML $$
+base_table: dcs_orders
+tables:
+  - alias: o
+    table: dcs_orders
+    pk_columns:
+      - id
+dimensions:
+  - name: region
+    expr: o.region
+    source_table: o
+metrics:
+  - name: total_amount
+    expr: SUM(o.amount)
+    source_table: o
+$$
+
+query T nosort
+SELECT * FROM dcs_ddl('yaml_test');
+----
+CREATE OR REPLACE SEMANTIC VIEW yaml_test AS
+TABLES (
+    o AS dcs_orders PRIMARY KEY (id)
+)
+DIMENSIONS (
+    o.region AS o.region
+)
+METRICS (
+    o.total_amount AS SUM(o.amount)
+)
+
+# S-341: rewrite.rs::test_from_yaml_case_insensitive, test_from_yaml_mixed_case — `from yaml` and `From Yaml`
+statement ok
+CREATE SEMANTIC VIEW y_lower from yaml $$
+tables:
+  - alias: o
+    table: dcs_orders
+    pk_columns: [id]
+dimensions:
+  - name: region
+    expr: o.region
+    source_table: o
+metrics:
+  - name: total
+    expr: SUM(o.amount)
+    source_table: o
+$$
+
+statement ok
+CREATE SEMANTIC VIEW y_mixed From Yaml $$
+tables:
+  - alias: o
+    table: dcs_orders
+    pk_columns: [id]
+dimensions:
+  - name: region
+    expr: o.region
+    source_table: o
+metrics:
+  - name: total
+    expr: SUM(o.amount)
+    source_table: o
+$$
+
+query TTT nosort
+SELECT * FROM dcs_views() WHERE name LIKE 'y\_%' ESCAPE '\';
+----
+main	y_lower	(empty)
+main	y_mixed	(empty)
+
+# S-342: rewrite.rs::test_from_yaml_flexible_whitespace — two spaces, a tab, a block comment, or a newline between FROM and YAML
+statement ok
+CREATE SEMANTIC VIEW y_ws1 FROM  YAML $$
+tables:
+  - alias: o
+    table: dcs_orders
+    pk_columns: [id]
+dimensions:
+  - name: region
+    expr: o.region
+    source_table: o
+metrics:
+  - name: total
+    expr: SUM(o.amount)
+    source_table: o
+$$
+
+statement ok
+CREATE SEMANTIC VIEW y_ws2 FROM	YAML $$
+tables:
+  - alias: o
+    table: dcs_orders
+    pk_columns: [id]
+dimensions:
+  - name: region
+    expr: o.region
+    source_table: o
+metrics:
+  - name: total
+    expr: SUM(o.amount)
+    source_table: o
+$$
+
+statement ok
+CREATE SEMANTIC VIEW y_ws3 FROM /* fmt */ YAML $$
+tables:
+  - alias: o
+    table: dcs_orders
+    pk_columns: [id]
+dimensions:
+  - name: region
+    expr: o.region
+    source_table: o
+metrics:
+  - name: total
+    expr: SUM(o.amount)
+    source_table: o
+$$
+
+statement ok
+CREATE SEMANTIC VIEW y_ws4 FROM
+YAML $$
+tables:
+  - alias: o
+    table: dcs_orders
+    pk_columns: [id]
+dimensions:
+  - name: region
+    expr: o.region
+    source_table: o
+metrics:
+  - name: total
+    expr: SUM(o.amount)
+    source_table: o
+$$
+
+query TTT nosort
+SELECT * FROM dcs_views() WHERE name LIKE 'y\_ws%' ESCAPE '\';
+----
+main	y_ws1	(empty)
+main	y_ws2	(empty)
+main	y_ws3	(empty)
+main	y_ws4	(empty)
+
+# S-343: rewrite.rs::test_create_or_replace_from_yaml, test_yaml_rewrite_create_or_replace — CREATE OR REPLACE ... FROM YAML replaces
+statement ok
+CREATE OR REPLACE SEMANTIC VIEW yaml_test FROM YAML $$
+tables:
+  - alias: o
+    table: dcs_orders
+    pk_columns: [id]
+dimensions:
+  - name: replaced_region
+    expr: o.region
+    source_table: o
+metrics:
+  - name: total
+    expr: SUM(o.amount)
+    source_table: o
+$$
+
+query T nosort
+SELECT * FROM dcs_ddl('yaml_test');
+----
+CREATE OR REPLACE SEMANTIC VIEW yaml_test AS
+TABLES (
+    o AS dcs_orders PRIMARY KEY (id)
+)
+DIMENSIONS (
+    o.replaced_region AS o.region
+)
+METRICS (
+    o.total AS SUM(o.amount)
+)
+
+# S-344: rewrite.rs::test_create_if_not_exists_from_yaml, test_yaml_rewrite_create_if_not_exists — CREATE IF NOT EXISTS ... FROM YAML is a no-op on an existing view and creates a missing one
+statement ok
+CREATE SEMANTIC VIEW IF NOT EXISTS yaml_test FROM YAML $$
+tables:
+  - alias: o
+    table: dcs_orders
+    pk_columns: [id]
+dimensions:
+  - name: ignored_region
+    expr: o.region
+    source_table: o
+metrics:
+  - name: total
+    expr: SUM(o.amount)
+    source_table: o
+$$
+
+query T nosort
+SELECT * FROM dcs_ddl('yaml_test') WHERE line LIKE '%region%';
+----
+    o.replaced_region AS o.region
+
+statement ok
+CREATE SEMANTIC VIEW IF NOT EXISTS y_ine FROM YAML $$
+tables:
+  - alias: o
+    table: dcs_orders
+    pk_columns: [id]
+dimensions:
+  - name: region
+    expr: o.region
+    source_table: o
+metrics:
+  - name: total
+    expr: SUM(o.amount)
+    source_table: o
+$$
+
+query TTT nosort
+SELECT * FROM dcs_views() WHERE name = 'y_ine';
+----
+main	y_ine	(empty)
+
+# S-345: rewrite.rs::test_comment_with_from_yaml — COMMENT = '...' before FROM YAML
+statement ok
+CREATE SEMANTIC VIEW y_cm COMMENT = 'my comment' FROM YAML $$
+tables:
+  - alias: o
+    table: dcs_orders
+    pk_columns: [id]
+dimensions:
+  - name: region
+    expr: o.region
+    source_table: o
+metrics:
+  - name: total
+    expr: SUM(o.amount)
+    source_table: o
+$$
+
+query TTT nosort
+SELECT * FROM dcs_views() WHERE name = 'y_cm';
+----
+main	y_cm	my comment
+
+# S-346: rewrite.rs::test_yaml_rewrite_comment_override — the DDL COMMENT wins over a `comment:` key in the YAML; without one the YAML comment is used
+statement ok
+CREATE SEMANTIC VIEW y_override COMMENT = 'ddl comment' FROM YAML $$
+tables:
+  - alias: o
+    table: dcs_orders
+    pk_columns: [id]
+dimensions:
+  - name: region
+    expr: o.region
+    source_table: o
+comment: yaml comment
+metrics:
+  - name: total
+    expr: SUM(o.amount)
+    source_table: o
+$$
+
+statement ok
+CREATE SEMANTIC VIEW y_yamlcm FROM YAML $$
+tables:
+  - alias: o
+    table: dcs_orders
+    pk_columns: [id]
+dimensions:
+  - name: region
+    expr: o.region
+    source_table: o
+comment: yaml comment
+metrics:
+  - name: total
+    expr: SUM(o.amount)
+    source_table: o
+$$
+
+query TTT nosort
+SELECT * FROM dcs_views() WHERE name IN ('y_override', 'y_yamlcm');
+----
+main	y_override	ddl comment
+main	y_yamlcm	yaml comment
+
+# S-347: rewrite.rs::test_yaml_rewrite_tagged_dollar_quote, test_extract_dollar_quoted_tagged — a tagged dollar quote `$yaml$ ... $yaml$`
+statement ok
+CREATE SEMANTIC VIEW y_tagged FROM YAML $yaml$
+tables:
+  - alias: o
+    table: dcs_orders
+    pk_columns: [id]
+dimensions:
+  - name: region
+    expr: o.region
+    source_table: o
+metrics:
+  - name: total
+    expr: SUM(o.amount)
+    source_table: o
+$yaml$
+
+query T nosort
+SELECT * FROM dcs_ddl('y_tagged');
+----
+CREATE OR REPLACE SEMANTIC VIEW y_tagged AS
+TABLES (
+    o AS dcs_orders PRIMARY KEY (id)
+)
+DIMENSIONS (
+    o.region AS o.region
+)
+METRICS (
+    o.total AS SUM(o.amount)
+)
+
+# S-348: rewrite.rs::test_yaml_rewrite_base_table_populated — an empty `base_table` is filled from the first table entry
+statement ok
+CREATE SEMANTIC VIEW y_base FROM YAML $$
+base_table: ""
+tables:
+  - alias: o
+    table: dcs_orders
+    pk_columns: []
+dimensions: []
+metrics:
+  - name: total
+    expr: sum(o.amount)
+    source_table: o
+$$
+
+query TTTTT nosort
+DESCRIBE SEMANTIC VIEW y_base;
+----
+TABLE	dcs_orders	(empty)	BASE_TABLE_DATABASE_NAME	memory
+TABLE	dcs_orders	(empty)	BASE_TABLE_SCHEMA_NAME	main
+TABLE	dcs_orders	(empty)	BASE_TABLE_NAME	dcs_orders
+METRIC	total	dcs_orders	TABLE	dcs_orders
+METRIC	total	dcs_orders	EXPRESSION	sum(o.amount)
+METRIC	total	dcs_orders	DATA_TYPE	BIGINT
+METRIC	total	dcs_orders	ACCESS_MODIFIER	PUBLIC
+
+query I
+SELECT * FROM semantic_view('y_base', metrics := ['total']);
+----
+60
+
+# S-349: rewrite.rs::test_yaml_rewrite_invalid_yaml — malformed YAML content names the view in the error
+statement error
+CREATE SEMANTIC VIEW bad_view FROM YAML $$
+: : : not valid yaml [[[$$
+----
+invalid YAML definition for semantic view 'bad_view'
+
+# S-350: rewrite.rs::test_extract_dollar_quoted_empty_content — `$$$$` is an empty YAML document, rejected as a definition
+statement error
+CREATE SEMANTIC VIEW y_empty_body FROM YAML $$$$
+----
+invalid YAML definition for semantic view 'y_empty_body'
+
+# S-351: rewrite.rs::test_yaml_rewrite_trailing_content_rejected — text after the closing `$$` [syntax]
+statement error
+CREATE SEMANTIC VIEW y_trail FROM YAML $$
+tables:
+  - alias: o
+    table: dcs_orders
+    pk_columns: [id]
+dimensions:
+  - name: region
+    expr: o.region
+    source_table: o
+metrics:
+  - name: total
+    expr: SUM(o.amount)
+    source_table: o
+$$ extra stuff
+----
+
+# S-352: rewrite.rs::test_extract_dollar_quoted_inner_dollar — the first closing `$$` ends the body, so a later `$$ text$$` is trailing content [syntax]
+statement error
+CREATE SEMANTIC VIEW y_inner FROM YAML $$
+tables:
+  - alias: o
+    table: dcs_orders
+    pk_columns: [id]
+dimensions:
+  - name: region
+    expr: o.region
+    source_table: o
+metrics:
+  - name: total
+    expr: SUM(o.amount)
+    source_table: o
+$$ text$$
+----
+
+# S-353: rewrite.rs::test_extract_dollar_quoted_no_leading_dollar — FROM YAML not followed by a dollar quote [syntax]
+statement error
+CREATE SEMANTIC VIEW y_nodollar FROM YAML not a dollar
+----
+
+# S-354: rewrite.rs::test_extract_dollar_quoted_unterminated_opening — `$tag` with no closing `$` on the opening delimiter [syntax]
+statement error
+CREATE SEMANTIC VIEW y_open FROM YAML $no_close
+----
+
+# S-355: rewrite.rs::test_extract_dollar_quoted_unterminated_body — `$$` body with no closing `$$` [syntax]
+statement error
+CREATE SEMANTIC VIEW y_body FROM YAML $$no closing
+----
+
+# S-356: rewrite.rs::test_extract_dollar_quoted_rejects_invalid_tag — a digit-led tag (`$1$`) and a tag with a space (`$ta g$`) [text]
+statement error
+CREATE SEMANTIC VIEW y_tag1 FROM YAML $1$
+tables: []
+$1$
+----
+Invalid dollar-quote tag
+
+statement error
+CREATE SEMANTIC VIEW y_tag2 FROM YAML $ta g$
+tables: []
+$ta g$
+----
+Invalid dollar-quote tag
+
+# S-357: the rejected FROM YAML statements created nothing
+query TTT nosort
+SELECT * FROM dcs_views() WHERE name IN ('bad_view', 'y_empty_body', 'y_trail', 'y_inner', 'y_nodollar', 'y_open', 'y_body', 'y_tag1', 'y_tag2');
+----
+
+# S-358: rewrite.rs::test_yaml_rewrite_create_or_replace, test_yaml_rewrite_create_if_not_exists — the Rust tests' YAML body declares no tables, dimensions or metrics, and is accepted
+# PRE-EXISTING (TECH-DEBT #94): an empty YAML definition (`tables: []`, `dimensions: []`, `metrics: []`) creates a view. Its AS-body equivalent, `DIMENSIONS () METRICS ()` (B-049), is accepted too; only a TABLES-only body (S-359 below) is rejected. The stored view has no members; GET_DDL on it fails ("Legacy definition format"), so it is not called here.
+statement ok
+CREATE SEMANTIC VIEW y_empty FROM YAML $$
+base_table: t
+tables: []
+dimensions: []
+metrics: []
+$$
+
+query TTT nosort
+SELECT * FROM dcs_views() WHERE name = 'y_empty';
+----
+main	y_empty	(empty)
+
+query TTTTT nosort
+DESCRIBE SEMANTIC VIEW y_empty;
+----
+
+# S-359: rewrite.rs::test_yaml_rewrite_create_or_replace — a near miss of S-358 in AS-body form (TABLES only, no DIMENSIONS or METRICS) is rejected, as TECH-DEBT #94's decision wants for every empty view [text]
+statement error
+CREATE SEMANTIC VIEW as_empty AS TABLES (o AS dcs_orders PRIMARY KEY (id))
+----
+At least one of 'DIMENSIONS' or 'METRICS' is required
+
+# --- FROM YAML FILE ---
+
+statement ok
+COPY (SELECT 'tables:
+  - alias: o
+    table: dcs_orders
+    pk_columns:
+      - id
+dimensions:
+  - name: region
+    expr: o.region
+    source_table: o
+metrics:
+  - name: total
+    expr: SUM(o.amount)
+    source_table: o' AS content)
+TO '__TEST_DIR__/ddl_corpus_s_basic.yaml' (FORMAT CSV, HEADER FALSE, QUOTE '');
+
+statement ok
+COPY (SELECT 'tables:
+  - alias: o
+    table: dcs_orders
+    pk_columns:
+      - id
+dimensions:
+  - name: file_region
+    expr: o.region
+    source_table: o
+metrics:
+  - name: total
+    expr: SUM(o.amount)
+    source_table: o
+comment: yaml file comment' AS content)
+TO '__TEST_DIR__/ddl_corpus_s_commented.yaml' (FORMAT CSV, HEADER FALSE, QUOTE '');
+
+# S-360: rewrite.rs::test_validate_and_rewrite_yaml_file, test_rewrite_ddl_yaml_file_body_create, test_extract_single_quoted_basic — CREATE ... FROM YAML FILE '<path>'
+statement ok
+CREATE SEMANTIC VIEW yf FROM YAML FILE '__TEST_DIR__/ddl_corpus_s_basic.yaml'
+
+query T nosort
+SELECT * FROM dcs_ddl('yf');
+----
+CREATE OR REPLACE SEMANTIC VIEW yf AS
+TABLES (
+    o AS dcs_orders PRIMARY KEY (id)
+)
+DIMENSIONS (
+    o.region AS o.region
+)
+METRICS (
+    o.total AS SUM(o.amount)
+)
+
+# S-361: rewrite.rs::test_validate_and_rewrite_yaml_file_case_insensitive — `from yaml file` in lower case
+statement ok
+CREATE SEMANTIC VIEW yf_lower from yaml file '__TEST_DIR__/ddl_corpus_s_basic.yaml'
+
+query TTT nosort
+SELECT * FROM dcs_views() WHERE name = 'yf_lower';
+----
+main	yf_lower	(empty)
+
+# S-362: rewrite.rs::test_rewrite_ddl_yaml_file_body_replace, test_rewrite_ddl_yaml_file_body_with_comment — OR REPLACE ... COMMENT ... FROM YAML FILE replaces, and the DDL comment wins over the file's
+statement ok
+CREATE OR REPLACE SEMANTIC VIEW yf COMMENT = 'a comment' FROM YAML FILE '__TEST_DIR__/ddl_corpus_s_commented.yaml'
+
+query T nosort
+SELECT * FROM dcs_ddl('yf');
+----
+CREATE OR REPLACE SEMANTIC VIEW yf COMMENT = 'a comment' AS
+TABLES (
+    o AS dcs_orders PRIMARY KEY (id)
+)
+DIMENSIONS (
+    o.file_region AS o.region
+)
+METRICS (
+    o.total AS SUM(o.amount)
+)
+
+statement ok
+CREATE SEMANTIC VIEW yf_filecm FROM YAML FILE '__TEST_DIR__/ddl_corpus_s_commented.yaml'
+
+query TTT nosort
+SELECT * FROM dcs_views() WHERE name = 'yf_filecm';
+----
+main	yf_filecm	yaml file comment
+
+# S-363: rewrite.rs::test_rewrite_ddl_yaml_file_body_if_not_exists — IF NOT EXISTS ... FROM YAML FILE is a no-op on an existing view and creates a missing one
+statement ok
+CREATE SEMANTIC VIEW IF NOT EXISTS yf FROM YAML FILE '__TEST_DIR__/ddl_corpus_s_basic.yaml'
+
+query T nosort
+SELECT * FROM dcs_ddl('yf') LIMIT 1;
+----
+CREATE OR REPLACE SEMANTIC VIEW yf COMMENT = 'a comment' AS
+
+statement ok
+CREATE SEMANTIC VIEW IF NOT EXISTS yf_ine FROM YAML FILE '__TEST_DIR__/ddl_corpus_s_basic.yaml'
+
+query TTT nosort
+SELECT * FROM dcs_views() WHERE name = 'yf_ine';
+----
+main	yf_ine	(empty)
+
+# S-364: rewrite.rs::test_rewrite_ddl_yaml_file_body_create — plain CREATE ... FROM YAML FILE is not OR REPLACE
+statement error
+CREATE SEMANTIC VIEW yf FROM YAML FILE '__TEST_DIR__/ddl_corpus_s_basic.yaml'
+----
+semantic view 'yf' already exists
+
+# S-365: rewrite.rs::test_extract_single_quoted_escaped — `''` in the file path is one `'`
+statement ok
+COPY (SELECT 'tables:
+  - alias: o
+    table: dcs_orders
+    pk_columns: [id]
+dimensions:
+  - name: quoted_path
+    expr: o.region
+    source_table: o
+metrics:
+  - name: total
+    expr: SUM(o.amount)
+    source_table: o' AS content)
+TO '__TEST_DIR__/ddl_corpus_s_file''s.yaml' (FORMAT CSV, HEADER FALSE, QUOTE '');
+
+statement ok
+CREATE SEMANTIC VIEW yf_quote FROM YAML FILE '__TEST_DIR__/ddl_corpus_s_file''s.yaml'
+
+query T nosort
+SELECT * FROM dcs_ddl('yf_quote') WHERE line LIKE '%region%';
+----
+    o.quoted_path AS o.region
+
+# S-366: rewrite.rs::test_extract_single_quoted_utf8_cjk_path — a CJK file path round-trips
+statement ok
+COPY (SELECT 'tables:
+  - alias: o
+    table: dcs_orders
+    pk_columns: [id]
+dimensions:
+  - name: cjk_path
+    expr: o.region
+    source_table: o
+metrics:
+  - name: total
+    expr: SUM(o.amount)
+    source_table: o' AS content)
+TO '__TEST_DIR__/ddl_corpus_s_视图.yaml' (FORMAT CSV, HEADER FALSE, QUOTE '');
+
+statement ok
+CREATE SEMANTIC VIEW yf_cjk FROM YAML FILE '__TEST_DIR__/ddl_corpus_s_视图.yaml'
+
+query T nosort
+SELECT * FROM dcs_ddl('yf_cjk') WHERE line LIKE '%region%';
+----
+    o.cjk_path AS o.region
+
+# S-367: rewrite.rs::test_extract_single_quoted_utf8_accented_path — an accented file path round-trips
+statement ok
+COPY (SELECT 'tables:
+  - alias: o
+    table: dcs_orders
+    pk_columns: [id]
+dimensions:
+  - name: accented_path
+    expr: o.region
+    source_table: o
+metrics:
+  - name: total
+    expr: SUM(o.amount)
+    source_table: o' AS content)
+TO '__TEST_DIR__/ddl_corpus_s_définition.yaml' (FORMAT CSV, HEADER FALSE, QUOTE '');
+
+statement ok
+CREATE SEMANTIC VIEW yf_accent FROM YAML FILE '__TEST_DIR__/ddl_corpus_s_définition.yaml'
+
+query T nosort
+SELECT * FROM dcs_ddl('yf_accent') WHERE line LIKE '%region%';
+----
+    o.accented_path AS o.region
+
+# S-368: rewrite.rs::test_extract_single_quoted_utf8_emoji_path — an emoji file path round-trips
+statement ok
+COPY (SELECT 'tables:
+  - alias: o
+    table: dcs_orders
+    pk_columns: [id]
+dimensions:
+  - name: emoji_path
+    expr: o.region
+    source_table: o
+metrics:
+  - name: total
+    expr: SUM(o.amount)
+    source_table: o' AS content)
+TO '__TEST_DIR__/ddl_corpus_s_🦆-data.yaml' (FORMAT CSV, HEADER FALSE, QUOTE '');
+
+statement ok
+CREATE SEMANTIC VIEW yf_emoji FROM YAML FILE '__TEST_DIR__/ddl_corpus_s_🦆-data.yaml'
+
+query T nosort
+SELECT * FROM dcs_ddl('yf_emoji') WHERE line LIKE '%region%';
+----
+    o.emoji_path AS o.region
+
+# S-369: rewrite.rs::test_rewrite_ddl_yaml_file_body_empty_path, test_extract_single_quoted_empty — an empty file path is refused
+statement error
+CREATE SEMANTIC VIEW yf_empty FROM YAML FILE ''
+----
+File path cannot be empty
+
+# S-370: rewrite.rs::test_rewrite_ddl_yaml_file_body_trailing_content — text after the file path [syntax]
+statement error
+CREATE SEMANTIC VIEW yf_trail FROM YAML FILE '__TEST_DIR__/ddl_corpus_s_basic.yaml' extra stuff
+----
+
+# S-371: rewrite.rs::test_extract_single_quoted_no_quote — an unquoted file path [syntax]
+statement error
+CREATE SEMANTIC VIEW yf_noquote FROM YAML FILE no quote
+----
+
+# S-372: rewrite.rs::test_extract_single_quoted_unterminated — an unterminated file path literal [syntax]
+statement error
+CREATE SEMANTIC VIEW yf_unterm FROM YAML FILE '__TEST_DIR__/ddl_corpus_s_basic.yaml
+----
+
+query TTT nosort
+SELECT * FROM dcs_views() WHERE name IN ('yf_empty', 'yf_trail', 'yf_noquote', 'yf_unterm');
+----
+
+# --- RELATIONSHIPS: reference columns and cardinality resolved at CREATE ---
+
+# S-380: rewrite.rs::phase33_inference_tests::rewrite_produces_json_with_ref_columns_and_cardinality, resolves_ref_columns_to_target_pk — `REFERENCES c` with no column list resolves to c's PRIMARY KEY
+statement ok
+CREATE SEMANTIC VIEW rel AS TABLES (o AS dcs_orders PRIMARY KEY (id), c AS dcs_customers PRIMARY KEY (cust_id)) RELATIONSHIPS (r AS o(customer_id) REFERENCES c) DIMENSIONS (o.region AS region) METRICS (o.revenue AS SUM(amount))
+
+query TTTTT nosort
+DESCRIBE SEMANTIC VIEW rel;
+----
+TABLE	dcs_orders	(empty)	BASE_TABLE_DATABASE_NAME	memory
+TABLE	dcs_orders	(empty)	BASE_TABLE_SCHEMA_NAME	main
+TABLE	dcs_orders	(empty)	BASE_TABLE_NAME	dcs_orders
+TABLE	dcs_orders	(empty)	PRIMARY_KEY	["id"]
+TABLE	dcs_customers	(empty)	BASE_TABLE_DATABASE_NAME	memory
+TABLE	dcs_customers	(empty)	BASE_TABLE_SCHEMA_NAME	main
+TABLE	dcs_customers	(empty)	BASE_TABLE_NAME	dcs_customers
+TABLE	dcs_customers	(empty)	PRIMARY_KEY	["cust_id"]
+RELATIONSHIP	r	dcs_orders	TABLE	dcs_orders
+RELATIONSHIP	r	dcs_orders	REF_TABLE	dcs_customers
+RELATIONSHIP	r	dcs_orders	FOREIGN_KEY	["customer_id"]
+RELATIONSHIP	r	dcs_orders	REF_KEY	["cust_id"]
+DIMENSION	region	dcs_orders	TABLE	dcs_orders
+DIMENSION	region	dcs_orders	EXPRESSION	region
+DIMENSION	region	dcs_orders	DATA_TYPE	VARCHAR
+METRIC	revenue	dcs_orders	TABLE	dcs_orders
+METRIC	revenue	dcs_orders	EXPRESSION	SUM(amount)
+METRIC	revenue	dcs_orders	DATA_TYPE	BIGINT
+METRIC	revenue	dcs_orders	ACCESS_MODIFIER	PUBLIC
+
+# S-381: rewrite.rs::phase33_inference_tests::keeps_explicit_ref_columns — an explicit `REFERENCES c(email)` column list is kept
+statement ok
+CREATE SEMANTIC VIEW rel_explicit AS TABLES (o AS dcs_orders PRIMARY KEY (id), c AS dcs_customers PRIMARY KEY (cust_id) UNIQUE (email)) RELATIONSHIPS (r AS o(email) REFERENCES c(email)) DIMENSIONS (o.region AS region) METRICS (o.revenue AS SUM(amount))
+
+query T nosort
+SELECT * FROM dcs_ddl('rel_explicit') WHERE line LIKE '%REFERENCES%';
+----
+    r AS o(email) REFERENCES c(email)
+
+# S-382: rewrite.rs::phase33_inference_tests::infers_many_to_one_when_fk_is_bare — an FK that is not the source's PK/UNIQUE is many-to-one: a metric on the target fans out under a source dimension
+statement ok
+CREATE SEMANTIC VIEW card_m2o AS TABLES (o AS dcs_orders PRIMARY KEY (id), c AS dcs_customers PRIMARY KEY (cust_id)) RELATIONSHIPS (r AS o(customer_id) REFERENCES c) DIMENSIONS (o.region AS o.region) METRICS (c.cnt AS COUNT(*))
+
+statement error
+SELECT * FROM semantic_view('card_m2o', dimensions := ['region'], metrics := ['cnt'])
+----
+many-to-one cardinality, inferred: FK is not PK/UNIQUE
+
+# S-383: rewrite.rs::phase33_inference_tests::infers_one_to_one_from_pk_match — an FK equal to the source's PRIMARY KEY is one-to-one: the same query is allowed
+statement ok
+CREATE SEMANTIC VIEW card_o2o_pk AS TABLES (o AS dcs_orders PRIMARY KEY (id), c AS dcs_customers PRIMARY KEY (cust_id)) RELATIONSHIPS (r AS o(id) REFERENCES c) DIMENSIONS (o.region AS o.region) METRICS (c.cnt AS COUNT(*))
+
+query TI rowsort
+SELECT * FROM semantic_view('card_o2o_pk', dimensions := ['region'], metrics := ['cnt'])
+----
+east	2
+west	1
+
+# S-384: rewrite.rs::phase33_inference_tests::infers_one_to_one_from_unique_match — an FK equal to a UNIQUE key of the source is one-to-one
+statement ok
+CREATE SEMANTIC VIEW card_o2o_uq AS TABLES (o AS dcs_orders PRIMARY KEY (id) UNIQUE (email), c AS dcs_customers PRIMARY KEY (cust_id) UNIQUE (email)) RELATIONSHIPS (r AS o(email) REFERENCES c(email)) DIMENSIONS (o.region AS o.region) METRICS (c.cnt AS COUNT(*))
+
+query TI rowsort
+SELECT * FROM semantic_view('card_o2o_uq', dimensions := ['region'], metrics := ['cnt'])
+----
+east	2
+west	1
+
+# S-385: rewrite.rs::phase33_inference_tests::case_insensitive_column_matching — PRIMARY KEY (ID) matches FK (id) regardless of case [text]
+statement ok
+CREATE SEMANTIC VIEW card_o2o_ci AS TABLES (o AS dcs_orders PRIMARY KEY (ID), c AS dcs_customers PRIMARY KEY (cust_id)) RELATIONSHIPS (r AS o(id) REFERENCES c) DIMENSIONS (o.region AS o.region) METRICS (c.cnt AS COUNT(*))
+
+query TI rowsort
+SELECT * FROM semantic_view('card_o2o_ci', dimensions := ['region'], metrics := ['cnt'])
+----
+east	2
+west	1
+
+# S-386: rewrite.rs::phase33_inference_tests::errors_when_target_has_no_pk_and_no_explicit_ref — `REFERENCES c` where c declares no key is refused
+statement error
+CREATE SEMANTIC VIEW rel_nopk AS TABLES (o AS dcs_orders PRIMARY KEY (id), c AS dcs_customers) RELATIONSHIPS (r AS o(customer_id) REFERENCES c) DIMENSIONS (o.region AS region) METRICS (o.revenue AS SUM(amount))
+----
+has no PRIMARY KEY declared but is referenced by FK in
+
+# S-387: rewrite.rs::phase33_inference_tests::fk_ref_column_count_mismatch_error — a one-column FK against a two-column PRIMARY KEY is refused
+statement error
+CREATE SEMANTIC VIEW rel_count AS TABLES (o AS dcs_orders PRIMARY KEY (id), c AS dcs_customers PRIMARY KEY (a, b)) RELATIONSHIPS (r AS o(customer_id) REFERENCES c) DIMENSIONS (o.region AS region) METRICS (o.revenue AS SUM(amount))
+----
+FK column count (1) does not match referenced column count (2)
+
+# S-388: rewrite.rs::phase33_inference_tests::enrich_rejects_cross_kind_name_collision — a metric named like a dimension (differing only in case) collides
+statement error
+CREATE SEMANTIC VIEW v_dup AS TABLES (o AS dcs_orders PRIMARY KEY (id)) DIMENSIONS (o.region AS o.region) METRICS (o.REGION AS count(o.region))
+----
+duplicate name 'REGION': metric 'REGION' collides with dimension 'region'
+
+query TTT nosort
+SELECT * FROM dcs_views() WHERE name IN ('rel_nopk', 'rel_count', 'v_dup');
+----
+
+# --- error-message rendering through the parser hook ---
+
+# S-390: rewrite.rs::write_error_to_buffer_handles_short_string — a short validation error reaches the user whole (the row pins the message's tail) [text]
+statement ok
+CREATE SEMANTIC VIEW dup_ok AS TABLES (o AS dcs_orders PRIMARY KEY (id)) DIMENSIONS (o.r AS o.region, o.r2 AS o.id)
+
+statement error
+CREATE SEMANTIC VIEW dup_short AS TABLES (o AS dcs_orders PRIMARY KEY (id)) DIMENSIONS (o.r AS o.region, o.r AS o.id)
+----
+duplicate name 'r': dimension 'r' collides with dimension 'r' -- dimension, metric, and fact names share one namespace and are case-insensitive (quoting does not make a name distinct)
+
+# S-391: rewrite.rs::write_error_to_buffer_truncates_at_char_boundary — an error message longer than the 1024-byte hook buffer is cut at a UTF-8 character boundary, so it still decodes (the dimension name is 600 two-byte `é`; today the message stops after 1022 bytes, mid-name, before "collides ...": the regex pins exactly that, 503 `é` and nothing after them) PRE-EXISTING (TECH-DEBT #98) [text]
+statement ok
+CREATE SEMANTIC VIEW long_ok AS TABLES (o AS dcs_orders PRIMARY KEY (id)) DIMENSIONS (o.éééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééé AS o.region)
+
+query I nosort
+SELECT strlen(line) FROM dcs_ddl('long_ok') WHERE line LIKE '%AS o.region';
+----
+1218
+
+statement error
+CREATE SEMANTIC VIEW long_dup AS TABLES (o AS dcs_orders PRIMARY KEY (id)) DIMENSIONS (o.éééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééé AS o.region, o.éééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééé AS o.id)
+----
+<REGEX>:^Parser Error: duplicate name 'é{503}$
+
+query TTT nosort
+SELECT * FROM dcs_views() WHERE name IN ('dup_short', 'long_dup');
+----

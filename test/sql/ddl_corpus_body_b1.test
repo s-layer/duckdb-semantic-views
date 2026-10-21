@@ -1,0 +1,1672 @@
+require semantic_views
+
+# DDL accept/reject corpus, slice C, part b1 of 2 (ddl_corpus_body_b2.test is the
+# other part). Ports, as SQL-level rows against the real extension, the cases
+# encoded by these Rust unit tests, which go away with the hand-written scanners
+# in Phase 3 of the PEG parser epic (.planning/PEG-PARSER-EPIC.md):
+#
+#   src/body_parser/mod.rs         mod tests, from `references_multi_column_list`
+#                                  to the end of the file
+#   src/body_parser/annotations.rs src/body_parser/clause_bounds.rs
+#   src/body_parser/cursor.rs      src/body_parser/lexer.rs
+#   src/body_parser/window.rs
+#
+# Case map (Rust test -> row id): _notes/phase3-corpus/map-C.md
+#
+# Conventions: `# C-NNN:` names each row and the Rust test(s) it ports.
+# Accept rows pin the stored definition through GET_DDL (dcc_ddl) and, where
+# GET_DDL does not show a parsed field, DESCRIBE / SHOW / YAML. Reject rows are
+# near misses of an accepted statement earlier in this file; [syntax] rejects do
+# not pin wording (it will change under the grammar): their `----` block is
+# left EMPTY, which this runner accepts as "any error" (it refuses a
+# `statement error` with no `----` at all). Semantic rejects pin a stable
+# message substring. [text] marks today's text-preservation / identifier-
+# quoting contract that a grammar might plausibly change.
+
+# --- fixtures ---
+
+statement ok
+CREATE TABLE dcc_orders (id INTEGER, region VARCHAR, amount INTEGER, cost INTEGER, cust_id INTEGER, created_at DATE, qty INTEGER, price DOUBLE, discount DOUBLE, tax_rate DOUBLE, email VARCHAR, first_name VARCHAR, last_name VARCHAR, comment_count INTEGER, o_id INTEGER, o_seq INTEGER, o_cust_id INTEGER, store INTEGER, sale_date DATE, code INTEGER, c2 INTEGER, labels VARCHAR);
+
+statement ok
+CREATE TABLE dcc_customers (id INTEGER, c_id INTEGER, name VARCHAR, code INTEGER, c2 INTEGER);
+
+statement ok
+CREATE TABLE dcc_fact (id INTEGER, email VARCHAR, x INTEGER);
+
+statement ok
+CREATE TABLE dcc_flights (id INTEGER, dep_id INTEGER, arr_id INTEGER, x INTEGER);
+
+statement ok
+CREATE TABLE dcc_airports (id INTEGER, name VARCHAR);
+
+statement ok
+CREATE TABLE dcc_accounts (id INTEGER, date DATE, account_id INTEGER, amount INTEGER);
+
+statement ok
+CREATE TABLE dcc_line_items (id INTEGER, amount INTEGER, unit_cost INTEGER);
+
+statement ok
+CREATE TABLE dcc_priv (id INTEGER, value INTEGER);
+
+statement ok
+CREATE TABLE "dcc my orders" (id INTEGER, region VARCHAR);
+
+statement ok
+CREATE TABLE "dcc PRIMARY KEY (id)" (id INTEGER, "UNIQUE" INTEGER, "x)y" INTEGER, region VARCHAR);
+
+statement ok
+CREATE SCHEMA "dcc a""b";
+
+statement ok
+CREATE TABLE "dcc a""b"."c d" (id INTEGER, "x)y" INTEGER, region VARCHAR);
+
+statement ok
+CREATE TABLE "dcc 東京 table" (id INTEGER, region VARCHAR);
+
+statement ok
+CREATE MACRO dcc_ddl(v) AS TABLE SELECT unnest(string_split(rtrim(get_ddl('SEMANTIC_VIEW', v), chr(10)), chr(10))) AS line;
+
+# Structured view of the stored model (window_spec etc.), for fields GET_DDL
+# only shows re-rendered.
+
+statement ok
+CREATE MACRO dcc_yaml(v) AS TABLE SELECT unnest(string_split(rtrim(read_yaml_from_semantic_view(v), chr(10)), chr(10))) AS line;
+
+# --- RELATIONSHIPS: REFERENCES target column lists ---
+
+# C-001: body_parser/mod.rs::references_multi_column_list — a multi-column FK list REFERENCES a multi-column target list; both lists kept in order
+statement ok
+CREATE SEMANTIC VIEW dcc_c001 AS TABLES (o AS dcc_orders PRIMARY KEY (id), c AS dcc_customers PRIMARY KEY (id) UNIQUE (code, c2)) RELATIONSHIPS (rel AS o(code, c2) REFERENCES c(code, c2)) DIMENSIONS (o.region AS o.region);
+
+query T nosort
+SELECT * FROM dcc_ddl('dcc_c001');
+----
+CREATE OR REPLACE SEMANTIC VIEW dcc_c001 AS
+TABLES (
+    o AS dcc_orders PRIMARY KEY (id),
+    c AS dcc_customers PRIMARY KEY (id) UNIQUE (code, c2)
+)
+RELATIONSHIPS (
+    rel AS o(code, c2) REFERENCES c(code, c2)
+)
+DIMENSIONS (
+    o.region AS o.region
+)
+
+query TTTT rowsort
+SELECT object_kind, object_name, property, property_value FROM describe_semantic_view('dcc_c001') WHERE object_kind = 'RELATIONSHIP';
+----
+RELATIONSHIP	rel	FOREIGN_KEY	["code","c2"]
+RELATIONSHIP	rel	REF_KEY	["code","c2"]
+RELATIONSHIP	rel	REF_TABLE	dcc_customers
+RELATIONSHIP	rel	TABLE	dcc_orders
+
+# C-002: body_parser/mod.rs::references_target_no_space_before_paren — `REFERENCES c(id)` (no space before the paren): target c, ref columns [id]
+# GET_DDL omits a ref column list equal to the target PK; DESCRIBE REF_KEY shows it.
+statement ok
+CREATE SEMANTIC VIEW dcc_c002 AS TABLES (o AS dcc_orders PRIMARY KEY (id), c AS dcc_customers PRIMARY KEY (id) UNIQUE (code, c2)) RELATIONSHIPS (rel AS o(cust_id) REFERENCES c(id)) DIMENSIONS (o.region AS o.region);
+
+query T nosort
+SELECT * FROM dcc_ddl('dcc_c002');
+----
+CREATE OR REPLACE SEMANTIC VIEW dcc_c002 AS
+TABLES (
+    o AS dcc_orders PRIMARY KEY (id),
+    c AS dcc_customers PRIMARY KEY (id) UNIQUE (code, c2)
+)
+RELATIONSHIPS (
+    rel AS o(cust_id) REFERENCES c
+)
+DIMENSIONS (
+    o.region AS o.region
+)
+
+query TTTT rowsort
+SELECT object_kind, object_name, property, property_value FROM describe_semantic_view('dcc_c002') WHERE object_kind = 'RELATIONSHIP' AND property IN ('REF_TABLE', 'REF_KEY');
+----
+RELATIONSHIP	rel	REF_KEY	["id"]
+RELATIONSHIP	rel	REF_TABLE	dcc_customers
+
+# C-003: body_parser/mod.rs::references_target_space_before_paren — `REFERENCES c (id)` (space before the paren) parses the same as C-002
+statement ok
+CREATE SEMANTIC VIEW dcc_c003 AS TABLES (o AS dcc_orders PRIMARY KEY (id), c AS dcc_customers PRIMARY KEY (id) UNIQUE (code, c2)) RELATIONSHIPS (rel AS o(cust_id) REFERENCES c (id)) DIMENSIONS (o.region AS o.region);
+
+query T nosort
+SELECT * FROM dcc_ddl('dcc_c003');
+----
+CREATE OR REPLACE SEMANTIC VIEW dcc_c003 AS
+TABLES (
+    o AS dcc_orders PRIMARY KEY (id),
+    c AS dcc_customers PRIMARY KEY (id) UNIQUE (code, c2)
+)
+RELATIONSHIPS (
+    rel AS o(cust_id) REFERENCES c
+)
+DIMENSIONS (
+    o.region AS o.region
+)
+
+query TTTT rowsort
+SELECT object_kind, object_name, property, property_value FROM describe_semantic_view('dcc_c003') WHERE object_kind = 'RELATIONSHIP' AND property IN ('REF_TABLE', 'REF_KEY');
+----
+RELATIONSHIP	rel	REF_KEY	["id"]
+RELATIONSHIP	rel	REF_TABLE	dcc_customers
+
+# C-004: body_parser/mod.rs::parse_relationships_quoted_paren_in_from_alias — a `(` inside a QUOTED from-alias is inert; the alias is `"a(b"` and the FK list is (cust_id) [text]
+statement ok
+CREATE SEMANTIC VIEW dcc_c004 AS TABLES ("a(b" AS dcc_orders PRIMARY KEY (id), c AS dcc_customers PRIMARY KEY (id)) RELATIONSHIPS (rel AS "a(b"(cust_id) REFERENCES c) DIMENSIONS ("a(b".region AS "a(b".region);
+
+query T nosort
+SELECT * FROM dcc_ddl('dcc_c004');
+----
+CREATE OR REPLACE SEMANTIC VIEW dcc_c004 AS
+TABLES (
+    "a(b" AS dcc_orders PRIMARY KEY (id),
+    c AS dcc_customers PRIMARY KEY (id)
+)
+RELATIONSHIPS (
+    rel AS "a(b"(cust_id) REFERENCES c
+)
+DIMENSIONS (
+    "a(b".region AS "a(b".region
+)
+
+query TTTT rowsort
+SELECT object_kind, object_name, property, property_value FROM describe_semantic_view('dcc_c004') WHERE object_kind = 'RELATIONSHIP' AND property IN ('TABLE', 'FOREIGN_KEY', 'REF_TABLE');
+----
+RELATIONSHIP	rel	FOREIGN_KEY	["cust_id"]
+RELATIONSHIP	rel	REF_TABLE	dcc_customers
+RELATIONSHIP	rel	TABLE	dcc_orders
+
+# C-005: body_parser/mod.rs::parse_relationships_multi_token_from_alias_rejected — near miss of C-002: a two-token from-alias `o c(...)` is rejected, not captured as a bogus alias [syntax]
+statement error
+CREATE SEMANTIC VIEW dcc_c005 AS TABLES (o AS dcc_orders PRIMARY KEY (id), c AS dcc_customers PRIMARY KEY (id) UNIQUE (code, c2)) RELATIONSHIPS (rel AS o c(cust_id) REFERENCES c(id)) DIMENSIONS (o.region AS o.region);
+----
+
+# C-006: body_parser/mod.rs::parse_relationships_multi_token_from_alias_rejected — near miss of C-002: a dotted from-alias `o.c(...)` is rejected [syntax]
+statement error
+CREATE SEMANTIC VIEW dcc_c006 AS TABLES (o AS dcc_orders PRIMARY KEY (id), c AS dcc_customers PRIMARY KEY (id) UNIQUE (code, c2)) RELATIONSHIPS (rel AS o.c(cust_id) REFERENCES c(id)) DIMENSIONS (o.region AS o.region);
+----
+
+# C-007: body_parser/mod.rs::parse_relationships_junk_before_references_rejected — near miss of C-002: junk between the FK list and REFERENCES is rejected, not skipped [syntax]
+statement error
+CREATE SEMANTIC VIEW dcc_c007 AS TABLES (o AS dcc_orders PRIMARY KEY (id), c AS dcc_customers PRIMARY KEY (id) UNIQUE (code, c2)) RELATIONSHIPS (rel AS o(cust_id) junk REFERENCES c(id)) DIMENSIONS (o.region AS o.region);
+----
+
+# --- TABLES: UNIQUE constraints and optional PRIMARY KEY ---
+
+# C-008: body_parser/mod.rs::unique_constraint_parsing — PRIMARY KEY then one UNIQUE (email)
+statement ok
+CREATE SEMANTIC VIEW dcc_c008 AS TABLES (o AS dcc_orders PRIMARY KEY (id) UNIQUE (email)) DIMENSIONS (o.region AS o.region);
+
+query T nosort
+SELECT * FROM dcc_ddl('dcc_c008');
+----
+CREATE OR REPLACE SEMANTIC VIEW dcc_c008 AS
+TABLES (
+    o AS dcc_orders PRIMARY KEY (id) UNIQUE (email)
+)
+DIMENSIONS (
+    o.region AS o.region
+)
+
+# C-009: body_parser/mod.rs::multiple_unique_constraints, body_parser/lexer.rs::paren_group_tokens — two UNIQUE constraints, the second multi-column, kept in order
+statement ok
+CREATE SEMANTIC VIEW dcc_c009 AS TABLES (o AS dcc_orders PRIMARY KEY (id) UNIQUE (email) UNIQUE (first_name, last_name)) DIMENSIONS (o.region AS o.region);
+
+query T nosort
+SELECT * FROM dcc_ddl('dcc_c009');
+----
+CREATE OR REPLACE SEMANTIC VIEW dcc_c009 AS
+TABLES (
+    o AS dcc_orders PRIMARY KEY (id) UNIQUE (email) UNIQUE (first_name, last_name)
+)
+DIMENSIONS (
+    o.region AS o.region
+)
+
+# C-010: body_parser/mod.rs::table_without_primary_key — a table with neither PRIMARY KEY nor UNIQUE
+# No PRIMARY_KEY property row is reported for a PK-less table.
+statement ok
+CREATE SEMANTIC VIEW dcc_c010 AS TABLES (f AS dcc_fact) DIMENSIONS (f.x AS f.x);
+
+query T nosort
+SELECT * FROM dcc_ddl('dcc_c010');
+----
+CREATE OR REPLACE SEMANTIC VIEW dcc_c010 AS
+TABLES (
+    f AS dcc_fact
+)
+DIMENSIONS (
+    f.x AS f.x
+)
+
+query TTTT rowsort
+SELECT object_kind, object_name, property, property_value FROM describe_semantic_view('dcc_c010') WHERE object_kind = 'TABLE' AND property = 'PRIMARY_KEY';
+----
+
+# C-011: body_parser/mod.rs::table_with_unique_no_pk — UNIQUE without PRIMARY KEY
+statement ok
+CREATE SEMANTIC VIEW dcc_c011 AS TABLES (f AS dcc_fact UNIQUE (email)) DIMENSIONS (f.x AS f.x);
+
+query T nosort
+SELECT * FROM dcc_ddl('dcc_c011');
+----
+CREATE OR REPLACE SEMANTIC VIEW dcc_c011 AS
+TABLES (
+    f AS dcc_fact UNIQUE (email)
+)
+DIMENSIONS (
+    f.x AS f.x
+)
+
+# --- qualified entries (DIMENSIONS / FACTS): alias.name AS expr ---
+
+# C-012: body_parser/mod.rs::parse_qualified_entries_simple — `o.revenue AS SUM(amount)` in DIMENSIONS splits into alias o, name revenue, expr SUM(amount)
+# PRE-EXISTING (TECH-DEBT #95): an aggregate DIMENSION expression is accepted at CREATE (DATA_TYPE
+# BIGINT), but no query can use it (GROUP BY cannot contain aggregates). Snowflake
+# rejects aggregates in a dimension at CREATE.
+statement ok
+CREATE SEMANTIC VIEW dcc_c012 AS TABLES (o AS dcc_orders PRIMARY KEY (id)) DIMENSIONS (o.revenue AS SUM(amount));
+
+query T nosort
+SELECT * FROM dcc_ddl('dcc_c012');
+----
+CREATE OR REPLACE SEMANTIC VIEW dcc_c012 AS
+TABLES (
+    o AS dcc_orders PRIMARY KEY (id)
+)
+DIMENSIONS (
+    o.revenue AS SUM(amount)
+)
+
+# C-013: body_parser/mod.rs::parse_qualified_entries_nested_parens — nested parens in the expression are kept verbatim
+statement ok
+CREATE SEMANTIC VIEW dcc_c013 AS TABLES (o AS dcc_orders PRIMARY KEY (id)) FACTS (o.disc_price AS ROUND(o.price * (1 - o.discount))) DIMENSIONS (o.region AS o.region);
+
+query T nosort
+SELECT * FROM dcc_ddl('dcc_c013');
+----
+CREATE OR REPLACE SEMANTIC VIEW dcc_c013 AS
+TABLES (
+    o AS dcc_orders PRIMARY KEY (id)
+)
+FACTS (
+    o.disc_price AS ROUND(o.price * (1 - o.discount))
+)
+DIMENSIONS (
+    o.region AS o.region
+)
+
+# C-014: body_parser/mod.rs::parse_qualified_entries_trailing_comma — a trailing comma after the only entry adds no entry
+statement ok
+CREATE SEMANTIC VIEW dcc_c014 AS TABLES (o AS dcc_orders PRIMARY KEY (id)) DIMENSIONS (o.revenue AS o.amount,);
+
+query T nosort
+SELECT * FROM dcc_ddl('dcc_c014');
+----
+CREATE OR REPLACE SEMANTIC VIEW dcc_c014 AS
+TABLES (
+    o AS dcc_orders PRIMARY KEY (id)
+)
+DIMENSIONS (
+    o.revenue AS o.amount
+)
+
+# C-015: body_parser/mod.rs::parse_qualified_entries_multiple_with_trailing_comma — two entries plus a trailing comma give exactly two entries, in order
+statement ok
+CREATE SEMANTIC VIEW dcc_c015 AS TABLES (o AS dcc_orders PRIMARY KEY (id)) DIMENSIONS (o.a AS o.region, o.b AS o.email,);
+
+query T nosort
+SELECT * FROM dcc_ddl('dcc_c015');
+----
+CREATE OR REPLACE SEMANTIC VIEW dcc_c015 AS
+TABLES (
+    o AS dcc_orders PRIMARY KEY (id)
+)
+DIMENSIONS (
+    o.a AS o.region,
+    o.b AS o.email
+)
+
+# C-016: body_parser/mod.rs::parse_qualified_entries_error_missing_dot, body_parser/mod.rs::parse_qualified_entries_still_rejects_unqualified — near miss of C-014: a DIMENSIONS entry without the `alias.` qualifier is rejected [syntax]
+statement error
+CREATE SEMANTIC VIEW dcc_c016 AS TABLES (o AS dcc_orders PRIMARY KEY (id)) DIMENSIONS (revenue AS o.amount);
+----
+
+# --- whole body: clause set ---
+
+# C-017: body_parser/mod.rs::parse_keyword_body_basic,
+#   body_parser/mod.rs::parse_keyword_body_without_facts_still_works,
+#   body_parser/mod.rs::parse_metrics_without_using_backward_compat,
+#   body_parser/mod.rs::parse_metrics_window_over_no_over_returns_none,
+#   body_parser/mod.rs::parse_keyword_body_without_materializations_has_empty_vec,
+#   body_parser/mod.rs::f7_tables_explicit_alias_still_parses,
+#   body_parser/mod.rs::f6_no_trailing_comment_is_none,
+#   body_parser/mod.rs::test_default_public_metric,
+#   body_parser/lexer.rs::bare_idents_and_symbols,
+#   body_parser/cursor.rs::peek_bump_and_kw
+#   — TABLES + DIMENSIONS + METRICS, no FACTS/RELATIONSHIPS/MATERIALIZATIONS, no view comment
+# No WINDOW_SPEC row (plain metric), PUBLIC by default, no materializations,
+# no view comment.
+statement ok
+CREATE SEMANTIC VIEW dcc_c017 AS TABLES (o AS dcc_orders PRIMARY KEY (id)) DIMENSIONS (o.region AS region) METRICS (o.rev AS SUM(amount));
+
+query T nosort
+SELECT * FROM dcc_ddl('dcc_c017');
+----
+CREATE OR REPLACE SEMANTIC VIEW dcc_c017 AS
+TABLES (
+    o AS dcc_orders PRIMARY KEY (id)
+)
+DIMENSIONS (
+    o.region AS region
+)
+METRICS (
+    o.rev AS SUM(amount)
+)
+
+query TTTT rowsort
+SELECT object_kind, object_name, property, property_value FROM describe_semantic_view('dcc_c017') WHERE object_kind <> 'TABLE' AND property IN ('TABLE', 'EXPRESSION', 'ACCESS_MODIFIER', 'WINDOW_SPEC');
+----
+DIMENSION	region	EXPRESSION	region
+DIMENSION	region	TABLE	dcc_orders
+METRIC	rev	ACCESS_MODIFIER	PUBLIC
+METRIC	rev	EXPRESSION	SUM(amount)
+METRIC	rev	TABLE	dcc_orders
+
+query I nosort
+SELECT count(*) FROM show_semantic_materializations('dcc_c017');
+----
+0
+
+query T nosort
+SELECT comment FROM list_semantic_views() WHERE name = 'dcc_c017';
+----
+(empty)
+
+# C-018: body_parser/mod.rs::parse_keyword_body_large_metrics_clause — a 500-entry METRICS clause parses whole: 500 metrics, first m0 and last m499, all SUM(amount)
+statement ok
+CREATE SEMANTIC VIEW dcc_c018 AS TABLES (o AS dcc_orders PRIMARY KEY (id)) DIMENSIONS (o.region AS region) METRICS (
+  o.m0 AS SUM(amount), o.m1 AS SUM(amount), o.m2 AS SUM(amount), o.m3 AS SUM(amount), o.m4 AS SUM(amount), o.m5 AS SUM(amount), o.m6 AS SUM(amount), o.m7 AS SUM(amount), o.m8 AS SUM(amount), o.m9 AS SUM(amount),
+  o.m10 AS SUM(amount), o.m11 AS SUM(amount), o.m12 AS SUM(amount), o.m13 AS SUM(amount), o.m14 AS SUM(amount), o.m15 AS SUM(amount), o.m16 AS SUM(amount), o.m17 AS SUM(amount), o.m18 AS SUM(amount), o.m19 AS SUM(amount),
+  o.m20 AS SUM(amount), o.m21 AS SUM(amount), o.m22 AS SUM(amount), o.m23 AS SUM(amount), o.m24 AS SUM(amount), o.m25 AS SUM(amount), o.m26 AS SUM(amount), o.m27 AS SUM(amount), o.m28 AS SUM(amount), o.m29 AS SUM(amount),
+  o.m30 AS SUM(amount), o.m31 AS SUM(amount), o.m32 AS SUM(amount), o.m33 AS SUM(amount), o.m34 AS SUM(amount), o.m35 AS SUM(amount), o.m36 AS SUM(amount), o.m37 AS SUM(amount), o.m38 AS SUM(amount), o.m39 AS SUM(amount),
+  o.m40 AS SUM(amount), o.m41 AS SUM(amount), o.m42 AS SUM(amount), o.m43 AS SUM(amount), o.m44 AS SUM(amount), o.m45 AS SUM(amount), o.m46 AS SUM(amount), o.m47 AS SUM(amount), o.m48 AS SUM(amount), o.m49 AS SUM(amount),
+  o.m50 AS SUM(amount), o.m51 AS SUM(amount), o.m52 AS SUM(amount), o.m53 AS SUM(amount), o.m54 AS SUM(amount), o.m55 AS SUM(amount), o.m56 AS SUM(amount), o.m57 AS SUM(amount), o.m58 AS SUM(amount), o.m59 AS SUM(amount),
+  o.m60 AS SUM(amount), o.m61 AS SUM(amount), o.m62 AS SUM(amount), o.m63 AS SUM(amount), o.m64 AS SUM(amount), o.m65 AS SUM(amount), o.m66 AS SUM(amount), o.m67 AS SUM(amount), o.m68 AS SUM(amount), o.m69 AS SUM(amount),
+  o.m70 AS SUM(amount), o.m71 AS SUM(amount), o.m72 AS SUM(amount), o.m73 AS SUM(amount), o.m74 AS SUM(amount), o.m75 AS SUM(amount), o.m76 AS SUM(amount), o.m77 AS SUM(amount), o.m78 AS SUM(amount), o.m79 AS SUM(amount),
+  o.m80 AS SUM(amount), o.m81 AS SUM(amount), o.m82 AS SUM(amount), o.m83 AS SUM(amount), o.m84 AS SUM(amount), o.m85 AS SUM(amount), o.m86 AS SUM(amount), o.m87 AS SUM(amount), o.m88 AS SUM(amount), o.m89 AS SUM(amount),
+  o.m90 AS SUM(amount), o.m91 AS SUM(amount), o.m92 AS SUM(amount), o.m93 AS SUM(amount), o.m94 AS SUM(amount), o.m95 AS SUM(amount), o.m96 AS SUM(amount), o.m97 AS SUM(amount), o.m98 AS SUM(amount), o.m99 AS SUM(amount),
+  o.m100 AS SUM(amount), o.m101 AS SUM(amount), o.m102 AS SUM(amount), o.m103 AS SUM(amount), o.m104 AS SUM(amount), o.m105 AS SUM(amount), o.m106 AS SUM(amount), o.m107 AS SUM(amount), o.m108 AS SUM(amount), o.m109 AS SUM(amount),
+  o.m110 AS SUM(amount), o.m111 AS SUM(amount), o.m112 AS SUM(amount), o.m113 AS SUM(amount), o.m114 AS SUM(amount), o.m115 AS SUM(amount), o.m116 AS SUM(amount), o.m117 AS SUM(amount), o.m118 AS SUM(amount), o.m119 AS SUM(amount),
+  o.m120 AS SUM(amount), o.m121 AS SUM(amount), o.m122 AS SUM(amount), o.m123 AS SUM(amount), o.m124 AS SUM(amount), o.m125 AS SUM(amount), o.m126 AS SUM(amount), o.m127 AS SUM(amount), o.m128 AS SUM(amount), o.m129 AS SUM(amount),
+  o.m130 AS SUM(amount), o.m131 AS SUM(amount), o.m132 AS SUM(amount), o.m133 AS SUM(amount), o.m134 AS SUM(amount), o.m135 AS SUM(amount), o.m136 AS SUM(amount), o.m137 AS SUM(amount), o.m138 AS SUM(amount), o.m139 AS SUM(amount),
+  o.m140 AS SUM(amount), o.m141 AS SUM(amount), o.m142 AS SUM(amount), o.m143 AS SUM(amount), o.m144 AS SUM(amount), o.m145 AS SUM(amount), o.m146 AS SUM(amount), o.m147 AS SUM(amount), o.m148 AS SUM(amount), o.m149 AS SUM(amount),
+  o.m150 AS SUM(amount), o.m151 AS SUM(amount), o.m152 AS SUM(amount), o.m153 AS SUM(amount), o.m154 AS SUM(amount), o.m155 AS SUM(amount), o.m156 AS SUM(amount), o.m157 AS SUM(amount), o.m158 AS SUM(amount), o.m159 AS SUM(amount),
+  o.m160 AS SUM(amount), o.m161 AS SUM(amount), o.m162 AS SUM(amount), o.m163 AS SUM(amount), o.m164 AS SUM(amount), o.m165 AS SUM(amount), o.m166 AS SUM(amount), o.m167 AS SUM(amount), o.m168 AS SUM(amount), o.m169 AS SUM(amount),
+  o.m170 AS SUM(amount), o.m171 AS SUM(amount), o.m172 AS SUM(amount), o.m173 AS SUM(amount), o.m174 AS SUM(amount), o.m175 AS SUM(amount), o.m176 AS SUM(amount), o.m177 AS SUM(amount), o.m178 AS SUM(amount), o.m179 AS SUM(amount),
+  o.m180 AS SUM(amount), o.m181 AS SUM(amount), o.m182 AS SUM(amount), o.m183 AS SUM(amount), o.m184 AS SUM(amount), o.m185 AS SUM(amount), o.m186 AS SUM(amount), o.m187 AS SUM(amount), o.m188 AS SUM(amount), o.m189 AS SUM(amount),
+  o.m190 AS SUM(amount), o.m191 AS SUM(amount), o.m192 AS SUM(amount), o.m193 AS SUM(amount), o.m194 AS SUM(amount), o.m195 AS SUM(amount), o.m196 AS SUM(amount), o.m197 AS SUM(amount), o.m198 AS SUM(amount), o.m199 AS SUM(amount),
+  o.m200 AS SUM(amount), o.m201 AS SUM(amount), o.m202 AS SUM(amount), o.m203 AS SUM(amount), o.m204 AS SUM(amount), o.m205 AS SUM(amount), o.m206 AS SUM(amount), o.m207 AS SUM(amount), o.m208 AS SUM(amount), o.m209 AS SUM(amount),
+  o.m210 AS SUM(amount), o.m211 AS SUM(amount), o.m212 AS SUM(amount), o.m213 AS SUM(amount), o.m214 AS SUM(amount), o.m215 AS SUM(amount), o.m216 AS SUM(amount), o.m217 AS SUM(amount), o.m218 AS SUM(amount), o.m219 AS SUM(amount),
+  o.m220 AS SUM(amount), o.m221 AS SUM(amount), o.m222 AS SUM(amount), o.m223 AS SUM(amount), o.m224 AS SUM(amount), o.m225 AS SUM(amount), o.m226 AS SUM(amount), o.m227 AS SUM(amount), o.m228 AS SUM(amount), o.m229 AS SUM(amount),
+  o.m230 AS SUM(amount), o.m231 AS SUM(amount), o.m232 AS SUM(amount), o.m233 AS SUM(amount), o.m234 AS SUM(amount), o.m235 AS SUM(amount), o.m236 AS SUM(amount), o.m237 AS SUM(amount), o.m238 AS SUM(amount), o.m239 AS SUM(amount),
+  o.m240 AS SUM(amount), o.m241 AS SUM(amount), o.m242 AS SUM(amount), o.m243 AS SUM(amount), o.m244 AS SUM(amount), o.m245 AS SUM(amount), o.m246 AS SUM(amount), o.m247 AS SUM(amount), o.m248 AS SUM(amount), o.m249 AS SUM(amount),
+  o.m250 AS SUM(amount), o.m251 AS SUM(amount), o.m252 AS SUM(amount), o.m253 AS SUM(amount), o.m254 AS SUM(amount), o.m255 AS SUM(amount), o.m256 AS SUM(amount), o.m257 AS SUM(amount), o.m258 AS SUM(amount), o.m259 AS SUM(amount),
+  o.m260 AS SUM(amount), o.m261 AS SUM(amount), o.m262 AS SUM(amount), o.m263 AS SUM(amount), o.m264 AS SUM(amount), o.m265 AS SUM(amount), o.m266 AS SUM(amount), o.m267 AS SUM(amount), o.m268 AS SUM(amount), o.m269 AS SUM(amount),
+  o.m270 AS SUM(amount), o.m271 AS SUM(amount), o.m272 AS SUM(amount), o.m273 AS SUM(amount), o.m274 AS SUM(amount), o.m275 AS SUM(amount), o.m276 AS SUM(amount), o.m277 AS SUM(amount), o.m278 AS SUM(amount), o.m279 AS SUM(amount),
+  o.m280 AS SUM(amount), o.m281 AS SUM(amount), o.m282 AS SUM(amount), o.m283 AS SUM(amount), o.m284 AS SUM(amount), o.m285 AS SUM(amount), o.m286 AS SUM(amount), o.m287 AS SUM(amount), o.m288 AS SUM(amount), o.m289 AS SUM(amount),
+  o.m290 AS SUM(amount), o.m291 AS SUM(amount), o.m292 AS SUM(amount), o.m293 AS SUM(amount), o.m294 AS SUM(amount), o.m295 AS SUM(amount), o.m296 AS SUM(amount), o.m297 AS SUM(amount), o.m298 AS SUM(amount), o.m299 AS SUM(amount),
+  o.m300 AS SUM(amount), o.m301 AS SUM(amount), o.m302 AS SUM(amount), o.m303 AS SUM(amount), o.m304 AS SUM(amount), o.m305 AS SUM(amount), o.m306 AS SUM(amount), o.m307 AS SUM(amount), o.m308 AS SUM(amount), o.m309 AS SUM(amount),
+  o.m310 AS SUM(amount), o.m311 AS SUM(amount), o.m312 AS SUM(amount), o.m313 AS SUM(amount), o.m314 AS SUM(amount), o.m315 AS SUM(amount), o.m316 AS SUM(amount), o.m317 AS SUM(amount), o.m318 AS SUM(amount), o.m319 AS SUM(amount),
+  o.m320 AS SUM(amount), o.m321 AS SUM(amount), o.m322 AS SUM(amount), o.m323 AS SUM(amount), o.m324 AS SUM(amount), o.m325 AS SUM(amount), o.m326 AS SUM(amount), o.m327 AS SUM(amount), o.m328 AS SUM(amount), o.m329 AS SUM(amount),
+  o.m330 AS SUM(amount), o.m331 AS SUM(amount), o.m332 AS SUM(amount), o.m333 AS SUM(amount), o.m334 AS SUM(amount), o.m335 AS SUM(amount), o.m336 AS SUM(amount), o.m337 AS SUM(amount), o.m338 AS SUM(amount), o.m339 AS SUM(amount),
+  o.m340 AS SUM(amount), o.m341 AS SUM(amount), o.m342 AS SUM(amount), o.m343 AS SUM(amount), o.m344 AS SUM(amount), o.m345 AS SUM(amount), o.m346 AS SUM(amount), o.m347 AS SUM(amount), o.m348 AS SUM(amount), o.m349 AS SUM(amount),
+  o.m350 AS SUM(amount), o.m351 AS SUM(amount), o.m352 AS SUM(amount), o.m353 AS SUM(amount), o.m354 AS SUM(amount), o.m355 AS SUM(amount), o.m356 AS SUM(amount), o.m357 AS SUM(amount), o.m358 AS SUM(amount), o.m359 AS SUM(amount),
+  o.m360 AS SUM(amount), o.m361 AS SUM(amount), o.m362 AS SUM(amount), o.m363 AS SUM(amount), o.m364 AS SUM(amount), o.m365 AS SUM(amount), o.m366 AS SUM(amount), o.m367 AS SUM(amount), o.m368 AS SUM(amount), o.m369 AS SUM(amount),
+  o.m370 AS SUM(amount), o.m371 AS SUM(amount), o.m372 AS SUM(amount), o.m373 AS SUM(amount), o.m374 AS SUM(amount), o.m375 AS SUM(amount), o.m376 AS SUM(amount), o.m377 AS SUM(amount), o.m378 AS SUM(amount), o.m379 AS SUM(amount),
+  o.m380 AS SUM(amount), o.m381 AS SUM(amount), o.m382 AS SUM(amount), o.m383 AS SUM(amount), o.m384 AS SUM(amount), o.m385 AS SUM(amount), o.m386 AS SUM(amount), o.m387 AS SUM(amount), o.m388 AS SUM(amount), o.m389 AS SUM(amount),
+  o.m390 AS SUM(amount), o.m391 AS SUM(amount), o.m392 AS SUM(amount), o.m393 AS SUM(amount), o.m394 AS SUM(amount), o.m395 AS SUM(amount), o.m396 AS SUM(amount), o.m397 AS SUM(amount), o.m398 AS SUM(amount), o.m399 AS SUM(amount),
+  o.m400 AS SUM(amount), o.m401 AS SUM(amount), o.m402 AS SUM(amount), o.m403 AS SUM(amount), o.m404 AS SUM(amount), o.m405 AS SUM(amount), o.m406 AS SUM(amount), o.m407 AS SUM(amount), o.m408 AS SUM(amount), o.m409 AS SUM(amount),
+  o.m410 AS SUM(amount), o.m411 AS SUM(amount), o.m412 AS SUM(amount), o.m413 AS SUM(amount), o.m414 AS SUM(amount), o.m415 AS SUM(amount), o.m416 AS SUM(amount), o.m417 AS SUM(amount), o.m418 AS SUM(amount), o.m419 AS SUM(amount),
+  o.m420 AS SUM(amount), o.m421 AS SUM(amount), o.m422 AS SUM(amount), o.m423 AS SUM(amount), o.m424 AS SUM(amount), o.m425 AS SUM(amount), o.m426 AS SUM(amount), o.m427 AS SUM(amount), o.m428 AS SUM(amount), o.m429 AS SUM(amount),
+  o.m430 AS SUM(amount), o.m431 AS SUM(amount), o.m432 AS SUM(amount), o.m433 AS SUM(amount), o.m434 AS SUM(amount), o.m435 AS SUM(amount), o.m436 AS SUM(amount), o.m437 AS SUM(amount), o.m438 AS SUM(amount), o.m439 AS SUM(amount),
+  o.m440 AS SUM(amount), o.m441 AS SUM(amount), o.m442 AS SUM(amount), o.m443 AS SUM(amount), o.m444 AS SUM(amount), o.m445 AS SUM(amount), o.m446 AS SUM(amount), o.m447 AS SUM(amount), o.m448 AS SUM(amount), o.m449 AS SUM(amount),
+  o.m450 AS SUM(amount), o.m451 AS SUM(amount), o.m452 AS SUM(amount), o.m453 AS SUM(amount), o.m454 AS SUM(amount), o.m455 AS SUM(amount), o.m456 AS SUM(amount), o.m457 AS SUM(amount), o.m458 AS SUM(amount), o.m459 AS SUM(amount),
+  o.m460 AS SUM(amount), o.m461 AS SUM(amount), o.m462 AS SUM(amount), o.m463 AS SUM(amount), o.m464 AS SUM(amount), o.m465 AS SUM(amount), o.m466 AS SUM(amount), o.m467 AS SUM(amount), o.m468 AS SUM(amount), o.m469 AS SUM(amount),
+  o.m470 AS SUM(amount), o.m471 AS SUM(amount), o.m472 AS SUM(amount), o.m473 AS SUM(amount), o.m474 AS SUM(amount), o.m475 AS SUM(amount), o.m476 AS SUM(amount), o.m477 AS SUM(amount), o.m478 AS SUM(amount), o.m479 AS SUM(amount),
+  o.m480 AS SUM(amount), o.m481 AS SUM(amount), o.m482 AS SUM(amount), o.m483 AS SUM(amount), o.m484 AS SUM(amount), o.m485 AS SUM(amount), o.m486 AS SUM(amount), o.m487 AS SUM(amount), o.m488 AS SUM(amount), o.m489 AS SUM(amount),
+  o.m490 AS SUM(amount), o.m491 AS SUM(amount), o.m492 AS SUM(amount), o.m493 AS SUM(amount), o.m494 AS SUM(amount), o.m495 AS SUM(amount), o.m496 AS SUM(amount), o.m497 AS SUM(amount), o.m498 AS SUM(amount), o.m499 AS SUM(amount)
+);
+
+query II nosort
+SELECT count(*), count(*) FILTER (WHERE line LIKE '% AS SUM(amount)%') FROM dcc_ddl('dcc_c018') WHERE line LIKE '    o.m%';
+----
+500	500
+
+query T nosort
+SELECT line FROM dcc_ddl('dcc_c018') WHERE line LIKE '    o.m0 %' OR line LIKE '    o.m499 %';
+----
+    o.m0 AS SUM(amount),
+    o.m499 AS SUM(amount)
+
+# C-019: body_parser/mod.rs::parse_keyword_body_deeply_nested_parens — a 64-deep balanced paren expression is stored verbatim
+statement ok
+CREATE SEMANTIC VIEW dcc_c019 AS TABLES (o AS dcc_orders PRIMARY KEY (id)) METRICS (o.deep AS SUM(((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((amount))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))));
+
+query T nosort
+SELECT * FROM dcc_ddl('dcc_c019');
+----
+CREATE OR REPLACE SEMANTIC VIEW dcc_c019 AS
+TABLES (
+    o AS dcc_orders PRIMARY KEY (id)
+)
+METRICS (
+    o.deep AS SUM(((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((amount)))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))
+)
+
+# C-020: body_parser/mod.rs::parse_keyword_body_with_relationships — a named relationship o_to_c AS o(cust_id) REFERENCES c
+statement ok
+CREATE SEMANTIC VIEW dcc_c020 AS TABLES (o AS dcc_orders PRIMARY KEY (id), c AS dcc_customers PRIMARY KEY (id)) RELATIONSHIPS (o_to_c AS o(cust_id) REFERENCES c) DIMENSIONS (o.reg AS region) METRICS (o.rev AS SUM(amount));
+
+query T nosort
+SELECT * FROM dcc_ddl('dcc_c020');
+----
+CREATE OR REPLACE SEMANTIC VIEW dcc_c020 AS
+TABLES (
+    o AS dcc_orders PRIMARY KEY (id),
+    c AS dcc_customers PRIMARY KEY (id)
+)
+RELATIONSHIPS (
+    o_to_c AS o(cust_id) REFERENCES c
+)
+DIMENSIONS (
+    o.reg AS region
+)
+METRICS (
+    o.rev AS SUM(amount)
+)
+
+# C-021: body_parser/mod.rs::parse_keyword_body_empty_relationships — an empty `RELATIONSHIPS ()` is accepted and stores no relationship
+statement ok
+CREATE SEMANTIC VIEW dcc_c021 AS TABLES (o AS dcc_orders PRIMARY KEY (id)) RELATIONSHIPS () DIMENSIONS (o.x AS x);
+
+query T nosort
+SELECT * FROM dcc_ddl('dcc_c021');
+----
+CREATE OR REPLACE SEMANTIC VIEW dcc_c021 AS
+TABLES (
+    o AS dcc_orders PRIMARY KEY (id)
+)
+DIMENSIONS (
+    o.x AS x
+)
+
+# C-022: body_parser/mod.rs::parse_keyword_body_error_missing_tables — near miss of C-021: a body with no TABLES clause is rejected [syntax]
+statement error
+CREATE SEMANTIC VIEW dcc_c022 AS DIMENSIONS (o.x AS x);
+----
+
+# --- whitespace tolerance ---
+
+# C-023: body_parser/mod.rs::parse_keyword_body_newlines_between_clauses — newlines between and inside every clause
+statement ok
+CREATE SEMANTIC VIEW dcc_c023 AS
+TABLES (
+  o AS dcc_orders PRIMARY KEY (id)
+)
+DIMENSIONS (
+  o.region AS region
+)
+METRICS (
+  o.rev AS SUM(amount)
+);
+
+query T nosort
+SELECT * FROM dcc_ddl('dcc_c023');
+----
+CREATE OR REPLACE SEMANTIC VIEW dcc_c023 AS
+TABLES (
+    o AS dcc_orders PRIMARY KEY (id)
+)
+DIMENSIONS (
+    o.region AS region
+)
+METRICS (
+    o.rev AS SUM(amount)
+)
+
+# C-024: body_parser/mod.rs::parse_keyword_body_tabs_between_tokens — tabs between every token (statement text below contains literal TABs)
+statement ok
+CREATE SEMANTIC VIEW dcc_c024 AS	TABLES	(	o	AS	dcc_orders	PRIMARY	KEY	(id)	)	DIMENSIONS	(	o.region	AS	region	)	METRICS	(	o.rev	AS	SUM(amount)	);
+
+query T nosort
+SELECT * FROM dcc_ddl('dcc_c024');
+----
+CREATE OR REPLACE SEMANTIC VIEW dcc_c024 AS
+TABLES (
+    o AS dcc_orders PRIMARY KEY (id)
+)
+DIMENSIONS (
+    o.region AS region
+)
+METRICS (
+    o.rev AS SUM(amount)
+)
+
+# C-025: body_parser/mod.rs::parse_keyword_body_extra_spaces — doubled spaces between every token; alias o, table dcc_orders, PK [id]
+statement ok
+CREATE SEMANTIC VIEW dcc_c025 AS  TABLES  (  o  AS  dcc_orders  PRIMARY  KEY  (  id  )  )  DIMENSIONS  (  o.region  AS  region  )  METRICS  (  o.rev  AS  SUM(amount)  );
+
+query T nosort
+SELECT * FROM dcc_ddl('dcc_c025');
+----
+CREATE OR REPLACE SEMANTIC VIEW dcc_c025 AS
+TABLES (
+    o AS dcc_orders PRIMARY KEY (id)
+)
+DIMENSIONS (
+    o.region AS region
+)
+METRICS (
+    o.rev AS SUM(amount)
+)
+
+# C-026: body_parser/mod.rs::parse_keyword_body_mixed_whitespace_multientry — newline + indent separated multi-entry clauses: 2 tables, 2 dimensions
+# (A relationship is added so the two tables are connected; the Rust test parsed
+# the body only.)
+statement ok
+CREATE SEMANTIC VIEW dcc_c026 AS TABLES (
+    o AS dcc_orders PRIMARY KEY (o_id),
+    c AS dcc_customers PRIMARY KEY (c_id)
+) RELATIONSHIPS (
+    o_to_c AS o(o_cust_id) REFERENCES c
+) DIMENSIONS (
+    o.region AS region,
+    c.name AS customer_name
+) METRICS (
+    o.rev AS SUM(amount)
+);
+
+query T nosort
+SELECT * FROM dcc_ddl('dcc_c026');
+----
+CREATE OR REPLACE SEMANTIC VIEW dcc_c026 AS
+TABLES (
+    o AS dcc_orders PRIMARY KEY (o_id),
+    c AS dcc_customers PRIMARY KEY (c_id)
+)
+RELATIONSHIPS (
+    o_to_c AS o(o_cust_id) REFERENCES c
+)
+DIMENSIONS (
+    o.region AS region,
+    c.name AS customer_name
+)
+METRICS (
+    o.rev AS SUM(amount)
+)
+
+# C-027: body_parser/mod.rs::parse_tables_extra_whitespace_around_tokens, body_parser/lexer.rs::dotted_name_is_ident_dot_ident — runs of spaces around a schema-qualified table and inside a two-column PK list
+statement ok
+CREATE SEMANTIC VIEW dcc_c027 AS TABLES (  o   AS   main.dcc_orders   PRIMARY   KEY   ( o_id ,  o_seq )  ) DIMENSIONS (o.region AS o.region);
+
+query T nosort
+SELECT * FROM dcc_ddl('dcc_c027');
+----
+CREATE OR REPLACE SEMANTIC VIEW dcc_c027 AS
+TABLES (
+    o AS main.dcc_orders PRIMARY KEY (o_id, o_seq)
+)
+DIMENSIONS (
+    o.region AS o.region
+)
+
+# C-028: body_parser/mod.rs::parse_relationships_newline_separated — a relationship entry surrounded by newlines keeps its name order_to_customer
+statement ok
+CREATE SEMANTIC VIEW dcc_c028 AS TABLES (o AS dcc_orders PRIMARY KEY (id), c AS dcc_customers PRIMARY KEY (id)) RELATIONSHIPS (
+  order_to_customer AS o(cust_id) REFERENCES c
+) DIMENSIONS (o.region AS o.region);
+
+query T nosort
+SELECT * FROM dcc_ddl('dcc_c028');
+----
+CREATE OR REPLACE SEMANTIC VIEW dcc_c028 AS
+TABLES (
+    o AS dcc_orders PRIMARY KEY (id),
+    c AS dcc_customers PRIMARY KEY (id)
+)
+RELATIONSHIPS (
+    order_to_customer AS o(cust_id) REFERENCES c
+)
+DIMENSIONS (
+    o.region AS o.region
+)
+
+# C-029: body_parser/mod.rs::parse_qualified_entries_newline_separated — newline-separated qualified entries: revenue then count
+statement ok
+CREATE SEMANTIC VIEW dcc_c029 AS TABLES (o AS dcc_orders PRIMARY KEY (id)) FACTS (
+  o.revenue AS o.amount,
+  o.count AS o.qty
+) DIMENSIONS (o.region AS o.region);
+
+query T nosort
+SELECT * FROM dcc_ddl('dcc_c029');
+----
+CREATE OR REPLACE SEMANTIC VIEW dcc_c029 AS
+TABLES (
+    o AS dcc_orders PRIMARY KEY (id)
+)
+FACTS (
+    o.revenue AS o.amount,
+    o.count AS o.qty
+)
+DIMENSIONS (
+    o.region AS o.region
+)
+
+# --- keyword case-insensitivity ---
+
+# C-030: body_parser/mod.rs::parse_keyword_body_lowercase_clause_keywords — lowercase clause keywords and `primary key`
+statement ok
+CREATE SEMANTIC VIEW dcc_c030 as tables (o AS dcc_orders primary key (id)) dimensions (o.region AS region) metrics (o.rev AS SUM(amount));
+
+query T nosort
+SELECT * FROM dcc_ddl('dcc_c030');
+----
+CREATE OR REPLACE SEMANTIC VIEW dcc_c030 AS
+TABLES (
+    o AS dcc_orders PRIMARY KEY (id)
+)
+DIMENSIONS (
+    o.region AS region
+)
+METRICS (
+    o.rev AS SUM(amount)
+)
+
+# C-031: body_parser/mod.rs::parse_keyword_body_mixedcase_clause_keywords — Mixed-case clause keywords and `Primary Key`
+statement ok
+CREATE SEMANTIC VIEW dcc_c031 As Tables (o AS dcc_orders Primary Key (id)) Dimensions (o.region AS region) Metrics (o.rev AS SUM(amount));
+
+query T nosort
+SELECT * FROM dcc_ddl('dcc_c031');
+----
+CREATE OR REPLACE SEMANTIC VIEW dcc_c031 AS
+TABLES (
+    o AS dcc_orders PRIMARY KEY (id)
+)
+DIMENSIONS (
+    o.region AS region
+)
+METRICS (
+    o.rev AS SUM(amount)
+)
+
+# C-032: body_parser/mod.rs::parse_tables_lowercase_as_and_primary_key — lowercase `as` and `primary key` inside a TABLES entry
+statement ok
+CREATE SEMANTIC VIEW dcc_c032 AS TABLES (o as dcc_orders primary key (o_id)) DIMENSIONS (o.region AS o.region);
+
+query T nosort
+SELECT * FROM dcc_ddl('dcc_c032');
+----
+CREATE OR REPLACE SEMANTIC VIEW dcc_c032 AS
+TABLES (
+    o AS dcc_orders PRIMARY KEY (o_id)
+)
+DIMENSIONS (
+    o.region AS o.region
+)
+
+# C-033: body_parser/mod.rs::parse_tables_primary_key_with_newline — PRIMARY<newline>KEY is still the PRIMARY KEY pair
+statement ok
+CREATE SEMANTIC VIEW dcc_c033 AS TABLES (o AS dcc_orders PRIMARY
+KEY (o_id)) DIMENSIONS (o.region AS o.region);
+
+query T nosort
+SELECT * FROM dcc_ddl('dcc_c033');
+----
+CREATE OR REPLACE SEMANTIC VIEW dcc_c033 AS
+TABLES (
+    o AS dcc_orders PRIMARY KEY (o_id)
+)
+DIMENSIONS (
+    o.region AS o.region
+)
+
+# C-034: body_parser/mod.rs::parse_tables_primary_key_with_tab — PRIMARY<TAB>KEY is still the PRIMARY KEY pair (literal TAB below)
+statement ok
+CREATE SEMANTIC VIEW dcc_c034 AS TABLES (o AS dcc_orders PRIMARY	KEY (o_id)) DIMENSIONS (o.region AS o.region);
+
+query T nosort
+SELECT * FROM dcc_ddl('dcc_c034');
+----
+CREATE OR REPLACE SEMANTIC VIEW dcc_c034 AS
+TABLES (
+    o AS dcc_orders PRIMARY KEY (o_id)
+)
+DIMENSIONS (
+    o.region AS o.region
+)
+
+# C-035: body_parser/mod.rs::parse_relationships_lowercase_as_and_references — lowercase `as` / `references` in a relationship
+statement ok
+CREATE SEMANTIC VIEW dcc_c035 AS TABLES (o AS dcc_orders PRIMARY KEY (id), c AS dcc_customers PRIMARY KEY (id)) RELATIONSHIPS (ord_to_cust as o(cust_id) references c) DIMENSIONS (o.region AS o.region);
+
+query T nosort
+SELECT * FROM dcc_ddl('dcc_c035');
+----
+CREATE OR REPLACE SEMANTIC VIEW dcc_c035 AS
+TABLES (
+    o AS dcc_orders PRIMARY KEY (id),
+    c AS dcc_customers PRIMARY KEY (id)
+)
+RELATIONSHIPS (
+    ord_to_cust AS o(cust_id) REFERENCES c
+)
+DIMENSIONS (
+    o.region AS o.region
+)
+
+# C-036: body_parser/mod.rs::parse_qualified_entries_lowercase_as — lowercase `as` in a qualified entry
+statement ok
+CREATE SEMANTIC VIEW dcc_c036 AS TABLES (o AS dcc_orders PRIMARY KEY (id)) DIMENSIONS (o.revenue as o.amount);
+
+query T nosort
+SELECT * FROM dcc_ddl('dcc_c036');
+----
+CREATE OR REPLACE SEMANTIC VIEW dcc_c036 AS
+TABLES (
+    o AS dcc_orders PRIMARY KEY (id)
+)
+DIMENSIONS (
+    o.revenue AS o.amount
+)
+
+# C-037: body_parser/mod.rs::parse_keyword_body_all_lowercase_full_round_trip — every keyword lowercase, newlines throughout; stored metric expr keeps lowercase `sum(amount)` [text]
+# (The relationship target c is declared here; the Rust test parsed the body
+# only.)
+statement ok
+CREATE SEMANTIC VIEW dcc_c037 as
+tables (
+    o as main.dcc_orders primary
+key (o_id),
+    c as dcc_customers primary key (id)
+)
+relationships (
+    ord_to_cust as o(o_cust_id) references c
+)
+dimensions (
+    o.region as region
+)
+metrics (
+    o.revenue as sum(amount)
+);
+
+query T nosort
+SELECT * FROM dcc_ddl('dcc_c037');
+----
+CREATE OR REPLACE SEMANTIC VIEW dcc_c037 AS
+TABLES (
+    o AS main.dcc_orders PRIMARY KEY (o_id),
+    c AS dcc_customers PRIMARY KEY (id)
+)
+RELATIONSHIPS (
+    ord_to_cust AS o(o_cust_id) REFERENCES c
+)
+DIMENSIONS (
+    o.region AS region
+)
+METRICS (
+    o.revenue AS sum(amount)
+)
+
+# --- FACTS clause ---
+
+# C-038: body_parser/mod.rs::parse_keyword_body_with_facts_single — one fact o.net_price with a parenthesised arithmetic expression
+statement ok
+CREATE SEMANTIC VIEW dcc_c038 AS TABLES (o AS dcc_orders PRIMARY KEY (id)) FACTS (o.net_price AS o.price * (1 - o.discount)) DIMENSIONS (o.region AS region) METRICS (o.rev AS SUM(amount));
+
+query T nosort
+SELECT * FROM dcc_ddl('dcc_c038');
+----
+CREATE OR REPLACE SEMANTIC VIEW dcc_c038 AS
+TABLES (
+    o AS dcc_orders PRIMARY KEY (id)
+)
+FACTS (
+    o.net_price AS o.price * (1 - o.discount)
+)
+DIMENSIONS (
+    o.region AS region
+)
+METRICS (
+    o.rev AS SUM(amount)
+)
+
+query TTTT rowsort
+SELECT object_kind, object_name, property, property_value FROM describe_semantic_view('dcc_c038') WHERE object_kind = 'FACT' AND property IN ('TABLE', 'EXPRESSION');
+----
+FACT	net_price	EXPRESSION	o.price * (1 - o.discount)
+FACT	net_price	TABLE	dcc_orders
+
+# C-039: body_parser/mod.rs::parse_keyword_body_with_facts_multiple — two facts, in order
+statement ok
+CREATE SEMANTIC VIEW dcc_c039 AS TABLES (o AS dcc_orders PRIMARY KEY (id)) FACTS (o.net_price AS o.price * (1 - o.discount), o.tax_amount AS o.price * o.tax_rate) DIMENSIONS (o.region AS region) METRICS (o.rev AS SUM(amount));
+
+query T nosort
+SELECT * FROM dcc_ddl('dcc_c039');
+----
+CREATE OR REPLACE SEMANTIC VIEW dcc_c039 AS
+TABLES (
+    o AS dcc_orders PRIMARY KEY (id)
+)
+FACTS (
+    o.net_price AS o.price * (1 - o.discount),
+    o.tax_amount AS o.price * o.tax_rate
+)
+DIMENSIONS (
+    o.region AS region
+)
+METRICS (
+    o.rev AS SUM(amount)
+)
+
+# C-040: body_parser/mod.rs::parse_keyword_body_with_facts_trailing_comma — trailing comma in FACTS adds no entry
+statement ok
+CREATE SEMANTIC VIEW dcc_c040 AS TABLES (o AS dcc_orders PRIMARY KEY (id)) FACTS (o.net_price AS o.price * (1 - o.discount),) DIMENSIONS (o.region AS region) METRICS (o.rev AS SUM(amount));
+
+query T nosort
+SELECT * FROM dcc_ddl('dcc_c040');
+----
+CREATE OR REPLACE SEMANTIC VIEW dcc_c040 AS
+TABLES (
+    o AS dcc_orders PRIMARY KEY (id)
+)
+FACTS (
+    o.net_price AS o.price * (1 - o.discount)
+)
+DIMENSIONS (
+    o.region AS region
+)
+METRICS (
+    o.rev AS SUM(amount)
+)
+
+# C-041: body_parser/mod.rs::parse_keyword_body_with_empty_facts — an empty `FACTS ()` is accepted and stores no fact
+statement ok
+CREATE SEMANTIC VIEW dcc_c041 AS TABLES (o AS dcc_orders PRIMARY KEY (id)) FACTS () DIMENSIONS (o.region AS region) METRICS (o.rev AS SUM(amount));
+
+query T nosort
+SELECT * FROM dcc_ddl('dcc_c041');
+----
+CREATE OR REPLACE SEMANTIC VIEW dcc_c041 AS
+TABLES (
+    o AS dcc_orders PRIMARY KEY (id)
+)
+DIMENSIONS (
+    o.region AS region
+)
+METRICS (
+    o.rev AS SUM(amount)
+)
+
+# C-042: body_parser/mod.rs::parse_keyword_body_fact_without_source_table_rejected — near miss of C-038: a fact without the `alias.` prefix is rejected [syntax]
+statement error
+CREATE SEMANTIC VIEW dcc_c042 AS TABLES (o AS dcc_orders PRIMARY KEY (id)) FACTS (net_price AS o.price * (1 - o.discount)) DIMENSIONS (o.region AS region) METRICS (o.rev AS SUM(amount));
+----
+
+# C-043: body_parser/mod.rs::parse_keyword_body_facts_after_dimensions_rejected — near miss of C-038: FACTS written after DIMENSIONS is rejected as out of order [text]
+statement error
+CREATE SEMANTIC VIEW dcc_c043 AS TABLES (o AS dcc_orders PRIMARY KEY (id)) DIMENSIONS (o.region AS region) FACTS (o.net_price AS o.price * (1 - o.discount)) METRICS (o.rev AS SUM(amount));
+----
+Clause 'FACTS' appears out of order
+
+# --- METRICS clause: qualified and derived entries ---
+
+# C-044: body_parser/mod.rs::parse_metrics_clause_qualified_entry — qualified metric li.revenue AS SUM(li.amount): source li, name revenue
+statement ok
+CREATE SEMANTIC VIEW dcc_c044 AS TABLES (li AS dcc_line_items PRIMARY KEY (id)) METRICS (li.revenue AS SUM(li.amount));
+
+query T nosort
+SELECT * FROM dcc_ddl('dcc_c044');
+----
+CREATE OR REPLACE SEMANTIC VIEW dcc_c044 AS
+TABLES (
+    li AS dcc_line_items PRIMARY KEY (id)
+)
+METRICS (
+    li.revenue AS SUM(li.amount)
+)
+
+query TTTT rowsort
+SELECT object_kind, object_name, property, property_value FROM describe_semantic_view('dcc_c044') WHERE property IN ('TABLE', 'EXPRESSION');
+----
+METRIC	revenue	EXPRESSION	SUM(li.amount)
+METRIC	revenue	TABLE	dcc_line_items
+
+# C-045: body_parser/mod.rs::parse_metrics_clause_unqualified_entry — unqualified `profit AS revenue - cost` is a DERIVED metric (no source table)
+statement ok
+CREATE SEMANTIC VIEW dcc_c045 AS TABLES (li AS dcc_line_items PRIMARY KEY (id)) METRICS (li.revenue AS SUM(li.amount), li.cost AS SUM(li.unit_cost), profit AS revenue - cost);
+
+query T nosort
+SELECT * FROM dcc_ddl('dcc_c045');
+----
+CREATE OR REPLACE SEMANTIC VIEW dcc_c045 AS
+TABLES (
+    li AS dcc_line_items PRIMARY KEY (id)
+)
+METRICS (
+    li.revenue AS SUM(li.amount),
+    li.cost AS SUM(li.unit_cost),
+    profit AS revenue - cost
+)
+
+query TTTT rowsort
+SELECT object_kind, object_name, property, property_value FROM describe_semantic_view('dcc_c045') WHERE object_name = 'profit';
+----
+DERIVED_METRIC	profit	ACCESS_MODIFIER	PUBLIC
+DERIVED_METRIC	profit	DATA_TYPE	BIGINT
+DERIVED_METRIC	profit	EXPRESSION	revenue - cost
+
+# C-046: body_parser/mod.rs::parse_metrics_clause_mixed_entries — qualified, derived, qualified in one clause: order and kinds kept (derived may reference a later metric)
+statement ok
+CREATE SEMANTIC VIEW dcc_c046 AS TABLES (li AS dcc_line_items PRIMARY KEY (id)) METRICS (li.revenue AS SUM(li.amount), profit AS revenue - cost, li.cost AS SUM(li.unit_cost));
+
+query T nosort
+SELECT * FROM dcc_ddl('dcc_c046');
+----
+CREATE OR REPLACE SEMANTIC VIEW dcc_c046 AS
+TABLES (
+    li AS dcc_line_items PRIMARY KEY (id)
+)
+METRICS (
+    li.revenue AS SUM(li.amount),
+    profit AS revenue - cost,
+    li.cost AS SUM(li.unit_cost)
+)
+
+query TTTT rowsort
+SELECT object_kind, object_name, property, property_value FROM describe_semantic_view('dcc_c046') WHERE property = 'EXPRESSION';
+----
+DERIVED_METRIC	profit	EXPRESSION	revenue - cost
+METRIC	cost	EXPRESSION	SUM(li.unit_cost)
+METRIC	revenue	EXPRESSION	SUM(li.amount)
+
+# C-047: body_parser/mod.rs::parse_metrics_clause_trailing_comma — trailing comma after a derived metric adds no entry
+statement ok
+CREATE SEMANTIC VIEW dcc_c047 AS TABLES (li AS dcc_line_items PRIMARY KEY (id)) METRICS (li.revenue AS SUM(li.amount), li.cost AS SUM(li.unit_cost), profit AS revenue - cost,);
+
+query T nosort
+SELECT * FROM dcc_ddl('dcc_c047');
+----
+CREATE OR REPLACE SEMANTIC VIEW dcc_c047 AS
+TABLES (
+    li AS dcc_line_items PRIMARY KEY (id)
+)
+METRICS (
+    li.revenue AS SUM(li.amount),
+    li.cost AS SUM(li.unit_cost),
+    profit AS revenue - cost
+)
+
+# C-048: body_parser/mod.rs::parse_metrics_clause_newline_separated — newline-separated qualified + derived metric entries
+statement ok
+CREATE SEMANTIC VIEW dcc_c048 AS TABLES (li AS dcc_line_items PRIMARY KEY (id)) METRICS (
+  li.revenue AS SUM(li.amount),
+  li.cost AS SUM(li.unit_cost),
+  profit AS revenue - cost
+);
+
+query T nosort
+SELECT * FROM dcc_ddl('dcc_c048');
+----
+CREATE OR REPLACE SEMANTIC VIEW dcc_c048 AS
+TABLES (
+    li AS dcc_line_items PRIMARY KEY (id)
+)
+METRICS (
+    li.revenue AS SUM(li.amount),
+    li.cost AS SUM(li.unit_cost),
+    profit AS revenue - cost
+)
+
+# C-049: body_parser/mod.rs::parse_keyword_body_with_derived_metrics — whole body with one qualified and one derived metric
+statement ok
+CREATE SEMANTIC VIEW dcc_c049 AS TABLES (o AS dcc_orders PRIMARY KEY (id)) DIMENSIONS (o.region AS region) METRICS (o.revenue AS SUM(o.amount), o.cost AS SUM(o.cost), profit AS revenue - cost);
+
+query T nosort
+SELECT * FROM dcc_ddl('dcc_c049');
+----
+CREATE OR REPLACE SEMANTIC VIEW dcc_c049 AS
+TABLES (
+    o AS dcc_orders PRIMARY KEY (id)
+)
+DIMENSIONS (
+    o.region AS region
+)
+METRICS (
+    o.revenue AS SUM(o.amount),
+    o.cost AS SUM(o.cost),
+    profit AS revenue - cost
+)
+
+query TTTT rowsort
+SELECT object_kind, object_name, property, property_value FROM describe_semantic_view('dcc_c049') WHERE property = 'TABLE';
+----
+DIMENSION	region	TABLE	dcc_orders
+METRIC	cost	TABLE	dcc_orders
+METRIC	revenue	TABLE	dcc_orders
+
+# C-050: body_parser/mod.rs::parse_keyword_body_only_derived_metrics — a METRICS clause of derived metrics only (no qualified metric at all), no DIMENSIONS
+# (The derived expressions are constants / each other so the view resolves; the
+# Rust test's `revenue - cost` named metrics it never declared.)
+statement ok
+CREATE SEMANTIC VIEW dcc_c050 AS TABLES (o AS dcc_orders PRIMARY KEY (id)) METRICS (profit AS 100 - 40, margin AS profit / 100);
+
+query T nosort
+SELECT * FROM dcc_ddl('dcc_c050');
+----
+CREATE OR REPLACE SEMANTIC VIEW dcc_c050 AS
+TABLES (
+    o AS dcc_orders PRIMARY KEY (id)
+)
+METRICS (
+    profit AS 100 - 40,
+    margin AS profit / 100
+)
+
+query TT rowsort
+SELECT object_kind, object_name FROM describe_semantic_view('dcc_c050') WHERE property = 'EXPRESSION';
+----
+DERIVED_METRIC	margin
+DERIVED_METRIC	profit
+
+# C-051: body_parser/mod.rs::parse_metrics_clause_empty_body — an empty `METRICS ()` is accepted and stores no metric
+statement ok
+CREATE SEMANTIC VIEW dcc_c051 AS TABLES (o AS dcc_orders PRIMARY KEY (id)) DIMENSIONS (o.region AS o.region) METRICS ();
+
+query T nosort
+SELECT * FROM dcc_ddl('dcc_c051');
+----
+CREATE OR REPLACE SEMANTIC VIEW dcc_c051 AS
+TABLES (
+    o AS dcc_orders PRIMARY KEY (id)
+)
+DIMENSIONS (
+    o.region AS o.region
+)
+
+# --- METRICS: USING (role-playing relationships) ---
+
+# C-052: body_parser/mod.rs::parse_metrics_using_single_relationship, body_parser/mod.rs::parse_keyword_body_with_using_metrics — `f.departure_count USING (dep_airport) AS COUNT(*)`: one USING relationship
+statement ok
+CREATE SEMANTIC VIEW dcc_c052 AS TABLES (f AS dcc_flights PRIMARY KEY (id), a AS dcc_airports PRIMARY KEY (id)) RELATIONSHIPS (dep_airport AS f(dep_id) REFERENCES a, arr_airport AS f(arr_id) REFERENCES a) DIMENSIONS (a.airport_name AS a.name) METRICS (f.departure_count USING (dep_airport) AS COUNT(*));
+
+query T nosort
+SELECT * FROM dcc_ddl('dcc_c052');
+----
+CREATE OR REPLACE SEMANTIC VIEW dcc_c052 AS
+TABLES (
+    f AS dcc_flights PRIMARY KEY (id),
+    a AS dcc_airports PRIMARY KEY (id)
+)
+RELATIONSHIPS (
+    dep_airport AS f(dep_id) REFERENCES a,
+    arr_airport AS f(arr_id) REFERENCES a
+)
+DIMENSIONS (
+    a.airport_name AS a.name
+)
+METRICS (
+    f.departure_count USING (dep_airport) AS COUNT(*)
+)
+
+query TTTT rowsort
+SELECT object_kind, object_name, property, property_value FROM describe_semantic_view('dcc_c052') WHERE object_kind = 'METRIC';
+----
+METRIC	departure_count	ACCESS_MODIFIER	PUBLIC
+METRIC	departure_count	DATA_TYPE	BIGINT
+METRIC	departure_count	EXPRESSION	COUNT(*)
+METRIC	departure_count	TABLE	dcc_flights
+
+# C-053: body_parser/mod.rs::parse_metrics_using_multiple_relationships — `USING (rel1, rel2)`: two relationships, in order
+statement ok
+CREATE SEMANTIC VIEW dcc_c053 AS TABLES (f AS dcc_flights PRIMARY KEY (id), a AS dcc_airports PRIMARY KEY (id)) RELATIONSHIPS (rel1 AS f(dep_id) REFERENCES a, rel2 AS f(arr_id) REFERENCES a) DIMENSIONS (a.airport_name AS a.name) METRICS (f.met USING (rel1, rel2) AS SUM(f.x));
+
+query T nosort
+SELECT * FROM dcc_ddl('dcc_c053');
+----
+CREATE OR REPLACE SEMANTIC VIEW dcc_c053 AS
+TABLES (
+    f AS dcc_flights PRIMARY KEY (id),
+    a AS dcc_airports PRIMARY KEY (id)
+)
+RELATIONSHIPS (
+    rel1 AS f(dep_id) REFERENCES a,
+    rel2 AS f(arr_id) REFERENCES a
+)
+DIMENSIONS (
+    a.airport_name AS a.name
+)
+METRICS (
+    f.met USING (rel1, rel2) AS SUM(f.x)
+)
+
+# C-054: body_parser/mod.rs::parse_metrics_using_on_derived_produces_error — near miss of C-052: USING on a DERIVED metric is rejected
+statement error
+CREATE SEMANTIC VIEW dcc_c054 AS TABLES (f AS dcc_flights PRIMARY KEY (id), a AS dcc_airports PRIMARY KEY (id)) RELATIONSHIPS (dep_airport AS f(dep_id) REFERENCES a, arr_airport AS f(arr_id) REFERENCES a) DIMENSIONS (a.airport_name AS a.name) METRICS (f.departure_count USING (dep_airport) AS COUNT(*), derived_met USING (dep_airport) AS departure_count + 1);
+----
+USING clause not allowed on derived metric 'derived_met'
+
+# C-055: body_parser/mod.rs::parse_metrics_using_case_insensitive — `using` and `UsInG` are the USING keyword
+statement ok
+CREATE SEMANTIC VIEW dcc_c055 AS TABLES (f AS dcc_flights PRIMARY KEY (id), a AS dcc_airports PRIMARY KEY (id)) RELATIONSHIPS (dep_airport AS f(dep_id) REFERENCES a, arr_airport AS f(arr_id) REFERENCES a) DIMENSIONS (a.airport_name AS a.name) METRICS (f.departure_count using (dep_airport) AS COUNT(*), f.arrival_count UsInG (arr_airport) AS COUNT(*));
+
+query T nosort
+SELECT * FROM dcc_ddl('dcc_c055');
+----
+CREATE OR REPLACE SEMANTIC VIEW dcc_c055 AS
+TABLES (
+    f AS dcc_flights PRIMARY KEY (id),
+    a AS dcc_airports PRIMARY KEY (id)
+)
+RELATIONSHIPS (
+    dep_airport AS f(dep_id) REFERENCES a,
+    arr_airport AS f(arr_id) REFERENCES a
+)
+DIMENSIONS (
+    a.airport_name AS a.name
+)
+METRICS (
+    f.departure_count USING (dep_airport) AS COUNT(*),
+    f.arrival_count USING (arr_airport) AS COUNT(*)
+)
+
+# --- COMMENT / WITH SYNONYMS / PRIVATE / PUBLIC ---
+
+# C-056: body_parser/mod.rs::test_dimension_with_comment — dimension `COMMENT = 'Order date'`
+statement ok
+CREATE SEMANTIC VIEW dcc_c056 AS TABLES (o AS dcc_orders PRIMARY KEY (id)) DIMENSIONS (o.date AS o.created_at COMMENT = 'Order date') METRICS (o.rev AS SUM(o.amount));
+
+query T nosort
+SELECT * FROM dcc_ddl('dcc_c056');
+----
+CREATE OR REPLACE SEMANTIC VIEW dcc_c056 AS
+TABLES (
+    o AS dcc_orders PRIMARY KEY (id)
+)
+DIMENSIONS (
+    o.date AS o.created_at COMMENT = 'Order date'
+)
+METRICS (
+    o.rev AS SUM(o.amount)
+)
+
+query TTTT rowsort
+SELECT object_kind, object_name, property, property_value FROM describe_semantic_view('dcc_c056') WHERE property IN ('EXPRESSION', 'COMMENT') AND object_kind = 'DIMENSION';
+----
+DIMENSION	date	COMMENT	Order date
+DIMENSION	date	EXPRESSION	o.created_at
+
+# C-057: body_parser/mod.rs::test_dimension_with_synonyms, body_parser/mod.rs::f12_with_synonyms_with_equals_still_accepted — dimension `WITH SYNONYMS = ('purchase_date', 'order_date')`, order kept
+statement ok
+CREATE SEMANTIC VIEW dcc_c057 AS TABLES (o AS dcc_orders PRIMARY KEY (id)) DIMENSIONS (o.date AS o.created_at WITH SYNONYMS = ('purchase_date', 'order_date')) METRICS (o.rev AS SUM(o.amount));
+
+query T nosort
+SELECT * FROM dcc_ddl('dcc_c057');
+----
+CREATE OR REPLACE SEMANTIC VIEW dcc_c057 AS
+TABLES (
+    o AS dcc_orders PRIMARY KEY (id)
+)
+DIMENSIONS (
+    o.date AS o.created_at WITH SYNONYMS = ('purchase_date', 'order_date')
+)
+METRICS (
+    o.rev AS SUM(o.amount)
+)
+
+query TTTT rowsort
+SELECT object_kind, object_name, property, property_value FROM describe_semantic_view('dcc_c057') WHERE property = 'SYNONYMS';
+----
+DIMENSION	date	SYNONYMS	["purchase_date","order_date"]
+
+# C-058: body_parser/mod.rs::test_comment_and_synonyms_either_order — COMMENT then SYNONYMS and SYNONYMS then COMMENT store the same annotations
+statement ok
+CREATE SEMANTIC VIEW dcc_c058 AS TABLES (o AS dcc_orders PRIMARY KEY (id)) DIMENSIONS (o.d1 AS o.created_at COMMENT = 'test' WITH SYNONYMS = ('a'), o.d2 AS o.created_at WITH SYNONYMS = ('a') COMMENT = 'test') METRICS (o.rev AS SUM(o.amount));
+
+query T nosort
+SELECT * FROM dcc_ddl('dcc_c058');
+----
+CREATE OR REPLACE SEMANTIC VIEW dcc_c058 AS
+TABLES (
+    o AS dcc_orders PRIMARY KEY (id)
+)
+DIMENSIONS (
+    o.d1 AS o.created_at COMMENT = 'test' WITH SYNONYMS = ('a'),
+    o.d2 AS o.created_at COMMENT = 'test' WITH SYNONYMS = ('a')
+)
+METRICS (
+    o.rev AS SUM(o.amount)
+)
+
+query TTTT rowsort
+SELECT object_kind, object_name, property, property_value FROM describe_semantic_view('dcc_c058') WHERE property IN ('EXPRESSION', 'COMMENT', 'SYNONYMS') AND object_kind = 'DIMENSION';
+----
+DIMENSION	d1	COMMENT	test
+DIMENSION	d1	EXPRESSION	o.created_at
+DIMENSION	d1	SYNONYMS	["a"]
+DIMENSION	d2	COMMENT	test
+DIMENSION	d2	EXPRESSION	o.created_at
+DIMENSION	d2	SYNONYMS	["a"]
+
+# C-059: body_parser/mod.rs::test_private_metric — `PRIVATE o.cost` metric
+statement ok
+CREATE SEMANTIC VIEW dcc_c059 AS TABLES (o AS dcc_orders PRIMARY KEY (id)) METRICS (PRIVATE o.cost AS SUM(o.cost));
+
+query T nosort
+SELECT * FROM dcc_ddl('dcc_c059');
+----
+CREATE OR REPLACE SEMANTIC VIEW dcc_c059 AS
+TABLES (
+    o AS dcc_orders PRIMARY KEY (id)
+)
+METRICS (
+    PRIVATE o.cost AS SUM(o.cost)
+)
+
+query TTTT rowsort
+SELECT object_kind, object_name, property, property_value FROM describe_semantic_view('dcc_c059') WHERE property = 'ACCESS_MODIFIER';
+----
+METRIC	cost	ACCESS_MODIFIER	PRIVATE
+
+# C-060: body_parser/mod.rs::test_explicit_public_metric, body_parser/mod.rs::test_default_public_metric — explicit `PUBLIC` and no modifier both give a PUBLIC metric
+statement ok
+CREATE SEMANTIC VIEW dcc_c060 AS TABLES (o AS dcc_orders PRIMARY KEY (id)) METRICS (PUBLIC o.revenue AS SUM(o.amount), o.revenue2 AS SUM(o.amount));
+
+query T nosort
+SELECT * FROM dcc_ddl('dcc_c060');
+----
+CREATE OR REPLACE SEMANTIC VIEW dcc_c060 AS
+TABLES (
+    o AS dcc_orders PRIMARY KEY (id)
+)
+METRICS (
+    o.revenue AS SUM(o.amount),
+    o.revenue2 AS SUM(o.amount)
+)
+
+query TTTT rowsort
+SELECT object_kind, object_name, property, property_value FROM describe_semantic_view('dcc_c060') WHERE property = 'ACCESS_MODIFIER';
+----
+METRIC	revenue	ACCESS_MODIFIER	PUBLIC
+METRIC	revenue2	ACCESS_MODIFIER	PUBLIC
+
+# C-061: body_parser/mod.rs::test_private_fact — `PRIVATE o.raw_cost` fact
+statement ok
+CREATE SEMANTIC VIEW dcc_c061 AS TABLES (o AS dcc_orders PRIMARY KEY (id)) FACTS (PRIVATE o.raw_cost AS o.cost) DIMENSIONS (o.region AS o.region) METRICS (o.rev AS SUM(o.amount));
+
+query T nosort
+SELECT * FROM dcc_ddl('dcc_c061');
+----
+CREATE OR REPLACE SEMANTIC VIEW dcc_c061 AS
+TABLES (
+    o AS dcc_orders PRIMARY KEY (id)
+)
+FACTS (
+    PRIVATE o.raw_cost AS o.cost
+)
+DIMENSIONS (
+    o.region AS o.region
+)
+METRICS (
+    o.rev AS SUM(o.amount)
+)
+
+query TTTT rowsort
+SELECT object_kind, object_name, property, property_value FROM describe_semantic_view('dcc_c061') WHERE property = 'ACCESS_MODIFIER';
+----
+FACT	raw_cost	ACCESS_MODIFIER	PRIVATE
+METRIC	rev	ACCESS_MODIFIER	PUBLIC
+
+# C-062: body_parser/mod.rs::test_private_dimension_rejected, body_parser/mod.rs::f12_private_on_dimension_still_rejected — near miss of C-056: PRIVATE on a DIMENSION is rejected
+statement error
+CREATE SEMANTIC VIEW dcc_c062 AS TABLES (o AS dcc_orders PRIMARY KEY (id)) DIMENSIONS (PRIVATE o.date AS o.created_at) METRICS (o.rev AS SUM(o.amount));
+----
+PRIVATE is not supported
+
+# C-063: body_parser/mod.rs::test_escaped_quotes_in_comment — `COMMENT = 'It''s a test'` stores It's a test (re-escaped by GET_DDL)
+statement ok
+CREATE SEMANTIC VIEW dcc_c063 AS TABLES (o AS dcc_orders PRIMARY KEY (id)) DIMENSIONS (o.date AS o.created_at COMMENT = 'It''s a test') METRICS (o.rev AS SUM(o.amount));
+
+query T nosort
+SELECT * FROM dcc_ddl('dcc_c063');
+----
+CREATE OR REPLACE SEMANTIC VIEW dcc_c063 AS
+TABLES (
+    o AS dcc_orders PRIMARY KEY (id)
+)
+DIMENSIONS (
+    o.date AS o.created_at COMMENT = 'It''s a test'
+)
+METRICS (
+    o.rev AS SUM(o.amount)
+)
+
+query TTTT rowsort
+SELECT object_kind, object_name, property, property_value FROM describe_semantic_view('dcc_c063') WHERE property = 'COMMENT';
+----
+DIMENSION	date	COMMENT	It's a test
+
+# C-064: body_parser/mod.rs::test_comment_identifier_not_confused — `comment_count` inside the expression is not the COMMENT annotation; expression kept whole
+statement ok
+CREATE SEMANTIC VIEW dcc_c064 AS TABLES (o AS dcc_orders PRIMARY KEY (id)) DIMENSIONS (o.flag AS CASE WHEN comment_count > 0 THEN 1 ELSE 0 END) METRICS (o.rev AS SUM(o.amount));
+
+query T nosort
+SELECT * FROM dcc_ddl('dcc_c064');
+----
+CREATE OR REPLACE SEMANTIC VIEW dcc_c064 AS
+TABLES (
+    o AS dcc_orders PRIMARY KEY (id)
+)
+DIMENSIONS (
+    o.flag AS CASE WHEN comment_count > 0 THEN 1 ELSE 0 END
+)
+METRICS (
+    o.rev AS SUM(o.amount)
+)
+
+query TTTT rowsort
+SELECT object_kind, object_name, property, property_value FROM describe_semantic_view('dcc_c064') WHERE object_kind = 'DIMENSION' AND property IN ('EXPRESSION', 'COMMENT');
+----
+DIMENSION	flag	EXPRESSION	CASE WHEN comment_count > 0 THEN 1 ELSE 0 END
+
+# C-065: body_parser/mod.rs::test_table_with_comment_and_synonyms — table-level `COMMENT = 'Orders table' WITH SYNONYMS = ('sales')`
+statement ok
+CREATE SEMANTIC VIEW dcc_c065 AS TABLES (o AS dcc_orders PRIMARY KEY (id) COMMENT = 'Orders table' WITH SYNONYMS = ('sales')) DIMENSIONS (o.region AS o.region) METRICS (o.rev AS SUM(o.amount));
+
+query T nosort
+SELECT * FROM dcc_ddl('dcc_c065');
+----
+CREATE OR REPLACE SEMANTIC VIEW dcc_c065 AS
+TABLES (
+    o AS dcc_orders PRIMARY KEY (id) COMMENT = 'Orders table' WITH SYNONYMS = ('sales')
+)
+DIMENSIONS (
+    o.region AS o.region
+)
+METRICS (
+    o.rev AS SUM(o.amount)
+)
+
+query TTTT rowsort
+SELECT object_kind, object_name, property, property_value FROM describe_semantic_view('dcc_c065') WHERE object_kind = 'TABLE' AND property IN ('COMMENT', 'SYNONYMS');
+----
+TABLE	dcc_orders	COMMENT	Orders table
+TABLE	dcc_orders	SYNONYMS	["sales"]
+
+# C-066: body_parser/mod.rs::test_metric_with_using_and_comment — USING (dep) then a trailing `COMMENT = 'Departures'` on one metric
+statement ok
+CREATE SEMANTIC VIEW dcc_c066 AS TABLES (f AS dcc_flights PRIMARY KEY (id), a AS dcc_airports PRIMARY KEY (id)) RELATIONSHIPS (dep AS f(dep_id) REFERENCES a) DIMENSIONS (a.name AS a.name) METRICS (f.dep_count USING (dep) AS COUNT(*) COMMENT = 'Departures');
+
+query T nosort
+SELECT * FROM dcc_ddl('dcc_c066');
+----
+CREATE OR REPLACE SEMANTIC VIEW dcc_c066 AS
+TABLES (
+    f AS dcc_flights PRIMARY KEY (id),
+    a AS dcc_airports PRIMARY KEY (id)
+)
+RELATIONSHIPS (
+    dep AS f(dep_id) REFERENCES a
+)
+DIMENSIONS (
+    a.name AS a.name
+)
+METRICS (
+    f.dep_count USING (dep) AS COUNT(*) COMMENT = 'Departures'
+)
+
+query TTTT rowsort
+SELECT object_kind, object_name, property, property_value FROM describe_semantic_view('dcc_c066') WHERE object_kind = 'METRIC' AND property IN ('EXPRESSION', 'COMMENT');
+----
+METRIC	dep_count	COMMENT	Departures
+METRIC	dep_count	EXPRESSION	COUNT(*)
+
+# C-067: body_parser/mod.rs::test_private_keyword_disambiguation — a table alias `private_schema` followed by `.` is an alias, not the PRIVATE modifier
+statement ok
+CREATE SEMANTIC VIEW dcc_c067 AS TABLES (private_schema AS dcc_priv PRIMARY KEY (id)) METRICS (private_schema.metric_name AS SUM(private_schema.value));
+
+query T nosort
+SELECT * FROM dcc_ddl('dcc_c067');
+----
+CREATE OR REPLACE SEMANTIC VIEW dcc_c067 AS
+TABLES (
+    private_schema AS dcc_priv PRIMARY KEY (id)
+)
+METRICS (
+    private_schema.metric_name AS SUM(private_schema.value)
+)
+
+query TTTT rowsort
+SELECT object_kind, object_name, property, property_value FROM describe_semantic_view('dcc_c067') WHERE object_kind = 'METRIC' AND property IN ('TABLE', 'ACCESS_MODIFIER');
+----
+METRIC	metric_name	ACCESS_MODIFIER	PUBLIC
+METRIC	metric_name	TABLE	dcc_priv
+
+# C-068: body_parser/mod.rs::test_full_keyword_body_with_all_metadata — comments, synonyms and PRIVATE on tables, facts, dimensions and metrics together
+statement ok
+CREATE SEMANTIC VIEW dcc_c068 AS TABLES (o AS dcc_orders PRIMARY KEY (id) COMMENT = 'Order table') FACTS (o.net_price AS o.amount * 0.9 COMMENT = 'Net price' WITH SYNONYMS = ('discounted_price')) DIMENSIONS (o.region AS o.region WITH SYNONYMS = ('territory')) METRICS (o.revenue AS SUM(o.amount) COMMENT = 'Total revenue', PRIVATE o.cost AS SUM(o.cost));
+
+query T nosort
+SELECT * FROM dcc_ddl('dcc_c068');
+----
+CREATE OR REPLACE SEMANTIC VIEW dcc_c068 AS
+TABLES (
+    o AS dcc_orders PRIMARY KEY (id) COMMENT = 'Order table'
+)
+FACTS (
+    o.net_price AS o.amount * 0.9 COMMENT = 'Net price' WITH SYNONYMS = ('discounted_price')
+)
+DIMENSIONS (
+    o.region AS o.region WITH SYNONYMS = ('territory')
+)
+METRICS (
+    o.revenue AS SUM(o.amount) COMMENT = 'Total revenue',
+    PRIVATE o.cost AS SUM(o.cost)
+)
+
+# --- METRICS: NON ADDITIVE BY ---
+
+# C-069: body_parser/mod.rs::parse_metrics_non_additive_by_single_dim_defaults — NON ADDITIVE BY (d1): one dimension, ASC / NULLS LAST by default
+statement ok
+CREATE SEMANTIC VIEW dcc_c069 AS TABLES (a AS dcc_accounts PRIMARY KEY (id)) DIMENSIONS (a.d1 AS a.date) METRICS (a.bal NON ADDITIVE BY (d1) AS SUM(a.amount));
+
+query T nosort
+SELECT * FROM dcc_ddl('dcc_c069');
+----
+CREATE OR REPLACE SEMANTIC VIEW dcc_c069 AS
+TABLES (
+    a AS dcc_accounts PRIMARY KEY (id)
+)
+DIMENSIONS (
+    a.d1 AS a.date
+)
+METRICS (
+    a.bal NON ADDITIVE BY (d1 NULLS LAST) AS SUM(a.amount)
+)
+
+query TTTT rowsort
+SELECT object_kind, object_name, property, property_value FROM describe_semantic_view('dcc_c069') WHERE property IN ('EXPRESSION', 'NON_ADDITIVE_BY') AND object_kind = 'METRIC';
+----
+METRIC	bal	EXPRESSION	SUM(a.amount)
+METRIC	bal	NON_ADDITIVE_BY	d1 NULLS LAST
+
+# C-070: body_parser/mod.rs::parse_metrics_non_additive_by_desc_nulls_first, body_parser/mod.rs::parse_keyword_body_non_additive_by_integration — NON ADDITIVE BY (date_dim DESC): DESC defaults to NULLS FIRST
+statement ok
+CREATE SEMANTIC VIEW dcc_c070 AS TABLES (a AS dcc_accounts PRIMARY KEY (id)) DIMENSIONS (a.date_dim AS a.date) METRICS (a.balance NON ADDITIVE BY (date_dim DESC) AS SUM(a.amount));
+
+query T nosort
+SELECT * FROM dcc_ddl('dcc_c070');
+----
+CREATE OR REPLACE SEMANTIC VIEW dcc_c070 AS
+TABLES (
+    a AS dcc_accounts PRIMARY KEY (id)
+)
+DIMENSIONS (
+    a.date_dim AS a.date
+)
+METRICS (
+    a.balance NON ADDITIVE BY (date_dim DESC NULLS FIRST) AS SUM(a.amount)
+)
+
+query TTTT rowsort
+SELECT object_kind, object_name, property, property_value FROM describe_semantic_view('dcc_c070') WHERE property = 'NON_ADDITIVE_BY';
+----
+METRIC	balance	NON_ADDITIVE_BY	date_dim DESC NULLS FIRST
+
+# C-071: body_parser/mod.rs::parse_metrics_non_additive_by_multiple_dims — two NON ADDITIVE BY dimensions with explicit order and nulls, kept in order
+statement ok
+CREATE SEMANTIC VIEW dcc_c071 AS TABLES (a AS dcc_accounts PRIMARY KEY (id)) DIMENSIONS (a.d1 AS a.date, a.d2 AS a.account_id) METRICS (a.bal NON ADDITIVE BY (d1 DESC NULLS FIRST, d2 ASC NULLS LAST) AS SUM(a.amount));
+
+query T nosort
+SELECT * FROM dcc_ddl('dcc_c071');
+----
+CREATE OR REPLACE SEMANTIC VIEW dcc_c071 AS
+TABLES (
+    a AS dcc_accounts PRIMARY KEY (id)
+)
+DIMENSIONS (
+    a.d1 AS a.date,
+    a.d2 AS a.account_id
+)
+METRICS (
+    a.bal NON ADDITIVE BY (d1 DESC NULLS FIRST, d2 NULLS LAST) AS SUM(a.amount)
+)
+
+query TTTT rowsort
+SELECT object_kind, object_name, property, property_value FROM describe_semantic_view('dcc_c071') WHERE property = 'NON_ADDITIVE_BY';
+----
+METRIC	bal	NON_ADDITIVE_BY	d1 DESC NULLS FIRST, d2 NULLS LAST
+
+# C-072: body_parser/mod.rs::parse_metrics_non_additive_by_on_derived_produces_error — near miss of C-069: NON ADDITIVE BY on a DERIVED metric is rejected
+statement error
+CREATE SEMANTIC VIEW dcc_c072 AS TABLES (a AS dcc_accounts PRIMARY KEY (id)) DIMENSIONS (a.d1 AS a.date) METRICS (a.bal NON ADDITIVE BY (d1) AS SUM(a.amount), profit NON ADDITIVE BY (d1) AS bal - 1);
+----
+NON ADDITIVE BY clause not allowed on derived metric 'profit'
+
+# C-073: body_parser/mod.rs::parse_metrics_non_additive_by_with_using — USING (rel1) followed by NON ADDITIVE BY (d1 DESC) on one metric
+statement ok
+CREATE SEMANTIC VIEW dcc_c073 AS TABLES (a AS dcc_accounts PRIMARY KEY (id), d AS dcc_customers PRIMARY KEY (id)) RELATIONSHIPS (rel1 AS a(account_id) REFERENCES d) DIMENSIONS (a.d1 AS a.date) METRICS (a.bal USING (rel1) NON ADDITIVE BY (d1 DESC) AS SUM(a.amount));
+
+query T nosort
+SELECT * FROM dcc_ddl('dcc_c073');
+----
+CREATE OR REPLACE SEMANTIC VIEW dcc_c073 AS
+TABLES (
+    a AS dcc_accounts PRIMARY KEY (id),
+    d AS dcc_customers PRIMARY KEY (id)
+)
+RELATIONSHIPS (
+    rel1 AS a(account_id) REFERENCES d
+)
+DIMENSIONS (
+    a.d1 AS a.date
+)
+METRICS (
+    a.bal USING (rel1) NON ADDITIVE BY (d1 DESC NULLS FIRST) AS SUM(a.amount)
+)
+
+query TTTT rowsort
+SELECT object_kind, object_name, property, property_value FROM describe_semantic_view('dcc_c073') WHERE object_kind = 'METRIC' AND property IN ('EXPRESSION', 'NON_ADDITIVE_BY');
+----
+METRIC	bal	EXPRESSION	SUM(a.amount)
+METRIC	bal	NON_ADDITIVE_BY	d1 DESC NULLS FIRST
+
+# C-074: body_parser/mod.rs::parse_keyword_body_non_additive_by_invalid_dim_error — near miss of C-070: a NON ADDITIVE BY dimension that is not declared is rejected
+statement error
+CREATE SEMANTIC VIEW dcc_c074 AS TABLES (a AS dcc_accounts PRIMARY KEY (id)) DIMENSIONS (a.date_dim AS a.date) METRICS (a.balance NON ADDITIVE BY (nonexistent DESC) AS SUM(a.amount));
+----
+does not match any declared dimension
+
+# C-075: body_parser/mod.rs::parse_keyword_body_non_additive_by_valid_dim_success — NON ADDITIVE BY (date_dim DESC, account): both resolve to declared dimensions
+statement ok
+CREATE SEMANTIC VIEW dcc_c075 AS TABLES (a AS dcc_accounts PRIMARY KEY (id)) DIMENSIONS (a.date_dim AS a.date, a.account AS a.account_id) METRICS (a.balance NON ADDITIVE BY (date_dim DESC, account) AS SUM(a.amount));
+
+query T nosort
+SELECT * FROM dcc_ddl('dcc_c075');
+----
+CREATE OR REPLACE SEMANTIC VIEW dcc_c075 AS
+TABLES (
+    a AS dcc_accounts PRIMARY KEY (id)
+)
+DIMENSIONS (
+    a.date_dim AS a.date,
+    a.account AS a.account_id
+)
+METRICS (
+    a.balance NON ADDITIVE BY (date_dim DESC NULLS FIRST, account NULLS LAST) AS SUM(a.amount)
+)
+
+# C-076: body_parser/mod.rs::parse_keyword_body_non_additive_by_case_insensitive_dim_match — NON ADDITIVE BY (date_dim) resolves against a dimension declared `Date_Dim`; both spellings stored as written [text]
+statement ok
+CREATE SEMANTIC VIEW dcc_c076 AS TABLES (a AS dcc_accounts PRIMARY KEY (id)) DIMENSIONS (a.Date_Dim AS a.date) METRICS (a.balance NON ADDITIVE BY (date_dim DESC) AS SUM(a.amount));
+
+query T nosort
+SELECT * FROM dcc_ddl('dcc_c076');
+----
+CREATE OR REPLACE SEMANTIC VIEW dcc_c076 AS
+TABLES (
+    a AS dcc_accounts PRIMARY KEY (id)
+)
+DIMENSIONS (
+    a.Date_Dim AS a.date
+)
+METRICS (
+    a.balance NON ADDITIVE BY (date_dim DESC NULLS FIRST) AS SUM(a.amount)
+)
+
+# C-077: body_parser/mod.rs::parse_keyword_body_quoted_non_additive_by_dim_accepted — NON ADDITIVE BY ("Region") resolves against the unquoted `region` dimension (DuckDB identifier rule) [text]
+statement ok
+CREATE SEMANTIC VIEW dcc_c077 AS TABLES (o AS dcc_orders PRIMARY KEY (id)) DIMENSIONS (o.region AS o.region) METRICS (o.bal NON ADDITIVE BY ("Region") AS SUM(o.amount));
+
+query T nosort
+SELECT * FROM dcc_ddl('dcc_c077');
+----
+CREATE OR REPLACE SEMANTIC VIEW dcc_c077 AS
+TABLES (
+    o AS dcc_orders PRIMARY KEY (id)
+)
+DIMENSIONS (
+    o.region AS o.region
+)
+METRICS (
+    o.bal NON ADDITIVE BY ("Region" NULLS LAST) AS SUM(o.amount)
+)
+
+# C-078: body_parser/mod.rs::parse_keyword_body_quoted_dotted_non_additive_by_dim_accepted — NON ADDITIVE BY ("O"."Region"): the alias-qualified quoted form folds on both halves [text]
+statement ok
+CREATE SEMANTIC VIEW dcc_c078 AS TABLES (o AS dcc_orders PRIMARY KEY (id)) DIMENSIONS (o.region AS o.region) METRICS (o.bal NON ADDITIVE BY ("O"."Region") AS SUM(o.amount));
+
+query T nosort
+SELECT * FROM dcc_ddl('dcc_c078');
+----
+CREATE OR REPLACE SEMANTIC VIEW dcc_c078 AS
+TABLES (
+    o AS dcc_orders PRIMARY KEY (id)
+)
+DIMENSIONS (
+    o.region AS o.region
+)
+METRICS (
+    o.bal NON ADDITIVE BY ("O"."Region" NULLS LAST) AS SUM(o.amount)
+)
+
+# C-079: body_parser/mod.rs::parse_keyword_body_quoted_unknown_non_additive_by_dim_still_rejected — near miss of C-077: quoting an UNKNOWN name does not make it resolve
+statement error
+CREATE SEMANTIC VIEW dcc_c079 AS TABLES (o AS dcc_orders PRIMARY KEY (id)) DIMENSIONS (o.region AS o.region) METRICS (o.bal NON ADDITIVE BY ("nope") AS SUM(o.amount));
+----
+does not match any declared dimension

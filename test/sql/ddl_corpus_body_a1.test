@@ -1,0 +1,1404 @@
+# DDL accept/reject corpus, slice B (part a, file 1 of 2): the SQL-level port of the first 150
+# `#[test]` functions in the `mod tests` block of `src/body_parser/mod.rs`
+# (clause splitting, dollar-quoting, clause bounds, TABLES entries, trailing
+# annotations, qualified entries, metric USING / NON ADDITIVE BY / OVER clauses,
+# RELATIONSHIPS and MATERIALIZATIONS entries).
+#
+# Phase 3 of the PEG-parser epic replaces those hand-written scanners with DuckDB
+# grammar productions and deletes their unit tests; every case they encode lives
+# on here as a row run against the real extension. The case map (one line per Rust
+# test, with its row ids or an N/A reason) is `_notes/phase3-corpus/map-B.md`.
+# Row ids run across ddl_corpus_body_a1.test and ddl_corpus_body_a2.test.
+#
+# Row conventions (see `_notes/phase3-corpus/`):
+#   `# B-nnn: <source>::<test_fn> — <what it pins>`
+#   accept rows pin the stored definition through GET_DDL (one line per row);
+#   rejects are near misses of an accepted statement earlier in this file;
+#   `[syntax]` = `statement error` with an empty `----` block: only that it fails
+#                (wording will change under the grammar, so none is pinned);
+#   `[text]`   = today's text contract (quoting, stored whitespace, case) that a
+#                grammar could plausibly change.
+
+require semantic_views
+
+statement ok
+CREATE MACRO dcb_ddl(v) AS TABLE SELECT unnest(string_split(rtrim(get_ddl('SEMANTIC_VIEW', v), chr(10)), chr(10))) AS line;
+
+# Fixtures. CREATE SEMANTIC VIEW does not resolve tables or columns, so these exist
+# only so every name the corpus mentions is a real object.
+statement ok
+CREATE TABLE dcb_orders (
+    id INTEGER, cid INTEGER, customer_id INTEGER, region VARCHAR, amount DOUBLE,
+    v DOUBLE, d DATE, a INTEGER, b INTEGER, c INTEGER, note VARCHAR, country VARCHAR,
+    "comment" VARCHAR, labels VARCHAR, commentary_col VARCHAR, "commenté" VARCHAR,
+    x INTEGER, y INTEGER, qty INTEGER, t INTEGER, report_date DATE, balance DOUBLE,
+    email VARCHAR, o_orderkey INTEGER, o_custkey INTEGER, order_date DATE,
+    "order date" DATE, "my dim" VARCHAR, "a,b" INTEGER, "x)y" INTEGER,
+    fk INTEGER, fk1 INTEGER, fk2 INTEGER, city VARCHAR
+);
+
+statement ok
+CREATE TABLE dcb_customers (
+    id INTEGER, k1 INTEGER, k2 INTEGER, "a)b" INTEGER, col1 INTEGER, col2 INTEGER, name VARCHAR
+);
+
+statement ok
+CREATE TABLE dcb_lineitem (l_orderkey INTEGER, l_linenumber INTEGER, qty INTEGER);
+
+statement ok
+CREATE TABLE dcb_line_items (id INTEGER, qty INTEGER);
+
+statement ok
+CREATE TABLE dcb_x (id INTEGER);
+
+statement ok
+CREATE TABLE dcb_y (id INTEGER);
+
+statement ok
+CREATE TABLE "dcb my orders" (id INTEGER, c INTEGER);
+
+statement ok
+CREATE TABLE "dcb weird PRIMARY KEY name" (id INTEGER);
+
+statement ok
+CREATE TABLE "dcb fact stage" (id INTEGER, email VARCHAR);
+
+statement ok
+CREATE TABLE "dcb a""b" (id INTEGER);
+
+statement ok
+CREATE TABLE "dcb tbl)x" (id INTEGER, c INTEGER);
+
+statement ok
+CREATE TABLE "dcb CAFÉ" (id INTEGER);
+
+statement ok
+CREATE TABLE "dcb ΩΩ Ω" (id INTEGER);
+
+statement ok
+CREATE TABLE "dcb my tbl" (id INTEGER);
+
+statement ok
+CREATE TABLE "dcb pre)agg" (region VARCHAR, total DOUBLE);
+
+statement ok
+CREATE TABLE dcb_my_primary (id INTEGER);
+
+statement ok
+CREATE TABLE dcb_東京 (a INTEGER);
+
+statement ok
+CREATE TABLE dcb_preagg (d DATE, region VARCHAR, total DOUBLE);
+
+statement ok
+CREATE SCHEMA dcb_staging;
+
+statement ok
+CREATE TABLE dcb_staging."dcb my orders" (id INTEGER);
+
+statement ok
+CREATE SCHEMA dcb_sch;
+
+statement ok
+CREATE TABLE dcb_sch.dcb_t (id INTEGER);
+
+statement ok
+ATTACH ':memory:' AS "dcb my db";
+
+statement ok
+CREATE SCHEMA "dcb my db"."dcb schema";
+
+statement ok
+CREATE TABLE "dcb my db"."dcb schema"."dcb my table" (id INTEGER);
+
+statement ok
+CREATE SCHEMA "dcb my db".dcb_sch;
+
+statement ok
+CREATE TABLE "dcb my db".dcb_sch.dcb_t (id INTEGER);
+
+# --- depth-0 entry splitting (split_at_depth0_commas) ---
+
+# B-001: body_parser/mod.rs::split_simple_three_entries — three comma-separated entries become three members
+statement ok
+CREATE SEMANTIC VIEW dcb_split3 AS
+TABLES (o AS dcb_orders PRIMARY KEY (id))
+DIMENSIONS (o.a AS o.a, o.b AS o.b, o.c AS o.c);
+
+query T nosort
+SELECT * FROM dcb_ddl('dcb_split3');
+----
+CREATE OR REPLACE SEMANTIC VIEW dcb_split3 AS
+TABLES (
+    o AS dcb_orders PRIMARY KEY (id)
+)
+DIMENSIONS (
+    o.a AS o.a,
+    o.b AS o.b,
+    o.c AS o.c
+)
+
+# B-002: body_parser/mod.rs::split_nested_parens_not_split — a comma inside a function call's parens does not split the entry
+statement ok
+CREATE SEMANTIC VIEW dcb_split_paren AS
+TABLES (o AS dcb_orders PRIMARY KEY (id))
+METRICS (o.s AS SUM(coalesce(o.a, o.b)), o.n AS COUNT(*));
+
+query T nosort
+SELECT * FROM dcb_ddl('dcb_split_paren');
+----
+CREATE OR REPLACE SEMANTIC VIEW dcb_split_paren AS
+TABLES (
+    o AS dcb_orders PRIMARY KEY (id)
+)
+METRICS (
+    o.s AS SUM(coalesce(o.a, o.b)),
+    o.n AS COUNT(*)
+)
+
+# B-003: body_parser/mod.rs::split_string_literal_comma_not_split — a comma inside a single-quoted literal does not split the entry
+statement ok
+CREATE SEMANTIC VIEW dcb_split_str AS
+TABLES (o AS dcb_orders PRIMARY KEY (id))
+DIMENSIONS (o.a AS o.a, o.lit AS 'x, y', o.b AS o.b);
+
+query T nosort
+SELECT * FROM dcb_ddl('dcb_split_str');
+----
+CREATE OR REPLACE SEMANTIC VIEW dcb_split_str AS
+TABLES (
+    o AS dcb_orders PRIMARY KEY (id)
+)
+DIMENSIONS (
+    o.a AS o.a,
+    o.lit AS 'x, y',
+    o.b AS o.b
+)
+
+# B-004: body_parser/mod.rs::split_dollar_quoted_comma_not_split — a comma inside $$...$$ does not split the entry
+statement ok
+CREATE SEMANTIC VIEW dcb_split_dollar AS
+TABLES (o AS dcb_orders PRIMARY KEY (id))
+DIMENSIONS (o.a AS o.a, o.lit AS $$x, y$$, o.b AS o.b);
+
+query T nosort
+SELECT * FROM dcb_ddl('dcb_split_dollar');
+----
+CREATE OR REPLACE SEMANTIC VIEW dcb_split_dollar AS
+TABLES (
+    o AS dcb_orders PRIMARY KEY (id)
+)
+DIMENSIONS (
+    o.a AS o.a,
+    o.lit AS $$x, y$$,
+    o.b AS o.b
+)
+
+# B-005: body_parser/mod.rs::split_tagged_dollar_quoted_comma_not_split — only the matching $t$ tag closes a tagged dollar string; an inner $z$ and its comma stay inside
+statement ok
+CREATE SEMANTIC VIEW dcb_split_tagged AS
+TABLES (o AS dcb_orders PRIMARY KEY (id))
+DIMENSIONS (o.a AS o.a, o.lit AS $t$x, $z$ y$t$, o.b AS o.b);
+
+query T nosort
+SELECT * FROM dcb_ddl('dcb_split_tagged');
+----
+CREATE OR REPLACE SEMANTIC VIEW dcb_split_tagged AS
+TABLES (
+    o AS dcb_orders PRIMARY KEY (id)
+)
+DIMENSIONS (
+    o.a AS o.a,
+    o.lit AS $t$x, $z$ y$t$,
+    o.b AS o.b
+)
+
+# B-006: body_parser/mod.rs::split_dollar_paren_does_not_change_depth — parens inside $$...$$ do not shift the depth counter
+statement ok
+CREATE SEMANTIC VIEW dcb_split_dollar_paren AS
+TABLES (o AS dcb_orders PRIMARY KEY (id))
+DIMENSIONS (o.lit AS $$a)b(c$$, o.d AS o.d);
+
+query T nosort
+SELECT * FROM dcb_ddl('dcb_split_dollar_paren');
+----
+CREATE OR REPLACE SEMANTIC VIEW dcb_split_dollar_paren AS
+TABLES (
+    o AS dcb_orders PRIMARY KEY (id)
+)
+DIMENSIONS (
+    o.lit AS $$a)b(c$$,
+    o.d AS o.d
+)
+
+# B-007: body_parser/mod.rs::split_lone_dollar_is_live_not_a_tag — a positional `$1` is not a dollar-quote opener; the following comma still splits
+# PRE-EXISTING (TECH-DEBT #95): a `$1` dimension expression is stored; when #95 rejects it, move this split check to a `$1` the grammar still accepts.
+statement ok
+CREATE SEMANTIC VIEW dcb_split_param AS
+TABLES (o AS dcb_orders PRIMARY KEY (id))
+DIMENSIONS (o.p AS $1, o.a AS o.a);
+
+query T nosort
+SELECT * FROM dcb_ddl('dcb_split_param');
+----
+CREATE OR REPLACE SEMANTIC VIEW dcb_split_param AS
+TABLES (
+    o AS dcb_orders PRIMARY KEY (id)
+)
+DIMENSIONS (
+    o.p AS $1,
+    o.a AS o.a
+)
+
+# B-008: body_parser/mod.rs::split_trailing_comma_discarded — a single trailing comma is tolerated and adds no entry
+statement ok
+CREATE SEMANTIC VIEW dcb_split_trailing AS
+TABLES (o AS dcb_orders PRIMARY KEY (id))
+DIMENSIONS (o.a AS o.a,);
+
+query T nosort
+SELECT * FROM dcb_ddl('dcb_split_trailing');
+----
+CREATE OR REPLACE SEMANTIC VIEW dcb_split_trailing AS
+TABLES (
+    o AS dcb_orders PRIMARY KEY (id)
+)
+DIMENSIONS (
+    o.a AS o.a
+)
+
+# B-009: body_parser/mod.rs::split_leading_and_interior_empty_entries_rejected — a doubled comma nested inside parens or inside a literal is not an empty entry
+statement ok
+CREATE SEMANTIC VIEW dcb_split_nested_empty AS
+TABLES (o AS dcb_orders PRIMARY KEY (id))
+DIMENSIONS (o.lit AS 'a,,b')
+METRICS (o.m AS concat(o.a,,o.b));
+
+query T nosort
+SELECT * FROM dcb_ddl('dcb_split_nested_empty');
+----
+CREATE OR REPLACE SEMANTIC VIEW dcb_split_nested_empty AS
+TABLES (
+    o AS dcb_orders PRIMARY KEY (id)
+)
+DIMENSIONS (
+    o.lit AS 'a,,b'
+)
+METRICS (
+    o.m AS concat(o.a,,o.b)
+)
+
+# B-010: body_parser/mod.rs::split_leading_and_interior_empty_entries_rejected — a leading stray comma is rejected (near miss of B-008) [syntax]
+statement error
+CREATE SEMANTIC VIEW dcb_split_lead AS
+TABLES (o AS dcb_orders PRIMARY KEY (id))
+DIMENSIONS (, o.a AS o.a);
+----
+
+# B-011: body_parser/mod.rs::split_leading_and_interior_empty_entries_rejected — an interior doubled comma `,,` is rejected (near miss of B-001) [syntax]
+statement error
+CREATE SEMANTIC VIEW dcb_split_double AS
+TABLES (o AS dcb_orders PRIMARY KEY (id))
+DIMENSIONS (o.a AS o.a,, o.b AS o.b);
+----
+
+# B-012: body_parser/mod.rs::split_leading_and_interior_empty_entries_rejected — an interior comma-space-comma `, ,` is rejected (near miss of B-001) [syntax]
+statement error
+CREATE SEMANTIC VIEW dcb_split_double_sp AS
+TABLES (o AS dcb_orders PRIMARY KEY (id))
+DIMENSIONS (o.a AS o.a, , o.b AS o.b);
+----
+
+# B-013: body_parser/mod.rs::t13_stray_comma_in_clause_rejected_end_to_end — a stray `,,` between DIMENSIONS entries, with METRICS present, is rejected end to end [syntax]
+statement error
+CREATE SEMANTIC VIEW dcb_t13 AS
+TABLES (o AS dcb_orders PRIMARY KEY (id))
+DIMENSIONS (o.a AS o.a,, o.b AS o.b)
+METRICS (o.rev AS SUM(o.amount));
+----
+
+# B-014: body_parser/mod.rs::test_split_commas_ignores_comma_inside_quoted_ident — a comma inside a double-quoted identifier does not split the entry [text]
+statement ok
+CREATE SEMANTIC VIEW dcb_split_qident AS
+TABLES (o AS dcb_orders PRIMARY KEY (id))
+DIMENSIONS (o.x AS o."a,b", o.y AS o.c);
+
+query T nosort
+SELECT * FROM dcb_ddl('dcb_split_qident');
+----
+CREATE OR REPLACE SEMANTIC VIEW dcb_split_qident AS
+TABLES (
+    o AS dcb_orders PRIMARY KEY (id)
+)
+DIMENSIONS (
+    o.x AS o."a,b",
+    o.y AS o.c
+)
+
+# --- dollar-quoted expressions ---
+
+# B-015: body_parser/mod.rs::dollar_quoted_dimension_expr_is_one_entry — $$p,q.r AS s$$ is ONE dimension; the inner comma and AS are inert
+statement ok
+CREATE SEMANTIC VIEW dcb_dq_dim AS
+TABLES (o AS dcb_orders)
+DIMENSIONS (o.a AS $$p,q.r AS s$$);
+
+query T nosort
+SELECT * FROM dcb_ddl('dcb_dq_dim');
+----
+CREATE OR REPLACE SEMANTIC VIEW dcb_dq_dim AS
+TABLES (
+    o AS dcb_orders
+)
+DIMENSIONS (
+    o.a AS $$p,q.r AS s$$
+)
+
+# B-016: body_parser/mod.rs::dollar_quoted_metric_keyword_is_inert — USING inside a derived metric's $$...$$ is not a USING clause
+statement ok
+CREATE SEMANTIC VIEW dcb_dq_metric AS
+TABLES (o AS dcb_orders)
+METRICS (m AS $$a USING b$$);
+
+query T nosort
+SELECT * FROM dcb_ddl('dcb_dq_metric');
+----
+CREATE OR REPLACE SEMANTIC VIEW dcb_dq_metric AS
+TABLES (
+    o AS dcb_orders
+)
+METRICS (
+    m AS $$a USING b$$
+)
+
+# no USING relationship was recorded: the metric is a plain derived metric
+query TTTT rowsort
+SELECT object_kind, object_name, property, property_value FROM describe_semantic_view('dcb_dq_metric') WHERE object_kind <> 'TABLE' AND property <> 'DATA_TYPE';
+----
+DERIVED_METRIC	m	ACCESS_MODIFIER	PUBLIC
+DERIVED_METRIC	m	EXPRESSION	$$a USING b$$
+
+# B-017: body_parser/mod.rs::dollar_quoted_dimension_close_paren_is_inert — a `)` inside $$...$$ does not close DIMENSIONS (...) early
+statement ok
+CREATE SEMANTIC VIEW dcb_dq_paren AS
+TABLES (o AS dcb_orders)
+DIMENSIONS (o.a AS $$x)y$$);
+
+query T nosort
+SELECT * FROM dcb_ddl('dcb_dq_paren');
+----
+CREATE OR REPLACE SEMANTIC VIEW dcb_dq_paren AS
+TABLES (
+    o AS dcb_orders
+)
+DIMENSIONS (
+    o.a AS $$x)y$$
+)
+
+# B-018: body_parser/mod.rs::unterminated_dollar_in_clause_reports_precise_error — an unterminated $$ in a clause is rejected (near miss of B-017) [text]
+statement error
+CREATE SEMANTIC VIEW dcb_dq_unterminated AS
+TABLES (o AS dcb_orders)
+DIMENSIONS (o.a AS $$unterminated);
+----
+Unterminated dollar-quoted string in clause 'DIMENSIONS'
+
+# --- pre-AS metric clauses written after AS (TECH-DEBT #38) ---
+
+# B-019: body_parser/mod.rs::non_additive_by_after_as_is_rejected — control: NON ADDITIVE BY (...) in its place, before AS
+statement ok
+CREATE SEMANTIC VIEW dcb_nab_ok AS
+TABLES (o AS dcb_orders PRIMARY KEY (id))
+DIMENSIONS (o.d AS o.d)
+METRICS (o.m NON ADDITIVE BY (d) AS sum(o.v));
+
+query T nosort
+SELECT * FROM dcb_ddl('dcb_nab_ok');
+----
+CREATE OR REPLACE SEMANTIC VIEW dcb_nab_ok AS
+TABLES (
+    o AS dcb_orders PRIMARY KEY (id)
+)
+DIMENSIONS (
+    o.d AS o.d
+)
+METRICS (
+    o.m NON ADDITIVE BY (d NULLS LAST) AS sum(o.v)
+)
+
+# B-020: body_parser/mod.rs::non_additive_by_after_as_is_rejected — NON ADDITIVE BY (...) after AS is rejected, not swallowed into the expression (near miss of B-019) [text]
+statement error
+CREATE SEMANTIC VIEW dcb_nab_after AS
+TABLES (o AS dcb_orders PRIMARY KEY (id))
+DIMENSIONS (o.d AS o.d)
+METRICS (o.m AS sum(o.v) NON ADDITIVE BY (d));
+----
+'NON ADDITIVE BY (...)' must come BEFORE 'AS' in a metric entry
+
+# B-021: body_parser/mod.rs::using_after_as_is_rejected — control: USING (...) in its place, before AS
+statement ok
+CREATE SEMANTIC VIEW dcb_using_ok AS
+TABLES (o AS dcb_orders PRIMARY KEY (id), c AS dcb_customers PRIMARY KEY (id))
+RELATIONSHIPS (r AS o(cid) REFERENCES c(id))
+DIMENSIONS (o.d AS o.d)
+METRICS (o.m USING (r) AS sum(o.v));
+
+query T nosort
+SELECT * FROM dcb_ddl('dcb_using_ok');
+----
+CREATE OR REPLACE SEMANTIC VIEW dcb_using_ok AS
+TABLES (
+    o AS dcb_orders PRIMARY KEY (id),
+    c AS dcb_customers PRIMARY KEY (id)
+)
+RELATIONSHIPS (
+    r AS o(cid) REFERENCES c
+)
+DIMENSIONS (
+    o.d AS o.d
+)
+METRICS (
+    o.m USING (r) AS sum(o.v)
+)
+
+# B-022: body_parser/mod.rs::using_after_as_is_rejected — USING (...) after AS is rejected (near miss of B-021) [text]
+statement error
+CREATE SEMANTIC VIEW dcb_using_after AS
+TABLES (o AS dcb_orders PRIMARY KEY (id), c AS dcb_customers PRIMARY KEY (id))
+RELATIONSHIPS (r AS o(cid) REFERENCES c(id))
+DIMENSIONS (o.d AS o.d)
+METRICS (o.m AS sum(o.v) USING (r));
+----
+'USING (...)' must come BEFORE 'AS' in a metric entry
+
+# B-023: body_parser/mod.rs::a_parenthesised_expression_does_not_hide_a_misplaced_clause — redundant outer parens do not hide a misplaced clause: `o.m AS (sum(o.v) USING (r))` (near miss of B-021) [text]
+statement error
+CREATE SEMANTIC VIEW dcb_paren_hide0 AS
+TABLES (o AS dcb_orders PRIMARY KEY (id), c AS dcb_customers PRIMARY KEY (id))
+RELATIONSHIPS (r AS o(cid) REFERENCES c(id))
+DIMENSIONS (o.d AS o.d)
+METRICS (o.m AS (sum(o.v) USING (r)));
+----
+'USING (...)' must come BEFORE 'AS' in a metric entry
+
+# B-024: body_parser/mod.rs::a_parenthesised_expression_does_not_hide_a_misplaced_clause — redundant outer parens do not hide a misplaced clause: `o.m AS (sum(o.v) NON ADDITIVE BY (d))` (near miss of B-021) [text]
+statement error
+CREATE SEMANTIC VIEW dcb_paren_hide1 AS
+TABLES (o AS dcb_orders PRIMARY KEY (id), c AS dcb_customers PRIMARY KEY (id))
+RELATIONSHIPS (r AS o(cid) REFERENCES c(id))
+DIMENSIONS (o.d AS o.d)
+METRICS (o.m AS (sum(o.v) NON ADDITIVE BY (d)));
+----
+'NON ADDITIVE BY (...)' must come BEFORE 'AS' in a metric entry
+
+# B-025: body_parser/mod.rs::a_parenthesised_expression_does_not_hide_a_misplaced_clause — redundant outer parens do not hide a misplaced clause: `o.m AS ((sum(o.v) USING (r)))` (near miss of B-021) [text]
+statement error
+CREATE SEMANTIC VIEW dcb_paren_hide2 AS
+TABLES (o AS dcb_orders PRIMARY KEY (id), c AS dcb_customers PRIMARY KEY (id))
+RELATIONSHIPS (r AS o(cid) REFERENCES c(id))
+DIMENSIONS (o.d AS o.d)
+METRICS (o.m AS ((sum(o.v) USING (r))));
+----
+'USING (...)' must come BEFORE 'AS' in a metric entry
+
+# B-026: body_parser/mod.rs::a_genuinely_nested_using_is_not_a_misplaced_clause — a USING inside a subquery JOIN in the expression is SQL, not a misplaced clause
+statement ok
+CREATE SEMANTIC VIEW dcb_nested_using AS
+TABLES (o AS dcb_orders PRIMARY KEY (id))
+DIMENSIONS (o.d AS o.d)
+METRICS (o.m AS sum(CASE WHEN o.id IN (SELECT a.id FROM dcb_x a JOIN dcb_y b USING (id)) THEN o.v ELSE 0 END));
+
+query T nosort
+SELECT * FROM dcb_ddl('dcb_nested_using');
+----
+CREATE OR REPLACE SEMANTIC VIEW dcb_nested_using AS
+TABLES (
+    o AS dcb_orders PRIMARY KEY (id)
+)
+DIMENSIONS (
+    o.d AS o.d
+)
+METRICS (
+    o.m AS sum(CASE WHEN o.id IN (SELECT a.id FROM dcb_x a JOIN dcb_y b USING (id)) THEN o.v ELSE 0 END)
+)
+
+# B-027: body_parser/mod.rs::a_missing_metric_name_is_reported_before_a_misplaced_clause — a metric with no name and a misplaced NON ADDITIVE BY is rejected (as a missing name today; near miss of B-019) [text]
+statement error
+CREATE SEMANTIC VIEW dcb_noname_nab AS
+TABLES (o AS dcb_orders PRIMARY KEY (id))
+DIMENSIONS (o.d AS o.d)
+METRICS (AS sum(o.v) NON ADDITIVE BY (d));
+----
+Missing metric name
+
+# --- a metric name eaten by a peeled USING / NON ADDITIVE BY clause ---
+
+# B-028: body_parser/mod.rs::a_named_metric_with_empty_clauses_still_parses — control: PRIVATE name + empty USING () + empty NON ADDITIVE BY () keeps the name
+statement ok
+CREATE SEMANTIC VIEW dcb_named_empty AS
+TABLES (o AS dcb_orders PRIMARY KEY (id))
+METRICS (PRIVATE o.total USING () NON ADDITIVE BY () AS sum(o.v));
+
+query T nosort
+SELECT * FROM dcb_ddl('dcb_named_empty');
+----
+CREATE OR REPLACE SEMANTIC VIEW dcb_named_empty AS
+TABLES (
+    o AS dcb_orders PRIMARY KEY (id)
+)
+METRICS (
+    PRIVATE o.total AS sum(o.v)
+)
+
+# B-029: body_parser/mod.rs::access_modifier_plus_empty_using_is_not_a_metric_name — PRIVATE + empty USING () with no name is rejected, not stored nameless (near miss of B-028) [text]
+statement error
+CREATE SEMANTIC VIEW dcb_access_modifier_plus_emp AS
+TABLES (o AS dcb_orders PRIMARY KEY (id))
+METRICS (PRIVATE USING () AS 1);
+----
+Missing metric name before 'AS'
+
+# B-030: body_parser/mod.rs::empty_using_alone_is_not_a_metric_name — empty USING () alone with no name is rejected, not stored nameless (near miss of B-028) [text]
+statement error
+CREATE SEMANTIC VIEW dcb_empty_using_alone_is_not AS
+TABLES (o AS dcb_orders PRIMARY KEY (id))
+METRICS (USING () AS 1);
+----
+Missing metric name before 'AS'
+
+# B-031: body_parser/mod.rs::empty_non_additive_by_alone_is_not_a_metric_name — empty NON ADDITIVE BY () alone with no name is rejected, not stored nameless (near miss of B-028) [text]
+statement error
+CREATE SEMANTIC VIEW dcb_empty_non_additive_by_al AS
+TABLES (o AS dcb_orders PRIMARY KEY (id))
+METRICS (NON ADDITIVE BY () AS 1);
+----
+Missing metric name before 'AS'
+
+# B-032: body_parser/mod.rs::empty_using_and_non_additive_by_together_are_not_a_metric_name — empty USING () + NON ADDITIVE BY () with no name is rejected, not stored nameless (near miss of B-028) [text]
+statement error
+CREATE SEMANTIC VIEW dcb_empty_using_and_non_addi AS
+TABLES (o AS dcb_orders PRIMARY KEY (id))
+METRICS (USING () NON ADDITIVE BY () AS 1);
+----
+Missing metric name before 'AS'
+
+# B-033: body_parser/mod.rs::over_after_as_is_still_accepted — control: OVER (...) legitimately follows AS
+statement ok
+CREATE SEMANTIC VIEW dcb_over_after_as AS
+TABLES (o AS dcb_orders PRIMARY KEY (id))
+DIMENSIONS (o.d AS o.d)
+METRICS (o.total AS sum(o.v), o.m AS SUM(total) OVER (PARTITION BY EXCLUDING d ORDER BY d ASC NULLS LAST));
+
+query T nosort
+SELECT * FROM dcb_ddl('dcb_over_after_as');
+----
+CREATE OR REPLACE SEMANTIC VIEW dcb_over_after_as AS
+TABLES (
+    o AS dcb_orders PRIMARY KEY (id)
+)
+DIMENSIONS (
+    o.d AS o.d
+)
+METRICS (
+    o.total AS sum(o.v),
+    o.m AS SUM(total) OVER (PARTITION BY EXCLUDING d ORDER BY d NULLS LAST)
+)
+
+# B-034: body_parser/mod.rs::clause_keywords_inside_a_string_literal_are_not_clauses — USING / NON ADDITIVE BY inside a string literal after AS are data
+statement ok
+CREATE SEMANTIC VIEW dcb_kw_in_string AS
+TABLES (o AS dcb_orders PRIMARY KEY (id))
+METRICS (o.m AS sum(CASE WHEN o.note = 'USING (x) NON ADDITIVE BY (y)' THEN o.v ELSE 0 END));
+
+query T nosort
+SELECT * FROM dcb_ddl('dcb_kw_in_string');
+----
+CREATE OR REPLACE SEMANTIC VIEW dcb_kw_in_string AS
+TABLES (
+    o AS dcb_orders PRIMARY KEY (id)
+)
+METRICS (
+    o.m AS sum(CASE WHEN o.note = 'USING (x) NON ADDITIVE BY (y)' THEN o.v ELSE 0 END)
+)
+
+# --- LABELS = (FILTER) only on facts and dimensions ---
+
+# B-035: body_parser/mod.rs::labels_is_still_accepted_on_a_fact_and_a_dimension — LABELS = (FILTER) on a fact and on a dimension is stored
+statement ok
+CREATE SEMANTIC VIEW dcb_labels_ok AS
+TABLES (o AS dcb_orders PRIMARY KEY (id))
+FACTS (o.is_large AS o.amount > 100 LABELS = (FILTER))
+DIMENSIONS (o.is_domestic AS o.country = 'US' LABELS = (FILTER))
+METRICS (o.revenue AS sum(o.amount));
+
+query T nosort
+SELECT * FROM dcb_ddl('dcb_labels_ok');
+----
+CREATE OR REPLACE SEMANTIC VIEW dcb_labels_ok AS
+TABLES (
+    o AS dcb_orders PRIMARY KEY (id)
+)
+FACTS (
+    o.is_large AS o.amount > 100 LABELS = (FILTER)
+)
+DIMENSIONS (
+    o.is_domestic AS o.country = 'US' LABELS = (FILTER)
+)
+METRICS (
+    o.revenue AS sum(o.amount)
+)
+
+# B-036: body_parser/mod.rs::labels_is_rejected_at_the_view_level — control: trailing view-level COMMENT = 'v' after the last clause
+statement ok
+CREATE SEMANTIC VIEW dcb_labels_ctl AS
+TABLES (o AS dcb_orders PRIMARY KEY (id))
+METRICS (o.revenue AS sum(o.amount)) COMMENT = 'v';
+
+query T nosort
+SELECT * FROM dcb_ddl('dcb_labels_ctl');
+----
+CREATE OR REPLACE SEMANTIC VIEW dcb_labels_ctl COMMENT = 'v' AS
+TABLES (
+    o AS dcb_orders PRIMARY KEY (id)
+)
+METRICS (
+    o.revenue AS sum(o.amount)
+)
+
+# B-037: body_parser/mod.rs::labels_is_rejected_on_a_metric — LABELS on a metric is rejected, not silently dropped (near miss of B-036) [text]
+statement error
+CREATE SEMANTIC VIEW dcb_labels_metric AS
+TABLES (o AS dcb_orders PRIMARY KEY (id))
+METRICS (o.revenue AS sum(o.amount) LABELS = (FILTER));
+----
+LABELS is not valid on a metric
+
+# B-038: body_parser/mod.rs::labels_is_rejected_on_a_table — LABELS on a table entry is rejected (near miss of B-036) [text]
+statement error
+CREATE SEMANTIC VIEW dcb_labels_table AS
+TABLES (o AS dcb_orders PRIMARY KEY (id) LABELS = (FILTER))
+METRICS (o.revenue AS sum(o.amount));
+----
+LABELS is not valid on a table
+
+# B-039: body_parser/mod.rs::labels_is_rejected_at_the_view_level — LABELS after the view-level COMMENT is rejected (near miss of B-036) [text]
+statement error
+CREATE SEMANTIC VIEW dcb_labels_view AS
+TABLES (o AS dcb_orders PRIMARY KEY (id))
+METRICS (o.revenue AS sum(o.amount)) COMMENT = 'v' LABELS = (FILTER);
+----
+LABELS is not valid at the view level
+
+# --- clause bounds ---
+
+# B-040: body_parser/mod.rs::find_clause_bounds_basic_tables_dimensions_metrics — TABLES + DIMENSIONS + METRICS, one entry each
+statement ok
+CREATE SEMANTIC VIEW dcb_bounds_basic AS TABLES (o AS dcb_orders PRIMARY KEY (id)) DIMENSIONS (o.region AS region) METRICS (o.rev AS SUM(amount));
+
+query T nosort
+SELECT * FROM dcb_ddl('dcb_bounds_basic');
+----
+CREATE OR REPLACE SEMANTIC VIEW dcb_bounds_basic AS
+TABLES (
+    o AS dcb_orders PRIMARY KEY (id)
+)
+DIMENSIONS (
+    o.region AS region
+)
+METRICS (
+    o.rev AS SUM(amount)
+)
+
+# B-041: body_parser/mod.rs::f16_leading_as_requires_word_boundary — a lower-case `as` followed by whitespace is the body's AS [text]
+statement ok
+CREATE SEMANTIC VIEW dcb_f16_ok as TABLES (o AS dcb_orders PRIMARY KEY (id)) DIMENSIONS (o.x AS x) METRICS (o.y AS SUM(y));
+
+query T nosort
+SELECT * FROM dcb_ddl('dcb_f16_ok');
+----
+CREATE OR REPLACE SEMANTIC VIEW dcb_f16_ok AS
+TABLES (
+    o AS dcb_orders PRIMARY KEY (id)
+)
+DIMENSIONS (
+    o.x AS x
+)
+METRICS (
+    o.y AS SUM(y)
+)
+
+# B-042: body_parser/mod.rs::f16_leading_as_requires_word_boundary — `ASTABLES` glued is not `AS TABLES` (near miss of B-041) [syntax]
+statement error
+CREATE SEMANTIC VIEW dcb_f16_glued ASTABLES (o AS dcb_orders PRIMARY KEY (id)) DIMENSIONS (o.x AS x) METRICS (o.y AS SUM(y));
+----
+
+# B-043: body_parser/mod.rs::find_clause_bounds_with_relationships — a RELATIONSHIPS clause between TABLES and DIMENSIONS
+statement ok
+CREATE SEMANTIC VIEW dcb_bounds_rel AS TABLES (o AS dcb_orders PRIMARY KEY (id), c AS dcb_customers PRIMARY KEY (id)) RELATIONSHIPS (o_to_c AS o(customer_id) REFERENCES c) DIMENSIONS (o.region AS region) METRICS (o.rev AS SUM(amount));
+
+query T nosort
+SELECT * FROM dcb_ddl('dcb_bounds_rel');
+----
+CREATE OR REPLACE SEMANTIC VIEW dcb_bounds_rel AS
+TABLES (
+    o AS dcb_orders PRIMARY KEY (id),
+    c AS dcb_customers PRIMARY KEY (id)
+)
+RELATIONSHIPS (
+    o_to_c AS o(customer_id) REFERENCES c
+)
+DIMENSIONS (
+    o.region AS region
+)
+METRICS (
+    o.rev AS SUM(amount)
+)
+
+# B-044: body_parser/mod.rs::find_clause_bounds_rejects_unknown_keyword — misspelled clause keyword TABLSE is rejected (near miss of B-040) [syntax]
+statement error
+CREATE SEMANTIC VIEW dcb_bounds_tablse AS TABLSE (o AS dcb_orders PRIMARY KEY (id)) DIMENSIONS (o.region AS region) METRICS (o.rev AS SUM(amount));
+----
+
+# B-045: body_parser/mod.rs::find_clause_bounds_rejects_missing_tables — a body without TABLES is rejected (near miss of B-040) [syntax]
+statement error
+CREATE SEMANTIC VIEW dcb_bounds_notables AS DIMENSIONS (o.region AS region) METRICS (o.rev AS SUM(amount));
+----
+
+# B-046: body_parser/mod.rs::find_clause_bounds_rejects_duplicate_dimensions — a second DIMENSIONS clause is rejected (near miss of B-040) [text]
+statement error
+CREATE SEMANTIC VIEW dcb_bounds_dup_dims AS TABLES (o AS dcb_orders PRIMARY KEY (id)) DIMENSIONS (o.region AS region) DIMENSIONS (o.b AS o.b) METRICS (o.rev AS SUM(amount));
+----
+Duplicate clause keyword 'DIMENSIONS'
+
+# B-047: body_parser/mod.rs::find_clause_bounds_rejects_duplicate_tables — a second TABLES clause is rejected (near miss of B-040) [text]
+statement error
+CREATE SEMANTIC VIEW dcb_bounds_dup_tables AS TABLES (o AS dcb_orders PRIMARY KEY (id)) TABLES (c AS dcb_customers PRIMARY KEY (id)) DIMENSIONS (o.region AS region) METRICS (o.rev AS SUM(amount));
+----
+Duplicate clause keyword 'TABLES'
+
+# B-048: body_parser/mod.rs::find_clause_bounds_nested_pk_not_confused — the `)` closing a composite PRIMARY KEY (...) does not end TABLES early
+statement ok
+CREATE SEMANTIC VIEW dcb_bounds_nested_pk AS TABLES (o AS dcb_orders PRIMARY KEY (o_orderkey, o_custkey)) DIMENSIONS (o.x AS x);
+
+query T nosort
+SELECT * FROM dcb_ddl('dcb_bounds_nested_pk');
+----
+CREATE OR REPLACE SEMANTIC VIEW dcb_bounds_nested_pk AS
+TABLES (
+    o AS dcb_orders PRIMARY KEY (o_orderkey, o_custkey)
+)
+DIMENSIONS (
+    o.x AS x
+)
+
+# --- empty clause bodies ---
+
+# PRE-EXISTING (TECH-DEBT #94): the view stores no DIMENSIONS/METRICS, so GET_DDL renders a body with neither clause, which CREATE then rejects ('At least one of DIMENSIONS or METRICS'): GET_DDL does not round-trip (see the replay row below)
+# B-049: body_parser/mod.rs::empty_dimensions_and_metrics_both_present_is_ok, body_parser/mod.rs::split_empty_body — DIMENSIONS () and METRICS () both present but empty: accepted, zero members
+statement ok
+CREATE SEMANTIC VIEW dcb_empty_dm AS TABLES (o AS dcb_orders PRIMARY KEY (id)) DIMENSIONS () METRICS ();
+
+query T nosort
+SELECT * FROM dcb_ddl('dcb_empty_dm');
+----
+CREATE OR REPLACE SEMANTIC VIEW dcb_empty_dm AS
+TABLES (
+    o AS dcb_orders PRIMARY KEY (id)
+)
+
+# PRE-EXISTING (TECH-DEBT #94): GET_DDL of a view created with empty DIMENSIONS () METRICS () is not re-creatable (round-trip break)
+# B-050: body_parser/mod.rs::empty_dimensions_and_metrics_both_present_is_ok — replaying the GET_DDL text of B-049 verbatim is rejected [text]
+statement error
+CREATE OR REPLACE SEMANTIC VIEW dcb_empty_dm AS
+TABLES (
+    o AS dcb_orders PRIMARY KEY (id)
+);
+----
+At least one of 'DIMENSIONS' or 'METRICS' is required
+
+# the failed replay left the stored view untouched
+query T nosort
+SELECT count(*) FROM dcb_ddl('dcb_empty_dm');
+----
+4
+
+# B-051: body_parser/mod.rs::split_leading_and_interior_empty_entries_rejected — a clause body of a lone comma is rejected (near miss of B-049) [syntax]
+statement error
+CREATE SEMANTIC VIEW dcb_split_lone AS TABLES (o AS dcb_orders PRIMARY KEY (id)) DIMENSIONS (,) METRICS ();
+----
+
+# PRE-EXISTING (TECH-DEBT #94): same round-trip break as the DIMENSIONS () METRICS () row above: GET_DDL renders TABLES only
+# B-052: body_parser/mod.rs::empty_metrics_only_still_requires_tables_and_d_or_m_by_presence — METRICS () alone satisfies the D-or-M presence rule
+statement ok
+CREATE SEMANTIC VIEW dcb_empty_m AS TABLES (o AS dcb_orders PRIMARY KEY (id)) METRICS ();
+
+query T nosort
+SELECT * FROM dcb_ddl('dcb_empty_m');
+----
+CREATE OR REPLACE SEMANTIC VIEW dcb_empty_m AS
+TABLES (
+    o AS dcb_orders PRIMARY KEY (id)
+)
+
+# B-053: body_parser/mod.rs::empty_metrics_only_still_requires_tables_and_d_or_m_by_presence — neither DIMENSIONS nor METRICS present is rejected (near miss of B-052) [text]
+statement error
+CREATE SEMANTIC VIEW dcb_empty_none AS TABLES (o AS dcb_orders PRIMARY KEY (id));
+----
+At least one of 'DIMENSIONS' or 'METRICS' is required
+
+# B-054: body_parser/mod.rs::empty_tables_clause_parses_to_zero_tables — control: one table + one dimension on it
+statement ok
+CREATE SEMANTIC VIEW dcb_one_table AS TABLES (o AS dcb_orders) DIMENSIONS (o.a AS o.a);
+
+query T nosort
+SELECT * FROM dcb_ddl('dcb_one_table');
+----
+CREATE OR REPLACE SEMANTIC VIEW dcb_one_table AS
+TABLES (
+    o AS dcb_orders
+)
+DIMENSIONS (
+    o.a AS o.a
+)
+
+# B-055: body_parser/mod.rs::empty_tables_clause_parses_to_zero_tables — TABLES () parses to zero tables; the dimension's alias then fails validation (near miss of B-054)
+statement error
+CREATE SEMANTIC VIEW dcb_zero_tables AS TABLES () DIMENSIONS (o.a AS o.a);
+----
+unknown source table 'o'
+
+# PRE-EXISTING (TECH-DEBT #94): a view with zero tables and zero members is accepted (the Rust test says downstream expansion rejects zero-table views; nothing at CREATE does), and GET_DDL on it fails ('Legacy definition format'), so the stored definition cannot be rendered
+# B-056: body_parser/mod.rs::empty_tables_clause_parses_to_zero_tables — TABLES () with no members referencing a table is accepted at CREATE (zero tables)
+statement ok
+CREATE SEMANTIC VIEW dcb_zero_tables_ok AS TABLES () DIMENSIONS ();
+
+# stored, with nothing to describe
+query T nosort
+SELECT name FROM list_semantic_views() WHERE name = 'dcb_zero_tables_ok';
+----
+dcb_zero_tables_ok
+
+query T nosort
+SELECT count(*) FROM describe_semantic_view('dcb_zero_tables_ok');
+----
+0
+
+# PRE-EXISTING (TECH-DEBT #94): the stored zero-table definition cannot be rendered
+statement error
+SELECT get_ddl('SEMANTIC_VIEW', 'dcb_zero_tables_ok');
+----
+Legacy definition format
+
+# B-057: body_parser/mod.rs::empty_materializations_clause_parses — MATERIALIZATIONS () parses to zero materializations
+statement ok
+CREATE SEMANTIC VIEW dcb_empty_mat AS TABLES (o AS dcb_orders PRIMARY KEY (id)) DIMENSIONS (o.a AS o.a) MATERIALIZATIONS ();
+
+query T nosort
+SELECT * FROM dcb_ddl('dcb_empty_mat');
+----
+CREATE OR REPLACE SEMANTIC VIEW dcb_empty_mat AS
+TABLES (
+    o AS dcb_orders PRIMARY KEY (id)
+)
+DIMENSIONS (
+    o.a AS o.a
+)
+
+# --- SQL comments inside the AS body ---
+
+# B-058: body_parser/mod.rs::block_comment_between_clauses_is_inert — a block comment between clauses is inert and not stored
+statement ok
+CREATE SEMANTIC VIEW dcb_cmt_between AS TABLES (o AS dcb_orders PRIMARY KEY (id)) /* between */ DIMENSIONS (o.a AS o.a);
+
+query T nosort
+SELECT * FROM dcb_ddl('dcb_cmt_between');
+----
+CREATE OR REPLACE SEMANTIC VIEW dcb_cmt_between AS
+TABLES (
+    o AS dcb_orders PRIMARY KEY (id)
+)
+DIMENSIONS (
+    o.a AS o.a
+)
+
+# B-059: body_parser/mod.rs::block_comment_inside_clause_parens_is_inert — a block comment holding `,` and `)` inside clause parens is inert [text]
+statement ok
+CREATE SEMANTIC VIEW dcb_cmt_inside AS TABLES (o AS dcb_orders PRIMARY KEY (id)) DIMENSIONS (o.a AS o.a /* c, ) inside */);
+
+query T nosort
+SELECT * FROM dcb_ddl('dcb_cmt_inside');
+----
+CREATE OR REPLACE SEMANTIC VIEW dcb_cmt_inside AS
+TABLES (
+    o AS dcb_orders PRIMARY KEY (id)
+)
+DIMENSIONS (
+    o.a AS o.a
+)
+
+# B-060: body_parser/mod.rs::caret_after_in_body_comment_is_honest — TABLSE after an in-body block comment is still rejected (caret not pinned here; near miss of B-040) [syntax]
+statement error
+CREATE SEMANTIC VIEW dcb_cmt_typo AS /* leading note */ TABLSE (o AS dcb_orders PRIMARY KEY (id)) DIMENSIONS (o.region AS region) METRICS (o.rev AS SUM(amount));
+----
+
+# --- TABLES entries: name slot, PRIMARY KEY, UNIQUE ---
+
+# B-061: body_parser/mod.rs::parse_tables_single_pk — alias AS table PRIMARY KEY (col)
+statement ok
+CREATE SEMANTIC VIEW dcb_t_single_pk AS TABLES (o AS dcb_orders PRIMARY KEY (o_orderkey)) DIMENSIONS (o.id AS o.id);
+
+query T nosort
+SELECT * FROM dcb_ddl('dcb_t_single_pk');
+----
+CREATE OR REPLACE SEMANTIC VIEW dcb_t_single_pk AS
+TABLES (
+    o AS dcb_orders PRIMARY KEY (o_orderkey)
+)
+DIMENSIONS (
+    o.id AS o.id
+)
+
+# B-062: body_parser/mod.rs::parse_tables_schema_qualified — a schema-qualified source table keeps its qualifier
+statement ok
+CREATE SEMANTIC VIEW dcb_t_schema AS TABLES (o AS main.dcb_orders PRIMARY KEY (o_orderkey)) DIMENSIONS (o.id AS o.id);
+
+query T nosort
+SELECT * FROM dcb_ddl('dcb_t_schema');
+----
+CREATE OR REPLACE SEMANTIC VIEW dcb_t_schema AS
+TABLES (
+    o AS main.dcb_orders PRIMARY KEY (o_orderkey)
+)
+DIMENSIONS (
+    o.id AS o.id
+)
+
+# B-063: body_parser/mod.rs::parse_tables_composite_pk — a composite PRIMARY KEY keeps both columns in order
+statement ok
+CREATE SEMANTIC VIEW dcb_t_composite AS TABLES (l AS dcb_lineitem PRIMARY KEY (l_orderkey, l_linenumber)) DIMENSIONS (l.l_orderkey AS l.l_orderkey);
+
+query T nosort
+SELECT * FROM dcb_ddl('dcb_t_composite');
+----
+CREATE OR REPLACE SEMANTIC VIEW dcb_t_composite AS
+TABLES (
+    l AS dcb_lineitem PRIMARY KEY (l_orderkey, l_linenumber)
+)
+DIMENSIONS (
+    l.l_orderkey AS l.l_orderkey
+)
+
+# B-064: body_parser/mod.rs::parse_tables_two_words_before_constraint_rejected — `o dcb_orders PRIMARY KEY` (missing AS) is rejected, not silently taken (near miss of B-061) [text]
+statement error
+CREATE SEMANTIC VIEW dcb_t_two_words AS TABLES (o dcb_orders PRIMARY KEY (o_orderkey)) DIMENSIONS (o.id AS o.id);
+----
+between source table name and PRIMARY KEY
+
+# B-065: body_parser/mod.rs::parse_tables_without_primary_key_is_valid — PRIMARY KEY is optional
+statement ok
+CREATE SEMANTIC VIEW dcb_t_no_pk AS TABLES (o AS dcb_orders) DIMENSIONS (o.id AS o.id);
+
+query T nosort
+SELECT * FROM dcb_ddl('dcb_t_no_pk');
+----
+CREATE OR REPLACE SEMANTIC VIEW dcb_t_no_pk AS
+TABLES (
+    o AS dcb_orders
+)
+DIMENSIONS (
+    o.id AS o.id
+)
+
+# B-066: body_parser/mod.rs::test_parse_single_table_entry_quoted_with_internal_whitespace — a quoted table name with an embedded space survives intact [text]
+statement ok
+CREATE SEMANTIC VIEW dcb_t_quoted_ws AS TABLES (o AS "dcb my orders" PRIMARY KEY (id)) DIMENSIONS (o.id AS o.id);
+
+query T nosort
+SELECT * FROM dcb_ddl('dcb_t_quoted_ws');
+----
+CREATE OR REPLACE SEMANTIC VIEW dcb_t_quoted_ws AS
+TABLES (
+    o AS "dcb my orders" PRIMARY KEY (id)
+)
+DIMENSIONS (
+    o.id AS o.id
+)
+
+# B-067: body_parser/mod.rs::test_parse_single_table_entry_quoted_containing_primary_key_substring — a quoted table name containing `PRIMARY KEY` is not split at it [text]
+statement ok
+CREATE SEMANTIC VIEW dcb_t_quoted_pk AS TABLES (o AS "dcb weird PRIMARY KEY name" PRIMARY KEY (id)) DIMENSIONS (o.id AS o.id);
+
+query T nosort
+SELECT * FROM dcb_ddl('dcb_t_quoted_pk');
+----
+CREATE OR REPLACE SEMANTIC VIEW dcb_t_quoted_pk AS
+TABLES (
+    o AS "dcb weird PRIMARY KEY name" PRIMARY KEY (id)
+)
+DIMENSIONS (
+    o.id AS o.id
+)
+
+# B-068: body_parser/mod.rs::test_parse_single_table_entry_3part_quoted_fqn_with_whitespace — a 3-part quoted name with spaces in two parts is kept verbatim [text]
+statement ok
+CREATE SEMANTIC VIEW dcb_t_3part AS TABLES (o AS "dcb my db"."dcb schema"."dcb my table" PRIMARY KEY (id)) DIMENSIONS (o.id AS o.id);
+
+query T nosort
+SELECT * FROM dcb_ddl('dcb_t_3part');
+----
+CREATE OR REPLACE SEMANTIC VIEW dcb_t_3part AS
+TABLES (
+    o AS "dcb my db"."dcb schema"."dcb my table" PRIMARY KEY (id)
+)
+DIMENSIONS (
+    o.id AS o.id
+)
+
+# B-069: body_parser/mod.rs::test_parse_single_table_entry_regression_no_whitespace — an unquoted schema.table name
+statement ok
+CREATE SEMANTIC VIEW dcb_t_sch_t AS TABLES (o AS dcb_sch.dcb_t PRIMARY KEY (id)) DIMENSIONS (o.id AS o.id);
+
+query T nosort
+SELECT * FROM dcb_ddl('dcb_t_sch_t');
+----
+CREATE OR REPLACE SEMANTIC VIEW dcb_t_sch_t AS
+TABLES (
+    o AS dcb_sch.dcb_t PRIMARY KEY (id)
+)
+DIMENSIONS (
+    o.id AS o.id
+)
+
+# B-070: body_parser/mod.rs::test_parse_single_table_entry_quoted_with_unique_no_pk — a quoted name followed by UNIQUE (no PRIMARY KEY) [text]
+statement ok
+CREATE SEMANTIC VIEW dcb_t_unique_nopk AS TABLES (f AS "dcb fact stage" UNIQUE (email)) DIMENSIONS (f.email AS f.email);
+
+query T nosort
+SELECT * FROM dcb_ddl('dcb_t_unique_nopk');
+----
+CREATE OR REPLACE SEMANTIC VIEW dcb_t_unique_nopk AS
+TABLES (
+    f AS "dcb fact stage" UNIQUE (email)
+)
+DIMENSIONS (
+    f.email AS f.email
+)
+
+# B-071: body_parser/mod.rs::test_parse_single_table_entry_mixed_quoted_and_bare — bare schema + quoted table name [text]
+statement ok
+CREATE SEMANTIC VIEW dcb_t_mixed1 AS TABLES (o AS dcb_staging."dcb my orders" PRIMARY KEY (id)) DIMENSIONS (o.id AS o.id);
+
+query T nosort
+SELECT * FROM dcb_ddl('dcb_t_mixed1');
+----
+CREATE OR REPLACE SEMANTIC VIEW dcb_t_mixed1 AS
+TABLES (
+    o AS dcb_staging."dcb my orders" PRIMARY KEY (id)
+)
+DIMENSIONS (
+    o.id AS o.id
+)
+
+# B-072: body_parser/mod.rs::test_parse_single_table_entry_mixed_quoted_and_bare — quoted database + bare schema + bare table [text]
+statement ok
+CREATE SEMANTIC VIEW dcb_t_mixed2 AS TABLES (o AS "dcb my db".dcb_sch.dcb_t PRIMARY KEY (id)) DIMENSIONS (o.id AS o.id);
+
+query T nosort
+SELECT * FROM dcb_ddl('dcb_t_mixed2');
+----
+CREATE OR REPLACE SEMANTIC VIEW dcb_t_mixed2 AS
+TABLES (
+    o AS "dcb my db".dcb_sch.dcb_t PRIMARY KEY (id)
+)
+DIMENSIONS (
+    o.id AS o.id
+)
+
+# B-073: body_parser/mod.rs::test_parse_single_table_entry_full_form_still_parses — PRIMARY KEY + UNIQUE + COMMENT + WITH SYNONYMS in the legal order
+statement ok
+CREATE SEMANTIC VIEW dcb_t_full AS TABLES (o AS dcb_orders PRIMARY KEY (id) UNIQUE (email) COMMENT = 'doc' WITH SYNONYMS = ('ord')) DIMENSIONS (o.id AS o.id);
+
+query T nosort
+SELECT * FROM dcb_ddl('dcb_t_full');
+----
+CREATE OR REPLACE SEMANTIC VIEW dcb_t_full AS
+TABLES (
+    o AS dcb_orders PRIMARY KEY (id) UNIQUE (email) COMMENT = 'doc' WITH SYNONYMS = ('ord')
+)
+DIMENSIONS (
+    o.id AS o.id
+)
+
+# B-074: body_parser/mod.rs::test_parse_single_table_entry_comment_before_pk_rejected — control: COMMENT after PRIMARY KEY
+statement ok
+CREATE SEMANTIC VIEW dcb_t_pk_comment AS TABLES (o AS dcb_orders PRIMARY KEY (id) COMMENT = 'load-bearing doc') DIMENSIONS (o.id AS o.id);
+
+query T nosort
+SELECT * FROM dcb_ddl('dcb_t_pk_comment');
+----
+CREATE OR REPLACE SEMANTIC VIEW dcb_t_pk_comment AS
+TABLES (
+    o AS dcb_orders PRIMARY KEY (id) COMMENT = 'load-bearing doc'
+)
+DIMENSIONS (
+    o.id AS o.id
+)
+
+# B-075: body_parser/mod.rs::test_parse_single_table_entry_comment_before_pk_rejected — a COMMENT between the table name and PRIMARY KEY is rejected, not dropped (near miss of B-074) [syntax]
+statement error
+CREATE SEMANTIC VIEW dcb_t_comment_pk AS TABLES (o AS dcb_orders COMMENT = 'load-bearing doc' PRIMARY KEY (id)) DIMENSIONS (o.id AS o.id);
+----
+
+# B-076: body_parser/mod.rs::test_parse_single_table_entry_junk_before_pk_rejected — junk between the table name and PRIMARY KEY is rejected (near miss of B-074) [syntax]
+statement error
+CREATE SEMANTIC VIEW dcb_t_junk_pk AS TABLES (o AS dcb_orders banana PRIMARY KEY (id)) DIMENSIONS (o.id AS o.id);
+----
+
+# B-077: body_parser/mod.rs::test_parse_single_table_entry_junk_between_pk_and_unique_rejected — junk between PRIMARY KEY (...) and UNIQUE is rejected (near miss of B-073) [syntax]
+statement error
+CREATE SEMANTIC VIEW dcb_t_junk_unique AS TABLES (o AS dcb_orders PRIMARY KEY (id) junk UNIQUE (email)) DIMENSIONS (o.id AS o.id);
+----
+
+# B-078: body_parser/mod.rs::test_parse_single_table_entry_annotation_before_unique_rejected — a COMMENT before UNIQUE is rejected (near miss of B-073) [syntax]
+statement error
+CREATE SEMANTIC VIEW dcb_t_comment_unique AS TABLES (o AS dcb_orders COMMENT = 'doc' UNIQUE (email)) DIMENSIONS (o.id AS o.id);
+----
+
+# B-079: body_parser/mod.rs::test_parse_single_table_entry_unique_inside_comment_string_ok — UNIQUE / PRIMARY KEY text inside the COMMENT string is data
+statement ok
+CREATE SEMANTIC VIEW dcb_t_kw_in_comment AS TABLES (o AS dcb_orders PRIMARY KEY (id) COMMENT = 'has UNIQUE and PRIMARY KEY inside') DIMENSIONS (o.id AS o.id);
+
+query T nosort
+SELECT * FROM dcb_ddl('dcb_t_kw_in_comment');
+----
+CREATE OR REPLACE SEMANTIC VIEW dcb_t_kw_in_comment AS
+TABLES (
+    o AS dcb_orders PRIMARY KEY (id) COMMENT = 'has UNIQUE and PRIMARY KEY inside'
+)
+DIMENSIONS (
+    o.id AS o.id
+)
+
+# B-080: body_parser/mod.rs::test_primary_key_inside_comment_string_not_fabricated — PRIMARY KEY (id) inside a COMMENT on a no-PK table fabricates no key and keeps the comment
+statement ok
+CREATE SEMANTIC VIEW dcb_t_pk_in_comment AS TABLES (o AS dcb_orders COMMENT = 'the PRIMARY KEY (id) lives here') DIMENSIONS (o.id AS o.id);
+
+query T nosort
+SELECT * FROM dcb_ddl('dcb_t_pk_in_comment');
+----
+CREATE OR REPLACE SEMANTIC VIEW dcb_t_pk_in_comment AS
+TABLES (
+    o AS dcb_orders COMMENT = 'the PRIMARY KEY (id) lives here'
+)
+DIMENSIONS (
+    o.id AS o.id
+)
+
+# B-081: body_parser/mod.rs::test_unique_inside_comment_string_not_fabricated — UNIQUE (x) inside a COMMENT fabricates no UNIQUE constraint
+statement ok
+CREATE SEMANTIC VIEW dcb_t_unique_in_comment AS TABLES (o AS dcb_orders PRIMARY KEY (id) COMMENT = 'a UNIQUE (x) mention') DIMENSIONS (o.id AS o.id);
+
+query T nosort
+SELECT * FROM dcb_ddl('dcb_t_unique_in_comment');
+----
+CREATE OR REPLACE SEMANTIC VIEW dcb_t_unique_in_comment AS
+TABLES (
+    o AS dcb_orders PRIMARY KEY (id) COMMENT = 'a UNIQUE (x) mention'
+)
+DIMENSIONS (
+    o.id AS o.id
+)
+
+# B-082: body_parser/mod.rs::test_no_pk_table_comment_and_synonyms_preserved — COMMENT + WITH SYNONYMS on a table with no PK/UNIQUE are kept
+statement ok
+CREATE SEMANTIC VIEW dcb_t_nopk_ann AS TABLES (li AS dcb_line_items COMMENT = 'fact rows' WITH SYNONYMS = ('items', 'lines')) DIMENSIONS (li.id AS li.id);
+
+query T nosort
+SELECT * FROM dcb_ddl('dcb_t_nopk_ann');
+----
+CREATE OR REPLACE SEMANTIC VIEW dcb_t_nopk_ann AS
+TABLES (
+    li AS dcb_line_items COMMENT = 'fact rows' WITH SYNONYMS = ('items', 'lines')
+)
+DIMENSIONS (
+    li.id AS li.id
+)
+
+# B-083: body_parser/mod.rs::test_table_entry_trailing_garbage_errors — junk between a no-PK table name and its COMMENT is rejected (near miss of B-082) [syntax]
+statement error
+CREATE SEMANTIC VIEW dcb_t_garbage AS TABLES (li AS dcb_line_items garbage COMMENT = 'fact rows' WITH SYNONYMS = ('items', 'lines')) DIMENSIONS (li.id AS li.id);
+----
+
+# --- TABLES entries: reserved keywords and symbols in the table-name slot ---
+
+# B-084: body_parser/mod.rs::test_parse_single_table_entry_reserved_keyword_after_as_primary — `o AS PRIMARY KEY (id)`: a reserved keyword where the table name belongs is a missing table name (near miss of B-061) [syntax]
+statement error
+CREATE SEMANTIC VIEW dcb_t_kw_primary AS TABLES (o AS PRIMARY KEY (id)) DIMENSIONS (o.id AS o.id);
+----
+
+# B-085: body_parser/mod.rs::test_parse_single_table_entry_reserved_keyword_after_as_unique — `o AS UNIQUE (id)`: a reserved keyword where the table name belongs is a missing table name (near miss of B-061) [syntax]
+statement error
+CREATE SEMANTIC VIEW dcb_t_kw_unique AS TABLES (o AS UNIQUE (id)) DIMENSIONS (o.id AS o.id);
+----
+
+# B-086: body_parser/mod.rs::test_parse_single_table_entry_reserved_keyword_after_as_foreign — `o AS FOREIGN KEY (id)`: a reserved keyword where the table name belongs is a missing table name (near miss of B-061) [syntax]
+statement error
+CREATE SEMANTIC VIEW dcb_t_kw_foreign AS TABLES (o AS FOREIGN KEY (id)) DIMENSIONS (o.id AS o.id);
+----
+
+# B-087: body_parser/mod.rs::test_parse_single_table_entry_reserved_keyword_after_as_references — `o AS REFERENCES dcb_customers(id)`: a reserved keyword where the table name belongs is a missing table name (near miss of B-061) [syntax]
+statement error
+CREATE SEMANTIC VIEW dcb_t_kw_references AS TABLES (o AS REFERENCES dcb_customers(id)) DIMENSIONS (o.id AS o.id);
+----
+
+# B-088: body_parser/mod.rs::test_parse_single_table_entry_reserved_keyword_after_as_not — `o AS NOT NULL`: a reserved keyword where the table name belongs is a missing table name (near miss of B-061) [syntax]
+statement error
+CREATE SEMANTIC VIEW dcb_t_kw_not AS TABLES (o AS NOT NULL) DIMENSIONS (o.id AS o.id);
+----
+
+# B-089: body_parser/mod.rs::test_parse_single_table_entry_reserved_keyword_after_as_lowercase — `o AS primary KEY (id)`: a reserved keyword where the table name belongs is a missing table name (near miss of B-061) [syntax]
+statement error
+CREATE SEMANTIC VIEW dcb_t_kw_lowercase AS TABLES (o AS primary KEY (id)) DIMENSIONS (o.id AS o.id);
+----
+
+# B-090: body_parser/mod.rs::test_leading_symbol_in_name_slot_is_missing_name — `o AS .foo`: a leading symbol in the name slot is a missing table name (near miss of B-065) [syntax]
+statement error
+CREATE SEMANTIC VIEW dcb_t_sym0 AS TABLES (o AS .foo) DIMENSIONS (o.id AS o.id);
+----
+
+# B-091: body_parser/mod.rs::test_leading_symbol_in_name_slot_is_missing_name — `o AS =x`: a leading symbol in the name slot is a missing table name (near miss of B-065) [syntax]
+statement error
+CREATE SEMANTIC VIEW dcb_t_sym1 AS TABLES (o AS =x) DIMENSIONS (o.id AS o.id);
+----
+
+# B-092: body_parser/mod.rs::test_leading_symbol_in_name_slot_is_missing_name — `o AS -1`: a leading symbol in the name slot is a missing table name (near miss of B-065) [syntax]
+statement error
+CREATE SEMANTIC VIEW dcb_t_sym2 AS TABLES (o AS -1) DIMENSIONS (o.id AS o.id);
+----
+
+# B-093: body_parser/mod.rs::test_bare_paren_immediately_after_name_terminates_name — `dcb_orders(foo)`: a contiguous `(` ends the name and the rest is rejected (near miss of B-065) [syntax]
+statement error
+CREATE SEMANTIC VIEW dcb_t_paren_after AS TABLES (o AS dcb_orders(foo)) DIMENSIONS (o.id AS o.id);
+----
+
+# B-094: body_parser/mod.rs::test_bare_paren_immediately_after_name_terminates_name — `dcb_orders;junk`: a contiguous `;` ends the name; the statement is rejected (near miss of B-065) [syntax]
+statement error
+CREATE SEMANTIC VIEW dcb_t_semi_after AS TABLES (o AS dcb_orders;junk) DIMENSIONS (o.id AS o.id);
+----
+
+# B-095: body_parser/mod.rs::test_underscore_joined_primary_in_name_is_not_a_constraint — `dcb_my_primary` is one identifier, not a name plus PRIMARY KEY
+statement ok
+CREATE SEMANTIC VIEW dcb_t_my_primary AS TABLES (o AS dcb_my_primary) DIMENSIONS (o.id AS o.id);
+
+query T nosort
+SELECT * FROM dcb_ddl('dcb_t_my_primary');
+----
+CREATE OR REPLACE SEMANTIC VIEW dcb_t_my_primary AS
+TABLES (
+    o AS dcb_my_primary
+)
+DIMENSIONS (
+    o.id AS o.id
+)
+
+# --- TABLES entries: quoted-identifier edge cases and non-ASCII ---
+
+# B-096: body_parser/mod.rs::test_parse_single_table_entry_unterminated_quote — an unterminated quoted table name is rejected (near miss of B-066) [syntax]
+statement error
+CREATE SEMANTIC VIEW dcb_t_unclosed AS TABLES (o AS "dcb my orders PRIMARY KEY (id)) DIMENSIONS (o.id AS o.id);
+----
+
+# B-097: body_parser/mod.rs::test_parse_single_table_entry_quoted_with_doubled_escape_balanced — a doubled `""` inside a quoted table name is an escape, not a close [text]
+statement ok
+CREATE SEMANTIC VIEW dcb_t_doubled AS TABLES (o AS "dcb a""b" PRIMARY KEY (id)) DIMENSIONS (o.id AS o.id);
+
+query T nosort
+SELECT * FROM dcb_ddl('dcb_t_doubled');
+----
+CREATE OR REPLACE SEMANTIC VIEW dcb_t_doubled AS
+TABLES (
+    o AS "dcb a""b" PRIMARY KEY (id)
+)
+DIMENSIONS (
+    o.id AS o.id
+)
+
+# B-098: body_parser/mod.rs::test_parse_single_table_entry_unbalanced_after_doubled_escape — `"dcb a""b` opens, escapes, never closes: rejected (near miss of B-097) [syntax]
+statement error
+CREATE SEMANTIC VIEW dcb_t_doubled_open AS TABLES (o AS "dcb a""b PRIMARY KEY (id)) DIMENSIONS (o.id AS o.id);
+----
+
+# B-099: body_parser/mod.rs::test_quoted_ident_with_paren_does_not_close_clause — a `)` inside a quoted table name does not close TABLES (...) [text]
+statement ok
+CREATE SEMANTIC VIEW dcb_t_qparen AS TABLES (o AS "dcb tbl)x" PRIMARY KEY (id)) DIMENSIONS (o.d AS o.c);
+
+query T nosort
+SELECT * FROM dcb_ddl('dcb_t_qparen');
+----
+CREATE OR REPLACE SEMANTIC VIEW dcb_t_qparen AS
+TABLES (
+    o AS "dcb tbl)x" PRIMARY KEY (id)
+)
+DIMENSIONS (
+    o.d AS o.c
+)
+
+# B-100: body_parser/mod.rs::test_non_ascii_name_then_primary_key_no_panic — a non-ASCII quoted name followed by PRIMARY KEY [text]
+statement ok
+CREATE SEMANTIC VIEW dcb_t_cafe AS TABLES (o AS "dcb CAFÉ" PRIMARY KEY (id)) DIMENSIONS (o.id AS o.id);
+
+query T nosort
+SELECT * FROM dcb_ddl('dcb_t_cafe');
+----
+CREATE OR REPLACE SEMANTIC VIEW dcb_t_cafe AS
+TABLES (
+    o AS "dcb CAFÉ" PRIMARY KEY (id)
+)
+DIMENSIONS (
+    o.id AS o.id
+)
+
+# B-101: body_parser/mod.rs::test_non_ascii_name_then_primary_key_no_panic — a non-ASCII quoted name with no constraint [text]
+statement ok
+CREATE SEMANTIC VIEW dcb_t_omega AS TABLES (o AS "dcb ΩΩ Ω") DIMENSIONS (o.id AS o.id);
+
+query T nosort
+SELECT * FROM dcb_ddl('dcb_t_omega');
+----
+CREATE OR REPLACE SEMANTIC VIEW dcb_t_omega AS
+TABLES (
+    o AS "dcb ΩΩ Ω"
+)
+DIMENSIONS (
+    o.id AS o.id
+)
+
+# B-102: body_parser/mod.rs::test_keyword_scan_over_non_ascii_no_panic — a non-ASCII unquoted alias before AS is found as alias AS table [text]
+statement ok
+CREATE SEMANTIC VIEW dcb_t_nonascii_alias AS TABLES (ÉÉÉ AS dcb_orders) DIMENSIONS (ÉÉÉ.a AS ÉÉÉ.a);
+
+query T nosort
+SELECT * FROM dcb_ddl('dcb_t_nonascii_alias');
+----
+CREATE OR REPLACE SEMANTIC VIEW dcb_t_nonascii_alias AS
+TABLES (
+    ÉÉÉ AS dcb_orders
+)
+DIMENSIONS (
+    ÉÉÉ.a AS ÉÉÉ.a
+)
+
+# B-103: body_parser/mod.rs::test_keyword_scan_over_non_ascii_no_panic — a non-ASCII table entry with no AS is a bare table (alias = table name) [text]
+statement ok
+CREATE SEMANTIC VIEW dcb_t_nonascii_bare AS TABLES (dcb_東京) DIMENSIONS (dcb_東京.a AS dcb_東京.a);
+
+query T nosort
+SELECT * FROM dcb_ddl('dcb_t_nonascii_bare');
+----
+CREATE OR REPLACE SEMANTIC VIEW dcb_t_nonascii_bare AS
+TABLES (
+    dcb_東京 AS dcb_東京
+)
+DIMENSIONS (
+    dcb_東京.a AS dcb_東京.a
+)

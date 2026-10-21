@@ -1,0 +1,9 @@
+# Per-file overrides only (no `root = true`), so editors keep their own
+# defaults everywhere else.
+
+# The front-door corpus tests whitespace on purpose: trailing spaces and
+# tab-only lines inside its statements are the cases under test. The
+# pre-commit `trailing-whitespace` hook excludes this file for the same reason.
+[test/sql/ddl_corpus_frontdoor_a.test]
+trim_trailing_whitespace = false
+insert_final_newline = unset
