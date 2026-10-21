@@ -1,6 +1,6 @@
 [package]
 name = "semantic_views"
-version = "0.14.1"
+version = "0.15.0"
 edition = "2021"
 description = "DuckDB extension providing semantic views — a declarative layer for dimensions, measures, and relationships"
 license = "MIT"

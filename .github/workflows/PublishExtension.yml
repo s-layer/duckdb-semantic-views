@@ -117,7 +117,13 @@ jobs:
           gh api "repos/${{ env.CE_UPSTREAM }}/contents/.github/workflows/build.yml" --jq '.content' | base64 -d > "$RUNNER_TEMP/build.yml"
           gh api "repos/${{ env.CE_UPSTREAM }}/contents/scripts/build.py" --jq '.content' | base64 -d > "$RUNNER_TEMP/build.py"
           echo "repo pin (.duckdb-version): $OURS"
-          if ! KEY=$(python3 scripts/registry_target.py key "$OURS" "$RUNNER_TEMP/build.yml" "$RUNNER_TEMP/build.py"); then
+          # The DuckDB commit our pin's tag points at (the peeled commit for an
+          # annotated tag), for a registry that names its default by commit with
+          # no release label. Empty when the pin is not a DuckDB tag.
+          PIN_COMMIT=$(git ls-remote --tags https://github.com/duckdb/duckdb \
+            | awk -v t="refs/tags/$OURS" '$2==t{c=$1} $2==t"^{}"{p=$1} END{print (p?p:c)}')
+          echo "pin commit: ${PIN_COMMIT:-none}"
+          if ! KEY=$(python3 scripts/registry_target.py key "$OURS" "$RUNNER_TEMP/build.yml" "$RUNNER_TEMP/build.py" "$PIN_COMMIT"); then
             echo "::error::the community-extensions registry does not build DuckDB $OURS (see above)"
             exit 1
           fi

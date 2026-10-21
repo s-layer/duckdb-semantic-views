@@ -124,6 +124,11 @@ extern "C" {
         char *error_out, size_t error_out_len,
         uint32_t *position_out);
 
+    // The database of the parser hook call about to be made on this thread
+    // (its SemanticViewsParserInfo pointer): a record of the user's query is
+    // read only on the database it was made on (src/parse/ffi.rs).
+    void sv_parser_hook_database(uintptr_t key);
+
     // Releases a buffer previously produced by sv_parser_override_rust.
     // Safe to call with a null pointer (no-op). ptr/len must be the exact
     // pair the Rust side returned.
@@ -400,6 +405,10 @@ struct SemanticViewsParserInfo : public ParserExtensionInfo {};
 // Otherwise a connection whose override is off, which records nothing, would
 // quote an earlier query on this thread that ended with the same statement.
 static thread_local std::string sv_override_query;
+// The database (parser_info) sv_override_query was recorded on. DuckDB 2.0
+// leaves a record unread when an earlier statement of its string fails as it
+// runs, so the stub reads it only on that database.
+static thread_local const ParserExtensionInfo *sv_override_info = nullptr;
 #endif
 
 // ---------------------------------------------------------------------------
@@ -424,8 +433,10 @@ static ParserOverrideResult sv_parser_override(
     if (!sv_info) {
         return ParserOverrideResult();
     }
+    sv_parser_hook_database(reinterpret_cast<uintptr_t>(info));
 #ifdef SV_DUCKDB_2
     sv_override_query = query;
+    sv_override_info = info;
 #endif
 
     SvOwnedBuffer sql_buf;
@@ -694,11 +705,14 @@ static std::string sv_statement_from_tokens(const vector<SimpleToken> &tokens) {
 }
 
 static ParserExtensionParseResult sv_parse_stub(
-    ParserExtensionInfo * /*info*/, const vector<SimpleToken> &tokens) {
+    ParserExtensionInfo *info, const vector<SimpleToken> &tokens) {
+    sv_parser_hook_database(reinterpret_cast<uintptr_t>(info));
+    // The user's query, recorded on this database.
     idx_t start = 0;
     idx_t statement_end = 0;
     const std::string &query = sv_override_query;
-    bool located = sv_locate_tail(query, tokens, start, statement_end);
+    bool located = sv_override_info == info &&
+                   sv_locate_tail(query, tokens, start, statement_end);
     auto result = sv_parse_statement(located ? query.substr(start, statement_end - start)
                                              : sv_statement_from_tokens(tokens));
     // DISPLAY_EXTENSION_ERROR -> throw; DISPLAY_ORIGINAL_ERROR keeps the
@@ -720,7 +734,8 @@ static ParserExtensionParseResult sv_parse_stub(
 }
 #else
 static ParserExtensionParseResult sv_parse_stub(
-    ParserExtensionInfo * /*info*/, const string &query) {
+    ParserExtensionInfo *info, const string &query) {
+    sv_parser_hook_database(reinterpret_cast<uintptr_t>(info));
     return sv_parse_statement(query);
 }
 #endif
@@ -4120,9 +4135,17 @@ static arena_ptr<TransformProcess> sv_grammar_start_tableref(PEGTransformer &tra
     return transformer.MakeProcess<FinalizeTransformProcess>(transformer, pr, sv_grammar_finalize_tableref);
 }
 
+// The variable a guard's value goes into (sv_grammar_finalize_statement).
+static const char *SV_GRAMMAR_GUARD_VARIABLE = "__semantic_views_guard";
+
 // A write statement lowers to several statements (the guards, then the DML).
 // They go back as one MultiStatement, which the client unpacks and runs in
-// order, as it does for a PIVOT's generated statements.
+// order, as it does for a PIVOT's generated statements. DuckDB 2.0.0 serves
+// such a statement's result from its one row-returning statement, which must
+// come last, so each guard `SELECT CASE ... error(...) ... END` before the DML
+// runs as `SET VARIABLE` of its value, which returns nothing and raises the
+// guard's error the same way (PIVOT stages its values the same way). A RESET
+// then drops the variable before the DML, whose RETURNING row is the result.
 static arena_ptr<TransformResultValue> sv_grammar_finalize_statement(PEGTransformer &transformer,
                                                                      ParseResult &pr) {
     auto statements = sv_grammar_lower(transformer, pr);
@@ -4133,9 +4156,24 @@ static arena_ptr<TransformResultValue> sv_grammar_finalize_statement(PEGTransfor
         return transformer.MakeResult<unique_ptr<SQLStatement>>(std::move(statements[0]));
     }
     auto multi = make_uniq<MultiStatement>();
-    for (auto &statement : statements) {
-        multi->statements.push_back(std::move(statement));
+    bool staged_guard = false;
+    for (idx_t i = 0; i + 1 < statements.size(); i++) {
+        auto &statement = statements[i];
+        if (statement->type != StatementType::SELECT_STATEMENT) {
+            multi->statements.push_back(std::move(statement));
+            continue;
+        }
+        auto guard = make_uniq<SubqueryExpression>();
+        guard->GetSubqueryTypeMutable() = SubqueryType::SCALAR;
+        guard->SubqueryMutable() = unique_ptr_cast<SQLStatement, SelectStatement>(std::move(statement));
+        multi->statements.push_back(
+            make_uniq<SetVariableStatement>(SV_GRAMMAR_GUARD_VARIABLE, std::move(guard), SetScope::VARIABLE));
+        staged_guard = true;
     }
+    if (staged_guard) {
+        multi->statements.push_back(make_uniq<ResetVariableStatement>(SV_GRAMMAR_GUARD_VARIABLE, SetScope::VARIABLE));
+    }
+    multi->statements.push_back(std::move(statements.back()));
     return transformer.MakeResult<unique_ptr<SQLStatement>>(std::move(multi));
 }
 
