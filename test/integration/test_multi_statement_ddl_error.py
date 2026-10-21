@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # /// script
-# dependencies = ["duckdb==2.0.0.dev2610151406"]
+# dependencies = ["duckdb==2.0.0"]
 # requires-python = ">=3.10"
 # ///
 """
@@ -27,6 +27,15 @@ Each scenario runs on a fresh in-memory database and reports independently:
                                read call's search path) rather than declines.
   error_shows_its_own_line     an invalid CREATE on the second line of a
                                multi-statement string: the caret says LINE 2.
+  ddl_after_describe           SELECT * FROM describe_semantic_view(...); CREATE
+                               SEMANTIC VIEW ... -- a read the override declines.
+                               DuckDB 2.0 runs it before it parses the DDL, and it
+                               runs its own catalog queries through the override.
+  caret_after_read_call        an invalid DDL on line 2, after a read call: the
+                               caret still points into the query as written.
+  ddl_after_read_with_semicolon  a read call whose view's expression holds a `;`
+                               in a literal, so the queries it runs look like
+                               several statements; the DDL after it still runs.
   control_override_disabled    the override really is off (SET
                                allow_parser_override_extension='DEFAULT'), DDL
                                sent alone: it runs through the grammar.
@@ -67,6 +76,11 @@ Each scenario runs on a fresh in-memory database and reports independently:
                                `;` that succeeds.
   control_stale_after_typo     the same after a string that fails to parse
                                before its DDL.
+  control_stale_after_runtime_error  the same after a string whose earlier
+                               statement fails as it runs, so DuckDB 2.0 never
+                               parses its DDL.
+  control_stale_caret_runtime_error  likewise for an invalid CREATE on another
+                               database: its error must not quote the first query.
   statement_costs_its_own_length  100 DROPs after a 40000-element SELECT, parsed
                                with the override on and off: each DROP is
                                handed only its own tokens, so the string parses
@@ -164,6 +178,52 @@ def scenario_error_shows_its_own_line():
     assert "LINE 2:" in msg, f"the caret must point into line 2; got: {msg}"
 
 
+def scenario_ddl_after_describe():
+    con = connect()
+    try:
+        con.execute("CREATE TABLE orders (id INTEGER, region VARCHAR, amount DOUBLE)")
+        con.execute(DDL.replace("sales", "existing", 1))
+        con.execute("SELECT * FROM describe_semantic_view('existing'); " + DDL)
+        names = views(con)
+    finally:
+        con.close()
+    assert names == ["existing", "sales"], f"the CREATE must run; got {names!r}"
+
+
+def scenario_caret_after_read_call():
+    con = connect()
+    try:
+        con.execute("CREATE TABLE orders (id INTEGER, region VARCHAR, amount DOUBLE)")
+        con.execute(DDL.replace("sales", "existing", 1))
+        bad = DDL.replace("DIMENSIONS", "DIMENSIONZ", 1)
+        msg = error_of(
+            con, "SELECT * FROM semantic_view('existing', metrics := ['revenue']);\n" + bad
+        )
+    finally:
+        con.close()
+    assert msg is not None, "an invalid DDL must fail"
+    assert "LINE 2:" in msg, f"the caret must point into the query as written; got: {msg}"
+
+
+def scenario_ddl_after_read_with_semicolon():
+    con = connect()
+    try:
+        con.execute("CREATE TABLE orders (id INTEGER, region VARCHAR, amount DOUBLE)")
+        con.execute(
+            "CREATE SEMANTIC VIEW semi AS TABLES (o AS orders PRIMARY KEY (id)) "
+            "DIMENSIONS (o.label AS CASE WHEN o.region = 'a;b' THEN 'x' ELSE o.region END) "
+            "METRICS (o.revenue AS SUM(o.amount))"
+        )
+        con.execute(
+            "SELECT * FROM semantic_view('semi', dimensions := ['label'], "
+            "metrics := ['revenue']); " + DDL
+        )
+        names = views(con)
+    finally:
+        con.close()
+    assert names == ["sales", "semi"], f"the CREATE must run; got {names!r}"
+
+
 def scenario_control_override_disabled():
     con = connect()
     try:
@@ -231,6 +291,22 @@ def scenario_control_stale_caret_parse_error():
     # A query that fails to parse before the override handles any of it, with
     # the DDL on its second line.
     check_not_quoted_after(lambda on: error_of(on, "SELEC 1;\n" + DDL))
+
+
+def scenario_control_stale_caret_runtime_error():
+    bad = DDL.replace("DIMENSIONS", "DIMENSIONZ", 1)
+    off, on = connect(), connect()
+    try:
+        off.execute("SET allow_parser_override_extension = 'DEFAULT'")
+        # The DDL starts on line 2 here, and is never parsed: the SELECT fails first.
+        first = error_of(on, "SELECT * FROM missing_table;\n" + bad)
+        msg = error_of(off, bad)
+    finally:
+        off.close()
+        on.close()
+    assert first is not None and "missing_table" in first, f"setup: unexpected first error: {first}"
+    assert msg is not None, "an invalid DDL must fail"
+    assert "LINE 2:" not in msg, f"must not quote another query; got: {msg}"
 
 
 STALE_TABLE = "CREATE TABLE orders (id INTEGER, a INTEGER, b INTEGER, ab INTEGER)"
@@ -355,6 +431,13 @@ def scenario_control_stale_after_typo():
     check_not_blamed_after("SELEC 1; " + RW_DDL, lambda first: first is not None)
 
 
+def scenario_control_stale_after_runtime_error():
+    check_not_blamed_after(
+        "SELECT * FROM missing_table; " + RW_DDL,
+        lambda first: first is not None and "missing_table" in first,
+    )
+
+
 def parse_seconds(con, sql):
     """The best of three parses of `sql` (no execution)."""
     best = None
@@ -389,6 +472,9 @@ SCENARIOS = [
     scenario_ddl_before_other_statement,
     scenario_ddl_after_read_call,
     scenario_error_shows_its_own_line,
+    scenario_ddl_after_describe,
+    scenario_caret_after_read_call,
+    scenario_ddl_after_read_with_semicolon,
     scenario_control_override_disabled,
     scenario_control_single_statement,
     scenario_control_stale_caret_query,
@@ -403,6 +489,8 @@ SCENARIOS = [
     scenario_control_stale_other_database,
     scenario_control_stale_after_success,
     scenario_control_stale_after_typo,
+    scenario_control_stale_after_runtime_error,
+    scenario_control_stale_caret_runtime_error,
     scenario_statement_costs_its_own_length,
 ]
 

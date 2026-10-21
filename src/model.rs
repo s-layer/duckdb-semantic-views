@@ -753,7 +753,8 @@ fn validate_yaml_joins(def: &SemanticViewDefinition) -> Result<(), String> {
 /// parser will read.
 ///
 /// 1. `column_roundtrips_verbatim` — balanced quotes and brackets that never
-///    dip negative (an unbalanced `)` closes the enclosing clause early), no
+///    dip negative (an unbalanced `)` closes the enclosing clause early), each
+///    closer of the same kind as its opener (the clause scan refuses `(]`), no
 ///    depth-0 comma (which would split one member or argument into two), and no
 ///    surrounding whitespace (which the parser trims, silently storing a
 ///    different string than the one given).
@@ -1548,6 +1549,25 @@ mod tests {
     // that separates one member from the next: two dimensions came back as
     // ONE, with the second's definition absorbed into the first's expression.
     // Silent model corruption through the documented dump/restore path.
+
+    // --- Brackets that don't nest by kind (#286) ---
+    //
+    // The DDL parser refuses a clause whose brackets don't pair up by kind, so
+    // an expression like `SUM(o.a[1)]`, whose `(`/`)` and all-kinds counts both
+    // balance, would import and then render a GET_DDL that CREATE refuses.
+
+    #[test]
+    fn yaml_metric_expression_with_brackets_of_the_wrong_kind_is_rejected() {
+        let yaml = format!(
+            "{VALID_TABLES}dimensions:\n  - name: d\n    expr: o.d\n    source_table: o\n\
+             metrics:\n  - name: total\n    expr: 'SUM(o.a[1)]'\n    source_table: o\n"
+        );
+        let e = yaml_err(&yaml);
+        assert!(
+            e.contains("total") && e.contains("balanced quotes and brackets"),
+            "the error must name the member and the bracket rule: {e}"
+        );
+    }
 
     #[test]
     fn yaml_dimension_expression_with_a_line_comment_is_rejected() {

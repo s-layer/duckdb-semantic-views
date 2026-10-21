@@ -1,0 +1,61 @@
+# Fuzz #277 / #285: the DDL body's brackets must nest by kind.
+#
+# The body parser's scanners counted `(`, `[` and `{` as one depth and let any
+# closer close any opener, while the clause scan counted only `(` and `)`. A
+# clause whose brackets did not nest by kind was accepted and split into members
+# one way when created and another way once GET_DDL rendered it back. CREATE now
+# refuses it with an error naming the bracket and the clause.
+#
+# The runner halts a file at its first failing statement, so each case's red is
+# proven at the unit layer (`body_parser::clause_bounds::tests`, and
+# `render_ddl::tests::test_render_fixpoint_fuzz_seed_mismatched_brackets_in_window_metric`
+# for the fuzz input itself). This file covers the CREATE path end to end.
+
+require semantic_views
+
+statement ok
+CREATE TABLE bbk_sales (id INTEGER PRIMARY KEY, region VARCHAR, tags INTEGER[], amount INTEGER);
+
+statement ok
+INSERT INTO bbk_sales VALUES (1, 'EU', [1, 2], 10), (2, 'US', [3], 20);
+
+# A `]` closing a `(`.
+statement error
+CREATE SEMANTIC VIEW bbk_wrong_kind AS
+  TABLES (s AS bbk_sales PRIMARY KEY (id))
+  METRICS (s.total AS SUM(s.amount]));
+----
+Mismatched ']' in clause 'METRICS'; expected ')' to close the '(' before it.
+
+# A `}` with nothing open.
+statement error
+CREATE SEMANTIC VIEW bbk_unmatched AS
+  TABLES (s AS bbk_sales PRIMARY KEY (id))
+  DIMENSIONS (s.region AS s.region})
+  METRICS (s.total AS SUM(s.amount));
+----
+Unmatched '}' in clause 'DIMENSIONS'.
+
+# A `[` never closed.
+statement error
+CREATE SEMANTIC VIEW bbk_unclosed AS
+  TABLES (s AS bbk_sales PRIMARY KEY (id))
+  DIMENSIONS (s.first_tag AS s.tags[1)
+  METRICS (s.total AS SUM(s.amount));
+----
+Unclosed '[' in clause 'DIMENSIONS'.
+
+# The control: every bracket kind, nested by kind, plus brackets inside a string.
+statement ok
+CREATE SEMANTIC VIEW bbk_ok AS
+  TABLES (s AS bbk_sales PRIMARY KEY (id))
+  DIMENSIONS (s.first_tag AS s.tags[1], s.label AS s.region || ']}')
+  METRICS (s.total AS SUM(s.amount) + {'k': (0)}.k);
+
+query ITI
+SELECT first_tag, label, total FROM semantic_view(
+  'bbk_ok', dimensions := ['first_tag', 'label'], metrics := ['total']
+) ORDER BY first_tag;
+----
+1	EU]}	10
+3	US]}	20

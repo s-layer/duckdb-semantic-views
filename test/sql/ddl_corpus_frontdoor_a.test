@@ -906,18 +906,10 @@ SELECT name FROM list_semantic_views();
 ----
 dcf_y
 
-# F-036: parse_proptest.rs::test_semicolon_in_name (DROP pair) — the rejected DROP drops nothing [syntax]
+# F-036: parse_proptest.rs::test_semicolon_in_name (DROP pair) — the `;` ends the name, so `injection` is a statement of its own and is rejected. DuckDB 2.0 runs a string's statements one at a time, so the complete `DROP SEMANTIC VIEW dcf_y` ahead of it has already run, as `DROP TABLE t;injection;` drops t in DuckDB itself; the name is not cut into `dcf_y;injection` [syntax]
 statement error
 DROP SEMANTIC VIEW dcf_y;injection;
 ----
-
-query T
-SELECT name FROM list_semantic_views();
-----
-dcf_y
-
-statement ok
-DROP SEMANTIC VIEW dcf_y;
 
 query I
 SELECT count(*) FROM list_semantic_views();
