@@ -108,6 +108,7 @@ test/sql/par6_cross_table_fact_join.test
 test/sql/member_reference_scoping.test
 test/sql/cr20260808_where_member_fan_fence.test
 test/sql/cr20260808_parser_fixes.test
+test/sql/body_bracket_kinds.test
 test/sql/cr20260808_phantom_row_guard.test
 test/sql/cr20260808_small_fixes.test
 test/sql/cr20260808_yaml_ingress.test

@@ -78,6 +78,7 @@
 #include "duckdb/main/extension_callback_manager.hpp"
 #include "duckdb/main/settings.hpp"
 #include "duckdb/parser/grammar_extension.hpp"
+#include "duckdb/parser/expression/subquery_expression.hpp"
 #include "duckdb/parser/parsed_data/create_scalar_function_info.hpp"
 #include "duckdb/parser/parsed_data/create_table_function_info.hpp"
 #include "duckdb/parser/parser.hpp"
@@ -105,6 +106,7 @@
 #include "duckdb/parser/tableref/subqueryref.hpp"
 #include "duckdb/parser/tableref/table_function_ref.hpp"
 #include "duckdb/planner/binder.hpp"
+#include "duckdb/parser/statement/set_statement.hpp"
 #include "duckdb/planner/extension_callback.hpp"
 
 #else // v1.5 amalgamation
