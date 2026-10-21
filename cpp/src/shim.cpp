@@ -148,6 +148,19 @@ extern "C" {
         char *error_out, size_t error_out_len,
         uint32_t *position_out);
 
+    // The extension is about to run / has finished running queries of its
+    // own on this thread; while any are running, the parser hooks keep the
+    // record of the user's query as it is (OVERRIDE_MULTI_STATEMENT in
+    // src/parse/ffi.rs). Held through SvNestedQueryGuard below.
+    void sv_nested_query_enter();
+    void sv_nested_query_exit();
+    bool sv_nested_query_active();
+
+    // The database of the parser hook call about to be made on this thread
+    // (its SemanticViewsParserInfo pointer): a record of the user's query is
+    // read only on the database it was made on (src/parse/ffi.rs).
+    void sv_parser_hook_database(uintptr_t key);
+
     // Releases a buffer previously produced by sv_parser_override_rust.
     // Safe to call with a null pointer (no-op). ptr/len must be the exact
     // pair the Rust side returned.
@@ -449,6 +462,21 @@ struct SvOwnedBuffer {
 // marker.)
 struct SemanticViewsParserInfo : public ParserExtensionInfo {};
 
+// Held at every per-call `Connection probe` for as long as the connection is
+// open (declare it first, so it outlives the connection). DuckDB 2.0 runs a
+// query string's earlier statements before it parses the later ones, so the
+// queries a semantic-view read runs here go through the parser hooks between
+// the override call on the user's string and the parse_function call on a
+// DDL statement later in it. The hooks ignore them while a guard is held,
+// so the records of the user's string (sv_override_query below, and the Rust
+// side's OVERRIDE_MULTI_STATEMENT) survive to that call.
+struct SvNestedQueryGuard {
+    SvNestedQueryGuard() { sv_nested_query_enter(); }
+    ~SvNestedQueryGuard() { sv_nested_query_exit(); }
+    SvNestedQueryGuard(const SvNestedQueryGuard &) = delete;
+    SvNestedQueryGuard &operator=(const SvNestedQueryGuard &) = delete;
+};
+
 #ifdef SV_DUCKDB_2
 // The query the last parser_override call on this thread saw. DuckDB 2.0's
 // parse_function gets tokens without source offsets; when it runs, it is inside
@@ -459,6 +487,10 @@ struct SemanticViewsParserInfo : public ParserExtensionInfo {};
 // Otherwise a connection whose override is off, which records nothing, would
 // quote an earlier query on this thread that ended with the same statement.
 static thread_local std::string sv_override_query;
+// The database (parser_info) sv_override_query was recorded on. DuckDB 2.0
+// leaves a record unread when an earlier statement of its string fails as it
+// runs, so the stub reads it only on that database.
+static thread_local const ParserExtensionInfo *sv_override_info = nullptr;
 #endif
 
 // ---------------------------------------------------------------------------
@@ -483,8 +515,13 @@ static ParserOverrideResult sv_parser_override(
     if (!sv_info) {
         return ParserOverrideResult();
     }
+    sv_parser_hook_database(reinterpret_cast<uintptr_t>(info));
 #ifdef SV_DUCKDB_2
-    sv_override_query = query;
+    const bool users_query = !sv_nested_query_active();
+    if (users_query) {
+        sv_override_query = query;
+        sv_override_info = info;
+    }
 #endif
 
     SvOwnedBuffer sql_buf;
@@ -520,7 +557,9 @@ static ParserOverrideResult sv_parser_override(
         Parser parser = sv_compat::builtin_parser();
         parser.ParseQuery(native_sql);
 #ifdef SV_DUCKDB_2
-        sv_override_query.clear();
+        if (users_query) {
+            sv_override_query.clear();
+        }
 #endif
         return ParserOverrideResult(std::move(parser.statements));
     } catch (std::exception &e) {
@@ -753,11 +792,16 @@ static std::string sv_statement_from_tokens(const vector<SimpleToken> &tokens) {
 }
 
 static ParserExtensionParseResult sv_parse_stub(
-    ParserExtensionInfo * /*info*/, const vector<SimpleToken> &tokens) {
+    ParserExtensionInfo *info, const vector<SimpleToken> &tokens) {
+    sv_parser_hook_database(reinterpret_cast<uintptr_t>(info));
+    // The user's query, recorded on this database; not a query the extension
+    // runs itself, whose tokens are not in it.
+    const bool users_query = !sv_nested_query_active();
     idx_t start = 0;
     idx_t statement_end = 0;
     const std::string &query = sv_override_query;
-    bool located = sv_locate_tail(query, tokens, start, statement_end);
+    bool located = users_query && sv_override_info == info &&
+                   sv_locate_tail(query, tokens, start, statement_end);
     auto result = sv_parse_statement(located ? query.substr(start, statement_end - start)
                                              : sv_statement_from_tokens(tokens));
     // DISPLAY_EXTENSION_ERROR -> throw; DISPLAY_ORIGINAL_ERROR keeps the
@@ -774,12 +818,16 @@ static ParserExtensionParseResult sv_parse_stub(
     // thrown, and an unclaimed statement makes DuckDB rethrow its own error.
     // (Only another extension claiming the statement lets the parse go on;
     // a later failing statement then gets no caret, as with the override off.)
-    sv_override_query.clear();
+    // A query the extension runs itself is not the user's, whose record stays.
+    if (users_query) {
+        sv_override_query.clear();
+    }
     return result;
 }
 #else
 static ParserExtensionParseResult sv_parse_stub(
-    ParserExtensionInfo * /*info*/, const string &query) {
+    ParserExtensionInfo *info, const string &query) {
+    sv_parser_hook_database(reinterpret_cast<uintptr_t>(info));
     return sv_parse_statement(query);
 }
 #endif
@@ -2051,6 +2099,7 @@ static void sv_run_varchar_bind(ClientContext &context,
                                 const char *fn_name,
                                 DispatcherFn &&dispatcher) {
     bd.expected_cols = expected_cols;
+    SvNestedQueryGuard nested_query;
     Connection probe(*context.db);
     SvBindCancellationScope cancellation(context, probe);
     duckdb_connection borrowed = reinterpret_cast<duckdb_connection>(&probe);
@@ -2136,6 +2185,7 @@ static void sv_run_varchar_bind_with_name(ClientContext &context,
     }
     std::string name = input.inputs[0].GetValue<std::string>();
     std::vector<uint8_t> sp = sv_search_path_payload(context, input);
+    SvNestedQueryGuard nested_query;
     Connection probe(*context.db);
     SvBindCancellationScope cancellation(context, probe);
     duckdb_connection borrowed = reinterpret_cast<duckdb_connection>(&probe);
@@ -2176,6 +2226,7 @@ static void sv_run_varchar_bool_bind_with_two_names(
     std::string name1 = input.inputs[0].GetValue<std::string>();
     std::string name2 = input.inputs[1].GetValue<std::string>();
     std::vector<uint8_t> sp = sv_search_path_payload(context, input);
+    SvNestedQueryGuard nested_query;
     Connection probe(*context.db);
     SvBindCancellationScope cancellation(context, probe);
     duckdb_connection borrowed = reinterpret_cast<duckdb_connection>(&probe);
@@ -2810,6 +2861,7 @@ static void sv_get_ddl_exec(DataChunk &args, ExpressionState &state,
 
     auto &result_validity = sv_compat::validity_mut(result);
 
+    SvNestedQueryGuard nested_query;
     Connection probe(*state.GetContext().db);
     duckdb_connection borrowed = reinterpret_cast<duckdb_connection>(&probe);
     // Read once per chunk: the path cannot change while a statement runs.
@@ -2855,6 +2907,7 @@ static void sv_read_yaml_from_semantic_view_exec(DataChunk &args,
     auto &name_validity = FlatVector::Validity(name_vec);
     auto &result_validity = sv_compat::validity_mut(result);
 
+    SvNestedQueryGuard nested_query;
     Connection probe(*state.GetContext().db);
     duckdb_connection borrowed = reinterpret_cast<duckdb_connection>(&probe);
     const std::vector<uint8_t> sp = sv_caller_search_path(state.GetContext());
@@ -3026,6 +3079,7 @@ static unique_ptr<FunctionData> sv_explain_semantic_view_bind(
     }
     std::vector<uint8_t> sp_buf = sv_search_path_payload(context, input);
 
+    SvNestedQueryGuard nested_query;
     Connection probe(*context.db);
     // The EXPLAIN of the expanded query binds the view's tables on `probe`, so
     // a cancelled caller is forwarded and raised bare, as in semantic_view().
@@ -3468,6 +3522,7 @@ static unique_ptr<FunctionData> sv_semantic_view_bind(
     }
     std::vector<uint8_t> sp_buf = sv_search_path_payload(context, input);
 
+    SvNestedQueryGuard nested_query;
     Connection probe(*context.db);
     // The Rust bind types the requested members on `probe`, and a DECIMAL or
     // LIST output adds a LIMIT 0 probe below; both read the view's tables, so a
@@ -3558,6 +3613,7 @@ static unique_ptr<GlobalTableFunctionState> sv_semantic_view_init_global(
     // the SqlExecution wrap below: ADBC recognises a cancellation only by the
     // exact "Interrupted!" text, so wrapping it would report it as an internal
     // error.
+    SvNestedQueryGuard nested_query;
     Connection probe(*context.db);
     auto qresult = sv_query_interruptible(probe, context, bd.execution_sql);
     if (qresult->HasError()) {
@@ -4090,6 +4146,7 @@ extern "C" {
             // scope exit. The bridged `handle` becomes invalid but is not
             // touched after the SELECT 1 round-trip.
             {
+                SvNestedQueryGuard nested_query;
                 Connection probe(db);
                 auto handle = reinterpret_cast<duckdb_connection>(&probe);
                 duckdb_result r;

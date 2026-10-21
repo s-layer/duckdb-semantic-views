@@ -1527,6 +1527,93 @@ mod tests {
     }
 
     #[test]
+    fn test_render_fixpoint_fuzz_seed_mismatched_brackets_in_window_metric() {
+        // fuzz_render_roundtrip, #285: a window metric whose function and
+        // arguments are runs of `[`, and a second metric whose USING names hold
+        // `}`. Rendered verbatim, the `}`s close the `[`s on the first parse
+        // (every bracket kind counted as one depth), which folds the second
+        // metric into the first one's expression; re-rendered, that expression
+        // no longer closes the METRICS clause.
+        let def = SemanticViewDefinition {
+            tables: vec![TableRef {
+                alias: "e".to_string(),
+                table: "m".to_string(),
+                comment: Some(String::new()),
+                ..Default::default()
+            }],
+            metrics: vec![
+                Metric {
+                    name: "v".to_string(),
+                    source_table: Some("e".to_string()),
+                    using_relationships: vec!["m".to_string()],
+                    synonyms: vec![String::new()],
+                    window_spec: Some(crate::model::WindowSpec {
+                        window_function: "[".to_string(),
+                        inner_metric: "[[[[[[[[[".to_string(),
+                        extra_args: vec!["[".to_string(), "[[[[[[[[[[".to_string()],
+                        excluding_dims: vec![
+                            String::new(),
+                            String::new(),
+                            String::new(),
+                            ".".to_string(),
+                        ],
+                        partition_dims: vec![],
+                        order_by: vec![],
+                        frame_clause: Some(String::new()),
+                    }),
+                    ..Default::default()
+                },
+                Metric {
+                    output_type: Some(String::new()),
+                    using_relationships: vec![
+                        "#\0\0}}\"\0\0\0\0\0\"}}}}}}}}}}}}}IC\u{15}\u{15}\u{15}".to_string(),
+                        String::new(),
+                        String::new(),
+                        String::new(),
+                        String::new(),
+                        String::new(),
+                        "_1".to_string(),
+                        String::new(),
+                        "troujdt}\"\0\0\0\0\0\"}}}}}}".to_string(),
+                        "{".to_string(),
+                    ],
+                    comment: Some("}".to_string()),
+                    synonyms: vec![
+                        "I.\"]".to_string(),
+                        "\"}IC\u{15}\u{15}\u{15}\u{15}\u{15}\u{15}".to_string(),
+                    ],
+                    ..Default::default()
+                },
+            ],
+            ..Default::default()
+        };
+        // The first parse is refused for the mismatch itself, so the fixpoint
+        // below returns at its stage-0 escape for this reason and no other.
+        let rendered = render_create_ddl("fuzz_view", &def).unwrap();
+        let body = body_of(&rendered).expect("rendered DDL has an AS body");
+        let err = crate::body_parser::parse_keyword_body(body, 0).unwrap_err();
+        assert!(err.message.starts_with("Mismatched "), "{}", err.message);
+        assert_render_fixpoint(&def);
+    }
+
+    #[test]
+    fn test_render_quotes_a_pk_column_whose_brackets_do_not_nest_by_kind() {
+        // `([)]` balances by `(`/`)` and by all bracket kinds together, so the
+        // verbatim check let it out bare, and the parser now refuses it (#286).
+        let mut def = minimal_def();
+        def.tables[0].pk_columns = vec!["([)]".to_string()];
+        let rendered = render_create_ddl("v", &def).unwrap();
+        assert!(
+            rendered.contains("PRIMARY KEY (\"([)]\")"),
+            "the column must be quoted:\n{rendered}"
+        );
+        let body = body_of(&rendered).expect("rendered DDL has an AS body");
+        crate::body_parser::parse_keyword_body(body, 0)
+            .unwrap_or_else(|e| panic!("rendered DDL must re-parse: {}\n{rendered}", e.message));
+        assert_render_fixpoint(&def);
+    }
+
+    #[test]
     fn test_materializations_ddl_roundtrip() {
         use crate::body_parser::parse_keyword_body;
         use crate::model::Materialization;

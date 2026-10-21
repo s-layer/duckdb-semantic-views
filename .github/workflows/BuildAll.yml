@@ -22,7 +22,7 @@ jobs:
   duckdb-stable-build:
     name: Build extension binaries (all platforms)
     if: ${{ github.event_name == 'push' || github.event_name == 'workflow_dispatch' }}
-    # IMPORTANT: the engine below must be the release in .duckdb-version (currently v2.0.0-alpha47600).
+    # IMPORTANT: the engine below must be the release in .duckdb-version (currently v2.0.0).
     # GitHub Actions 'uses:' does not support dynamic values, so update these
     # manually whenever .duckdb-version changes; tests::duckdb_derived_pins_agree
     # checks them. extension-ci-tools is versioned apart from DuckDB since 2.0
@@ -30,13 +30,11 @@ jobs:
     # the same in both places.
     uses: duckdb/extension-ci-tools/.github/workflows/_extension_distribution.yml@v2.0-cyanoptera
     with:
-      # The pre-release engine has no release tag upstream, so this is the
-      # commit its wheel was built from, and duckdb_tag labels the clone with
-      # the release (the Makefile's set_duckdb_tag; scripts/ensure_engine.py
-      # builds a tagged tree under its tag). At a GA release, put the tag here
-      # and drop duckdb_tag.
-      duckdb_version: d4355d01c59362d57036ad377735dd5340276a5b
-      duckdb_tag: v2.0.0-alpha47600
+      # A release is pinned by its tag. A pre-release has no tag upstream: pin
+      # the commit its wheel was built from and add a `duckdb_tag` input naming
+      # the release, which labels the clone (the Makefile's set_duckdb_tag;
+      # scripts/ensure_engine.py builds a tagged tree under its tag).
+      duckdb_version: v2.0.0
       ci_tools_version: v2.0-cyanoptera
       extension_name: semantic_views
       extra_toolchains: 'rust;python3'
