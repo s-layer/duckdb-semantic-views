@@ -9,6 +9,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+_No unreleased changes yet._
+
+## [0.15.0] - 2026-10-21
+
 ### Added
 
 - **`SET max_execution_time` stops semantic-view queries.** DuckDB 2.0's per-query time
@@ -26,14 +30,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   parser hook (with `allow_parser_override_extension` set to `DEFAULT`, or from DuckDB's
   Python relational API) follow the path too, instead of requiring a unique match.
 - **The extension now runs on DuckDB 2.0, and only there.** This release is built
-  against DuckDB 2.0 and loads only in that exact DuckDB release. Until DuckDB 2.0.0 is
-  released it is built against the `v2.0.0-alpha47600` pre-release (the `duckdb`
-  `2.0.0.dev2610151406` Python wheel) and loads only there. If you stay on DuckDB 1.5, keep
-  v0.14.1, the last release for 1.5.
+  against DuckDB `v2.0.0` and loads only in that exact DuckDB release. If you stay on
+  DuckDB 1.5, keep v0.14.1, the last release for 1.5.
 - **Two identifier errors now come from DuckDB.** In semantic-view DDL, an unterminated
   quoted identifier and an empty one (`""`) are now rejected by DuckDB 2.0 before the
   extension sees the statement. The errors read `unterminated quoted identifier` and
   `zero-length delimited identifier` instead of the extension's own wording.
+
+### Fixed
+
+- **Brackets in semantic-view DDL must pair up by kind.** `CREATE SEMANTIC VIEW` now refuses
+  a clause where a closing bracket doesn't match the one it closes (a `]` or `}` closing a
+  `(`), or where one is never opened or never closed, with an error that names the bracket
+  and the clause. Such a body used to be accepted, and could be split into members
+  differently from how it was written, so `GET_DDL` rendered back a different view.
+  `CREATE SEMANTIC VIEW ... FROM YAML` refuses a member expression with such brackets for
+  the same reason, and `GET_DDL` quotes a column name that has them.
 
 ### Known limitations
 
@@ -820,7 +832,8 @@ Connection-lifecycle and ADBC fixes. Two downstream regressions reported against
 - `list_semantic_views()` and `describe_semantic_view()` introspection functions
 - Fuzz targets for FFI boundary testing
 
-[Unreleased]: https://github.com/s-layer/duckdb-semantic-views/compare/v0.14.1...HEAD
+[Unreleased]: https://github.com/s-layer/duckdb-semantic-views/compare/v0.15.0...HEAD
+[0.15.0]: https://github.com/s-layer/duckdb-semantic-views/compare/v0.14.1...v0.15.0
 [0.14.1]: https://github.com/s-layer/duckdb-semantic-views/compare/v0.14.0...v0.14.1
 [0.14.0]: https://github.com/s-layer/duckdb-semantic-views/compare/v0.13.0...v0.14.0
 [0.13.0]: https://github.com/s-layer/duckdb-semantic-views/compare/v0.12.1...v0.13.0
