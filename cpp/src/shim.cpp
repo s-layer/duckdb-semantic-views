@@ -3993,9 +3993,17 @@ static arena_ptr<TransformProcess> sv_grammar_start_query(PEGTransformer &transf
     return transformer.MakeProcess<FinalizeTransformProcess>(transformer, pr, sv_grammar_finalize_query);
 }
 
+// The variable a guard's value goes into (sv_grammar_finalize_statement).
+static const char *SV_GRAMMAR_GUARD_VARIABLE = "__semantic_views_guard";
+
 // A write statement lowers to several statements (the guards, then the DML).
 // They go back as one MultiStatement, which the client unpacks and runs in
-// order, as it does for a PIVOT's generated statements.
+// order, as it does for a PIVOT's generated statements. DuckDB 2.0.0 serves
+// such a statement's result from its one row-returning statement, which must
+// come last, so each guard `SELECT CASE ... error(...) ... END` before the DML
+// runs as `SET VARIABLE` of its value, which returns nothing and raises the
+// guard's error the same way (PIVOT stages its values the same way). A RESET
+// then drops the variable before the DML, whose RETURNING row is the result.
 static arena_ptr<TransformResultValue> sv_grammar_finalize_statement(PEGTransformer &transformer,
                                                                      ParseResult &pr) {
     auto statements = sv_grammar_lower(transformer, pr);
@@ -4006,9 +4014,24 @@ static arena_ptr<TransformResultValue> sv_grammar_finalize_statement(PEGTransfor
         return transformer.MakeResult<unique_ptr<SQLStatement>>(std::move(statements[0]));
     }
     auto multi = make_uniq<MultiStatement>();
-    for (auto &statement : statements) {
-        multi->statements.push_back(std::move(statement));
+    bool staged_guard = false;
+    for (idx_t i = 0; i + 1 < statements.size(); i++) {
+        auto &statement = statements[i];
+        if (statement->type != StatementType::SELECT_STATEMENT) {
+            multi->statements.push_back(std::move(statement));
+            continue;
+        }
+        auto guard = make_uniq<SubqueryExpression>();
+        guard->GetSubqueryTypeMutable() = SubqueryType::SCALAR;
+        guard->SubqueryMutable() = unique_ptr_cast<SQLStatement, SelectStatement>(std::move(statement));
+        multi->statements.push_back(
+            make_uniq<SetVariableStatement>(SV_GRAMMAR_GUARD_VARIABLE, std::move(guard), SetScope::VARIABLE));
+        staged_guard = true;
     }
+    if (staged_guard) {
+        multi->statements.push_back(make_uniq<ResetVariableStatement>(SV_GRAMMAR_GUARD_VARIABLE, SetScope::VARIABLE));
+    }
+    multi->statements.push_back(std::move(statements.back()));
     return transformer.MakeResult<unique_ptr<SQLStatement>>(std::move(multi));
 }
 
