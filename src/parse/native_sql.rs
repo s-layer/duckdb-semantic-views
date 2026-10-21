@@ -111,11 +111,8 @@ fn current_database_guard(view: &ViewRef) -> String {
 //       → passed through as `SELECT * FROM <existing_read_side_table_function>(...)`
 //         (or the same SQL with WHERE/LIMIT clauses appended). DuckDB re-parses
 //         and executes on the caller's connection. The read-side table functions
-//         themselves query via a fresh per-call `Connection(*context.db)` opened
-//         in each C++ bind callback (committed state; the `catalog_conn` static
-//         was retired in Phase 65). Making DESCRIBE/SHOW transactional w.r.t. the
-//         caller's snapshot is blocked by a DuckDB liveness constraint — see
-//         TECH-DEBT #19 for the full analysis.
+//         themselves read the catalog in the caller's transaction too, through
+//         the storage layer rather than a statement (TECH-DEBT #19).
 //
 //   * Anything else (`validate_and_rewrite` returns None)
 //       → `Ok(None)`; the C++ shim returns DISPLAY_ORIGINAL_ERROR and DuckDB's
@@ -393,8 +390,8 @@ fn emit_native_create_sql(
 /// and emit a transactional INSERT that selects from the
 /// `__sv_compute_create_from_yaml(path, name, kind, comment)` helper TF
 /// (registered via the C++ Catalog API in `cpp/src/shim.cpp`). The helper's
-/// bind callback opens a per-call `Connection(*context.db)`, runs
-/// `read_text()` against the user-supplied path, calls into Rust to parse
+/// bind callback reads the user-supplied path through `DuckDB`'s `FileSystem`
+/// API (subject to `enable_external_access`), calls into Rust to parse
 /// and enrich the YAML, and returns a metadata-less JSON in a single row.
 /// The outer INSERT wraps that row with `json_merge_patch` to add the
 /// metadata fields (`created_on`, `database_name`, `schema_name`) on the
@@ -403,8 +400,7 @@ fn emit_native_create_sql(
 ///
 /// Phase 65 Plan 06: pure-SQL, no extension-owned catalog connection. The YAML
 /// read happens inside the `__sv_compute_create_from_yaml` helper TF's
-/// bind callback (per-call `Connection(*context.db)`), not on any
-/// long-lived extension-owned connection.
+/// bind callback, through the `FileSystem` API, with no connection.
 #[cfg(feature = "extension")]
 fn emit_native_create_from_yaml_file(
     file_path: &str,

@@ -113,14 +113,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - **`semantic_view()` sees your open transaction.** Rows you insert, update or delete
   inside a transaction are now counted by a semantic-view query in that transaction.
-  Before, the query ran on a connection of its own and saw only committed data. A
-  semantic view you create inside a transaction still can't be queried until you commit.
+  Before, the query ran on a connection of its own and saw only committed data.
+
+- **Semantic-view reads see your open transaction's DDL.** A semantic view you create,
+  drop, rename or alter inside a transaction now reads that way in the transaction before
+  you commit: `semantic_view()`, `explain_semantic_view()`, `SHOW`, `DESCRIBE`, `GET_DDL`
+  and `READ_YAML_FROM_SEMANTIC_VIEW` all see it, and other connections still see only
+  what is committed. Before, every read saw the last committed definitions, so a view
+  created in an open transaction could not be queried or described until you committed.
+  The member types `SHOW` and `DESCRIBE` report, and the plan `explain_semantic_view()`
+  shows, follow a source table changed in the transaction too. These reads scan the
+  catalog table directly, so it must be a DuckDB table: if the primary database comes
+  from a storage extension instead, reads report that `semantic_layer._definitions` is
+  not a DuckDB table.
 
 - **A semantic view over a temporary table can be queried** in the session that has the
   table. Each table in `TABLES` is the one CREATE found: a temporary table if that is what
   its name meant then, otherwise the table in the database and schema the view was created
-  in. Before, the query could not see temporary tables at all. `SHOW` and `DESCRIBE` don't
-  report member types for such a view yet, and `explain_semantic_view` shows no plan for it.
+  in. Before, the query could not see temporary tables at all. `SHOW` and `DESCRIBE`
+  report the members' types for such a view, and `explain_semantic_view` shows its plan.
 
 - **A prepared `semantic_view()` query follows a later `SET search_path`.** `EXECUTE`
   now looks the view up on the search path in effect when it runs, as DuckDB does for

@@ -1,12 +1,10 @@
-//! Raw `DuckDB` C-API query helpers shared by the read paths.
+//! Raw `DuckDB` C-API query helpers for the member-type probe.
 //!
-//! These run SQL on a `duckdb_connection` the caller already holds (the
-//! per-call connection a bind callback borrowed) and read the result through
-//! the C API directly. They used to live in the `extension`-gated
-//! `table_function` module; they moved here, always compiled, so the
-//! read-side member-type probe (`member_types`, TECH-DEBT #51) can use them,
-//! and so `cargo test` can drive them against the bundled `DuckDB`.
-//! `table_function` re-exports the two older helpers for its existing callers.
+//! These run SQL on a `duckdb_connection` the caller holds and read the result
+//! through the C API directly. The extension types members in the caller's own
+//! context instead (`read_ffi::caller_describe`, TECH-DEBT #19), which reports
+//! what `DESCRIBE` reports; these give `cargo test` the same probe against the
+//! bundled `DuckDB`, which drives the member-type tests and proptests.
 
 use std::ffi::{CStr, CString};
 
@@ -27,24 +25,9 @@ impl From<RawSqlError> for String {
     }
 }
 
-/// Execute a SQL string via the `DuckDB` C API and return the result.
-///
-/// The caller is responsible for calling `duckdb_destroy_result` on the returned
-/// result when done.
-///
-/// # Safety
-///
-/// `conn` must be a valid, non-null `duckdb_connection` handle.
-// Its remaining callers are the `extension`-gated query paths.
-#[cfg_attr(not(feature = "extension"), allow(dead_code))]
-pub(crate) unsafe fn execute_sql_raw(
-    conn: ffi::duckdb_connection,
-    sql: &str,
-) -> Result<ffi::duckdb_result, String> {
-    Ok(execute_sql_checked(conn, sql)?)
-}
-
-/// [`execute_sql_raw`], keeping the failure's error class.
+/// Execute a SQL string via the `DuckDB` C API and return the result, keeping
+/// the failure's error class. The caller is responsible for calling
+/// `duckdb_destroy_result` on the returned result when done.
 ///
 /// # Safety
 ///

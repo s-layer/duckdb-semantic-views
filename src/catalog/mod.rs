@@ -506,77 +506,113 @@ fn upgrade_definitions_schema(con: &Connection) -> Result<(), Box<dyn std::error
 }
 
 // ---------------------------------------------------------------------------
-// CatalogReader — extension-side handle wrapping the catalog connection.
+// CatalogReader — the catalog table as the caller's transaction sees it.
 // ---------------------------------------------------------------------------
-//
-// Gated on the `extension` feature because it depends on the C-API stubs
-// (`duckdb_query`, `duckdb_prepare`, ...) which are only linked when the
-// crate is built as a loadable extension.
 
-#[cfg(feature = "extension")]
 mod reader {
-    use std::ffi::{CStr, CString};
-    use std::marker::PhantomData;
-    use std::os::raw::c_void;
-
-    use libduckdb_sys as ffi;
-
-    use crate::catalog::DEFINITIONS_TABLE;
-    use crate::ddl::read_ffi::BorrowedConnection;
     use crate::ident::ViewRef;
+
+    /// One row of `semantic_layer._definitions`; any cell may be NULL.
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    struct CatalogRow {
+        schema_name: Option<String>,
+        name: Option<String>,
+        definition: Option<String>,
+    }
+
+    /// `lower()` as `DuckDB` computes it: one codepoint at a time, each to its
+    /// simple lowercase mapping. `str::to_lowercase` differs: it maps a
+    /// word-final `Σ` to `ς`, and `İ` to two codepoints.
+    fn lower_codepoints(s: &str) -> String {
+        // Of the full mappings, only `İ`'s has more than one codepoint, and
+        // its first is the simple mapping.
+        s.chars()
+            .map(|c| c.to_lowercase().next().unwrap_or(c))
+            .collect()
+    }
+
+    /// `ORDER BY` on a nullable VARCHAR as `DuckDB` sorts it by default:
+    /// byte-wise, NULLs last.
+    fn nulls_last(value: Option<&String>) -> (bool, Option<&String>) {
+        (value.is_none(), value)
+    }
 
     /// Read-side handle for `semantic_layer._definitions`.
     ///
-    /// Wraps a per-call `BorrowedConnection` — the raw `duckdb_connection`
-    /// borrowed from the caller's stack `Connection probe(*context.db)` in
-    /// the C++ bind callback (the extension-load-time "catalog connection"
-    /// was retired in Phase 65). A fresh connection runs its own
-    /// transaction, so reads see **committed** state (TECH-DEBT #19). Writes
-    /// performed by parser-override-emitted SQL run on the *caller's*
-    /// connection and become visible here on commit.
+    /// Holds the table's rows as the caller's transaction sees them (TECH-DEBT
+    /// #19): [`CatalogReader::for_caller`] scans it in the transaction of the
+    /// statement whose bind or scalar is running, so a view created, dropped
+    /// or renamed earlier in that transaction, and not yet committed, reads
+    /// that way, while another session sees only committed state. The reader
+    /// is built per read and dropped with it.
     ///
-    /// The `'a` lifetime ties the reader to the `&'a BorrowedConnection` it
-    /// was constructed from (Phase 65.1 WR-05 follow-up to Copilot PR #35
-    /// review): the underlying raw handle is owned by the caller's stack
-    /// `Connection probe(*context.db)`, so allowing a `CatalogReader` to
-    /// escape that scope would be use-after-free. `PhantomData<&'a
-    /// BorrowedConnection>` enforces this at compile time. Because
-    /// `BorrowedConnection` is neither `Send` nor `Sync` (it wraps a raw
-    /// pointer), `&'a BorrowedConnection` is neither either, so
-    /// `CatalogReader<'a>` inherits the !Send / !Sync auto-traits without
-    /// any `unsafe impl` claiming otherwise.
-    pub struct CatalogReader<'a> {
-        conn: ffi::duckdb_connection,
-        // Phase 63 (v0.9.0): when false (only possible on a read-only host
-        // DB whose semantic_layer._definitions table was never created),
-        // reader methods short-circuit to "empty" / "not found" without
-        // hitting the DB. On a writable host this is always true (the
-        // table is CREATE'd in init_catalog).
+    /// The queries the reader used to run on its own connection are answered
+    /// over the rows with the same rules: `name` matches byte for byte, a
+    /// schema case-insensitively, and orders are `DuckDB`'s (byte-wise, NULLs
+    /// last).
+    #[derive(Debug, Clone)]
+    pub struct CatalogReader {
+        // Phase 63 (v0.9.0): false only on a read-only host DB whose
+        // semantic_layer._definitions table was never created. Reads then
+        // answer "empty" / "not found".
         catalog_table_present: bool,
-        _borrow: PhantomData<&'a BorrowedConnection>,
+        // The database the table was read from: the managed catalog, which a
+        // CAT-4 foreign-database reference is compared against.
+        current_database: String,
+        rows: Vec<CatalogRow>,
     }
 
-    impl<'a> CatalogReader<'a> {
-        /// Construct a `CatalogReader` from a borrowed connection (D-10 / WR-05).
+    impl CatalogReader {
+        /// The catalog as the transaction of the read now running on this
+        /// thread sees it.
         ///
-        /// The handle is extracted via `borrowed.as_raw()` and stored as a raw
-        /// pointer in the reader. `CatalogReader` never disconnects — the
-        /// underlying lifetime is owned by the caller's stack `Connection`
-        /// (the BORROW contract documented at module scope of
-        /// `src/ddl/read_ffi.rs`). The `'a` lifetime parameter prevents safe
-        /// code from moving the reader past that scope.
-        #[must_use]
-        pub fn new(borrowed: &'a BorrowedConnection, catalog_table_present: bool) -> Self {
-            Self {
-                conn: borrowed.as_raw(),
-                catalog_table_present,
-                _borrow: PhantomData,
-            }
+        /// # Errors
+        ///
+        /// The scan's error (a damaged catalog table, say), never "no views":
+        /// a missing table reads as an empty catalog (FF-9).
+        #[cfg(feature = "extension")]
+        pub fn for_caller() -> Result<Self, String> {
+            let defs = crate::ddl::read_ffi::caller_definitions(None)?;
+            Ok(Self::from_rows(defs.present, defs.database, defs.rows))
         }
 
+        /// [`CatalogReader::lookup`] over the caller's catalog, reading only
+        /// the rows named `view.name` (the lookup matches the name byte for
+        /// byte, so it would discard the others). For a scalar that looks
+        /// up one view per row, which would otherwise copy the whole
+        /// catalog each time.
+        ///
+        /// # Errors
+        ///
+        /// As [`CatalogReader::for_caller`] and [`CatalogReader::lookup`].
+        #[cfg(feature = "extension")]
+        pub fn lookup_in_caller(
+            view: &ViewRef,
+            search_path: &[String],
+        ) -> Result<Option<String>, String> {
+            let defs = crate::ddl::read_ffi::caller_definitions(Some(&view.name))?;
+            Self::from_rows(defs.present, defs.database, defs.rows).lookup(view, search_path)
+        }
+
+        /// A reader over the given `(schema_name, name, definition)` rows.
         #[must_use]
-        pub fn raw(&self) -> ffi::duckdb_connection {
-            self.conn
+        pub fn from_rows(
+            catalog_table_present: bool,
+            current_database: impl Into<String>,
+            rows: Vec<(Option<String>, Option<String>, Option<String>)>,
+        ) -> Self {
+            Self {
+                catalog_table_present,
+                current_database: current_database.into(),
+                rows: rows
+                    .into_iter()
+                    .map(|(schema_name, name, definition)| CatalogRow {
+                        schema_name,
+                        name,
+                        definition,
+                    })
+                    .collect(),
+            }
         }
 
         /// Fetch the JSON definition for a single view.
@@ -585,24 +621,27 @@ mod reader {
         ///
         /// Semantic views are schema-scoped, so `view.schema` decides which
         /// row is meant. A qualified reference matches that schema only. An
-        /// unqualified one matches on name alone and is an **error** when
-        /// several schemas hold a view of that name, rather than returning an
-        /// arbitrary one — see the note on
-        /// [`crate::catalog::writes::resolved_schema_expr`] for why this side
-        /// cannot prefer the caller's search path yet (TECH-DEBT #19/#25), and
-        /// why erroring keeps reads and DROP/ALTER agreeing on which view a
-        /// bare name means.
+        /// unqualified one matches on name alone, and
+        /// [`crate::catalog::resolve_in_search_path`] decides between the
+        /// schemas holding a view of that name.
         ///
-        /// Phase 63: when `catalog_table_present=false` (read-only host DB
-        /// without a bootstrapped `_definitions` table), short-circuits to
-        /// `Ok(None)` BEFORE the unsafe FFI call. Callers see the existing
-        /// "semantic view '<name>' does not exist" error path. See
-        /// 63-RESEARCH.md §3 Q4.
+        /// Phase 63: when the catalog table is absent (read-only host DB
+        /// without a bootstrapped `_definitions` table), answers `Ok(None)`.
+        /// Callers see the existing "semantic view '<name>' does not exist"
+        /// error path.
         pub fn lookup(
             &self,
             view: &ViewRef,
             search_path: &[String],
         ) -> Result<Option<String>, String> {
+            // No stored name holds a NUL, and the "does not exist" error would
+            // echo it back and be cut short there.
+            if view.name.contains('\0') {
+                return Err("view name contains null byte".to_string());
+            }
+            if view.schema.as_deref().is_some_and(|s| s.contains('\0')) {
+                return Err("schema name contains null byte".to_string());
+            }
             // CAT-4: a reference spelling out a foreign database names an
             // object this catalog cannot hold, so resolving it against the
             // managed catalog would answer a question that was not asked.
@@ -616,18 +655,51 @@ mod reader {
             // reporting it as "does not exist" would suggest the qualifier was
             // honoured and the view simply absent.
             //
-            // Only a reference that actually wrote a `<database>.` prefix pays
-            // for the extra query, which is the rare case.
+            // The comparison is against the managed catalog, not the caller's
+            // current database, so a caller `USE`-d into an attached database
+            // still sees `adb.main.v` as foreign: reads are pinned to the
+            // primary regardless of `USE`.
             if view.database.is_some() {
-                let current = unsafe { query_current_database(self.conn)? };
-                if let Some(err) = crate::catalog::foreign_database_error(view, &current) {
+                if let Some(err) =
+                    crate::catalog::foreign_database_error(view, &self.current_database)
+                {
                     return Err(err);
                 }
             }
             if !self.catalog_table_present {
                 return Ok(None);
             }
-            unsafe { prepared_lookup(self.conn, view, search_path) }
+            // Folded on both sides: DuckDB matches identifiers
+            // case-insensitively and a row may carry a different case than
+            // the caller writes.
+            let wanted_schema = view.schema.as_deref().map(lower_codepoints);
+            let mut matches: Vec<&CatalogRow> = self
+                .rows
+                .iter()
+                .filter(|row| row.name.as_deref() == Some(view.name.as_str()))
+                .filter(|row| match &wanted_schema {
+                    None => true,
+                    Some(wanted) => row
+                        .schema_name
+                        .as_deref()
+                        .is_some_and(|s| lower_codepoints(s) == *wanted),
+                })
+                .collect();
+            matches.sort_by(|a, b| {
+                nulls_last(a.schema_name.as_ref()).cmp(&nulls_last(b.schema_name.as_ref()))
+            });
+            // More than one candidate can only mean an unqualified reference
+            // matched views in different schemas — the `(schema_name, name)`
+            // primary key rules out duplicates within one.
+            let candidates: Vec<(String, String)> = matches
+                .into_iter()
+                .filter_map(|row| {
+                    let definition = row.definition.clone()?;
+                    Some((row.schema_name.clone().unwrap_or_default(), definition))
+                })
+                .collect();
+            crate::catalog::resolve_in_search_path(view, &candidates, search_path)
+                .map(|opt| opt.map(ToString::to_string))
         }
 
         /// Whether a view with this reference exists.
@@ -645,259 +717,48 @@ mod reader {
         /// patches both. Callers can therefore read the schema off the parsed
         /// definition without a second source of truth.
         ///
-        /// Phase 63: short-circuits to `Ok(Vec::new())` when
-        /// `catalog_table_present=false`.
+        /// Phase 63: empty when the catalog table is absent.
         pub fn list_all(&self) -> Result<Vec<(String, String)>, String> {
             if !self.catalog_table_present {
                 return Ok(Vec::new());
             }
-            unsafe { execute_list_all(self.conn) }
+            let mut rows: Vec<&CatalogRow> = self.rows.iter().collect();
+            rows.sort_by(|a, b| {
+                nulls_last(a.schema_name.as_ref())
+                    .cmp(&nulls_last(b.schema_name.as_ref()))
+                    .then_with(|| nulls_last(a.name.as_ref()).cmp(&nulls_last(b.name.as_ref())))
+            });
+            Ok(rows
+                .into_iter()
+                .map(|row| {
+                    (
+                        row.name.clone().unwrap_or_default(),
+                        row.definition.clone().unwrap_or_default(),
+                    )
+                })
+                .collect())
         }
 
-        /// Return just the view names, sorted. Used by error-path suggestion
-        /// helpers ("did you mean ...?"); avoids reading the full JSON
-        /// definition column that `list_all` would pull.
+        /// Return just the distinct view names, sorted. Used by error-path
+        /// suggestion helpers ("did you mean ...?").
         ///
-        /// Phase 63: short-circuits to `Ok(Vec::new())` when
-        /// `catalog_table_present=false`.
+        /// Phase 63: empty when the catalog table is absent.
         pub fn list_names(&self) -> Result<Vec<String>, String> {
             if !self.catalog_table_present {
                 return Ok(Vec::new());
             }
-            unsafe { execute_list_names(self.conn) }
+            let mut names: Vec<Option<&String>> =
+                self.rows.iter().map(|row| row.name.as_ref()).collect();
+            names.sort_by(|a, b| nulls_last(*a).cmp(&nulls_last(*b)));
+            names.dedup();
+            Ok(names
+                .into_iter()
+                .map(|name| name.cloned().unwrap_or_default())
+                .collect())
         }
-    }
-
-    /// RAII guard for `duckdb_prepared_statement`. Drops the statement on
-    /// scope exit even when the body short-circuits via `?`. Pre-v0.8.0
-    /// every error path repeated `duckdb_destroy_prepare` by hand.
-    struct PreparedStmt {
-        ptr: ffi::duckdb_prepared_statement,
-    }
-
-    impl PreparedStmt {
-        unsafe fn prepare(conn: ffi::duckdb_connection, sql: &CStr) -> Result<Self, String> {
-            let mut ptr: ffi::duckdb_prepared_statement = std::ptr::null_mut();
-            let rc = ffi::duckdb_prepare(conn, sql.as_ptr(), &raw mut ptr);
-            if rc != ffi::DuckDBSuccess {
-                let err = ffi::duckdb_prepare_error(ptr);
-                let msg = if err.is_null() {
-                    "unknown prepare error".to_string()
-                } else {
-                    CStr::from_ptr(err).to_string_lossy().into_owned()
-                };
-                ffi::duckdb_destroy_prepare(&raw mut ptr);
-                return Err(msg);
-            }
-            Ok(Self { ptr })
-        }
-
-        fn raw(&self) -> ffi::duckdb_prepared_statement {
-            self.ptr
-        }
-    }
-
-    impl Drop for PreparedStmt {
-        fn drop(&mut self) {
-            unsafe { ffi::duckdb_destroy_prepare(&raw mut self.ptr) };
-        }
-    }
-
-    /// RAII guard for `duckdb_result`. Like `PreparedStmt`, removes the
-    /// per-error-path `duckdb_destroy_result` calls.
-    struct QueryResult {
-        inner: ffi::duckdb_result,
-    }
-
-    impl QueryResult {
-        fn zeroed() -> Self {
-            Self {
-                inner: unsafe { std::mem::zeroed() },
-            }
-        }
-
-        fn raw_mut(&mut self) -> *mut ffi::duckdb_result {
-            std::ptr::addr_of_mut!(self.inner)
-        }
-    }
-
-    impl Drop for QueryResult {
-        fn drop(&mut self) {
-            unsafe { ffi::duckdb_destroy_result(self.raw_mut()) };
-        }
-    }
-
-    unsafe fn read_column_string(
-        result: *mut ffi::duckdb_result,
-        col: ffi::idx_t,
-        row: ffi::idx_t,
-    ) -> Option<String> {
-        let ptr = ffi::duckdb_value_varchar(result, col, row);
-        if ptr.is_null() {
-            return None;
-        }
-        let s = CStr::from_ptr(ptr).to_string_lossy().into_owned();
-        ffi::duckdb_free(ptr.cast::<c_void>());
-        Some(s)
-    }
-
-    unsafe fn result_error_message(result: *mut ffi::duckdb_result, fallback: &str) -> String {
-        let err_ptr = ffi::duckdb_result_error(result);
-        if err_ptr.is_null() {
-            fallback.to_string()
-        } else {
-            CStr::from_ptr(err_ptr).to_string_lossy().into_owned()
-        }
-    }
-
-    unsafe fn prepared_lookup(
-        conn: ffi::duckdb_connection,
-        view: &ViewRef,
-        search_path: &[String],
-    ) -> Result<Option<String>, String> {
-        // `$2 IS NULL` makes the schema predicate opt-in from one prepared
-        // statement: bound, it pins the schema; NULL, the name alone selects
-        // every schema's view of that name and `resolve_in_search_path`
-        // decides between them. Both sides are folded — DuckDB matches
-        // identifiers case-insensitively and a row may carry a different case
-        // than the caller writes.
-        let c_sql = CString::new(format!(
-            "SELECT schema_name, definition FROM {DEFINITIONS_TABLE} \
-              WHERE name = $1 AND ($2 IS NULL OR lower(schema_name) = lower($2)) \
-              ORDER BY schema_name"
-        ))
-        .map_err(|_| "SQL contains null byte".to_string())?;
-        let stmt = PreparedStmt::prepare(conn, &c_sql)?;
-
-        let c_name = CString::new(view.name.as_str())
-            .map_err(|_| "view name contains null byte".to_string())?;
-        if ffi::duckdb_bind_varchar(stmt.raw(), 1, c_name.as_ptr()) != ffi::DuckDBSuccess {
-            return Err("failed to bind view name".to_string());
-        }
-        // Bound as a separate `let` so the `CString` outlives the bind call and
-        // the execution that follows, rather than being a temporary dropped at
-        // the end of the binding statement.
-        let c_schema = match view.schema.as_deref() {
-            Some(s) => {
-                Some(CString::new(s).map_err(|_| "schema name contains null byte".to_string())?)
-            }
-            None => None,
-        };
-        let bind_rc = match &c_schema {
-            Some(s) => ffi::duckdb_bind_varchar(stmt.raw(), 2, s.as_ptr()),
-            None => ffi::duckdb_bind_null(stmt.raw(), 2),
-        };
-        if bind_rc != ffi::DuckDBSuccess {
-            return Err("failed to bind schema name".to_string());
-        }
-
-        let mut result = QueryResult::zeroed();
-        let exec_rc = ffi::duckdb_execute_prepared(stmt.raw(), result.raw_mut());
-        if exec_rc != ffi::DuckDBSuccess {
-            return Err(result_error_message(
-                result.raw_mut(),
-                "catalog lookup failed",
-            ));
-        }
-
-        // Collect every candidate and let the pure rule pick. More than one row
-        // can only mean an unqualified reference matched views in different
-        // schemas — the `(schema_name, name)` primary key rules out duplicates
-        // within one.
-        let row_count = ffi::duckdb_row_count(result.raw_mut());
-        let mut rows: Vec<(String, String)> =
-            Vec::with_capacity(usize::try_from(row_count).unwrap_or(0));
-        for r in 0..row_count {
-            let schema = read_column_string(result.raw_mut(), 0, r).unwrap_or_default();
-            let Some(definition) = read_column_string(result.raw_mut(), 1, r) else {
-                continue;
-            };
-            rows.push((schema, definition));
-        }
-        crate::catalog::resolve_in_search_path(view, &rows, search_path)
-            .map(|opt| opt.map(ToString::to_string))
-    }
-
-    /// The database the reader's connection resolves against — the one holding
-    /// `semantic_layer._definitions`.
-    ///
-    /// Read on the borrowed probe connection, not the caller's, so a caller
-    /// `USE`-d into an attached database still compares against the managed
-    /// catalog. That is the comparison CAT-4 wants: reads are pinned to the
-    /// primary regardless of `USE`, so `adb.main.v` is foreign even to a
-    /// session sitting in `adb`.
-    unsafe fn query_current_database(conn: ffi::duckdb_connection) -> Result<String, String> {
-        let c_sql = CString::new("SELECT current_database()")
-            .map_err(|_| "SQL contains null byte".to_string())?;
-        let mut result = QueryResult::zeroed();
-        let rc = ffi::duckdb_query(conn, c_sql.as_ptr(), result.raw_mut());
-        if rc != ffi::DuckDBSuccess {
-            return Err(result_error_message(
-                result.raw_mut(),
-                "current_database() query failed",
-            ));
-        }
-        read_column_string(result.raw_mut(), 0, 0)
-            .ok_or_else(|| "current_database() returned no value".to_string())
-    }
-
-    unsafe fn execute_list_all(
-        conn: ffi::duckdb_connection,
-    ) -> Result<Vec<(String, String)>, String> {
-        let c_sql = CString::new(format!(
-            "SELECT name, definition FROM {DEFINITIONS_TABLE} ORDER BY schema_name, name"
-        ))
-        .map_err(|_| "SQL contains null byte".to_string())?;
-        let mut result = QueryResult::zeroed();
-        let rc = ffi::duckdb_query(conn, c_sql.as_ptr(), result.raw_mut());
-        if rc != ffi::DuckDBSuccess {
-            return Err(result_error_message(
-                result.raw_mut(),
-                "catalog list failed",
-            ));
-        }
-
-        let row_count = ffi::duckdb_row_count(result.raw_mut());
-        // Capacity hint only; `unwrap_or(0)` keeps it correct (never truncating)
-        // on 32-bit targets where idx_t (u64) may exceed usize.
-        let mut out = Vec::with_capacity(usize::try_from(row_count).unwrap_or(0));
-        for r in 0..row_count {
-            let name = read_column_string(result.raw_mut(), 0, r).unwrap_or_default();
-            let def = read_column_string(result.raw_mut(), 1, r).unwrap_or_default();
-            out.push((name, def));
-        }
-        Ok(out)
-    }
-
-    /// Names-only counterpart to `execute_list_all`. Skips the `definition`
-    /// column so error-path suggestion lookups don't pay for the JSON blobs.
-    unsafe fn execute_list_names(conn: ffi::duckdb_connection) -> Result<Vec<String>, String> {
-        let c_sql = CString::new(format!(
-            "SELECT DISTINCT name FROM {DEFINITIONS_TABLE} ORDER BY name"
-        ))
-        .map_err(|_| "SQL contains null byte".to_string())?;
-        let mut result = QueryResult::zeroed();
-        let rc = ffi::duckdb_query(conn, c_sql.as_ptr(), result.raw_mut());
-        if rc != ffi::DuckDBSuccess {
-            return Err(result_error_message(
-                result.raw_mut(),
-                "catalog list failed",
-            ));
-        }
-
-        let row_count = ffi::duckdb_row_count(result.raw_mut());
-        // Capacity hint only; `unwrap_or(0)` keeps it correct (never truncating)
-        // on 32-bit targets where idx_t (u64) may exceed usize.
-        let mut out = Vec::with_capacity(usize::try_from(row_count).unwrap_or(0));
-        for r in 0..row_count {
-            let name = read_column_string(result.raw_mut(), 0, r).unwrap_or_default();
-            out.push(name);
-        }
-        Ok(out)
     }
 }
 
-#[cfg(feature = "extension")]
 pub use reader::CatalogReader;
 
 /// The schemas holding a name, sorted, for the two "which one did you mean"
@@ -2373,17 +2234,10 @@ mod tests {
         );
     }
 
-    #[cfg(feature = "extension")]
     #[test]
     fn lookup_returns_none_when_table_missing() {
-        // Phase 63 (RO-04): catalog_table_present=false must short-circuit
-        // BEFORE hitting the DB. Use std::ptr::null_mut() for the conn —
-        // the short-circuit must return Ok(None) before any FFI call, so
-        // the null pointer is never dereferenced.
-        use crate::catalog::CatalogReader;
-        use crate::ddl::read_ffi::BorrowedConnection;
-        let borrowed = unsafe { BorrowedConnection::new(std::ptr::null_mut()) };
-        let reader = CatalogReader::new(&borrowed, false);
+        // Phase 63 (RO-04): an absent catalog table reads as "not found".
+        let reader = CatalogReader::from_rows(false, "memory", vec![]);
         let result = reader.lookup(&crate::ident::parse_view_ref("any_view").unwrap(), &[]);
         assert!(
             matches!(result, Ok(None)),
@@ -2392,14 +2246,10 @@ mod tests {
         );
     }
 
-    #[cfg(feature = "extension")]
     #[test]
     fn list_all_returns_empty_when_table_missing() {
-        // Phase 63 (RO-03): catalog_table_present=false must short-circuit.
-        use crate::catalog::CatalogReader;
-        use crate::ddl::read_ffi::BorrowedConnection;
-        let borrowed = unsafe { BorrowedConnection::new(std::ptr::null_mut()) };
-        let reader = CatalogReader::new(&borrowed, false);
+        // Phase 63 (RO-03): an absent catalog table lists nothing.
+        let reader = CatalogReader::from_rows(false, "memory", vec![]);
         let result = reader.list_all();
         assert!(
             matches!(result, Ok(ref v) if v.is_empty()),
@@ -2408,19 +2258,196 @@ mod tests {
         );
     }
 
-    #[cfg(feature = "extension")]
     #[test]
     fn list_names_returns_empty_when_table_missing() {
-        // Phase 63 (RO-03): catalog_table_present=false must short-circuit.
-        use crate::catalog::CatalogReader;
-        use crate::ddl::read_ffi::BorrowedConnection;
-        let borrowed = unsafe { BorrowedConnection::new(std::ptr::null_mut()) };
-        let reader = CatalogReader::new(&borrowed, false);
+        // Phase 63 (RO-03): an absent catalog table lists nothing.
+        let reader = CatalogReader::from_rows(false, "memory", vec![]);
         let result = reader.list_names();
         assert!(
             matches!(result, Ok(ref v) if v.is_empty()),
             "expected Ok(empty), got: {:?}",
             result
         );
+    }
+
+    #[test]
+    fn foreign_database_is_checked_against_the_managed_catalog() {
+        // CAT-4 runs ahead of the absent-table short-circuit, against the
+        // database the rows were read from.
+        let reader = CatalogReader::from_rows(false, "memory", vec![]);
+        let foreign = crate::ident::parse_view_ref("other.main.v").unwrap();
+        assert!(reader.lookup(&foreign, &[]).is_err());
+        let own = crate::ident::parse_view_ref("memory.main.v").unwrap();
+        assert_eq!(reader.lookup(&own, &[]), Ok(None));
+    }
+
+    #[test]
+    fn a_nul_in_the_name_is_rejected_not_looked_up() {
+        // The SQL lookup this reader replaced refused a NUL at its CString
+        // boundary; a plain "does not exist" would echo the NUL back and the
+        // message would be cut short there.
+        let reader = CatalogReader::from_rows(true, "memory", vec![]);
+        let view = |schema: Option<&str>, name: &str| crate::ident::ViewRef {
+            database: None,
+            schema: schema.map(str::to_string),
+            name: name.to_string(),
+        };
+        let err = reader.lookup(&view(None, "v\0bad"), &[]).unwrap_err();
+        assert!(err.contains("view name contains null byte"), "{err}");
+        let err = reader.lookup(&view(Some("s\0"), "v"), &[]).unwrap_err();
+        assert!(err.contains("schema name contains null byte"), "{err}");
+    }
+
+    #[test]
+    fn a_schema_folds_one_codepoint_at_a_time() {
+        // As DuckDB's lower() does: a word-final Σ is σ, not ς, and İ is i.
+        let reader = CatalogReader::from_rows(
+            true,
+            "memory",
+            vec![
+                (
+                    Some("ΣΑΣ".into()),
+                    Some("v".into()),
+                    Some("{\"a\":1}".into()),
+                ),
+                (Some("İ".into()), Some("w".into()), Some("{\"b\":2}".into())),
+            ],
+        );
+        let view = |schema: &str, name: &str| crate::ident::ViewRef {
+            database: None,
+            schema: Some(schema.to_string()),
+            name: name.to_string(),
+        };
+        let found = reader.lookup(&view("σασ", "v"), &[]).unwrap();
+        assert_eq!(found.as_deref(), Some("{\"a\":1}"));
+        let found = reader.lookup(&view("i", "w"), &[]).unwrap();
+        assert_eq!(found.as_deref(), Some("{\"b\":2}"));
+    }
+
+    /// The reader answers over the rows the caller's transaction sees what the
+    /// SQL it replaced (TECH-DEBT #19) answered over the table: compared here
+    /// against those queries run on a real table holding the same rows,
+    /// NULLs, case variants and ordering ties included.
+    #[cfg(not(feature = "extension"))]
+    mod reader_matches_its_sql {
+        use super::*;
+        use proptest::prelude::*;
+
+        type Row = (Option<String>, Option<String>, Option<String>);
+
+        fn opt(values: &'static [&'static str]) -> impl Strategy<Value = Option<String>> {
+            prop_oneof![
+                1 => Just(None),
+                6 => proptest::sample::select(values).prop_map(|v| Some(v.to_string())),
+            ]
+        }
+
+        fn rows() -> impl Strategy<Value = Vec<Row>> {
+            proptest::collection::vec(
+                (
+                    opt(&["main", "Main", "s", "S", "é", "É", "ΣΑΣ", "İ"]),
+                    opt(&["v", "V", "w", ""]),
+                    opt(&["{\"a\":1}", "{\"b\":2}", ""]),
+                ),
+                0..10,
+            )
+            // `(schema_name, name)` is the table's key.
+            .prop_map(|rows| {
+                let mut seen = std::collections::HashSet::new();
+                rows.into_iter()
+                    .filter(|(s, n, _)| seen.insert((s.clone(), n.clone())))
+                    .collect()
+            })
+        }
+
+        fn table(rows: &[Row]) -> Connection {
+            let con = in_memory_con();
+            con.execute_batch(
+                "CREATE TABLE d (schema_name VARCHAR, name VARCHAR, definition VARCHAR)",
+            )
+            .unwrap();
+            for (s, n, d) in rows {
+                con.execute("INSERT INTO d VALUES (?, ?, ?)", duckdb::params![s, n, d])
+                    .unwrap();
+            }
+            con
+        }
+
+        fn sql_lookup(con: &Connection, name: &str, schema: Option<&str>) -> Vec<(String, String)> {
+            let mut stmt = con
+                .prepare(
+                    "SELECT schema_name, definition FROM d \
+                     WHERE name = $1 AND ($2 IS NULL OR lower(schema_name) = lower($2)) \
+                     ORDER BY schema_name",
+                )
+                .unwrap();
+            stmt.query_map(duckdb::params![name, schema], |r| {
+                Ok((
+                    r.get::<_, Option<String>>(0)?,
+                    r.get::<_, Option<String>>(1)?,
+                ))
+            })
+            .unwrap()
+            .filter_map(|r| {
+                let (s, d) = r.unwrap();
+                Some((s.unwrap_or_default(), d?))
+            })
+            .collect()
+        }
+
+        fn sql_strings(con: &Connection, sql: &str, columns: usize) -> Vec<Vec<String>> {
+            let mut stmt = con.prepare(sql).unwrap();
+            stmt.query_map([], |r| {
+                (0..columns)
+                    .map(|i| Ok(r.get::<_, Option<String>>(i)?.unwrap_or_default()))
+                    .collect::<Result<Vec<_>, _>>()
+            })
+            .unwrap()
+            .map(Result::unwrap)
+            .collect()
+        }
+
+        proptest! {
+            #[test]
+            fn lookup_and_listings_match(
+                rows in rows(),
+                name in proptest::sample::select(&["v", "V", "w", "x", ""][..]),
+                schema in opt(&["main", "MAIN", "s", "é", "É", "t", "σασ", "ΣΑΣ", "i", "İ"]),
+                search_path in proptest::collection::vec(
+                    proptest::sample::select(&["main", "s", "S", "é"][..]).prop_map(String::from),
+                    0..3,
+                ),
+            ) {
+                let con = table(&rows);
+                let reader = CatalogReader::from_rows(true, "memory", rows.clone());
+
+                let view = crate::ident::ViewRef {
+                    database: None,
+                    schema: schema.clone(),
+                    name: name.to_string(),
+                };
+                let candidates = sql_lookup(&con, &view.name, view.schema.as_deref());
+                let expected = resolve_in_search_path(&view, &candidates, &search_path)
+                    .map(|opt| opt.map(ToString::to_string));
+                prop_assert_eq!(reader.lookup(&view, &search_path), expected);
+
+                let expected_all: Vec<(String, String)> = sql_strings(
+                    &con,
+                    "SELECT name, definition FROM d ORDER BY schema_name, name",
+                    2,
+                )
+                .into_iter()
+                .map(|r| (r[0].clone(), r[1].clone()))
+                .collect();
+                prop_assert_eq!(reader.list_all().unwrap(), expected_all);
+
+                let expected_names: Vec<String> =
+                    sql_strings(&con, "SELECT DISTINCT name FROM d ORDER BY name", 1)
+                        .into_iter()
+                        .map(|r| r[0].clone())
+                        .collect();
+                prop_assert_eq!(reader.list_names().unwrap(), expected_names);
+            }
+        }
     }
 }

@@ -1,5 +1,3 @@
-use libduckdb_sys as ffi;
-
 use crate::catalog::CatalogReader;
 use crate::expand::wildcard::{expand_wildcards, WildcardItemType};
 use crate::expand::{expand, QueryRequest};
@@ -10,11 +8,6 @@ use super::error::QueryError;
 use super::items::{aliases_for, Item, OutputColumns, RequestItems};
 use super::wire::{build_projected_sql, frame_bind_payload, parse_varchar_list};
 
-// The raw C-API helpers moved to the always-compiled `raw_sql` module so the
-// read-side member-type probe (TECH-DEBT #51) can share them; re-exported here
-// for their existing callers (`explain.rs`).
-pub(crate) use super::raw_sql::{execute_sql_raw, read_varchar_from_vector};
-
 // ---------------------------------------------------------------------------
 // Phase 65 Plan 05 Task 6 (Wave 6) — sv_semantic_view_bind_rust
 // ---------------------------------------------------------------------------
@@ -22,11 +15,9 @@ pub(crate) use super::raw_sql::{execute_sql_raw, read_varchar_from_vector};
 // FFI dispatcher for the migrated
 // `semantic_view(view_name, dimensions := [...], metrics := [...], facts := [...])`
 // table function. The C++ bind callback (`sv_semantic_view_bind` in
-// `cpp/src/shim.cpp`) opens a per-call `Connection probe(*context.db)`,
-// flattens the three optional LIST(VARCHAR) named parameters into the
+// `cpp/src/shim.cpp`) flattens the three optional LIST(VARCHAR) named parameters into the
 // length-prefixed wire format (same encoding as the Wave 5 explain
-// migration), and invokes this dispatcher. Same `reinterpret_cast` bridge
-// + BORROW contract as the 15 prior migrations.
+// migration), and invokes this dispatcher in the caller's scope.
 //
 // Responsibilities of the Rust side:
 //   - Catalog lookup (name normalisation, view-not-found suggestion).
@@ -38,8 +29,8 @@ pub(crate) use super::raw_sql::{execute_sql_raw, read_varchar_from_vector};
 // (`sv_semantic_view_bind_replace`) parses it into a subquery that DuckDB binds
 // and plans inside the caller's query, so its column names and types are
 // DuckDB's own and it runs in the caller's transaction (TECH-DEBT #42). No
-// probe runs here: the only query on the per-call connection is the catalog
-// read (TECH-DEBT #19).
+// probe runs here; the catalog read is in the caller's transaction too
+// (TECH-DEBT #19), so a view created earlier in it is found.
 //
 // Return codes mirror the Wave 5 dispatcher:
 //   0 — success; (out_ptr, out_len) populated.
@@ -48,13 +39,12 @@ pub(crate) use super::raw_sql::{execute_sql_raw, read_varchar_from_vector};
 
 /// # Safety
 ///
-/// `conn` is a borrowed handle (do NOT disconnect). Wire-format payloads
+/// Wire-format payloads
 /// described above; `name_ptr` must point to `name_len` UTF-8 bytes.
 #[cfg(feature = "extension")]
 #[no_mangle]
 #[allow(clippy::too_many_arguments)]
 pub unsafe extern "C" fn sv_semantic_view_bind_rust(
-    conn: ffi::duckdb_connection,
     name_ptr: *const u8,
     name_len: usize,
     sp_ptr: *const u8,
@@ -75,20 +65,18 @@ pub unsafe extern "C" fn sv_semantic_view_bind_rust(
     error_buf: *mut u8,
     error_buf_len: usize,
 ) -> u8 {
-    // R-6/C-3: the catch_unwind guard, borrowed-connection null check, buffer
-    // publish, error-string write, and panic arm now live in the shared
+    // R-6/C-3: the catch_unwind guard, buffer publish, error-string write, and
+    // panic arm now live in the shared
     // `run_dispatcher` scaffold (ST-2); the body does only the interesting work
     // and returns `Result<Vec<u8>, String>`.
     crate::ddl::read_ffi::run_dispatcher(
-        conn,
         out_ptr,
         out_len,
         error_buf,
         error_buf_len,
         "sv_semantic_view_bind_rust",
-        |borrowed| unsafe {
+        || unsafe {
             semantic_view_bind_body(
-                borrowed,
                 name_ptr,
                 name_len,
                 sp_ptr,
@@ -118,12 +106,10 @@ pub unsafe extern "C" fn sv_semantic_view_bind_rust(
 /// Each `*_ptr` is either null or points to its paired `*_len` readable bytes.
 /// A null pointer is only meaningful with `*_len == 0` (an empty list / absent
 /// name); the decoders reject `(null, len > 0)` as FFI shape drift rather than
-/// dereferencing it. The borrowed connection must outlive the call (see the
-/// module borrow contract).
+/// dereferencing it.
 #[cfg(feature = "extension")]
 #[allow(clippy::too_many_arguments, clippy::too_many_lines)]
 unsafe fn semantic_view_bind_body(
-    borrowed: &crate::ddl::read_ffi::BorrowedConnection,
     name_ptr: *const u8,
     name_len: usize,
     sp_ptr: *const u8,
@@ -140,7 +126,7 @@ unsafe fn semantic_view_bind_body(
     order_len: usize,
     fence: bool,
 ) -> Result<Vec<u8>, String> {
-    use crate::ddl::read_ffi::{probe_catalog_table_present, read_str_arg};
+    use crate::ddl::read_ffi::read_str_arg;
 
     let view_name_raw = read_str_arg(name_ptr, name_len, "view name")?;
     let view = crate::ident::parse_view_ref(&view_name_raw)
@@ -178,8 +164,7 @@ unsafe fn semantic_view_bind_body(
 
     // FF-9: surface a probe-query failure as an error distinct from "no
     // views" instead of silently folding it into absence.
-    let present = probe_catalog_table_present(borrowed)?;
-    let reader = CatalogReader::new(borrowed, present);
+    let reader = CatalogReader::for_caller()?;
     let json_str = match reader.lookup(&view, &search_path) {
         Ok(Some(j)) => j,
         Ok(None) => {

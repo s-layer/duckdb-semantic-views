@@ -6,8 +6,8 @@
 //! Nothing at CREATE records one (v0.10.0 removed CREATE-time inference, and
 //! no DDL clause can declare a type — see TECH-DEBT #68), so the type is
 //! computed here, at the SHOW / DESCRIBE bind: expand a request for the
-//! member, `DESCRIBE` the expanded SQL on the per-call connection, and read the
-//! column type back.
+//! member, bind the expanded SQL in the caller's context
+//! (`read_ffi::caller_describe`, TECH-DEBT #19), and read the column type back.
 //!
 //! # What is reported
 //!
@@ -45,15 +45,14 @@
 //!
 //! # Cancellation
 //!
-//! The one failure that is not swallowed. The probes run on the bind's own
-//! connection, whose interrupt flag a cancel of the caller does not set, so
-//! the caller's state is passed in (`cancelled`) and consulted before every
-//! probe, and a probe the engine reports as interrupted
-//! ([`ProbeError::Interrupted`]) is a cancellation, not an untypable member.
-//! Either way typing stops at once with [`Interrupted`] — no fallback probes,
-//! no further views — and the C++ bind helpers raise the caller's INTERRUPT.
-//! They also forward the caller's flag into the probe connection while the
-//! dispatcher runs, which is what stops a probe that is already binding.
+//! The one failure that is not swallowed. The caller's state is passed in
+//! (`cancelled`) and consulted before every probe, and a probe the engine
+//! reports as interrupted ([`ProbeError::Interrupted`]) is a cancellation, not
+//! an untypable member. Either way typing stops at once with [`Interrupted`] —
+//! no fallback probes, no further views — and the C++ bind helpers raise the
+//! caller's INTERRUPT. The extension binds each probe in the caller's own
+//! context, so `DuckDB`'s interrupt checks inside the bind stop a probe that
+//! is already binding.
 //!
 //! # PRIVATE members
 //!
@@ -137,8 +136,8 @@ pub struct Interrupted;
 
 impl From<Interrupted> for String {
     /// `DuckDB`'s own interrupt text. The C++ bind helpers raise a bare
-    /// `InterruptException` for a cancelled caller ahead of this message; it
-    /// only reaches the user if the probe connection alone was interrupted.
+    /// `InterruptException` for a cancelled caller ahead of this message, so
+    /// it is a fallback that does not normally reach the user.
     fn from(_: Interrupted) -> Self {
         "Interrupted!".to_string()
     }
@@ -448,8 +447,11 @@ pub unsafe fn probe_output_types(
 }
 
 /// [`infer_member_types`] probing on `conn` via [`probe_output_types`].
-/// `cancelled` reports whether the command's caller has been cancelled (the
-/// extension passes the bind caller's interrupt flag).
+/// `cancelled` reports whether the command's caller has been cancelled.
+///
+/// The extension types members in the caller's own context instead
+/// (`read_ffi::member_types_for_bind`); this runs the same rules on a
+/// connection, so `cargo test` can drive them against the bundled `DuckDB`.
 ///
 /// # Safety
 ///
@@ -840,8 +842,9 @@ mod tests {
 
     // ---- Cancellation (PR #248 review) --------------------------------------
     //
-    // SHOW / DESCRIBE probe on the bind's own connection, whose interrupt flag
-    // nothing sets when the *caller* is cancelled. Typing must therefore stop
+    // A probe's own interrupt checks may not see the caller's cancellation
+    // (under `cargo test` it runs on a connection of its own, whose flag
+    // nothing sets when the *caller* is cancelled). Typing must therefore stop
     // on the caller's word, and a probe the engine itself reports as
     // interrupted must stop it too — never be filed as "type unknown" and
     // followed by every remaining fallback probe.

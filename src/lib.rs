@@ -102,8 +102,8 @@ pub mod test_helpers {
     /// function — the extension's read side no longer materializes typed values
     /// in Rust (that path was retired in Phase 65: production now hands zero-copy
     /// vector references to DuckDB and streams results C++-side, with
-    /// `query::table_function::read_varchar_from_vector` the only remaining
-    /// per-value Rust reader, used for VARCHAR-only paths like EXPLAIN).
+    /// `query::raw_sql::read_varchar_from_vector` the only remaining per-value
+    /// Rust reader, used by the member-type probe's tests).
     ///
     /// What it *does* mirror is the binary layout contract the extension depends
     /// on: it decodes `duckdb_data_chunk` vectors directly (validity mask +
@@ -341,7 +341,8 @@ mod extension {
     // INVARIANT: every read-side function is registered through the C++ Catalog
     // API path (no duckdb-rs `register_*_with_extra_info` / `_with_state`
     // calls), and `init_extension` allocates no long-lived extension-owned
-    // `duckdb_connection` — reads run on per-call borrowed connections.
+    // `duckdb_connection` — reads run in the caller's own context and
+    // transaction (TECH-DEBT #19) and open no connection at all.
     // `tests/no_long_lived_conn.rs` is the structural guard that fails CI if a
     // future change re-introduces a long-lived connection here.
 

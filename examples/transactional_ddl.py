@@ -105,20 +105,14 @@ def native_demo() -> None:
     print("After DROP+rollback:", list_views(con))
     print("  -> DROP rolled back, view still present.\n")
 
-    # Note on visibility:
-    #   list_semantic_views() runs on a separate read connection that only
-    #   sees committed catalog state, so a view created in the current
-    #   uncommitted transaction is not visible to it until COMMIT. To
-    #   inspect in-flight catalog rows use the underlying table directly
-    #   on the same connection:
+    # Reads run in your transaction, so a view created in it is listed (and
+    # can be queried) before COMMIT. Other connections see it only after.
     second_view = CREATE_VIEW.replace("orders_view", "orders_view_2")
     con.execute("BEGIN")
     con.execute(second_view)
-    in_flight = con.execute(
-        "SELECT name FROM semantic_layer._definitions WHERE name = 'orders_view_2'"
-    ).fetchall()
-    print("In-flight (same conn, _definitions):", in_flight)
+    print("In-flight (same transaction):", list_views(con))
     con.execute("ROLLBACK")
+    print("After rollback:", list_views(con))
     print()
 
     con.close()

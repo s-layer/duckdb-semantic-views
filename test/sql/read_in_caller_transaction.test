@@ -1,0 +1,444 @@
+# Every read of a semantic view's definition runs in the caller's transaction
+# (TECH-DEBT #19): a view created, dropped, renamed, altered or replaced in an open transaction is
+# seen that way by that transaction's own reads, and by no other session until
+# it commits. The member types SHOW / DESCRIBE report and explain_semantic_view's
+# plan are found in the caller's transaction too, so they follow a source table
+# changed in it.
+
+require semantic_views
+
+statement ok
+CREATE TABLE rt_orders (id INTEGER, region VARCHAR, amount INTEGER);
+
+statement ok
+INSERT INTO rt_orders VALUES (1, 'EU', 10), (2, 'US', 20), (3, 'EU', 5);
+
+# --- A view created in an open transaction ---------------------------------
+# Each read gets a transaction of its own: a failing statement aborts the
+# transaction it runs in, which would hide whether the next read works.
+
+statement ok
+BEGIN;
+
+statement ok
+CREATE SEMANTIC VIEW rt_new AS
+  TABLES (o AS rt_orders PRIMARY KEY (id))
+  DIMENSIONS (o.region AS o.region)
+  METRICS (o.total AS sum(o.amount));
+
+query TI rowsort
+SELECT * FROM semantic_view('rt_new', dimensions := ['region'], metrics := ['total']);
+----
+EU	15
+US	20
+
+statement ok
+ROLLBACK;
+
+statement ok
+BEGIN;
+
+statement ok
+CREATE SEMANTIC VIEW rt_new AS
+  TABLES (o AS rt_orders PRIMARY KEY (id))
+  DIMENSIONS (o.region AS o.region)
+  METRICS (o.total AS sum(o.amount));
+
+query T
+SELECT name FROM list_semantic_views() WHERE name = 'rt_new';
+----
+rt_new
+
+statement ok
+ROLLBACK;
+
+statement ok
+BEGIN;
+
+statement ok
+CREATE SEMANTIC VIEW rt_new AS
+  TABLES (o AS rt_orders PRIMARY KEY (id))
+  DIMENSIONS (o.region AS o.region)
+  METRICS (o.total AS sum(o.amount));
+
+query T
+SELECT name FROM (SHOW SEMANTIC VIEWS) WHERE name = 'rt_new';
+----
+rt_new
+
+statement ok
+ROLLBACK;
+
+statement ok
+BEGIN;
+
+statement ok
+CREATE SEMANTIC VIEW rt_new AS
+  TABLES (o AS rt_orders PRIMARY KEY (id))
+  DIMENSIONS (o.region AS o.region)
+  METRICS (o.total AS sum(o.amount));
+
+query T
+SELECT property_value FROM (DESCRIBE SEMANTIC VIEW rt_new)
+WHERE object_name = 'total' AND property = 'DATA_TYPE';
+----
+HUGEINT
+
+statement ok
+ROLLBACK;
+
+statement ok
+BEGIN;
+
+statement ok
+CREATE SEMANTIC VIEW rt_new AS
+  TABLES (o AS rt_orders PRIMARY KEY (id))
+  DIMENSIONS (o.region AS o.region)
+  METRICS (o.total AS sum(o.amount));
+
+query TT
+SELECT name, data_type FROM (SHOW SEMANTIC METRICS IN rt_new);
+----
+total	HUGEINT
+
+statement ok
+ROLLBACK;
+
+statement ok
+BEGIN;
+
+statement ok
+CREATE SEMANTIC VIEW rt_new AS
+  TABLES (o AS rt_orders PRIMARY KEY (id))
+  DIMENSIONS (o.region AS o.region)
+  METRICS (o.total AS sum(o.amount));
+
+query I
+SELECT get_ddl('SEMANTIC_VIEW', 'rt_new') LIKE 'CREATE OR REPLACE SEMANTIC VIEW rt_new AS%';
+----
+true
+
+statement ok
+ROLLBACK;
+
+statement ok
+BEGIN;
+
+statement ok
+CREATE SEMANTIC VIEW rt_new AS
+  TABLES (o AS rt_orders PRIMARY KEY (id))
+  DIMENSIONS (o.region AS o.region)
+  METRICS (o.total AS sum(o.amount));
+
+query I
+SELECT read_yaml_from_semantic_view('rt_new') LIKE '%rt_orders%';
+----
+true
+
+statement ok
+ROLLBACK;
+
+statement ok
+BEGIN;
+
+statement ok
+CREATE SEMANTIC VIEW rt_new AS
+  TABLES (o AS rt_orders PRIMARY KEY (id))
+  DIMENSIONS (o.region AS o.region)
+  METRICS (o.total AS sum(o.amount));
+
+query I
+SELECT count(*) > 0 FROM explain_semantic_view('rt_new', dimensions := ['region'], metrics := ['total'])
+WHERE explain_output LIKE '%Table: memory.main.rt_orders%';
+----
+true
+
+statement ok
+ROLLBACK;
+
+# Another session does not see an uncommitted view, and a rolled-back view is
+# gone.
+
+statement ok
+BEGIN;
+
+statement ok
+CREATE SEMANTIC VIEW rt_new AS
+  TABLES (o AS rt_orders PRIMARY KEY (id))
+  DIMENSIONS (o.region AS o.region)
+  METRICS (o.total AS sum(o.amount));
+
+statement error con2
+SELECT * FROM semantic_view('rt_new', metrics := ['total']);
+----
+not found
+
+statement ok
+ROLLBACK;
+
+statement error
+SELECT * FROM semantic_view('rt_new', metrics := ['total']);
+----
+not found
+
+# The listings across views, and the SHOW forms not used above, read it too.
+
+statement ok
+BEGIN;
+
+statement ok
+CREATE SEMANTIC VIEW rt_full AS
+  TABLES (o AS rt_orders PRIMARY KEY (id))
+  FACTS (o.amt AS o.amount)
+  DIMENSIONS (o.region AS o.region)
+  METRICS (o.total AS sum(o.amount))
+  MATERIALIZATIONS (rt_mat AS (TABLE rt_orders, DIMENSIONS (region)));
+
+query T
+SELECT name FROM (SHOW TERSE SEMANTIC VIEWS) WHERE name = 'rt_full';
+----
+rt_full
+
+statement ok
+ROLLBACK;
+
+statement ok
+BEGIN;
+
+statement ok
+CREATE SEMANTIC VIEW rt_full AS
+  TABLES (o AS rt_orders PRIMARY KEY (id))
+  FACTS (o.amt AS o.amount)
+  DIMENSIONS (o.region AS o.region)
+  METRICS (o.total AS sum(o.amount))
+  MATERIALIZATIONS (rt_mat AS (TABLE rt_orders, DIMENSIONS (region)));
+
+query T
+SELECT name FROM (SHOW SEMANTIC METRICS) WHERE semantic_view_name = 'rt_full';
+----
+total
+
+statement ok
+ROLLBACK;
+
+statement ok
+BEGIN;
+
+statement ok
+CREATE SEMANTIC VIEW rt_full AS
+  TABLES (o AS rt_orders PRIMARY KEY (id))
+  FACTS (o.amt AS o.amount)
+  DIMENSIONS (o.region AS o.region)
+  METRICS (o.total AS sum(o.amount))
+  MATERIALIZATIONS (rt_mat AS (TABLE rt_orders, DIMENSIONS (region)));
+
+query T
+SELECT name FROM (SHOW SEMANTIC DIMENSIONS) WHERE semantic_view_name = 'rt_full';
+----
+region
+
+statement ok
+ROLLBACK;
+
+statement ok
+BEGIN;
+
+statement ok
+CREATE SEMANTIC VIEW rt_full AS
+  TABLES (o AS rt_orders PRIMARY KEY (id))
+  FACTS (o.amt AS o.amount)
+  DIMENSIONS (o.region AS o.region)
+  METRICS (o.total AS sum(o.amount))
+  MATERIALIZATIONS (rt_mat AS (TABLE rt_orders, DIMENSIONS (region)));
+
+query T
+SELECT name FROM (SHOW SEMANTIC FACTS) WHERE semantic_view_name = 'rt_full';
+----
+amt
+
+statement ok
+ROLLBACK;
+
+statement ok
+BEGIN;
+
+statement ok
+CREATE SEMANTIC VIEW rt_full AS
+  TABLES (o AS rt_orders PRIMARY KEY (id))
+  FACTS (o.amt AS o.amount)
+  DIMENSIONS (o.region AS o.region)
+  METRICS (o.total AS sum(o.amount))
+  MATERIALIZATIONS (rt_mat AS (TABLE rt_orders, DIMENSIONS (region)));
+
+query I
+SELECT count(*) FROM (SHOW COLUMNS IN SEMANTIC VIEW rt_full);
+----
+3
+
+statement ok
+ROLLBACK;
+
+statement ok
+BEGIN;
+
+statement ok
+CREATE SEMANTIC VIEW rt_full AS
+  TABLES (o AS rt_orders PRIMARY KEY (id))
+  FACTS (o.amt AS o.amount)
+  DIMENSIONS (o.region AS o.region)
+  METRICS (o.total AS sum(o.amount))
+  MATERIALIZATIONS (rt_mat AS (TABLE rt_orders, DIMENSIONS (region)));
+
+query TT
+SELECT name, data_type FROM (SHOW SEMANTIC DIMENSIONS IN rt_full FOR METRIC total);
+----
+region	VARCHAR
+
+statement ok
+ROLLBACK;
+
+statement ok
+BEGIN;
+
+statement ok
+CREATE SEMANTIC VIEW rt_full AS
+  TABLES (o AS rt_orders PRIMARY KEY (id))
+  FACTS (o.amt AS o.amount)
+  DIMENSIONS (o.region AS o.region)
+  METRICS (o.total AS sum(o.amount))
+  MATERIALIZATIONS (rt_mat AS (TABLE rt_orders, DIMENSIONS (region)));
+
+query I
+SELECT count(*) FROM (SHOW SEMANTIC MATERIALIZATIONS IN rt_full);
+----
+1
+
+statement ok
+ROLLBACK;
+
+# --- A view dropped or renamed in an open transaction ----------------------
+
+statement ok
+CREATE SEMANTIC VIEW rt_kept AS
+  TABLES (o AS rt_orders PRIMARY KEY (id))
+  DIMENSIONS (o.region AS o.region)
+  METRICS (o.total AS sum(o.amount));
+
+statement ok
+BEGIN;
+
+statement ok
+DROP SEMANTIC VIEW rt_kept;
+
+statement error
+SELECT * FROM semantic_view('rt_kept', metrics := ['total']);
+----
+not found
+
+# The other session still sees the committed view.
+
+query I con2
+SELECT * FROM semantic_view('rt_kept', metrics := ['total']);
+----
+35
+
+statement ok
+ROLLBACK;
+
+statement ok
+BEGIN;
+
+statement ok
+ALTER SEMANTIC VIEW rt_kept RENAME TO rt_renamed;
+
+query I
+SELECT * FROM semantic_view('rt_renamed', metrics := ['total']);
+----
+35
+
+statement ok
+ROLLBACK;
+
+statement ok
+BEGIN;
+
+statement ok
+ALTER SEMANTIC VIEW rt_kept RENAME TO rt_renamed;
+
+statement error
+SELECT * FROM semantic_view('rt_kept', metrics := ['total']);
+----
+not found
+
+statement ok
+ROLLBACK;
+
+# --- A view altered or replaced in an open transaction ---------------------
+# Both update the stored row in place.
+
+statement ok
+BEGIN;
+
+statement ok
+ALTER SEMANTIC VIEW rt_kept SET COMMENT = 'in flight';
+
+query T
+SELECT comment FROM list_semantic_views() WHERE name = 'rt_kept';
+----
+in flight
+
+statement ok
+ROLLBACK;
+
+query T
+SELECT coalesce(comment, '') = '' FROM list_semantic_views() WHERE name = 'rt_kept';
+----
+true
+
+statement ok
+BEGIN;
+
+statement ok
+CREATE OR REPLACE SEMANTIC VIEW rt_kept AS
+  TABLES (o AS rt_orders PRIMARY KEY (id))
+  DIMENSIONS (o.region AS o.region)
+  METRICS (o.total AS max(o.amount));
+
+query I
+SELECT * FROM semantic_view('rt_kept', metrics := ['total']);
+----
+20
+
+statement ok
+ROLLBACK;
+
+query I
+SELECT * FROM semantic_view('rt_kept', metrics := ['total']);
+----
+35
+
+# --- A source table changed in an open transaction -------------------------
+
+statement ok
+BEGIN;
+
+statement ok
+ALTER TABLE rt_orders ALTER amount TYPE DOUBLE;
+
+query TT
+SELECT name, data_type FROM (SHOW SEMANTIC METRICS IN rt_kept);
+----
+total	DOUBLE
+
+query I
+SELECT typeof(total) FROM semantic_view('rt_kept', metrics := ['total']);
+----
+DOUBLE
+
+statement ok
+ROLLBACK;
+
+query TT
+SELECT name, data_type FROM (SHOW SEMANTIC METRICS IN rt_kept);
+----
+total	HUGEINT

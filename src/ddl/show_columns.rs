@@ -8,18 +8,15 @@ use crate::model::{AccessModifier, SemanticViewDefinition};
 // 8-column VARCHAR (database_name, schema_name, semantic_view_name,
 // column_name, data_type, kind, expression, comment).
 //
-// Per-call Connection from the C++ bind opens an `information_schema.tables`
-// probe to determine catalog-table-present; same borrow contract as
-// list_semantic_views (Wave 0 spike).
+// Runs in the caller's scope like list_semantic_views: the catalog is read in
+// the caller's transaction (TECH-DEBT #19).
 
 /// # Safety
 ///
-/// `conn` is a borrowed handle (see `src/ddl/list.rs` file-level docs).
 /// `name_ptr` must point to `name_len` UTF-8 bytes (not NUL-terminated).
 #[cfg(feature = "extension")]
 #[no_mangle]
 pub unsafe extern "C" fn sv_show_columns_in_semantic_view_bind_rust(
-    conn: libduckdb_sys::duckdb_connection,
     name_ptr: *const u8,
     name_len: usize,
     sp_ptr: *const u8,
@@ -30,13 +27,12 @@ pub unsafe extern "C" fn sv_show_columns_in_semantic_view_bind_rust(
     error_buf_len: usize,
 ) -> u8 {
     crate::ddl::read_ffi::run_dispatcher(
-        conn,
         out_ptr,
         out_len,
         error_buf,
         error_buf_len,
         "sv_show_columns_in_semantic_view_bind_rust",
-        |borrowed| unsafe { show_columns_rows(borrowed, name_ptr, name_len, sp_ptr, sp_len) },
+        || unsafe { show_columns_rows(name_ptr, name_len, sp_ptr, sp_len) },
     )
 }
 
@@ -48,13 +44,12 @@ pub unsafe extern "C" fn sv_show_columns_in_semantic_view_bind_rust(
 /// `name_ptr` must be null or point to `name_len` readable bytes.
 #[cfg(feature = "extension")]
 unsafe fn show_columns_rows(
-    borrowed: &crate::ddl::read_ffi::BorrowedConnection,
     name_ptr: *const u8,
     name_len: usize,
     sp_ptr: *const u8,
     sp_len: usize,
 ) -> Result<Vec<u8>, String> {
-    use crate::ddl::read_ffi::{probe_catalog_table_present, read_str_arg, serialize_varchar_rows};
+    use crate::ddl::read_ffi::{read_str_arg, serialize_varchar_rows};
 
     let raw_name = read_str_arg(name_ptr, name_len, "view name")?;
     // FF-4: normalize so quoted-identifier inputs resolve like `semantic_view()`.
@@ -62,17 +57,15 @@ unsafe fn show_columns_rows(
         .map_err(|e| format!("Invalid view name '{raw_name}': {e}"))?;
     let view_name = view.name.clone();
     let search_path = unsafe { crate::ddl::read_ffi::read_search_path(sp_ptr, sp_len) }?;
-    // FF-9: a probe-query failure is distinct from "no views" (propagated).
-    let present = probe_catalog_table_present(borrowed)?;
-    let reader = CatalogReader::new(borrowed, present);
+    // FF-9: a catalog-read failure is distinct from "no views" (propagated).
+    let reader = CatalogReader::for_caller()?;
     // C-4 (code-review 2026-07-11): canonical wording via view_not_found_msg.
     let json = reader
         .lookup(&view, &search_path)?
         .ok_or_else(|| crate::catalog::view_not_found_msg(&view.to_string()))?;
     let def = SemanticViewDefinition::from_json(&view_name, &json)?;
-    // TECH-DEBT #51: probe each column's type on this bind's connection.
+    // TECH-DEBT #51: probe each column's type in the caller's context.
     let types = crate::ddl::read_ffi::member_types_for_bind(
-        borrowed,
         &view_name,
         &def,
         crate::query::member_types::Wanted::ALL,

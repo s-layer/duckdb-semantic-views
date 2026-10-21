@@ -27,23 +27,19 @@ use crate::render_ddl::render_create_ddl_qualified;
 // ---------------------------------------------------------------------------
 // FFI dispatcher for the migrated `get_ddl(object_type, name)` scalar.
 // Invoked once per row by the C++ exec callback `sv_get_ddl_exec` in
-// cpp/src/shim.cpp. The caller (C++ side) opens a per-call
-// `Connection probe(*state.GetContext().db)` and passes it as a borrowed
-// `duckdb_connection` — the same borrow contract as the read-path bind
-// dispatchers (see `src/ddl/read_ffi.rs` module docs). The Rust side MUST
-// NOT call `duckdb_disconnect`; teardown is the C++ scope's responsibility.
+// cpp/src/shim.cpp, in the scope of the executing query, so the catalog is
+// read in that query's transaction (TECH-DEBT #19), as the read-path bind
+// dispatchers do (see `src/ddl/read_ffi.rs` module docs).
 
 /// # Safety
 ///
-/// `conn` is a borrowed handle (do NOT disconnect). `type_ptr` and `name_ptr`
-/// must each point to the corresponding number of UTF-8 bytes (not
+/// `type_ptr` and `name_ptr` must each point to the corresponding number of UTF-8 bytes (not
 /// NUL-terminated). `qualify` is `0` (bare name) or non-zero (schema-qualified
 /// name); the C++ side maps the optional third `BOOLEAN` argument onto it and
 /// passes `0` when the caller wrote the two-argument form.
 #[cfg(feature = "extension")]
 #[no_mangle]
 pub unsafe extern "C" fn sv_get_ddl_exec_rust(
-    conn: libduckdb_sys::duckdb_connection,
     type_ptr: *const u8,
     type_len: usize,
     name_ptr: *const u8,
@@ -57,15 +53,14 @@ pub unsafe extern "C" fn sv_get_ddl_exec_rust(
     error_buf_len: usize,
 ) -> u8 {
     crate::ddl::read_ffi::run_dispatcher(
-        conn,
         out_ptr,
         out_len,
         error_buf,
         error_buf_len,
         "sv_get_ddl_exec_rust",
-        |borrowed| unsafe {
+        || unsafe {
             get_ddl(
-                borrowed, type_ptr, type_len, name_ptr, name_len, sp_ptr, sp_len, qualify,
+                type_ptr, type_len, name_ptr, name_len, sp_ptr, sp_len, qualify,
             )
         },
     )
@@ -84,7 +79,6 @@ pub unsafe extern "C" fn sv_get_ddl_exec_rust(
 #[allow(clippy::too_many_arguments)]
 #[cfg(feature = "extension")]
 unsafe fn get_ddl(
-    borrowed: &crate::ddl::read_ffi::BorrowedConnection,
     type_ptr: *const u8,
     type_len: usize,
     name_ptr: *const u8,
@@ -93,7 +87,7 @@ unsafe fn get_ddl(
     sp_len: usize,
     qualify: u8,
 ) -> Result<Vec<u8>, String> {
-    use crate::ddl::read_ffi::{probe_catalog_table_present, read_str_arg};
+    use crate::ddl::read_ffi::read_str_arg;
 
     let obj_type = read_str_arg(type_ptr, type_len, "object_type")?;
     let raw_name = read_str_arg(name_ptr, name_len, "view name")?;
@@ -112,11 +106,8 @@ unsafe fn get_ddl(
     let name = view.name.clone();
     let search_path = unsafe { crate::ddl::read_ffi::read_search_path(sp_ptr, sp_len) }?;
 
-    // FF-9: a probe-query failure is distinct from "no views" (propagated).
-    let present = probe_catalog_table_present(borrowed)?;
-    let reader = CatalogReader::new(borrowed, present);
-    let json = reader
-        .lookup(&view, &search_path)?
+    // FF-9: a catalog-read failure is distinct from "no views" (propagated).
+    let json = CatalogReader::lookup_in_caller(&view, &search_path)?
         .ok_or_else(|| crate::catalog::view_not_found_msg(&view.to_string()))?;
     // C-2: `from_json` for the canonical "invalid definition for semantic
     // view '<name>'" context on corrupt rows.

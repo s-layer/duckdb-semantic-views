@@ -12,10 +12,7 @@
 use std::collections::{HashMap, HashSet};
 
 use crate::catalog::CatalogReader;
-use crate::ddl::read_ffi::{
-    probe_catalog_table_present, read_str_arg, run_dispatcher, serialize_varchar_bool_rows,
-    BorrowedConnection,
-};
+use crate::ddl::read_ffi::{read_str_arg, run_dispatcher, serialize_varchar_bool_rows};
 use crate::expand::collect_derived_metric_source_tables;
 use crate::graph::{JoinTree, RelationshipGraph};
 use crate::model::{Cardinality, Dimension, SemanticViewDefinition};
@@ -23,12 +20,11 @@ use crate::util::suggest_closest;
 
 /// # Safety
 ///
-/// `conn` is a borrowed handle; both name pointers must point to valid UTF-8
+/// Both name pointers must point to valid UTF-8
 /// bytes of the matching length. The caller releases the returned buffer via
 /// `sv_free_buffer`.
 #[no_mangle]
 pub unsafe extern "C" fn sv_show_semantic_dimensions_for_metric_bind_rust(
-    conn: libduckdb_sys::duckdb_connection,
     view_name_ptr: *const u8,
     view_name_len: usize,
     metric_name_ptr: *const u8,
@@ -41,15 +37,13 @@ pub unsafe extern "C" fn sv_show_semantic_dimensions_for_metric_bind_rust(
     error_buf_len: usize,
 ) -> u8 {
     run_dispatcher(
-        conn,
         out_ptr,
         out_len,
         error_buf,
         error_buf_len,
         "sv_show_semantic_dimensions_for_metric_bind_rust",
-        |borrowed| unsafe {
+        || unsafe {
             show_dims_for_metric(
-                borrowed,
                 view_name_ptr,
                 view_name_len,
                 metric_name_ptr,
@@ -74,7 +68,6 @@ pub unsafe extern "C" fn sv_show_semantic_dimensions_for_metric_bind_rust(
 // returns its own tailored diagnostic.
 #[allow(clippy::too_many_lines)]
 unsafe fn show_dims_for_metric(
-    borrowed: &BorrowedConnection,
     view_name_ptr: *const u8,
     view_name_len: usize,
     metric_name_ptr: *const u8,
@@ -91,8 +84,7 @@ unsafe fn show_dims_for_metric(
     let view_name = view.name.clone();
     let search_path = unsafe { crate::ddl::read_ffi::read_search_path(sp_ptr, sp_len) }?;
 
-    let present = probe_catalog_table_present(borrowed)?;
-    let reader = CatalogReader::new(borrowed, present);
+    let reader = CatalogReader::for_caller()?;
     let Some(json) = reader.lookup(&view, &search_path)? else {
         let available = reader.list_names().unwrap_or_default();
         let not_found = crate::catalog::view_not_found_msg(&view.to_string());
@@ -147,9 +139,8 @@ unsafe fn show_dims_for_metric(
     };
 
     let alias_map = def.alias_to_table_map();
-    // TECH-DEBT #51: probe the dimensions' types on this bind's connection.
+    // TECH-DEBT #51: probe the dimensions' types in the caller's context.
     let types = crate::ddl::read_ffi::member_types_for_bind(
-        borrowed,
         &view_name,
         &def,
         crate::query::member_types::Wanted::DIMENSIONS,

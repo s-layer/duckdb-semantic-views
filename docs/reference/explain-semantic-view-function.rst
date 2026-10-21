@@ -96,7 +96,7 @@ The output has three sections:
 
 1. **Header:** the view name, the requested dimensions and metrics (plus a ``-- Facts:`` line when facts are requested), and the materialization routing decision.
 2. **Expanded SQL:** the SQL query the extension generates, formatted with indentation.
-3. **DuckDB Plan:** the physical query plan from ``EXPLAIN``.
+3. **DuckDB Plan:** the physical query plan, as ``EXPLAIN`` shows it. It is planned in your session and transaction, as ``semantic_view()`` would be, so a temporary table of your session or a table changed in your open transaction is planned as the query would read it.
 
 The header includes a ``-- Materialization:`` line that reports the routing decision:
 

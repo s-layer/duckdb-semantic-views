@@ -11,9 +11,7 @@
 
 use crate::catalog::CatalogReader;
 use crate::ddl::describe::format_json_array;
-use crate::ddl::read_ffi::{
-    probe_catalog_table_present, read_str_arg, run_dispatcher, serialize_varchar_rows,
-};
+use crate::ddl::read_ffi::{read_str_arg, run_dispatcher, serialize_varchar_rows};
 use crate::model::SemanticViewDefinition;
 
 /// A single 7-column row of SHOW SEMANTIC MATERIALIZATIONS output.
@@ -64,26 +62,22 @@ fn collect_mats(view_name: &str, def: &SemanticViewDefinition) -> Vec<ShowMatRow
 
 /// # Safety
 ///
-/// `conn` is a borrowed handle (see `read_ffi` borrow contract). The caller
-/// releases the returned buffer via `sv_free_buffer`.
+/// The caller releases the returned buffer via `sv_free_buffer`.
 #[no_mangle]
 pub unsafe extern "C" fn sv_show_semantic_materializations_all_bind_rust(
-    conn: libduckdb_sys::duckdb_connection,
     out_ptr: *mut *mut u8,
     out_len: *mut usize,
     error_buf: *mut u8,
     error_buf_len: usize,
 ) -> u8 {
     run_dispatcher(
-        conn,
         out_ptr,
         out_len,
         error_buf,
         error_buf_len,
         "sv_show_semantic_materializations_all_bind_rust",
-        |borrowed| {
-            let present = unsafe { probe_catalog_table_present(borrowed) }?;
-            let reader = CatalogReader::new(borrowed, present);
+        || {
+            let reader = CatalogReader::for_caller()?;
             let entries = reader.list_all()?;
             let mut rows: Vec<Vec<String>> = Vec::new();
             for (name, json) in &entries {
@@ -104,11 +98,9 @@ pub unsafe extern "C" fn sv_show_semantic_materializations_all_bind_rust(
 
 /// # Safety
 ///
-/// `conn` is a borrowed handle; `name_ptr` must point to `name_len` UTF-8
-/// bytes. The caller releases the returned buffer via `sv_free_buffer`.
+/// `name_ptr` must point to `name_len` UTF-8 bytes. The caller releases the returned buffer via `sv_free_buffer`.
 #[no_mangle]
 pub unsafe extern "C" fn sv_show_semantic_materializations_bind_rust(
-    conn: libduckdb_sys::duckdb_connection,
     name_ptr: *const u8,
     name_len: usize,
     sp_ptr: *const u8,
@@ -119,13 +111,12 @@ pub unsafe extern "C" fn sv_show_semantic_materializations_bind_rust(
     error_buf_len: usize,
 ) -> u8 {
     run_dispatcher(
-        conn,
         out_ptr,
         out_len,
         error_buf,
         error_buf_len,
         "sv_show_semantic_materializations_bind_rust",
-        |borrowed| {
+        || {
             let view_name = unsafe { read_str_arg(name_ptr, name_len, "view name") }?;
             // FF-4: normalize so quoted-identifier inputs resolve like
             // `semantic_view()` does.
@@ -133,8 +124,7 @@ pub unsafe extern "C" fn sv_show_semantic_materializations_bind_rust(
                 .map_err(|e| format!("Invalid view name '{view_name}': {e}"))?;
             let view_name = view.name.clone();
             let search_path = unsafe { crate::ddl::read_ffi::read_search_path(sp_ptr, sp_len) }?;
-            let present = unsafe { probe_catalog_table_present(borrowed) }?;
-            let reader = CatalogReader::new(borrowed, present);
+            let reader = CatalogReader::for_caller()?;
             let Some(json) = reader.lookup(&view, &search_path)? else {
                 return Err(crate::catalog::view_not_found_msg(&view.to_string()));
             };
