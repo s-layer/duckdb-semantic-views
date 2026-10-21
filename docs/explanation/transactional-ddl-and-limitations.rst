@@ -249,6 +249,8 @@ Send each semantic-view statement to DuckDB on its own. A query string that hold
 
    Parser Error: semantic_views: semantic-view DDL must be sent as its own statement, one statement per call. This query string also contains other statements; send each statement in a separate call (a single trailing ';' is fine).
 
+DuckDB 2.0 runs a string's statements one at a time and parses each one just before it runs. So the statements ahead of the semantic-view DDL have already run when the error comes, and their effects stay: in the example above, the table exists and holds its rows, but the view is not created. Nothing after the DDL runs. The exception is a string that opens its own transaction with ``BEGIN``: the error aborts that transaction, so the statements ahead of the DDL are rolled back with it, and the connection needs a ``ROLLBACK`` before it runs anything else.
+
 Split the string into one call per statement (a single trailing semicolon is fine):
 
 .. code-block:: python
