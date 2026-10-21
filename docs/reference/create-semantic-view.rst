@@ -158,7 +158,7 @@ All three variants work with both the ``AS`` keyword body and the ``FROM YAML`` 
 
    A name that exists only in schemas *off* the path is a miss: the error names the schemas it does live in, the path that was searched, and the two ways out (qualify the reference, or add the schema to ``search_path``). ``IF EXISTS`` does not absorb it -- that clause means "do not complain if the view is absent", and a view sitting off the path is not absent.
 
-   Two exceptions: :ref:`ref-get-ddl` and :ref:`READ_YAML_FROM_SEMANTIC_VIEW <ref-read-yaml>` are scalar functions, which cannot be handed the search path, so they resolve a bare name to the unique match and raise an error naming the candidate schemas when several hold it.
+   The rule holds everywhere a view is named, :ref:`ref-get-ddl` and :ref:`READ_YAML_FROM_SEMANTIC_VIEW <ref-read-yaml>` included (before 0.16.0 those two ignored ``search_path`` and required a unique match).
 
    Unqualified table names in the body resolve in the **creating session's** schema, not in the view's -- so a semantic view in ``analytics`` built over ``main.orders`` can be written as ``CREATE SEMANTIC VIEW analytics.sales AS TABLES (o AS orders ...)`` from a session in ``main``. This follows DuckDB's rule for a view body.
 

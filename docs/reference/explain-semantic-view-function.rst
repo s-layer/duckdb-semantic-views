@@ -57,7 +57,7 @@ Parameters
      - Optional predicate applied **before** metrics are aggregated -- the equivalent of Snowflake's ``SEMANTIC_VIEW( ... WHERE <predicate> )``. See :ref:`ref-sv-pre-agg-filtering`. An omitted, empty, or whitespace-only value is treated as absent.
    * - ``search_path``
      - VARCHAR[] (named)
-     - **Reserved for the extension. Do not pass it.** The extension fills it in with the session's ``search_path`` so that an unqualified ``<view_name>`` resolves the way it does for :ref:`semantic_view() <ref-semantic-view-function>` (see :ref:`ref-functions-search-path`).
+     - **Reserved. Do not pass it.** The function reads the session's ``search_path`` itself, so an unqualified ``<view_name>`` resolves the way it does for :ref:`semantic_view() <ref-semantic-view-function>` (see :ref:`ref-functions-search-path`).
 
 At least one of ``dimensions``, ``metrics``, or ``facts`` must be specified. ``where_clause`` alone is not a query.
 

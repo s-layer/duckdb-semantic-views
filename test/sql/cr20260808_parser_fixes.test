@@ -18,9 +18,10 @@
 #
 # The runner halts a file at its first failing statement, so the per-case red
 # proof lives at the unit layer (`body_parser::window::tests`,
-# `expr_tokens::tests`, `parse::search_path::tests`, `util::tests`), each of
-# which was individually watched failing before the fix. This file covers the
-# whole pipeline.
+# `expr_tokens::tests`, `util::tests`, and `parse::search_path::tests` until
+# that module was deleted with the injection on 2026-10-16), each of which was
+# individually watched failing before the fix. This file covers the whole
+# pipeline.
 
 require semantic_views
 

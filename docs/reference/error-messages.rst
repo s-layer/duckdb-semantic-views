@@ -1078,21 +1078,6 @@ This applies to reads and writes alike, and ``IF EXISTS`` does not suppress it: 
 **Note:** A view that is the *only* one of its name resolves whether or not its schema is on the path, so this error only appears once a second view shares the name.
 
 
-Ambiguous name in GET_DDL or READ_YAML_FROM_SEMANTIC_VIEW
----------------------------------------------------------
-
-.. code-block:: text
-
-   get_ddl: semantic view '<name>' is ambiguous: it exists in schemas
-   <schema1>, <schema2>. Qualify the reference as <schema>.<name>
-
-``READ_YAML_FROM_SEMANTIC_VIEW`` raises the same message with a ``read_yaml_from_semantic_view:`` prefix.
-
-**Cause:** :ref:`GET_DDL <ref-get-ddl>` and :ref:`READ_YAML_FROM_SEMANTIC_VIEW <ref-read-yaml>` are scalar functions, so they do not follow ``search_path``. An unqualified name must match exactly one view, and several schemas hold a view of this name.
-
-**Fix:** Qualify the name: ``GET_DDL('SEMANTIC_VIEW', 'analytics.sales')``. See :ref:`ref-get-ddl-resolution`.
-
-
 DDL issued from an attached database
 ------------------------------------
 

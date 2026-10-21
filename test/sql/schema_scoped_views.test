@@ -159,12 +159,11 @@ DROP SEMANTIC VIEW IF EXISTS no_such_view
 #     and the ORDER of the path picks the winner.
 #
 # The read side binds on a fresh connection that can see neither
-# the caller's search path nor its current schema, so the parser
-# override injects the path as a table-function argument
-# (TECH-DEBT #19/#25). These cases are what prove the injection
-# actually happens: without it the read functions fall back to
-# "the unique match, else ambiguous" and every query below
-# errors instead of answering.
+# the caller's search path nor its current schema, so the bind reads
+# the path off the caller's context and passes it in (TECH-DEBT
+# #19/#25). These cases prove it does: without it the read functions
+# fall back to "the unique match, else ambiguous" and every query
+# below errors instead of answering.
 #
 # `analytics.sales` totals 350; `staging.sales` counts 2 rows.
 # ============================================================

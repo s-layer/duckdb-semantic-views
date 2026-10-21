@@ -38,14 +38,6 @@ mod native_sql;
 #[cfg(feature = "extension")]
 pub(crate) use native_sql::rewrite_to_native_sql;
 
-/// Rewrite-time injection of the caller's schema resolution order (#25/#19).
-///
-/// Compiled unconditionally so its unit tests run under plain `cargo test`,
-/// but only `rewrite_to_native_sql` — itself extension-gated — calls it, so the
-/// bundled non-test build sees the whole module as dead. Same shape as
-/// `catalog::writes`.
-#[cfg_attr(not(any(feature = "extension", test)), allow(dead_code))]
-pub(crate) mod search_path;
 mod show_clauses;
 pub(crate) use show_clauses::{build_filter_suffix, parse_show_filter_clauses};
 

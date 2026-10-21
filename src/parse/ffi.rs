@@ -142,10 +142,10 @@ pub unsafe extern "C" fn sv_parser_override_rust(
         let outcome = rewrite_to_native_sql(query);
         // Remember a multi-statement string so that parse_function can name
         // the real cause (TECH-DEBT #85). Noted on every call, rewritten or
-        // not: a string whose read call gets the search path injected (rc=0)
-        // still fails when the plain re-parse below meets its DDL. A DDL
-        // rewrite, though, took the whole string as ONE statement, whatever
-        // `;` it holds in a literal or comment -- nothing to remember.
+        // not: a string the override declines still fails when the plain
+        // re-parse below meets its DDL. A DDL rewrite, though, took the whole
+        // string as ONE statement, whatever `;` it holds in a literal or
+        // comment -- nothing to remember.
         let one_ddl_statement = matches!(outcome, Ok(Some(_))) && detect_ddl_kind(query).is_some();
         note_override_query(if one_ddl_statement { "" } else { query });
         match outcome {

@@ -1,0 +1,183 @@
+# Resolution of an unqualified semantic-view name follows the caller's search
+# path in every read function, including the two scalars and a table function
+# that reaches DuckDB without passing through the parser override.
+#
+# The read functions now take the path from the caller's ClientContext at bind
+# (scalars: at execution), instead of a `search_path :=` argument the parser
+# override spliced into the statement text. TECH-DEBT #19 / #25.
+#
+# Setup: one view name, `v`, in two schemas, each over its own table, so which
+# definition a call resolved is visible in its output. Only sp2's view has the
+# `sp2_only` dimension, which tells the two apart where the output names no table.
+
+require semantic_views
+
+statement ok
+CREATE SCHEMA sp1;
+
+statement ok
+CREATE SCHEMA sp2;
+
+statement ok
+CREATE TABLE sp1.t (id INTEGER, region VARCHAR);
+
+statement ok
+INSERT INTO sp1.t VALUES (1, 'one');
+
+statement ok
+CREATE TABLE sp2.t (id INTEGER, region VARCHAR);
+
+statement ok
+INSERT INTO sp2.t VALUES (2, 'two');
+
+statement ok
+CREATE SEMANTIC VIEW sp1.v AS TABLES (t AS sp1.t PRIMARY KEY (id)) DIMENSIONS (t.region AS region) METRICS (t.n AS COUNT(*)) COMMENT = 'from sp1';
+
+statement ok
+CREATE SEMANTIC VIEW sp2.v AS TABLES (t AS sp2.t PRIMARY KEY (id)) DIMENSIONS (t.region AS region, t.sp2_only AS t.id) METRICS (t.n AS COUNT(*)) COMMENT = 'from sp2';
+
+# Neither schema is on the path: no read guesses, and the error names where
+# the view does live.
+statement error
+SELECT get_ddl('SEMANTIC_VIEW', 'v');
+----
+It exists in schemas sp1, sp2, none of which are on the current search path (main)
+
+statement ok
+SET search_path = 'sp2';
+
+# --- the two scalar functions --------------------------------------------------
+# Before: both used the no-path fallback, so with `v` in two schemas they raised
+# the ambiguity error whatever the search path said.
+
+query I
+SELECT get_ddl('SEMANTIC_VIEW', 'v') LIKE '%from sp2%';
+----
+true
+
+query I
+SELECT read_yaml_from_semantic_view('v') LIKE '%from sp2%';
+----
+true
+
+# The path is read per statement, not once per connection. A prepared
+# statement keeps the path it was prepared under (TECH-DEBT #101, below).
+statement ok
+SET search_path = 'sp1';
+
+query I
+SELECT get_ddl('SEMANTIC_VIEW', 'v') LIKE '%from sp1%';
+----
+true
+
+query I
+SELECT read_yaml_from_semantic_view('v') LIKE '%from sp1%';
+----
+true
+
+# --- a table function the parser override never sees ----------------------------
+# With overrides off, the statement reaches DuckDB's own parser untouched, so no
+# `search_path :=` argument was ever spliced in and the call fell back to the
+# ambiguity error.
+
+statement ok
+SET allow_parser_override_extension = 'DEFAULT';
+
+query TI
+SELECT * FROM semantic_view('v', dimensions := ['region'], metrics := ['n']);
+----
+one	1
+
+query TT
+SELECT object_kind, property_value FROM describe_semantic_view('v') WHERE property = 'COMMENT';
+----
+(empty)	from sp1
+
+statement ok
+SET search_path = 'sp2';
+
+query TI
+SELECT * FROM semantic_view('v', dimensions := ['region'], metrics := ['n']);
+----
+two	1
+
+# The other bind shapes: explain_semantic_view, and the two-name bind of
+# show_semantic_dimensions_for_metric.
+query I
+SELECT bool_or(contains(explain_output, 'sp2')) AND NOT bool_or(contains(explain_output, 'sp1')) FROM explain_semantic_view('v', metrics := ['n']);
+----
+true
+
+query T rowsort
+SELECT name FROM show_semantic_dimensions_for_metric('v', 'n');
+----
+region
+sp2_only
+
+statement ok
+SET search_path = 'sp1';
+
+query T rowsort
+SELECT name FROM show_semantic_dimensions_for_metric('v', 'n');
+----
+region
+
+statement ok
+SET allow_parser_override_extension = 'FALLBACK';
+
+# --- a prepared statement (TECH-DEBT #101) ------------------------------------
+# DuckDB resolves its own tables on the path in effect at EXECUTE. The table
+# function resolves at PREPARE (its bind), and a scalar with constant arguments
+# is folded at PREPARE, so both keep the PREPARE-time path, as the injected
+# argument did before. A scalar with a parameter is not folded and follows the
+# EXECUTE-time path. Pinned so that a fix shows up here.
+
+statement ok
+PREPARE sp_prep_ddl AS SELECT get_ddl('SEMANTIC_VIEW', 'v') LIKE '%from sp1%';
+
+statement ok
+PREPARE sp_prep_ddl_param AS SELECT get_ddl('SEMANTIC_VIEW', $1) LIKE '%from sp2%';
+
+statement ok
+PREPARE sp_prep_tf AS SELECT region FROM semantic_view('v', dimensions := ['region'], metrics := ['n']);
+
+statement ok
+SET search_path = 'sp2';
+
+query I
+EXECUTE sp_prep_ddl;
+----
+true
+
+query I
+EXECUTE sp_prep_ddl_param('v');
+----
+true
+
+query T
+EXECUTE sp_prep_tf;
+----
+one
+
+# --- an explicit path still wins -----------------------------------------------
+# Views created before this change were stored with the argument the parser
+# override spliced in, which evaluates to the same path the bind now reads. So an
+# explicit `search_path` is still accepted, and still decides. The session path
+# is sp2 here; both explicit paths put sp1 first.
+
+query TI
+SELECT * FROM semantic_view('v', dimensions := ['region'], metrics := ['n'], search_path := ['sp1']);
+----
+one	1
+
+query TI
+SELECT * FROM semantic_view('v', dimensions := ['region'], metrics := ['n'], search_path := list_concat(['sp1'], current_schemas(false), [current_schema()]));
+----
+one	1
+
+# The stored views' exact expression is accepted, and evaluates to the session
+# path.
+query TI
+SELECT * FROM semantic_view('v', dimensions := ['region'], metrics := ['n'], search_path := list_concat(current_schemas(false), [current_schema()]));
+----
+two	1

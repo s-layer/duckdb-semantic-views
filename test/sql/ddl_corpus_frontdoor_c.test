@@ -23,6 +23,10 @@ require semantic_views
 # else error" and fails, since the name is in two schemas; one whose argument
 # was spliced into the wrong place fails to parse or bind. So every accept row
 # below would go red on the bug its Rust test pins.
+#
+# Since 0.16.0 there is no splice: each read function takes the caller's path
+# from its bind (search_path.rs is deleted). The rows still discriminate the
+# same way, since a call that ignored the path fails on the duplicated name.
 
 statement ok
 CREATE TABLE dcf_orders (id INTEGER PRIMARY KEY, region VARCHAR, amount INTEGER);
@@ -334,16 +338,16 @@ SELECT count(*) FROM explain_semantic_view('dcf_sp', metrics := ['total']) WHERE
 ----
 1
 
-# F-091: search_path.rs module doc ("What is deliberately NOT rewritten", TECH-DEBT #25) — the scalar functions get_ddl and read_yaml_from_semantic_view take no path: with the name in two schemas they refuse as ambiguous even though the session path names one. The refusal is a plain Invalid Input error (it was an INTERNAL error on the DuckDB 2.0 engine until the scalars were marked fallible; scalar_errors_are_input_errors.test)
-statement error
-SELECT get_ddl('SEMANTIC_VIEW', 'dcf_sp');
+# F-091: search_path.rs module doc ("What is deliberately NOT rewritten", TECH-DEBT #25) — the scalar functions get_ddl and read_yaml_from_semantic_view follow the session path too (since 0.16.0; they used to refuse as ambiguous with the name in two schemas, whatever the path said): with the path set to dcf_b they resolve dcf_b's view, whose fact is amt_b
+query T
+SELECT get_ddl('SEMANTIC_VIEW', 'dcf_sp') LIKE '%o.amt_b AS%';
 ----
-Invalid Input Error: get_ddl: semantic view 'dcf_sp' is ambiguous
+true
 
-statement error
-SELECT read_yaml_from_semantic_view('dcf_sp');
+query T
+SELECT read_yaml_from_semantic_view('dcf_sp') LIKE '%amt_b%' AND read_yaml_from_semantic_view('dcf_sp') NOT LIKE '%amt_a%';
 ----
-Invalid Input Error: read_yaml_from_semantic_view: semantic view 'dcf_sp' is ambiguous
+true
 
 # --- Search path: which list of schemas is passed ---
 

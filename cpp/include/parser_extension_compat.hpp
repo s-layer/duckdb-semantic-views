@@ -69,7 +69,9 @@
 // amalgamation header exposed directly.
 #include "duckdb.hpp"
 #include "duckdb/catalog/catalog.hpp"
+#include "duckdb/catalog/catalog_search_path.hpp"
 #include "duckdb/main/capi/capi_internal.hpp"
+#include "duckdb/main/client_data.hpp"
 #include "duckdb/main/extension_callback_manager.hpp"
 #include "duckdb/parser/parsed_data/create_scalar_function_info.hpp"
 #include "duckdb/parser/parsed_data/create_table_function_info.hpp"

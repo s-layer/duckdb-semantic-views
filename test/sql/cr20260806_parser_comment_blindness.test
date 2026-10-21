@@ -21,9 +21,15 @@
 # only later, as a query-time syntax error.
 #
 # The runner halts a file at its first failing statement, so the per-case red
-# proof lives at the unit layer (`parse::search_path::tests`,
+# proof lived at the unit layer (`parse::search_path::tests`,
 # `body_parser::tests`). This file covers what those cannot: the whole
 # extension-load -> DDL -> query path.
+#
+# Since 2026-10-16 (Phase 3) the injector is gone: the read functions take the
+# caller's search path at bind, so no comment can reach the path. The PARSE-5
+# rows below stay as end-to-end checks that a comment above a read call still
+# resolves the bare name; they no longer guard a scanner. PARSE-6 is
+# unaffected.
 
 require semantic_views
 

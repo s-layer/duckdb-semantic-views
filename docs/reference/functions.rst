@@ -219,8 +219,8 @@ The ``internal`` column is ``true`` for every function the extension registers, 
                  metrics and/or facts, generating the joins and GROUP BY from
                  the view definition. Pass at least one of dimensions, metrics
                  or facts; where_clause filters rows before aggregation. The
-                 search_path parameter is reserved for the extension, which
-                 fills it in where needed; do not pass it.
+                 search_path parameter is reserved (kept so views stored by
+                 earlier releases still bind); do not pass it.
       examples = [SELECT * FROM semantic_view('sales', dimensions := ['region'],
                  metrics := ['revenue']);]
 
@@ -238,8 +238,8 @@ The example assumes a view named ``sales`` with a ``region`` dimension and a ``r
 
    description = Backs SHOW SEMANTIC METRICS IN <view>: lists the metrics of one
                  semantic view. Use that statement rather than calling this
-                 directly. The search_path parameter is reserved for the
-                 extension, which fills it in where needed; do not pass it.
+                 directly. The search_path parameter is reserved (kept so
+                 views stored by earlier releases still bind); do not pass it.
       examples = [SHOW SEMANTIC METRICS IN sales;]
 
 .. tip::
@@ -252,9 +252,9 @@ The example assumes a view named ``sales`` with a ``region`` dimension and a ``r
 The ``search_path`` Parameter
 =============================
 
-Every table function the extension registers has a named parameter called ``search_path`` (type ``VARCHAR[]``). It is **reserved for the extension**: the extension fills it in with the session's ``search_path`` so that an unqualified view name resolves the way an unqualified table name does. Do not pass it yourself. To control which schema an unqualified name resolves to, set DuckDB's ``search_path`` setting, or qualify the view name (``'analytics.sales'``). See :ref:`ref-create-semantic-view` for the resolution rule.
+Every table function the extension registers has a named parameter called ``search_path`` (type ``VARCHAR[]``). It is **reserved**: each function reads the session's ``search_path`` itself, so an unqualified view name resolves the way an unqualified table name does, and the parameter is kept only so that views stored by releases before 0.16.0, whose SQL text carries it, still bind. Do not pass it yourself. To control which schema an unqualified name resolves to, set DuckDB's ``search_path`` setting, or qualify the view name (``'analytics.sales'``). See :ref:`ref-create-semantic-view` for the resolution rule.
 
-The scalar functions (``get_ddl`` and ``read_yaml_from_semantic_view``) have no ``search_path`` parameter. They resolve an unqualified name to the one view of that name; see :ref:`ref-get-ddl-resolution`.
+The scalar functions (``get_ddl`` and ``read_yaml_from_semantic_view``) have no ``search_path`` parameter; they read the session's path the same way (see :ref:`ref-get-ddl-resolution`).
 
 
 .. _ref-functions-subqueries:

@@ -36,7 +36,7 @@ Parameters
      - Description
    * - ``<view_name>``
      - VARCHAR
-     - The name of the semantic view to export. Supports unqualified (``my_view``), schema-qualified (``main.my_view``), and catalog-qualified (``memory.main.my_view``) names. A schema qualifier pins the schema. An unqualified name resolves to the unique view of that name; if several schemas hold one, the call fails with an error naming them, and ``search_path`` does not break the tie. This is the same rule :ref:`GET_DDL <ref-get-ddl-resolution>` uses.
+     - The name of the semantic view to export. Supports unqualified (``my_view``), schema-qualified (``main.my_view``), and catalog-qualified (``memory.main.my_view``) names. A schema qualifier pins the schema. An unqualified name resolves through the session's ``search_path``: the first schema on the path holding a view of that name wins. This is the same rule :ref:`GET_DDL <ref-get-ddl-resolution>` uses.
 
 
 .. _ref-read-yaml-output:
@@ -156,13 +156,14 @@ Error Cases
 
    Error: read_yaml_from_semantic_view: semantic view 'nonexistent' does not exist
 
-**Name held by several schemas:**
+**Name held by several schemas, none of them on the path:**
 
 .. code-block:: sql
 
-   -- With both main.order_metrics and staging.order_metrics present
+   -- With both analytics.order_metrics and staging.order_metrics present,
+   -- and the default search path (main)
    SELECT READ_YAML_FROM_SEMANTIC_VIEW('order_metrics');
 
 .. code-block:: text
 
-   Error: read_yaml_from_semantic_view: semantic view 'order_metrics' is ambiguous: it exists in schemas main, staging. Qualify the reference as <schema>.order_metrics
+   Error: read_yaml_from_semantic_view: semantic view 'order_metrics' does not exist on the search path. It exists in schemas analytics, staging, none of which are on the current search path (main). Qualify the reference as <schema>.order_metrics, or add the schema to search_path.

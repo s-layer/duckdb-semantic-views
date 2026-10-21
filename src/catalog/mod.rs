@@ -964,8 +964,9 @@ pub(crate) fn foreign_database_error(
 /// connection — the reader does the I/O, this decides.
 ///
 /// `rows` is every `(schema_name, definition)` the name matched, and
-/// `search_path` the caller's resolution order (see
-/// [`crate::parse::search_path::SEARCH_PATH_SQL`] for how it reaches the read side).
+/// `search_path` the caller's resolution order, which the shim reads off the
+/// caller's context (`sv_caller_search_path`) and the write side evaluates as
+/// [`crate::catalog::writes::SEARCH_PATH_SQL`].
 ///
 /// Two cases are not a plain first-match:
 ///
@@ -973,10 +974,11 @@ pub(crate) fn foreign_database_error(
 ///   as "does not exist", and so do we — but the error says where it *does*
 ///   live, because "does not exist" for a view that `SHOW SEMANTIC VIEWS`
 ///   plainly lists is otherwise baffling.
-/// * **No search path was supplied at all.** That means the call did not come
-///   through the parser override — a directly-invoked table function, or SQL
-///   emitted before injection existed. Falling back to "the unique match, or an
-///   ambiguity error" keeps such calls working and never picks arbitrarily.
+/// * **The search path is empty.** On `DuckDB` 2.0 every call carries one (the
+///   caller's path, or an explicit `search_path` argument), so this is an
+///   explicit `search_path := []`, or a v1.5 build, where the shim cannot read
+///   the caller's path. Falling back to "the unique match, or an ambiguity
+///   error" keeps such calls working and never picks arbitrarily.
 ///
 /// # Errors
 ///

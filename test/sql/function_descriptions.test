@@ -280,10 +280,19 @@ WHERE function_name = 'show_columns_in_semantic_view'
   AND coalesce(description, '') NOT LIKE '%declared%';
 ----
 
-# The listing functions declare search_path but the parser never injects it
-# into them (src/parse/search_path.rs), so the note must not claim it does.
+# Nothing fills search_path in any more (each function reads the caller's
+# path itself), so no description may claim something does.
 query T
 SELECT function_name FROM sv_fns
 WHERE coalesce(description, '') LIKE '%supplied automatically by the extension''s parser%'
+   OR coalesce(description, '') LIKE '%fills it in%'
+ORDER BY ALL;
+----
+
+# Every function that declares search_path says it is reserved.
+query T
+SELECT function_name FROM sv_fns
+WHERE list_contains(parameters, 'search_path')
+  AND coalesce(description, '') NOT LIKE '%search_path parameter is reserved (kept so views stored by earlier releases still bind)%'
 ORDER BY ALL;
 ----

@@ -72,6 +72,17 @@ pub(crate) fn create_target_schema_expr(target: &SchemaTarget) -> String {
     )
 }
 
+/// SQL yielding the caller's schema resolution order, most significant first.
+///
+/// `current_schemas(false)` is what `SET search_path` / `USE` set, and is
+/// **empty** on a fresh connection — so `current_schema()` is appended to cover
+/// the default. Duplicates (`USE a` already puts `a` on the path) are harmless:
+/// resolution takes the first match. `current_schemas(true)` is deliberately not
+/// used: it prepends the *temp* schema, itself called `main`, which would shadow
+/// a real schema of that name. The read side builds the same order in C++
+/// (`sv_caller_search_path`), so the two resolve a bare name alike.
+pub(crate) const SEARCH_PATH_SQL: &str = "list_concat(current_schemas(false), [current_schema()])";
+
 /// SQL scalar yielding the schema an existing semantic view lives in.
 ///
 /// A qualifier answers the question outright. Unqualified, the answer comes
@@ -93,10 +104,9 @@ pub(crate) fn create_target_schema_expr(target: &SchemaTarget) -> String {
 /// This mirrors [`crate::catalog::resolve_in_search_path`] branch for branch,
 /// deliberately: writes and reads resolving a bare name differently would mean
 /// `DROP SEMANTIC VIEW v` deleting a view other than the one `semantic_view('v')`
-/// reads. The read side is handed the path as a table-function argument the
-/// parser override injects (TECH-DEBT #19/#25); here the emitted SQL runs on
-/// the caller's own connection, so it just evaluates
-/// [`crate::parse::search_path::SEARCH_PATH_SQL`] directly.
+/// reads. The read side takes the path from the caller's context in its bind
+/// (`sv_caller_search_path` in the shim); here the emitted SQL runs on the
+/// caller's own connection, so it just evaluates [`SEARCH_PATH_SQL`] there.
 ///
 /// Both sides of the position lookup are folded — `DuckDB` matches identifiers
 /// case-insensitively, and a row may carry a different case than the path entry.
@@ -128,7 +138,7 @@ pub(crate) fn resolved_schema_expr(
             // `(analytics)` to someone who wrote `SET search_path = 'Analytics'`
             // names a path they did not set, and disagrees with the read side,
             // which prints its input verbatim.
-            let path = crate::parse::search_path::SEARCH_PATH_SQL;
+            let path = SEARCH_PATH_SQL;
             let folded = format!("list_transform({path}, lambda s: lower(s))");
             // 1-based position of a row's schema on the path, or NULL when the
             // schema is not on it. `count(rank)` therefore counts the reachable
@@ -605,7 +615,7 @@ mod tests {
         // `DROP SEMANTIC VIEW v` and `semantic_view('v')` cannot disagree
         // about which `v` they mean.
         assert!(
-            e.contains(crate::parse::search_path::SEARCH_PATH_SQL),
+            e.contains(SEARCH_PATH_SQL),
             "must resolve through the caller's search path: {e}"
         );
         // Earliest schema on the path wins. `min(schema_name)` would pick
@@ -652,10 +662,7 @@ mod tests {
         // configure, and disagrees with the read side, which prints its input
         // verbatim. (Raised by review on PR #187.)
         assert!(
-            e.contains(&format!(
-                "array_to_string({}, ', ')",
-                crate::parse::search_path::SEARCH_PATH_SQL
-            )),
+            e.contains(&format!("array_to_string({}, ', ')", SEARCH_PATH_SQL)),
             "the message must render the unfolded path: {e}"
         );
     }

@@ -143,17 +143,12 @@ fn current_database_guard(view: &ViewRef) -> String {
 // run's `(query -> result)` rather than re-deriving it.
 #[cfg(feature = "extension")]
 pub(crate) fn rewrite_to_native_sql(query: &str) -> Result<Option<String>, ParseError> {
+    // Not semantic-view DDL: DuckDB's own parser handles it. (Statements that
+    // only *query* a semantic view used to be rewritten here to carry the
+    // caller's search path; the read functions now take it from the caller's
+    // context themselves.)
     let Some(action) = plan_rewrite(query)? else {
-        // Not semantic-view DDL — but it may still *query* a semantic view,
-        // and the read side cannot see the caller's search path on its own
-        // (TECH-DEBT #19). Hand it in here, the one place that sees every
-        // statement. Statements mentioning no read function are returned
-        // unchanged as `None`, so DuckDB's own parser handles them exactly as
-        // before.
-        return Ok(match crate::parse::search_path::inject_search_path(query) {
-            std::borrow::Cow::Borrowed(_) => None,
-            std::borrow::Cow::Owned(rewritten) => Some(rewritten),
-        });
+        return Ok(None);
     };
 
     // Every `<database>.` prefix the statement writes must name the current
@@ -170,13 +165,7 @@ pub(crate) fn rewrite_to_native_sql(query: &str) -> Result<Option<String>, Parse
     let emitted: Option<String> = match action {
         // Read-side DDL (DESCRIBE / SHOW / SHOW COLUMNS): DuckDB runs the
         // read-side table function on the caller's connection unchanged.
-        // The lowered SQL calls a read table function, so it needs the path
-        // just as a hand-written call does.
-        RewriteAction::Passthrough(sql) => {
-            return Ok(Some(
-                crate::parse::search_path::inject_search_path(&sql).into_owned(),
-            ))
-        }
+        RewriteAction::Passthrough(sql) => return Ok(Some(sql)),
         // CREATE from an in-memory definition — hand the definition straight to
         // the shared emission path. AR-2: no JSON serialize → re-parse →
         // deserialize round-trip; the `SemanticViewDefinition` flows structurally.

@@ -79,8 +79,8 @@ use crate::model::SemanticViewDefinition;
 /// fresh `Connection(*context.db)` on the primary catalog with its own
 /// transaction, which is the whole premise of TECH-DEBT #19 (reads see
 /// committed state and the primary catalog; unqualified names are resolved
-/// by the `search_path` argument the parser override injects, not by this
-/// connection's own session state). This comment claimed the opposite until
+/// by the caller's search path, which the shim reads off the caller's
+/// context and passes in, not by this connection's own session state). This comment claimed the opposite until
 /// the 2026-08-08 review.
 #[cfg(feature = "extension")]
 #[no_mangle]

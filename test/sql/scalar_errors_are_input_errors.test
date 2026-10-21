@@ -46,7 +46,7 @@ Invalid Input Error: get_ddl: GET_DDL: unsupported object type 'TABLE'
 statement error
 SELECT get_ddl('SEMANTIC_VIEW', 'dup');
 ----
-Invalid Input Error: get_ddl: semantic view 'dup' is ambiguous
+Invalid Input Error: get_ddl: semantic view 'dup' does not exist on the search path
 
 statement error
 SELECT get_ddl('SEMANTIC_VIEW', 'se_nosuch', true);
@@ -61,7 +61,7 @@ Invalid Input Error: read_yaml_from_semantic_view: semantic view 'se_nosuch' doe
 statement error
 SELECT read_yaml_from_semantic_view('dup');
 ----
-Invalid Input Error: read_yaml_from_semantic_view: semantic view 'dup' is ambiguous
+Invalid Input Error: read_yaml_from_semantic_view: semantic view 'dup' does not exist on the search path
 
 # --- arguments from a table (evaluated at execution) ---------------------------
 

@@ -183,12 +183,12 @@ SELECT GET_DDL('SEMANTIC_VIEW', 'analytics.nosuch', true);
 does not exist
 
 # ============================================================
-# 7. A bare name is the UNIQUE match, not a search-path walk.
-#    Once two schemas hold `sales`, the bare lookup is an
-#    ambiguity error however `search_path` is set — which is
-#    what makes §2's bare-name assertion a unique-match proof
-#    rather than a path-resolution one. Kept last, because it
-#    is the second `sales` that breaks §3's single-row check.
+# 7. Once two schemas hold `sales`, a bare name follows
+#    `search_path` (since 0.16.0; earlier releases raised an
+#    ambiguity error however the path was set), and with
+#    neither schema on the path it is an error naming both.
+#    Kept last, because it is the second `sales` that breaks
+#    §3's single-row check.
 # ============================================================
 
 statement ok
@@ -200,13 +200,32 @@ CREATE SEMANTIC VIEW staging.sales AS
 statement ok
 SET search_path = 'analytics';
 
-statement error
-SELECT GET_DDL('SEMANTIC_VIEW', 'sales', true);
+query T
+SELECT starts_with(
+  GET_DDL('SEMANTIC_VIEW', 'sales', true),
+  'CREATE OR REPLACE SEMANTIC VIEW analytics.sales AS'
+);
 ----
-is ambiguous
+true
+
+statement ok
+SET search_path = 'staging';
+
+query T
+SELECT starts_with(
+  GET_DDL('SEMANTIC_VIEW', 'sales', true),
+  'CREATE OR REPLACE SEMANTIC VIEW staging.sales AS'
+);
+----
+true
 
 statement ok
 RESET search_path;
+
+statement error
+SELECT GET_DDL('SEMANTIC_VIEW', 'sales', true);
+----
+It exists in schemas analytics, staging, none of which are on the current search path
 
 # Qualifying it is the way through, exactly as the error says.
 

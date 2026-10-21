@@ -9,6 +9,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- **`GET_DDL` and `READ_YAML_FROM_SEMANTIC_VIEW` follow `search_path`.** An unqualified
+  view name now resolves through the session's `search_path`, as it already did for the
+  DDL statements and `semantic_view()`: when several schemas hold a view of that name,
+  the first one on the path wins, where before these two raised an ambiguity error
+  whatever the path said. Table functions called without going through the extension's
+  parser hook (with `allow_parser_override_extension` set to `DEFAULT`, or from DuckDB's
+  Python relational API) follow the path too, instead of requiring a unique match.
+
 ### Fixed
 
 - **The docs now say what runs when a multi-statement string is refused.** On DuckDB 2.0, the statements ahead of semantic-view DDL in one query string have already run when the "one statement per call" error is raised, and their effects stay. The "One Statement per Call" section of the transactions and limitations page says so.

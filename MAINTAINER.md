@@ -81,7 +81,6 @@ src/
 │   ├── create_body.rs         #   CREATE front door (validate_and_rewrite)
 │   ├── native_sql.rs          #   INSERT/UPDATE/DELETE emission on _definitions
 │   ├── show_clauses.rs        #   SHOW … clause parsing
-│   ├── search_path.rs         #   injects search_path := … into read-TF calls (#19/#25)
 │   └── mod.rs
 ├── graph/                     # Relationship graph: cardinality, join tree, toposort, derived-metric DAG
 │   ├── relationship.rs cardinality.rs join_tree.rs toposort.rs

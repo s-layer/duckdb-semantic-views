@@ -66,27 +66,24 @@ If the definition records no schema -- possible only for a view stored before se
 How an Unqualified Name Resolves
 ================================
 
-``GET_DDL`` is a **scalar** function, and scalar functions have no named parameters, so the extension cannot hand it the session's ``search_path`` the way it does for the :ref:`semantic_view() <ref-semantic-view-function>` table function. An unqualified name therefore resolves to the **unique** view of that name, wherever it lives:
+An unqualified name resolves through the session's ``search_path``, exactly as it does for the DDL statements and :ref:`semantic_view() <ref-semantic-view-function>` (see :ref:`ref-create-semantic-view`):
 
 - exactly one schema holds it -- that view is returned, whether or not its schema is on ``search_path``;
-- several schemas hold it -- an error naming them, so the answer is never a silent pick;
+- several schemas hold it -- the first schema on the path that holds it wins;
+- several schemas hold it, none of them on the path -- an error naming them;
 - none holds it -- the usual ``does not exist`` error.
-
-``SET search_path`` does **not** disambiguate here. Qualify the name instead:
 
 .. code-block:: sql
 
    SET search_path = 'analytics';
-   SELECT GET_DDL('SEMANTIC_VIEW', 'sales');    -- still an error if staging.sales exists too
-   SELECT GET_DDL('SEMANTIC_VIEW', 'analytics.sales');  -- unambiguous
+   SELECT GET_DDL('SEMANTIC_VIEW', 'sales');            -- analytics.sales, even if staging.sales exists
+   SELECT GET_DDL('SEMANTIC_VIEW', 'staging.sales');    -- a qualifier always wins
 
-:ref:`READ_YAML_FROM_SEMANTIC_VIEW <ref-read-yaml>` is a scalar too and follows the same rule. The DDL statements and :ref:`semantic_view() <ref-semantic-view-function>` **do** follow ``search_path`` -- see :ref:`ref-create-semantic-view`.
+:ref:`READ_YAML_FROM_SEMANTIC_VIEW <ref-read-yaml>` follows the same rule.
 
-The ambiguity error reads:
+.. versionchanged:: 0.16.0
 
-.. code-block:: text
-
-   get_ddl: semantic view 'sales' is ambiguous: it exists in schemas analytics, main. Qualify the reference as <schema>.sales
+   Earlier releases did not consult ``search_path`` here: an unqualified name had to match exactly one view, and two schemas holding it was an ambiguity error whatever the path said.
 
 
 .. _ref-get-ddl-examples:

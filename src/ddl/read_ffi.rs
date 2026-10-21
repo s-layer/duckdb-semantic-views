@@ -454,9 +454,9 @@ pub unsafe fn read_str_arg(ptr: *const u8, len: usize, what: &str) -> Result<Str
 /// wire format — the same encoding the `dimensions` / `metrics` / `facts`
 /// named parameters use.
 ///
-/// A null or empty buffer yields an empty path, which is the "no path was
-/// supplied" case [`crate::catalog::resolve_in_search_path`] falls back on: a
-/// table function invoked directly rather than through the parser override.
+/// A null or empty buffer yields an empty path, which
+/// [`crate::catalog::resolve_in_search_path`] falls back on (an explicit
+/// `search_path := []`, or a v1.5 build that cannot read the caller's path).
 /// That has to stay working, so absence is not an error.
 ///
 /// # Safety
