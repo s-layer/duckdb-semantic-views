@@ -27,6 +27,10 @@ Each scenario runs on a fresh in-memory database and reports independently:
                                runs its own catalog queries through the override.
   caret_after_read_call        an invalid DDL on line 2, after a read call: the
                                caret still points into the query as written.
+  ddl_after_read_with_semicolon  a read call whose view's expression holds a `;`
+                               in a literal, so the queries it runs look like
+                               several statements; the DDL after it still says
+                               'one statement per call'.
   control_override_disabled    the override really is off (SET
                                allow_parser_override_extension='DEFAULT'), DDL
                                sent alone: the original "not active" message
@@ -41,6 +45,11 @@ Each scenario runs on a fresh in-memory database and reports independently:
                                trailing comment) and succeeded.
   control_stale_after_typo     the same, but the first database's string
                                failed on a typo before reaching its DDL.
+  control_stale_after_runtime_error  the same, but an earlier statement of the
+                               first database's string failed as it ran, so
+                               DuckDB 2.0 never parsed its DDL.
+  control_stale_caret_runtime_error  likewise for an invalid DDL: the second
+                               error must not quote the first query.
   control_stale_caret_query    an invalid DDL in a multi-statement string on
                                one database, then the same invalid DDL alone on
                                another database whose override is off: the
@@ -158,6 +167,27 @@ def scenario_caret_after_read_call():
     assert "LINE 2:" in msg, f"the caret must point into the query as written; got: {msg}"
 
 
+def scenario_ddl_after_read_with_semicolon():
+    con = connect()
+    try:
+        con.execute("CREATE TABLE orders (id INTEGER, region VARCHAR, amount DOUBLE)")
+        con.execute(
+            "CREATE SEMANTIC VIEW semi AS TABLES (o AS orders PRIMARY KEY (id)) "
+            "DIMENSIONS (o.label AS CASE WHEN o.region = 'a;b' THEN 'x' ELSE o.region END) "
+            "METRICS (o.revenue AS SUM(o.amount))"
+        )
+        msg = error_of(
+            con,
+            "SELECT * FROM semantic_view('semi', dimensions := ['label'], "
+            "metrics := ['revenue']); " + DDL,
+        )
+    finally:
+        con.close()
+    assert msg is not None, "a multi-statement string with semantic-view DDL must still fail"
+    assert NEW_HINT in msg, f"error must say {NEW_HINT!r}; got: {msg}"
+    assert OLD_HINT not in msg, f"error must not blame the override setting; got: {msg}"
+
+
 def scenario_control_override_disabled():
     con = connect()
     try:
@@ -226,6 +256,26 @@ def scenario_control_stale_after_typo():
     check_not_blamed_after("SELEC 1; " + DDL, expect_first_error=True)
 
 
+def scenario_control_stale_after_runtime_error():
+    check_not_blamed_after("SELECT * FROM missing_table; " + DDL, expect_first_error=True)
+
+
+def scenario_control_stale_caret_runtime_error():
+    bad = DDL.replace("DIMENSIONS", "DIMENSIONZ", 1)
+    off, on = connect(), connect()
+    try:
+        off.execute("SET allow_parser_override_extension = 'DEFAULT'")
+        # The DDL starts on line 2 here, and is never parsed: the SELECT fails first.
+        first = error_of(on, "SELECT * FROM missing_table;\n" + bad)
+        msg = error_of(off, bad)
+    finally:
+        off.close()
+        on.close()
+    assert first is not None and "missing_table" in first, f"setup: unexpected first error: {first}"
+    assert msg is not None, "an invalid DDL must fail"
+    assert "LINE 2:" not in msg, f"must not quote another query; got: {msg}"
+
+
 def scenario_control_stale_caret_query():
     bad = DDL.replace("DIMENSIONS", "DIMENSIONZ", 1)
     off, on = connect(), connect()
@@ -281,11 +331,14 @@ SCENARIOS = [
     scenario_ddl_after_read_call,
     scenario_ddl_after_describe,
     scenario_caret_after_read_call,
+    scenario_ddl_after_read_with_semicolon,
     scenario_control_override_disabled,
     scenario_control_single_statement,
     scenario_control_stale_other_database,
     scenario_control_stale_after_success,
     scenario_control_stale_after_typo,
+    scenario_control_stale_after_runtime_error,
+    scenario_control_stale_caret_runtime_error,
     scenario_control_stale_caret_query,
     scenario_control_stale_caret_success,
     scenario_control_stale_caret_parse_error,
