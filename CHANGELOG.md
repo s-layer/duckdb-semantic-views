@@ -9,7 +9,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-_No unreleased changes yet._
+### Fixed
+
+- **The docs now say what runs when a multi-statement string is refused.** On DuckDB 2.0, the statements ahead of semantic-view DDL in one query string have already run when the "one statement per call" error is raised, and their effects stay. The "One Statement per Call" section of the transactions and limitations page says so.
 
 ## [0.15.0] - 2026-10-21
 
