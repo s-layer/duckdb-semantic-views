@@ -248,9 +248,23 @@ SELECT * FROM SEMANTIC_VIEW(svc_sv DIMENSIONS region METRICS revenue) PIVOT (sum
 150.00	70.00
 
 query TT
-PIVOT SEMANTIC_VIEW(svc_sv DIMENSIONS region METRICS revenue) ON region USING sum(revenue);
+PIVOT SEMANTIC_VIEW(svc_sv DIMENSIONS region METRICS revenue) ON region IN ('EU', 'US') USING sum(revenue);
 ----
 150.00	70.00
+
+# Without IN, DuckDB 2.0 runs the PIVOT as several statements (it reads the
+# distinct `region` values from the construct first), whose result the runner
+# cannot compare, so it lands in a table that is queried instead.
+statement ok
+CREATE TABLE svc_pivoted AS PIVOT SEMANTIC_VIEW(svc_sv DIMENSIONS region METRICS revenue) ON region USING sum(revenue);
+
+query TT
+SELECT "EU", "US" FROM svc_pivoted;
+----
+150.00	70.00
+
+statement ok
+DROP TABLE svc_pivoted;
 
 # FACTS returns rows unaggregated, and its place among the clauses sets its
 # columns' place too.

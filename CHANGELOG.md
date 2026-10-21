@@ -11,35 +11,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
-- **The `SEMANTIC_VIEW(...)` query construct.** You can query a semantic view the way
-  Snowflake does, in `FROM`:
-  `SELECT * FROM SEMANTIC_VIEW(sales DIMENSIONS c.region AS r METRICS o.revenue WHERE o.year = 2024)`.
-  It stands wherever a table can: in joins, CTEs, subqueries, `PIVOT` and view bodies, with
-  a table alias and column aliases. Clauses can come in any order, and the order you write
-  them in is the order of the columns. `WHERE` filters the rows the metrics aggregate, as
-  `where_clause` does. A view over the construct expands against the semantic view's
-  current definition each time it is queried. Items are member names or `<table>.*`
-  wildcards for now; expressions are not supported yet. A prepared statement's `?`
-  parameter inside the construct is refused with an error.
-
-- **Output names and column order for `semantic_view()`.** A `dimensions`, `metrics` or
-  `facts` item can name its output column with `AS`, as in `'o.region AS r'`, and the new
-  `column_order` parameter (for example `['metrics', 'dimensions']`) sets which list's
-  columns come first. Two columns with the same name are an error.
-
 - **`SHOW` and `DESCRIBE` statements work as subqueries.** `DESCRIBE SEMANTIC VIEW`,
   `SHOW [TERSE] SEMANTIC VIEWS`, `SHOW SEMANTIC DIMENSIONS / METRICS / FACTS /
   MATERIALIZATIONS` (with `FOR METRIC` too) and `SHOW COLUMNS IN SEMANTIC VIEW` can now be
   used wherever DuckDB accepts a query: in `FROM`, in a CTE or in a view body, so you can
   filter, join and aggregate their output, as in
   `SELECT * FROM (DESCRIBE SEMANTIC VIEW v) WHERE object_kind = 'METRIC'`.
-
-- **`SET max_execution_time` stops semantic-view queries.** DuckDB 2.0's per-query time
-  limit now applies to `semantic_view()` and to the `SHOW` / `DESCRIBE` commands that look
-  up member types, which fail with DuckDB's own `Query exceeded maximum execution time`
-  like any other query instead of running past the limit. As with DuckDB's own queries,
-  the limit counts from when the query starts running, so time DuckDB spends planning a
-  source that is slow to bind, such as a long list of files, is not limited.
 
 - **Semantic-view DDL can share a query string with other statements.** One `execute()`
   call can now hold, say, `CREATE TABLE …; INSERT …; CREATE SEMANTIC VIEW …`: DuckDB
@@ -58,19 +35,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   that names a view with an unquoted reserved word (`select`) still fails there with
   "parser_override is not active"; quote the name to run it.
 
+- **The `SEMANTIC_VIEW(...)` query construct.** You can query a semantic view the way
+  Snowflake does, in `FROM`:
+  `SELECT * FROM SEMANTIC_VIEW(sales DIMENSIONS c.region AS r METRICS o.revenue WHERE o.year = 2024)`.
+  It stands wherever a table can: in joins, CTEs, subqueries, `PIVOT` and view bodies, with
+  a table alias and column aliases. Clauses can come in any order, and the order you write
+  them in is the order of the columns. `WHERE` filters the rows the metrics aggregate, as
+  `where_clause` does. A view over the construct expands against the semantic view's
+  current definition each time it is queried. Items are member names or `<table>.*`
+  wildcards for now; expressions are not supported yet. A prepared statement's `?`
+  parameter inside the construct is refused with an error.
+
+- **Output names and column order for `semantic_view()`.** A `dimensions`, `metrics` or
+  `facts` item can name its output column with `AS`, as in `'o.region AS r'`, and the new
+  `column_order` parameter (for example `['metrics', 'dimensions']`) sets which list's
+  columns come first. Two columns with the same name are an error.
+
 ### Changed
 
-- **A member named with the word `as` has to be quoted in a `semantic_view()` list item.**
-  Since an item can now give its column an alias with `AS`, a member whose name contains
-  the word `as` on its own (`Sales as of`) has to be quoted there (`'"Sales as of"'`).
-  Names with spaces otherwise work unquoted as before.
-- **A member name inside a `where_clause` subquery is the subquery's own.** Before, a
-  member could be named inside a subquery to correlate it with the outer query, as in
-  `EXISTS (SELECT 1 FROM t WHERE t.k = region)`. Now `region` there refers to the
-  subquery's own tables, as in Snowflake, where the `WHERE` clause takes uncorrelated
-  subqueries. A subquery sees none of the semantic view's tables, so a name its own tables
-  lack is DuckDB's `Referenced column ... not found` error. Write a condition on the member
-  outside the subquery.
 - **`GET_DDL` and `READ_YAML_FROM_SEMANTIC_VIEW` follow `search_path`.** An unqualified
   view name now resolves through the session's `search_path`, as it already did for the
   DDL statements and `semantic_view()`: when several schemas hold a view of that name,
@@ -78,15 +60,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   whatever the path said. Table functions called without going through the extension's
   parser hook (with `allow_parser_override_extension` set to `DEFAULT`, or from DuckDB's
   Python relational API) follow the path too, instead of requiring a unique match.
-- **The extension now runs on DuckDB 2.0, and only there.** This release is built
-  against DuckDB 2.0 and loads only in that exact DuckDB release. Until DuckDB 2.0.0 is
-  released it is built against the `v2.0.0-alpha47600` pre-release (the `duckdb`
-  `2.0.0.dev2610151406` Python wheel) and loads only there. If you stay on DuckDB 1.5, keep
-  v0.14.1, the last release for 1.5.
-- **Two identifier errors now come from DuckDB.** In semantic-view DDL, an unterminated
-  quoted identifier and an empty one (`""`) are now rejected by DuckDB 2.0 before the
-  extension sees the statement. The errors read `unterminated quoted identifier` and
-  `zero-length delimited identifier` instead of the extension's own wording.
+
+- **CREATE rejects an empty view.** A view with no tables (`TABLES ()`, or a YAML
+  definition with `tables: []` or no `tables`), or whose `DIMENSIONS` and `METRICS`
+  clauses are all empty (`DIMENSIONS () METRICS ()`, a lone `METRICS ()`), is now refused at
+  `CREATE SEMANTIC VIEW`, as Snowflake does. Before, such a view was created but could not
+  be queried, and `GET_DDL` either failed on it or returned DDL that `CREATE` refused. A
+  YAML export of a view stored in the legacy format, which lists no tables, can no longer be
+  imported either; re-create that view with `CREATE OR REPLACE SEMANTIC VIEW`.
+
+- **A member named with the word `as` has to be quoted in a `semantic_view()` list item.**
+  Since an item can now give its column an alias with `AS`, a member whose name contains
+  the word `as` on its own (`Sales as of`) has to be quoted there (`'"Sales as of"'`).
+  Names with spaces otherwise work unquoted as before.
+
+- **A member name inside a `where_clause` subquery is the subquery's own.** Before, a
+  member could be named inside a subquery to correlate it with the outer query, as in
+  `EXISTS (SELECT 1 FROM t WHERE t.k = region)`. Now `region` there refers to the
+  subquery's own tables, as in Snowflake, where the `WHERE` clause takes uncorrelated
+  subqueries. A subquery sees none of the semantic view's tables, so a name its own tables
+  lack is DuckDB's `Referenced column ... not found` error. Write a condition on the member
+  outside the subquery.
+
+- **`SET max_execution_time` counts from when a `semantic_view()` query starts running.**
+  As with DuckDB's own queries, time DuckDB spends planning a source that is slow to bind,
+  such as a long list of files, is not limited.
 
 - **`semantic_view()` runs as part of your query.** DuckDB now plans the semantic view's
   expanded SQL inside the query that calls it, instead of the extension running it
@@ -105,19 +103,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - **`where_clause` can use a column of an enclosing query**, as in
     `FROM t, LATERAL (SELECT * FROM semantic_view('v', metrics := ['revenue'], where_clause := 'region = t.r'))`.
 
-- **CREATE rejects an empty view.** A view with no tables (`TABLES ()`, or a YAML
-  definition with `tables: []` or no `tables`), or whose `DIMENSIONS` and `METRICS`
-  clauses are all empty (`DIMENSIONS () METRICS ()`, a lone `METRICS ()`), is now refused at
-  `CREATE SEMANTIC VIEW`, as Snowflake does. Before, such a view was created but could not
-  be queried, and `GET_DDL` either failed on it or returned DDL that `CREATE` refused. A
-  YAML export of a view stored in the legacy format, which lists no tables, can no longer be
-  imported either; re-create that view with `CREATE OR REPLACE SEMANTIC VIEW`.
-
 ### Fixed
+
+- **A subquery in `where_clause` keeps its own names.** A name inside a subquery, such as
+  `amt` in `amt IN (SELECT amt FROM targets)`, was replaced with the member of that name, so
+  the subquery compared each row with itself and filtered nothing, or failed to parse. Names
+  inside a subquery now refer to the subquery's own tables, as in Snowflake, where the
+  `WHERE` clause takes uncorrelated subqueries.
 
 - **`semantic_view()` sees your open transaction.** Rows you insert, update or delete
   inside a transaction are now counted by a semantic-view query in that transaction.
   Before, the query ran on a connection of its own and saw only committed data.
+
 - **Semantic-view reads see your open transaction's DDL.** A semantic view you create,
   drop, rename or alter inside a transaction now reads that way in the transaction before
   you commit: `semantic_view()`, `explain_semantic_view()`, `SHOW`, `DESCRIBE`, `GET_DDL`
@@ -129,20 +126,45 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   catalog table directly, so it must be a DuckDB table: if the primary database comes
   from a storage extension instead, reads report that `semantic_layer._definitions` is
   not a DuckDB table.
+
 - **A semantic view over a temporary table can be queried** in the session that has the
   table. Each table in `TABLES` is the one CREATE found: a temporary table if that is what
   its name meant then, otherwise the table in the database and schema the view was created
   in. Before, the query could not see temporary tables at all. `SHOW` and `DESCRIBE`
   report the members' types for such a view, and `explain_semantic_view` shows its plan.
+
 - **A prepared `semantic_view()` query follows a later `SET search_path`.** `EXECUTE`
   now looks the view up on the search path in effect when it runs, as DuckDB does for
   its own tables. Before, it kept the view found when the statement was prepared.
 
-- **A subquery in `where_clause` keeps its own names.** A name inside a subquery, such as
-  `amt` in `amt IN (SELECT amt FROM targets)`, was replaced with the member of that name, so
-  the subquery compared each row with itself and filtered nothing, or failed to parse. Names
-  inside a subquery now refer to the subquery's own tables, as in Snowflake, where the
-  `WHERE` clause takes uncorrelated subqueries.
+## [0.15.0] - 2026-10-21
+
+### Added
+
+- **`SET max_execution_time` stops semantic-view queries.** DuckDB 2.0's per-query time
+  limit now applies to `semantic_view()` and to the `SHOW` / `DESCRIBE` commands that look
+  up member types, which fail with DuckDB's own `Query exceeded maximum execution time`
+  like any other query instead of running past the limit.
+
+### Changed
+
+- **The extension now runs on DuckDB 2.0, and only there.** This release is built
+  against DuckDB `v2.0.0` and loads only in that exact DuckDB release. If you stay on
+  DuckDB 1.5, keep v0.14.1, the last release for 1.5.
+- **Two identifier errors now come from DuckDB.** In semantic-view DDL, an unterminated
+  quoted identifier and an empty one (`""`) are now rejected by DuckDB 2.0 before the
+  extension sees the statement. The errors read `unterminated quoted identifier` and
+  `zero-length delimited identifier` instead of the extension's own wording.
+
+### Fixed
+
+- **Brackets in semantic-view DDL must pair up by kind.** `CREATE SEMANTIC VIEW` now refuses
+  a clause where a closing bracket doesn't match the one it closes (a `]` or `}` closing a
+  `(`), or where one is never opened or never closed, with an error that names the bracket
+  and the clause. Such a body used to be accepted, and could be split into members
+  differently from how it was written, so `GET_DDL` rendered back a different view.
+  `CREATE SEMANTIC VIEW ... FROM YAML` refuses a member expression with such brackets for
+  the same reason, and `GET_DDL` quotes a column name that has them.
 
 ### Known limitations
 
@@ -929,7 +951,8 @@ Connection-lifecycle and ADBC fixes. Two downstream regressions reported against
 - `list_semantic_views()` and `describe_semantic_view()` introspection functions
 - Fuzz targets for FFI boundary testing
 
-[Unreleased]: https://github.com/s-layer/duckdb-semantic-views/compare/v0.14.1...HEAD
+[Unreleased]: https://github.com/s-layer/duckdb-semantic-views/compare/v0.15.0...HEAD
+[0.15.0]: https://github.com/s-layer/duckdb-semantic-views/compare/v0.14.1...v0.15.0
 [0.14.1]: https://github.com/s-layer/duckdb-semantic-views/compare/v0.14.0...v0.14.1
 [0.14.0]: https://github.com/s-layer/duckdb-semantic-views/compare/v0.13.0...v0.14.0
 [0.13.0]: https://github.com/s-layer/duckdb-semantic-views/compare/v0.12.1...v0.13.0
