@@ -185,7 +185,7 @@ pub(super) fn find_clause_bounds<'a>(
                 Some(UnterminatedRegion::Dollar) => {
                     format!("Unterminated dollar-quoted string in clause '{kw_upper}'.")
                 }
-                None => format!("Unclosed '(' for clause '{kw_upper}'."),
+                None => format!("Unclosed '(' in clause '{kw_upper}'."),
             };
             return Err(cur.err(open_tok.start, message));
         };
@@ -215,6 +215,8 @@ pub(super) fn find_clause_bounds<'a>(
                         char::from(inner.symbol(t))
                     ),
                 ),
+                // With several brackets open, the innermost is the one
+                // reported, as compilers do.
                 BracketMismatch::Unclosed(t) => (
                     t.start,
                     format!(

@@ -175,7 +175,7 @@ Unclosed parenthesis
 
 .. code-block:: text
 
-   Unclosed '(' for clause '<KEYWORD>'.
+   Unclosed '(' in clause '<KEYWORD>'.
 
 **Cause:** A clause's opening parenthesis has no matching closing parenthesis.
 

@@ -239,6 +239,33 @@ fn a_pin_whose_tag_is_another_commit_is_refused() {
     assert!(err.contains("does not build DuckDB v2.0.0"), "{err}");
 }
 
+/// Every release passes the pin's commit, which is empty when the pin's tag has
+/// no commit to name: an empty commit matches nothing, so an unbuilt pin is
+/// still refused (#287 review).
+#[test]
+fn an_empty_pin_commit_does_not_make_an_unbuilt_pin_the_default() {
+    let err = key_with_commit("empty-commit", "v1.5.7", BUILD_YML_SHA, BUILD_PY, "").unwrap_err();
+    assert!(err.contains("does not build DuckDB v1.5.7"), "{err}");
+}
+
+/// An empty pin commit leaves an older line in its own key.
+#[test]
+fn an_empty_pin_commit_leaves_an_older_line_in_its_key() {
+    assert_eq!(
+        key_with_commit("empty-older", "v1.5.6", BUILD_YML_SHA, BUILD_PY, "").as_deref(),
+        Ok("variegata")
+    );
+}
+
+/// An abbreviated pin commit names the default commit too.
+#[test]
+fn an_abbreviated_pin_commit_of_the_default_goes_in_ref() {
+    assert_eq!(
+        key_with_commit("short-commit", "v2.0.0", BUILD_YML_SHA, BUILD_PY, "b15358c").as_deref(),
+        Ok("ref")
+    );
+}
+
 /// The label alone settles nothing for the older lines: they still go in
 /// their own keys.
 #[test]
@@ -310,6 +337,55 @@ jobs:
     assert_eq!(
         key("two-jobs-default", "v2.0.0-alpha46057", yml, BUILD_PY).as_deref(),
         Ok("ref")
+    );
+}
+
+/// The same jobs indented by four spaces: the job blocks are found at whatever
+/// indentation the file uses, so the default's label still comes from its own
+/// job (v0.15.0 delta review, F6).
+#[test]
+fn another_jobs_label_is_not_the_default_at_four_space_indentation() {
+    let yml = "\
+jobs:
+    prepare:
+        env:
+            DUCKDB_LATEST_STABLE: 'b15358c371daf10dad799a43b6167f6ccdce84d8'
+    build-older:
+        with:
+            duckdb_version: ${{ inputs.duckdb_version || 'v1.5.6' }}
+            duckdb_tag: ${{ inputs.duckdb_tag || 'v1.5.6' }}
+    build:
+        with:
+            duckdb_version: ${{ inputs.duckdb_version || 'b15358c371daf10dad799a43b6167f6ccdce84d8' }}
+            duckdb_tag: ${{ inputs.duckdb_tag || 'v2.0.0-alpha46057' }}
+";
+    assert_eq!(
+        key("four-space-default", "v2.0.0-alpha46057", yml, BUILD_PY).as_deref(),
+        Ok("ref")
+    );
+}
+
+/// At four-space indentation, an older line's label after an unlabelled
+/// default job is still that line's, so its pin keeps its own key instead of
+/// being taken for the default: the blocks are split per job, not read as one.
+#[test]
+fn an_older_jobs_label_after_the_default_job_stays_its_own_at_four_space_indentation() {
+    let yml = "\
+jobs:
+    prepare:
+        env:
+            DUCKDB_LATEST_STABLE: 'b15358c371daf10dad799a43b6167f6ccdce84d8'
+    build:
+        with:
+            duckdb_version: ${{ inputs.duckdb_version || 'b15358c371daf10dad799a43b6167f6ccdce84d8' }}
+    build-older:
+        with:
+            duckdb_version: ${{ inputs.duckdb_version || 'v1.5.6' }}
+            duckdb_tag: ${{ inputs.duckdb_tag || 'v1.5.6' }}
+";
+    assert_eq!(
+        key("four-space-older", "v1.5.6", yml, BUILD_PY).as_deref(),
+        Ok("variegata")
     );
 }
 

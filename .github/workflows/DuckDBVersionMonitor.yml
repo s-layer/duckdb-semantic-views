@@ -27,9 +27,9 @@ jobs:
           echo "latest=$LATEST" >> $GITHUB_OUTPUT
           echo "current=$CURRENT" >> $GITHUB_OUTPUT
           # Newer, not merely different: the pin can be ahead of the latest
-          # release (a 2.0 pre-release while 1.5.x is still "latest"), and that
-          # must not be "bumped" back. A release is newer than a pre-release of
-          # the same version (v2.0.0 > v2.0.0-alpha47600).
+          # release (a pre-release of the next line while the last one is still
+          # "latest"), and that must not be "bumped" back. A release is newer than a
+          # pre-release of the same version (vX.Y.Z > vX.Y.Z-alphaN).
           IS_NEW=$(python3 - "$CURRENT" "$LATEST" <<'PY'
           import re, sys
           def key(tag):

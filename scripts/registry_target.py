@@ -15,9 +15,11 @@ it is built as (`v2.0.0-alpha46057` for `b15358c…`), and a pin naming that rel
 the default too, as is a release whose tag points at that commit (the registry may
 name a release by commit with no label). So a release pinned to the registry's default
 goes in `ref`, and a release pinned to one of those older versions goes in that
-version's key. Any other
-pin is not built by the registry at all, and publishing it would only produce a failing
-registry build.
+version's key. Any other pin is not built by the registry's own runs, and publishing it
+would only produce a failing registry build. The one exception is not modelled here:
+for a DuckDB other than the default that a `workflow_dispatch` run of the registry names,
+`build.py` reads `repo.ref_next`, which a maintainer sets by hand when wanted
+(see MAINTAINER.md).
 
 Usage:
     registry_target.py key <our-pin> <build.yml> <build.py> [<pin-commit>]
@@ -50,17 +52,17 @@ import sys
 # `DUCKDB_LATEST_STABLE: 'b15358c…'` (current layout), else the default in
 # `DUCKDB_VERSION: ${{ inputs.duckdb_version || 'v1.5.6' }}` or a bare
 # `DUCKDB_VERSION: v1.5.6` (the layout through v1.5.6).
-LATEST_STABLE = re.compile(r"^\s*DUCKDB_LATEST_STABLE:\s*['\"]?([^'\"\s]+)", re.M)
-VERSION_DEFAULT = re.compile(r"^\s*DUCKDB_VERSION:\s*(?:\$\{\{.*\|\|\s*)?['\"]?([^'\"\s}]+)", re.M)
+LATEST_STABLE = re.compile(r"^[ \t]*DUCKDB_LATEST_STABLE:\s*['\"]?([^'\"\s]+)", re.M)
+VERSION_DEFAULT = re.compile(r"^[ \t]*DUCKDB_VERSION:\s*(?:\$\{\{.*\|\|\s*)?['\"]?([^'\"\s}]+)", re.M)
 # A job's `duckdb_version:` / `duckdb_tag:` in its `with:` block, as an
 # `${{ inputs.x || '<default>' }}` expression or a plain value. The build job's
 # `duckdb_tag` is the release label a default *commit* is built under
 # (extension-ci-tools tags its clone with it), so a pin naming that label is the
 # registry's default build.
-JOB_VERSION = re.compile(r"^\s*duckdb_version:[ \t]*(?:\$\{\{.*\|\|\s*)?['\"]?([^'\"\s}]+)", re.M)
-JOB_TAG = re.compile(r"^\s*duckdb_tag:[ \t]*(?:\$\{\{.*\|\|\s*)?['\"]?([^'\"\s}]+)", re.M)
-# A top-level key under `jobs:` (or under `on:`), which starts the next block.
-BLOCK = re.compile(r"^  [A-Za-z0-9_-]+:[ \t]*$", re.M)
+JOB_VERSION = re.compile(r"^[ \t]*duckdb_version:[ \t]*(?:\$\{\{.*\|\|\s*)?['\"]?([^'\"\s}]+)", re.M)
+JOB_TAG = re.compile(r"^[ \t]*duckdb_tag:[ \t]*(?:\$\{\{.*\|\|\s*)?['\"]?([^'\"\s}]+)", re.M)
+# The first key under `jobs:`, whose indentation is that of every job key.
+FIRST_JOB = re.compile(r"^jobs:[ \t]*\n(?:[ \t]*(?:#.*)?\n)*([ \t]+)[A-Za-z0-9_-]+:", re.M)
 RELEASE_TAG = re.compile(r"^v\d+\.\d+\.\d+")
 HEX = re.compile(r"^[0-9a-f]{7,40}$")
 # One `== '<version>'` branch of build.py and the descriptor key it reads.
@@ -85,7 +87,11 @@ def default_label(build_yml: str, default: str) -> str | None:
     """
     if RELEASE_TAG.match(default):
         return None
-    starts = [m.start() for m in BLOCK.finditer(build_yml)] + [len(build_yml)]
+    first = FIRST_JOB.search(build_yml)
+    indent = re.escape(first.group(1)) if first else "  "
+    # A key at the job keys' indentation (under `jobs:`, or under `on:`) starts a block.
+    job_key = re.compile(rf"^{indent}[A-Za-z0-9_-]+:[ \t]*$", re.M)
+    starts = [m.start() for m in job_key.finditer(build_yml)] + [len(build_yml)]
     for start, end in zip(starts, starts[1:]):
         block = build_yml[start:end]
         version, tag = JOB_VERSION.search(block), JOB_TAG.search(block)

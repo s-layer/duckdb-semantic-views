@@ -60,6 +60,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **The unclosed-bracket error names its clause like the others.** It now reads
+  `Unclosed '(' in clause 'METRICS'.`, as the other bracket and quote errors for a clause
+  do, instead of `... for clause 'METRICS'.`
+
 - **`GET_DDL` and `READ_YAML_FROM_SEMANTIC_VIEW` follow `search_path`.** An unqualified
   view name now resolves through the session's `search_path`, as it already did for the
   DDL statements and `semantic_view()`: when several schemas hold a view of that name,
@@ -171,7 +175,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   and the clause. Such a body used to be accepted, and could be split into members
   differently from how it was written, so `GET_DDL` rendered back a different view.
   `CREATE SEMANTIC VIEW ... FROM YAML` refuses a member expression with such brackets for
-  the same reason, and `GET_DDL` quotes a column name that has them.
+  the same reason, and `GET_DDL` quotes a column name that has them. A view created before
+  0.15.0 with such brackets still loads, but `CREATE` refuses its `GET_DDL` output, so
+  correct the brackets before you re-create it from that output.
 
 ### Known limitations
 
