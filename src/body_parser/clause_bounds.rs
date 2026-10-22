@@ -440,6 +440,19 @@ mod tests {
         assert_eq!(err.position, Some(text.find('[').unwrap()));
     }
 
+    /// A clause whose own `(` never closes is reported in the same words as
+    /// the brackets inside it, at that `(` (#290 review).
+    #[test]
+    fn a_clause_paren_left_open_is_refused() {
+        let text = "TABLES (o AS orders) METRICS (o.x AS SUM(o.a)";
+        let err = find_clause_bounds(text, 0).unwrap_err();
+        assert_eq!(err.message, "Unclosed '(' in clause 'METRICS'.");
+        assert_eq!(
+            err.position,
+            Some(text.find("METRICS (").unwrap() + "METRICS ".len())
+        );
+    }
+
     /// The control: brackets of every kind, nested by kind, and brackets
     /// inside strings, quoted names and dollar-quoted strings, are accepted.
     #[test]
