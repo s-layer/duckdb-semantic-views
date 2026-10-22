@@ -419,3 +419,35 @@ pub(super) fn extract_paren_prefix(s: &str) -> Option<(&str, usize)> {
 // now consumes tokens in order via `super::cursor::Cursor`, so a constraint
 // keyword is recognized as a bare-identifier token — inherently quote-aware and
 // UTF-8-safe — rather than by a substring scan (code-review 2026-07-11).
+
+#[cfg(test)]
+mod tests {
+    use super::column_roundtrips_verbatim;
+
+    /// The contract of the bracket-stack rewrite (#286), case by case, so a
+    /// change to it goes red here rather than only through the emitters that
+    /// call it (v0.15.0 delta review, F3).
+    #[test]
+    fn column_roundtrips_verbatim_cases() {
+        let cases: &[(&str, bool)] = &[
+            ("a", true),
+            ("f(a, b)", true),
+            ("", false),
+            (" a", false),
+            ("a ", false),
+            ("a,b", false),
+            ("a]", false),
+            ("(a", false),
+            ("([)]", false),
+            ("\"a,]\"", true),
+            ("']'", true),
+            ("\"([)]\"", true),
+            ("$$)$$", true),
+            ("E'\\']'", true),
+            ("'a", false),
+        ];
+        for &(input, want) in cases {
+            assert_eq!(column_roundtrips_verbatim(input), want, "input: {input:?}");
+        }
+    }
+}

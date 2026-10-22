@@ -860,7 +860,10 @@ Key fields:
 > default's commit, or to the `duckdb_tag` of the job that builds that commit, or a DuckDB tag that
 > points at that commit, resolved with `git ls-remote`, is the default) and refuses a pin the
 > registry does not build; the release SHA is then written under that key, leaving `ref` as it was.
-> `just release` uses the same script, so a manual release writes the same key.
+> `just release` uses the same script, so a manual release writes the same key. The gate does not
+> model the registry's `ref_next`: `build.py` reads it for any other DuckDB the registry is asked to
+> build (a `workflow_dispatch` run naming a non-default version), so a release meant for such a run
+> needs `repo.ref_next` set in `description.yml` by hand. The script never prints that key.
 >
 > The monitor's changelog bullet comes from `scripts/changelog_add_bullet.py`, guarded by
 > `tests/changelog_scripts.rs`. Still read the rolled section in the dry-run diff: it becomes

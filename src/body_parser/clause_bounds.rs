@@ -185,7 +185,7 @@ pub(super) fn find_clause_bounds<'a>(
                 Some(UnterminatedRegion::Dollar) => {
                     format!("Unterminated dollar-quoted string in clause '{kw_upper}'.")
                 }
-                None => format!("Unclosed '(' for clause '{kw_upper}'."),
+                None => format!("Unclosed '(' in clause '{kw_upper}'."),
             };
             return Err(cur.err(open_tok.start, message));
         };
@@ -215,6 +215,8 @@ pub(super) fn find_clause_bounds<'a>(
                         char::from(inner.symbol(t))
                     ),
                 ),
+                // With several brackets open, the innermost is the one
+                // reported, as compilers do.
                 BracketMismatch::Unclosed(t) => (
                     t.start,
                     format!(
@@ -436,6 +438,19 @@ mod tests {
         let err = find_clause_bounds(text, 0).unwrap_err();
         assert_eq!(err.message, "Unclosed '[' in clause 'DIMENSIONS'.");
         assert_eq!(err.position, Some(text.find('[').unwrap()));
+    }
+
+    /// A clause whose own `(` never closes is reported in the same words as
+    /// the brackets inside it, at that `(` (#290 review).
+    #[test]
+    fn a_clause_paren_left_open_is_refused() {
+        let text = "TABLES (o AS orders) METRICS (o.x AS SUM(o.a)";
+        let err = find_clause_bounds(text, 0).unwrap_err();
+        assert_eq!(err.message, "Unclosed '(' in clause 'METRICS'.");
+        assert_eq!(
+            err.position,
+            Some(text.find("METRICS (").unwrap() + "METRICS ".len())
+        );
     }
 
     /// The control: brackets of every kind, nested by kind, and brackets

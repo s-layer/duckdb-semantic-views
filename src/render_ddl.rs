@@ -1527,7 +1527,7 @@ mod tests {
     }
 
     #[test]
-    fn test_render_fixpoint_fuzz_seed_mismatched_brackets_in_window_metric() {
+    fn test_render_fuzz_seed_mismatched_brackets_in_window_metric_is_refused_at_first_parse() {
         // fuzz_render_roundtrip, #285: a window metric whose function and
         // arguments are runs of `[`, and a second metric whose USING names hold
         // `}`. Rendered verbatim, the `}`s close the `[`s on the first parse
@@ -1587,13 +1587,12 @@ mod tests {
             ],
             ..Default::default()
         };
-        // The first parse is refused for the mismatch itself, so the fixpoint
-        // below returns at its stage-0 escape for this reason and no other.
+        // The first parse is refused for the mismatch itself, which is where
+        // the fuzz target stops for this seed, so there is no fixpoint to check.
         let rendered = render_create_ddl("fuzz_view", &def).unwrap();
         let body = body_of(&rendered).expect("rendered DDL has an AS body");
         let err = crate::body_parser::parse_keyword_body(body, 0).unwrap_err();
         assert!(err.message.starts_with("Mismatched "), "{}", err.message);
-        assert_render_fixpoint(&def);
     }
 
     #[test]
