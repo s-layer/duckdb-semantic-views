@@ -63,7 +63,7 @@ jobs:
       # than the extension itself. It only changes with the engine pins or the
       # script that builds it, so the build is cached across runs.
       - name: Cache the DuckDB engine build
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: .engine
           key: duckdb-engine-${{ runner.os }}-${{ hashFiles('.duckdb-version', '.duckdb-pypi-version', 'scripts/ensure_engine.py') }}
@@ -147,7 +147,7 @@ jobs:
       # than the extension itself. It only changes with the engine pins or the
       # script that builds it, so the build is cached across runs.
       - name: Cache the DuckDB engine build
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: .engine
           key: duckdb-engine-${{ runner.os }}-${{ hashFiles('.duckdb-version', '.duckdb-pypi-version', 'scripts/ensure_engine.py') }}
