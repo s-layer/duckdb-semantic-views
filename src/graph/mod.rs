@@ -16,6 +16,7 @@ mod test_helpers;
 
 // Public API (matches prior graph.rs surface exactly)
 pub(crate) use cardinality::infer_cardinality;
+pub(crate) use derived_metrics::aggregate_name;
 pub use derived_metrics::{contains_aggregate_function, validate_derived_metrics};
 pub use facts::{find_fact_references, validate_facts};
 pub use member_exprs::validate_member_expressions;

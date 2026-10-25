@@ -54,7 +54,7 @@ const AGGREGATE_FUNCTIONS: &[&str] = &[
     "bool_or",
     // DuckDB's own aggregates (`duckdb_functions()` lists them; the
     // `every_duckdb_aggregate_is_known` test in `member_exprs` keeps this
-    // list complete).
+    // list complete, and `expand::facts`' phantom-row guard uses it too).
     "approx_quantile",
     "approx_top_k",
     "arbitrary",
@@ -120,7 +120,7 @@ pub fn contains_aggregate_function(expr: &str) -> Option<&'static str> {
 }
 
 /// `name` (a lowercase function-name key) if it is a known aggregate.
-pub(super) fn aggregate_name(name: &str) -> Option<&'static str> {
+pub(crate) fn aggregate_name(name: &str) -> Option<&'static str> {
     AGGREGATE_FUNCTIONS.iter().copied().find(|&f| f == name)
 }
 
