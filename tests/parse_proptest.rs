@@ -389,8 +389,10 @@ proptest! {
 
 #[test]
 fn test_large_input_no_panic() {
-    // 1 MB of non-DDL text must be refused as "not a CREATE" quickly, not
-    // scanned to the end or panicked on.
+    // 1 MB of non-DDL text must be refused as "not a CREATE" in one linear
+    // pass (comment blanking scans all of it), without panicking. The bound
+    // leaves room for a debug build on a loaded runner (about 30ms locally)
+    // while still catching a quadratic scan, which would take seconds.
     let s: String = std::iter::repeat('A').take(1_000_000).collect();
     let start = std::time::Instant::now();
     let result = plan_create(&s);
@@ -400,8 +402,8 @@ fn test_large_input_no_panic() {
         "1MB non-DDL should not plan as a CREATE, got {result:?}"
     );
     assert!(
-        elapsed.as_millis() < 50,
-        "1MB scan took {}ms, expected <50ms",
+        elapsed.as_millis() < 500,
+        "1MB scan took {}ms, expected <500ms",
         elapsed.as_millis()
     );
 }
