@@ -81,6 +81,14 @@ ORDER BY 1;
 EU	50.00
 US	100.00
 
+# And through semantic_view()'s string argument.
+query II
+FROM semantic_view('"SalesView"', dimensions := ['region'], metrics := ['total'])
+ORDER BY 1;
+----
+EU	50.00
+US	100.00
+
 query II
 FROM SEMANTIC_VIEW(salesview DIMENSIONS region METRICS total)
 ORDER BY 1;

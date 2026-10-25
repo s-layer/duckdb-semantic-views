@@ -95,6 +95,15 @@ ORDER BY 1;
 São Paulo	100.00
 Tōkyō	50.00
 
+# The same lookup through semantic_view()'s string argument, where the single
+# quote is doubled inside the SQL literal.
+query II
+FROM semantic_view('"it''s_ok"', dimensions := ['city'], metrics := ['total'])
+ORDER BY 1;
+----
+São Paulo	100.00
+Tōkyō	50.00
+
 # ALTER RENAME embeds BOTH the old and new single-quote names in the UPDATE +
 # guard SQL.
 statement ok
