@@ -995,6 +995,17 @@ fn validate_yaml_members(def: &SemanticViewDefinition) -> Result<(), String> {
     for m in &def.metrics {
         slot_single("metric", "name", &m.name)?;
         member_expr("metric", &m.name, &m.expr)?;
+        // The render writes the expression after `AS`, where the metric
+        // grammar refuses a depth-0 `USING` or `NON ADDITIVE BY`
+        // (fuzz_create_text, CI run 40234410533: a metric over one named
+        // `USING`). Quoted, the name is not the keyword.
+        if let Some((_, message)) = crate::body_parser::misplaced_metric_clause(&m.expr) {
+            return Err(format!(
+                "metric '{}' has an expression the DDL grammar cannot carry ('{}'): {message} \
+                 Quote it as an identifier if it names a member or column",
+                m.name, m.expr
+            ));
+        }
         reject_output_type("metric", &m.name, m.output_type.as_deref())?;
         if let Some(ref ws) = m.window_spec {
             validate_window_spec(&m.name, ws)?;

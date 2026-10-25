@@ -266,13 +266,21 @@ pub fn plan_create(query: &str) -> Result<Option<RewriteAction>, ParseError> {
     // the grammar sees it. A quote the body parser reads (in the body, or a
     // `"` in the name, which `parse_view_ref` owns) gets its own message from
     // it. A `'` or `$tag$` in a bare name is read by nothing, so it is refused
-    // first, before the body parser trips on comment text left in place.
+    // first, before the body parser trips on comment text left in place. That
+    // holds wherever the quote closes: one that closes in the body hides the
+    // body's comments from the pass just the same. So the check is on the
+    // name's own text, scanned on its own: a quote still open at its end.
     // Measured from the slice itself: `trim` also strips leading non-ASCII
     // whitespace, which `lead` does not count.
     let name_start = crate::util::byte_offset_within(query, trimmed_no_semi[plen..].trim_start());
     let name_end = name_start + crate::ident::find_identifier_end(&query[name_start..], true);
-    if let Some(pos) = unterminated.filter(|&p| p < name_end && query.as_bytes()[p] != b'"') {
-        return Err(unterminated_quote(query, pos));
+    let (_, open_in_name) = crate::util::blank_sql_comments_tracking(&query[..name_end]);
+    if let Some(pos) = open_in_name.filter(|&p| query.as_bytes()[p] != b'"') {
+        return Err(if unterminated == Some(pos) {
+            unterminated_quote(query, pos)
+        } else {
+            quote_in_view_name(query, pos)
+        });
     }
     let planned = validate_create_body(trimmed_no_semi, lead, plen, kind)?;
     if let Some(pos) = unterminated {
@@ -290,6 +298,22 @@ fn unterminated_quote(query: &str, pos: usize) -> ParseError {
     };
     ParseError {
         message: message.to_string(),
+        position: Some(pos),
+    }
+}
+
+/// A `'` or `$tag$` opened in a bare view name that closes later: the name is
+/// not a string, so it is refused as such rather than as unterminated.
+fn quote_in_view_name(query: &str, pos: usize) -> ParseError {
+    let what = if query.as_bytes()[pos] == b'$' {
+        "a dollar-quoted string"
+    } else {
+        "a string literal"
+    };
+    ParseError {
+        message: format!(
+            "A view name cannot be {what}; quote the name with double quotes, as in \"my view\"."
+        ),
         position: Some(pos),
     }
 }
