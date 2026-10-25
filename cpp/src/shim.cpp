@@ -378,14 +378,13 @@ static const std::vector<SvFunctionDoc> &sv_function_docs() {
         {"list_semantic_views", {},
          "Backs SHOW SEMANTIC VIEWS: lists every registered semantic view with "
          "its creation time, database, schema and comment. Use that statement "
-         "to list views; call this directly only to use the listing as a FROM "
-         "source.",
+         "rather than calling this directly; it works as a subquery too.",
          {"SHOW SEMANTIC VIEWS;",
           // Qualified and quoted per part: a bare name is a unique-match
           // lookup, ambiguous once two schemas hold the same view name.
           "SELECT GET_DDL('SEMANTIC_VIEW', '\"' || replace(schema_name, '\"', "
           "'\"\"') || '\".\"' || replace(name, '\"', '\"\"') || '\"') FROM "
-          "list_semantic_views();"},
+          "(SHOW SEMANTIC VIEWS);"},
          {"semantic_views", "metadata"}},
         {"list_terse_semantic_views", {},
          "Backs SHOW TERSE SEMANTIC VIEWS: lists every registered semantic "

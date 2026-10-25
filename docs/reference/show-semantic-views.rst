@@ -156,9 +156,27 @@ If no semantic views are registered, the result set is empty.
 
 .. _ref-show-subquery:
 
-.. note::
+**Selecting and filtering columns:**
 
-   Since 0.16.0, ``SHOW SEMANTIC VIEWS`` can be used as a subquery or in a ``WITH`` clause, like DuckDB's own ``SHOW``: ``SELECT name FROM (SHOW SEMANTIC VIEWS) WHERE comment <> ''``. See :ref:`ref-functions-subqueries`.
+.. versionadded:: 0.16.0
+
+``SHOW SEMANTIC VIEWS`` can be used as a subquery or in a ``WITH`` clause, like DuckDB's own ``SHOW`` (see :ref:`ref-functions-subqueries`), so you can pick the columns you want and filter the rows:
+
+.. code-block:: sql
+
+   SELECT name, schema_name
+   FROM (SHOW SEMANTIC VIEWS)
+   WHERE comment <> '';
+
+.. code-block:: text
+
+   ┌───────────────┬─────────────┐
+   │ name          │ schema_name │
+   ├───────────────┼─────────────┤
+   │ order_metrics │ main        │
+   └───────────────┴─────────────┘
+
+To dump the DDL of every view, see the :ref:`GET_DDL <ref-get-ddl-examples>` recipe.
 
 **TERSE variant (no comment column):**
 

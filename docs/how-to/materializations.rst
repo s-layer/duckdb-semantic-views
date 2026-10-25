@@ -245,7 +245,13 @@ Use :ref:`DESCRIBE SEMANTIC VIEW <ref-describe-semantic-view>` to see materializ
 
    DESCRIBE SEMANTIC VIEW order_metrics;
 
-The materialization rows come last, after the tables, dimensions, and metrics. To see only the materializations, use ``SHOW SEMANTIC MATERIALIZATIONS IN order_metrics`` above.
+The materialization rows come last, after the tables, dimensions, and metrics. To see only those rows, filter the output by ``object_kind``:
+
+.. code-block:: sql
+
+   SELECT object_name, property, property_value
+   FROM (DESCRIBE SEMANTIC VIEW order_metrics)
+   WHERE object_kind = 'MATERIALIZATION';
 
 
 .. _howto-materializations-staleness:
