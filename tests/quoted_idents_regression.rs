@@ -1,7 +1,7 @@
 //! Phase 64 regression test — quoted identifier handling.
 //!
 //! These inputs were the bug-report reproductions for Phase 64.
-//! They must never regress: `plan_rewrite()` must accept each one and produce a
+//! They must never regress: `plan_create()` must accept each one and produce a
 //! `RewriteAction::Create` whose stored view name is the bare unquoted last part
 //! of the identifier (e.g. `"memory"."main"."orders_sv"` → `orders_sv`).
 //!
@@ -11,7 +11,7 @@
 //!   - fuzz/seeds/fuzz_ddl_parse/seed_phase64_mixed_quoting.txt
 
 use semantic_views::ident::ViewRef;
-use semantic_views::parse::{plan_rewrite, RewriteAction};
+use semantic_views::parse::{plan_create, RewriteAction};
 
 const QUOTED_BARE_NAME: &str = "CREATE SEMANTIC VIEW \"memory\".\"main\".\"orders_sv\" AS \
                                 TABLES (o AS orders PRIMARY KEY (id)) \
@@ -30,7 +30,7 @@ const MIXED_QUOTING: &str = "CREATE SEMANTIC VIEW db.\"s\".v AS \
 
 /// Plan a CREATE statement and return the reference it captured.
 fn created_view_ref(query: &str) -> ViewRef {
-    match plan_rewrite(query)
+    match plan_create(query)
         .expect("parse should not error")
         .expect("rewrite should return Some")
     {

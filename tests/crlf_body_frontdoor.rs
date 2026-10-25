@@ -3,7 +3,7 @@
 //! The lexer treats `\r` as whitespace (`is_ascii_whitespace`, `lexer.rs`), so
 //! a CREATE body with Windows (CRLF) line endings is handled "by construction".
 //! But that was only ever *implicit* — no test drove a CRLF body through the
-//! real `plan_rewrite` CREATE front door, and the extra `\r` bytes are exactly
+//! real `plan_create` CREATE front door, and the extra `\r` bytes are exactly
 //! the kind of thing byte-offset threading (error carets) can silently
 //! miscount. These two tests pin both halves:
 //!   (a) a CRLF body parses to the *same* definition its LF twin does — no
@@ -11,7 +11,7 @@
 //!   (b) an error caret in a CRLF body lands on the correct *byte*, i.e. the
 //!       `\r`s are counted in the offset rather than dropped.
 
-use semantic_views::parse::{plan_rewrite, CreateMode, RewriteAction};
+use semantic_views::parse::{plan_create, CreateMode, RewriteAction};
 
 /// A complete, valid CREATE with LF line endings between every clause and
 /// entry. The CRLF twin is produced by replacing each `\n` with `\r\n`.
@@ -39,10 +39,10 @@ fn crlf_body_parses_identically_to_lf() {
         "test setup: CRLF conversion happened"
     );
 
-    let lf = plan_rewrite(LF_DDL)
+    let lf = plan_create(LF_DDL)
         .expect("LF body must parse")
         .expect("LF body is a valid CREATE");
-    let cr = plan_rewrite(&crlf)
+    let cr = plan_create(&crlf)
         .expect("CRLF body must parse")
         .expect("CRLF body is a valid CREATE");
 
@@ -100,7 +100,7 @@ DIMENSIONS (o.status AS o.status)
 METRICS (o.revenue AS SUM(o.amount))";
     let crlf = lf.replace('\n', "\r\n");
 
-    let err = plan_rewrite(&crlf).expect_err("duplicate DIMENSIONS must error");
+    let err = plan_create(&crlf).expect_err("duplicate DIMENSIONS must error");
     assert!(
         err.message
             .contains("Duplicate clause keyword 'DIMENSIONS'"),

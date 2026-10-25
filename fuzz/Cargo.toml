@@ -45,8 +45,8 @@ path = "fuzz_targets/fuzz_yaml_parse.rs"
 doc = false
 
 [[bin]]
-name = "fuzz_parser_override_ffi"
-path = "fuzz_targets/fuzz_parser_override_ffi.rs"
+name = "fuzz_create_text"
+path = "fuzz_targets/fuzz_create_text.rs"
 doc = false
 
 [[bin]]

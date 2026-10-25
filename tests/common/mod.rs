@@ -2,7 +2,7 @@
 //!
 //! Factored out of `roundtrip_proptest.rs` (T-5, code-review 2026-07-11) so
 //! the SAME hostile-identifier / hostile-payload generators drive BOTH the
-//! `parse_keyword_body` round-trip AND the full `plan_rewrite` CREATE front
+//! `parse_keyword_body` round-trip AND the full `plan_create` CREATE front
 //! door. The front door owns comment-blanking, prefix detection, name
 //! extraction, and offset threading — layers the fixed-body CREATE proptest
 //! in `parse_proptest.rs` never exercised with hostile content.

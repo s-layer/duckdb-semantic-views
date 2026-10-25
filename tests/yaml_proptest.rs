@@ -359,7 +359,7 @@ proptest! {
 //          -> blank_sql_comments -> parse_keyword_body -> compare
 //
 // with the comment-blanking step included, because that is what production
-// does (`parse::rewrite::plan_rewrite` blanks the whole statement before it
+// does (`parse::rewrite::plan_create` blanks the whole statement before it
 // looks at anything).
 
 use semantic_views::body_parser::parse_keyword_body;

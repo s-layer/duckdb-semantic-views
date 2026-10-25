@@ -1,9 +1,8 @@
 # DROP and ALTER SEMANTIC VIEW through the grammar productions.
 #
-# With parser overrides off, these statements reach DuckDB's own grammar,
-# where the extension adds them as alternatives of `Statement`. They lower to
-# the same guarded native DML the parser override emits, run as several
-# statements, so they keep its transactional behaviour.
+# The extension adds these statements to DuckDB's own grammar as alternatives
+# of `Statement`. They lower to guarded native DML, run as several statements,
+# so they keep the extension's transactional behaviour.
 
 require semantic_views
 
@@ -18,9 +17,6 @@ CREATE SCHEMA gw_s;
 
 statement ok
 CREATE SEMANTIC VIEW gw_s.gw_b AS TABLES (t AS gw_t PRIMARY KEY (id)) DIMENSIONS (t.region AS region);
-
-statement ok
-SET allow_parser_override_extension = 'DEFAULT';
 
 # --- ALTER ---------------------------------------------------------------------
 
@@ -101,20 +97,19 @@ does not exist
 statement ok
 DROP SEMANTIC VIEW IF EXISTS gw_a2;
 
-# --- malformed statements still get the extension's own message ----------------
+# --- malformed statements get DuckDB's syntax error -----------------------------
 
 statement error
 ALTER SEMANTIC VIEW gw_a2 TRUNCATE;
 ----
-Unsupported ALTER operation
+syntax error at or near "TRUNCATE"
 
 statement error
 ALTER SEMANTIC VIEW gw_a2 RENAME TO;
 ----
-Missing new name after RENAME TO
+syntax error at or near ";"
 
-# A comment is a plain '...' literal, as for the parser override: DuckDB's
-# string literal also takes $$...$$ and E'...', which the grammar refuses.
+# A comment is a plain '...' literal: DuckDB's string literal also takes $$...$$ and E'...', which the grammar refuses.
 statement error
 ALTER SEMANTIC VIEW gw_a2 SET COMMENT = $$x$$;
 ----
@@ -130,8 +125,8 @@ ALTER SEMANTIC VIEW gw_a2 SET COMMENT = $t$x$t$;
 ----
 Expected single-quoted string after SET COMMENT =
 
-# A view name is one run of text, as for the parser override: whitespace or a
-# comment inside a dotted name ends it, and the rest is reported.
+# A view name is one run of text: whitespace or a comment inside a dotted name
+# ends it, and the rest is reported.
 statement ok
 CREATE SEMANTIC VIEW gw_s.gw_c AS TABLES (t AS gw_t PRIMARY KEY (id)) DIMENSIONS (t.region AS region);
 
@@ -175,11 +170,8 @@ DROP SEMANTIC VIEW gw_s.gw_c;
 
 # --- inside a multi-statement string (TECH-DEBT #85) ---------------------------
 
-# Back to the override as the extension loads it. It declines a string holding
-# several statements, and DuckDB's grammar splits it and runs each one, ours
-# included.
-statement ok
-SET allow_parser_override_extension = 'FALLBACK';
+# DuckDB's grammar splits a string holding several statements and runs each
+# one, ours included.
 
 statement ok
 CREATE SEMANTIC VIEW gw_m AS TABLES (t AS gw_t PRIMARY KEY (id)) DIMENSIONS (t.region AS region);
@@ -210,8 +202,7 @@ DROP SEMANTIC VIEW gw_s . gw_e; SELECT 3;
 ----
 Unexpected tokens after view name: '. gw_e'
 
-# Alone, with the override on, the statement gets the same message: the
-# override refuses it and declines, and the grammar takes it.
+# Alone, the statement gets the same message.
 statement error
 DROP SEMANTIC VIEW gw_s . gw_e;
 ----

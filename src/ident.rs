@@ -274,6 +274,129 @@ impl std::fmt::Display for ViewRef {
     }
 }
 
+/// The keywords `DuckDB` refuses as a bare name, lowercase and sorted. Its
+/// grammar takes a name as a `ColId` (an unreserved or column-name keyword, or
+/// an identifier that is not a reserved keyword), so these are the reserved
+/// keywords and the type and function-name keywords (`left`, `join`, `semi`),
+/// less the six of those that are also unreserved or column-name keywords
+/// (`columns`, `generated`, `map`, `struct`, `try_cast`, `tuple`). Checked
+/// against the engine's `duckdb_keywords()` in `test/sql/grammar_create.test`.
+const KEYWORDS_REFUSED_AS_NAMES: &[&str] = &[
+    "all",
+    "analyse",
+    "analyze",
+    "and",
+    "anti",
+    "any",
+    "array",
+    "as",
+    "asc",
+    "asof",
+    "asymmetric",
+    "at",
+    "authorization",
+    "binary",
+    "both",
+    "by",
+    "case",
+    "cast",
+    "check",
+    "collate",
+    "collation",
+    "column",
+    "concurrently",
+    "constraint",
+    "create",
+    "cross",
+    "default",
+    "deferrable",
+    "desc",
+    "describe",
+    "distinct",
+    "do",
+    "else",
+    "end",
+    "except",
+    "false",
+    "fetch",
+    "for",
+    "foreign",
+    "freeze",
+    "from",
+    "full",
+    "glob",
+    "group",
+    "having",
+    "ilike",
+    "in",
+    "initially",
+    "inner",
+    "intersect",
+    "into",
+    "is",
+    "isnull",
+    "join",
+    "lambda",
+    "lateral",
+    "leading",
+    "left",
+    "like",
+    "limit",
+    "natural",
+    "not",
+    "notnull",
+    "null",
+    "offset",
+    "on",
+    "only",
+    "or",
+    "order",
+    "outer",
+    "overlaps",
+    "pivot",
+    "pivot_longer",
+    "pivot_wider",
+    "placing",
+    "positional",
+    "primary",
+    "qualify",
+    "references",
+    "returning",
+    "right",
+    "select",
+    "semi",
+    "show",
+    "similar",
+    "some",
+    "summarize",
+    "symmetric",
+    "table",
+    "tablesample",
+    "then",
+    "to",
+    "trailing",
+    "true",
+    "union",
+    "unique",
+    "unpack",
+    "unpivot",
+    "using",
+    "variadic",
+    "verbose",
+    "when",
+    "where",
+    "window",
+    "with",
+];
+
+/// Whether `DuckDB` refuses `word` as a bare name, so it must be quoted.
+#[must_use]
+pub fn is_refused_as_name(word: &str) -> bool {
+    KEYWORDS_REFUSED_AS_NAMES
+        .binary_search(&word.to_ascii_lowercase().as_str())
+        .is_ok()
+}
+
 /// Parse a (possibly qualified) semantic-view reference.
 ///
 /// The qualifier-preserving sibling of [`normalize_view_name`], which returns
@@ -508,6 +631,24 @@ pub fn first_unquoted_dot(s: &str) -> Option<usize> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Sorted (the lookup is a binary search) and lowercase. The list itself
+    /// is checked against the engine's `duckdb_keywords()` in
+    /// `test/sql/grammar_create.test`.
+    #[test]
+    fn keywords_refused_as_names_are_sorted_lowercase() {
+        assert_eq!(KEYWORDS_REFUSED_AS_NAMES.len(), 105);
+        assert!(KEYWORDS_REFUSED_AS_NAMES.windows(2).all(|w| w[0] < w[1]));
+        assert!(KEYWORDS_REFUSED_AS_NAMES
+            .iter()
+            .all(|w| w.bytes().all(|b| b.is_ascii_lowercase() || b == b'_')));
+        for refused in ["SELECT", "pivot_wider", "left", "semi"] {
+            assert!(is_refused_as_name(refused), "{refused}");
+        }
+        for bare in ["region", "if", "int", "between", "columns", "map"] {
+            assert!(!is_refused_as_name(bare), "{bare}");
+        }
+    }
 
     #[test]
     fn ident_key_keeps_identifier_parts_apart() {

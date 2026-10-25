@@ -4,28 +4,24 @@
 # requires-python = ">=3.10"
 # ///
 """
-Phase 65.1 Plan 12 (WR-09 D-21) — `LOAD semantic_views` must be idempotent
-across repeated calls within a single process.
+`LOAD semantic_views` must be idempotent across repeated calls within a single
+process, and must turn the extension's grammar on for every connection.
 
-`ParserExtension::Register` unconditionally appends to
-`DBConfig::parser_extensions` (no dedup API), so without the
-`sv_register_parser_hooks` idempotence guard added in Plan 12, every LOAD
-would grow that list by one entry pointing at the same `sv_parser_override`
-— an unbounded "soft leak" called out by 65-REVIEW.md WR-09.
+The grammar is registered once per database (`sv_register_grammar` in
+`cpp/src/shim.cpp` checks `FindGrammarExtension` first), so a second LOAD adds
+nothing. DuckDB does not surface a double registration as a user error, so this
+file pins the behaviour: a second LOAD does not throw, and DDL still parses.
 
-DuckDB does NOT surface a double-register as a user error, so neither
-LOAD call throws on the pre-fix binary; the symptom is internal list
-bloat which isn't user-visible. The structural pre/post-fix discriminator
-lives in `tests/parser_hook_idempotent.rs` (B-07 plan-checker fix —
-counts parser-extension entries via the `sv_count_parser_extensions`
-helper FFI).
-
-This Python test pins the BEHAVIOURAL contract: a second `LOAD
-semantic_views` in the same process must (a) not throw, and (b) leave
-the parser-override hook functional so subsequent DDL still flows
-through the `sv_parser_override` rewrite path. A regression where list
-bloat caused a downstream parser failure (e.g. ambiguous override
-dispatch) would surface as the sentinel DDL block failing.
+`active_grammar_extensions` is a per-connection setting that may only be
+changed on the connection's own thread (TECH-DEBT #103), so LOAD turns the
+grammar on in three ways:
+  * the loading connection, when the LOAD ends (the sentinel DDL in the first
+    test);
+  * a connection opened later, when it opens;
+  * a connection already open, when it next begins or ends a query. DuckDB
+    parses a statement before its query begins, and a statement that fails to
+    parse begins none, so that connection parses without the grammar until it
+    runs a query (any query, LOAD semantic_views included).
 
 Exit codes:
     0 = test passed (including pytest SKIP convention if run directly)
@@ -63,18 +59,14 @@ def test_load_extension_twice_idempotent():
             # First LOAD — bootstrap path.
             conn.execute("LOAD semantic_views")
 
-            # Second LOAD — D-21 idempotence contract. Pre-fix this did
-            # NOT throw either (DuckDB doesn't surface double-register as
-            # a user error) so the assertion is "no exception" only; the
-            # structural pre/post-fix discriminator lives in the Rust
-            # integration test `tests/parser_hook_idempotent.rs`.
+            # Second LOAD — the idempotence contract. A double registration
+            # would not throw either, so the assertion is "no exception" plus
+            # the sentinel below.
             conn.execute("LOAD semantic_views")
 
-            # Sentinel — exercise a DDL statement that goes through the
-            # parser_override hook. If the second LOAD had somehow broken
-            # the override dispatch (e.g. via duplicate entries causing
-            # ambiguous selection in some future DuckDB version), this
-            # would surface as a parse error here.
+            # Sentinel — a DDL statement through the grammar. If the second
+            # LOAD had broken it (a duplicate production, say), this would
+            # surface as a parse error here.
             conn.execute("CREATE TABLE t1 (id INTEGER)")
             conn.execute(
                 "CREATE SEMANTIC VIEW v_after_double_load AS "
@@ -95,12 +87,73 @@ def test_load_extension_twice_idempotent():
             conn.close()
 
 
+def _connect(tmp):
+    conn = duckdb.connect(
+        os.path.join(tmp, "test.duckdb"),
+        config={
+            "allow_unsigned_extensions": "true",
+            "extension_directory": EXT_DIR,
+        },
+    )
+    conn.execute(f"FORCE INSTALL '{EXT_PATH}'")
+    return conn
+
+
+CREATE_VIEW = (
+    "CREATE SEMANTIC VIEW {name} AS TABLES (t1 AS t1) METRICS (t1.cnt AS count(*))"
+)
+
+
+def test_connection_opened_after_load():
+    with tempfile.TemporaryDirectory() as tmp:
+        conn = _connect(tmp)
+        try:
+            conn.execute("LOAD semantic_views")
+            conn.execute("CREATE TABLE t1 (id INTEGER)")
+            later = conn.cursor()
+            later.execute(CREATE_VIEW.format(name="v_later"))
+            names = later.execute("SELECT name FROM (SHOW SEMANTIC VIEWS)").fetchall()
+            assert names == [("v_later",)], names
+        finally:
+            conn.close()
+
+
+def test_connection_open_before_load():
+    with tempfile.TemporaryDirectory() as tmp:
+        conn = _connect(tmp)
+        try:
+            earlier = conn.cursor()
+            reloaded = conn.cursor()
+            conn.execute("CREATE TABLE t1 (id INTEGER)")
+            conn.execute("LOAD semantic_views")
+
+            # A statement is parsed before its query begins, and one that fails
+            # to parse begins none, so until this connection runs a query it
+            # parses without the grammar.
+            for _ in range(2):
+                with pytest.raises(duckdb.ParserException, match="syntax error"):
+                    earlier.execute("SHOW SEMANTIC VIEWS")
+            earlier.execute("SELECT 1")
+            earlier.execute(CREATE_VIEW.format(name="v_earlier"))
+            names = earlier.execute("SELECT name FROM (SHOW SEMANTIC VIEWS)").fetchall()
+            assert names == [("v_earlier",)], names
+
+            # LOAD on the connection itself turns the grammar on at once.
+            reloaded.execute("LOAD semantic_views")
+            names = reloaded.execute("SELECT name FROM (SHOW SEMANTIC VIEWS)").fetchall()
+            assert names == [("v_earlier",)], names
+        finally:
+            conn.close()
+
+
 if __name__ == "__main__":
     # `uv run test/integration/test_load_extension_twice_idempotent.py`
     # — invoke the test directly so the file is self-contained, mirroring
     # the convention established by `test_concurrent_reads_per_call_conn.py`.
     try:
         test_load_extension_twice_idempotent()
+        test_connection_opened_after_load()
+        test_connection_open_before_load()
     except AssertionError as exc:
         print(f"FAILED: {exc}", file=sys.stderr)
         sys.exit(1)

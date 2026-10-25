@@ -502,8 +502,8 @@ inline duckdb::ValidityMask &validity_mut(duckdb::Vector &vector) {
 #endif
 }
 
-// A parser with the built-in grammar and no parser extensions, so re-parsing
-// the SQL our parser_override produced cannot re-enter parser_override. v1.5:
+// A parser with the built-in grammar and no grammar extensions, so re-parsing
+// SQL the extension produced cannot re-enter its own productions. v1.5:
 // default-constructed ParserOptions; 2.0 dropped the default constructor for
 // `Parser::GetBuiltinParser()`.
 inline duckdb::Parser builtin_parser() {

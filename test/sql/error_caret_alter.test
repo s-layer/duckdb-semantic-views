@@ -1,9 +1,8 @@
 # Phase 62 Wave 3 — caret rendering coverage for ALTER error paths.
 #
-# Plans 02-03 restored caret rendering. ALTER SEMANTIC VIEW with an
-# unsupported sub-operation keyword (RENAM instead of RENAME TO) triggers
-# validate_alter -> "Unsupported ALTER operation..." with position pointing
-# past the view name.
+# ALTER SEMANTIC VIEW with an unsupported sub-operation keyword (RENAM
+# instead of RENAME TO) matches no grammar production, so DuckDB reports its
+# own syntax error with a caret under the offending token.
 #
 # Behavioural property pinned (from RESEARCH.md §6):
 #   B6: caret renders for ALTER errors
@@ -23,9 +22,9 @@ CREATE SEMANTIC VIEW v_for_alter AS TABLES (t AS t PRIMARY KEY (id)) DIMENSIONS 
 statement error
 ALTER SEMANTIC VIEW v_for_alter RENAM TO w;
 ----
-Unsupported ALTER operation
+syntax error at or near "RENAM"
 
-# Caret rendering pinned via LINE 1: substring (proves parse_function path).
+# Caret rendering pinned via the LINE 1: substring.
 statement error
 ALTER SEMANTIC VIEW v_for_alter RENAM TO w;
 ----

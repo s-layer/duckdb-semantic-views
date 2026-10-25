@@ -235,13 +235,3 @@ jobs:
       # executed", is the check that the suite really ran.
       - name: Run SQL logic tests
         run: just test-sql-prebuilt
-
-      # The same files again, with every statement the grammar productions
-      # cover (src/grammar/) parsed by DuckDB's grammar instead of the parser
-      # override (`just test-sql-grammar`; GRAMMAR_OWNED in the runner). Both
-      # implementations coexist during Phase 3 of the DuckDB 2.0 epic, and
-      # this holds the grammar to the same tests.
-      - name: Run SQL logic tests through the grammar
-        env:
-          SV_ROUTE_TO_GRAMMAR: "1"
-        run: just test-sql-prebuilt

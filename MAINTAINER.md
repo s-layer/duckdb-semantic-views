@@ -56,7 +56,7 @@ After `just build`, the extension binary is at `build/debug/semantic_views.duckd
 
 ```
 src/
-├── lib.rs                     # Extension entrypoint — registers table functions + the parser_override hook
+├── lib.rs                     # Extension entrypoint — registers table functions + the grammar productions
 ├── model.rs                   # Core data types: SemanticViewDefinition, Dimension, Metric, Fact, Relationship…
 ├── errors.rs                  # Typed error surface (ParseError + optional caret) for the CREATE/parse boundary
 ├── ident.rs                   # Identifier grammar: quoting, case-folding, qualified-name splitting
@@ -74,13 +74,12 @@ src/
 │   ├── annotations.rs window.rs materializations.rs
 │   ├── cross_refs.rs          #   semantic cross-reference checks shared by the DDL and YAML paths
 │   └── mod.rs
-├── parse/                     # Statement-level DDL orchestration + parser_override FFI (write side)
-│   ├── ffi.rs                 #   FFI entry points: sv_parser_override_rust / sv_parse_function_rust
-│   ├── detect.rs              #   DDL-prefix detection
-│   ├── rewrite.rs             #   rewrite_to_native_sql: recognised DDL → native SQL (or error)
-│   ├── create_body.rs         #   CREATE front door (validate_and_rewrite)
+├── parse/                     # Text-level planning behind the grammar productions (write side)
+│   ├── detect.rs              #   CREATE-prefix detection
+│   ├── rewrite.rs             #   plan_create (CREATE text → RewriteAction), DESCRIBE / SHOW lowering
+│   ├── create_body.rs         #   CREATE body (validate_create_body)
 │   ├── native_sql.rs          #   INSERT/UPDATE/DELETE emission on _definitions
-│   ├── show_clauses.rs        #   SHOW … clause parsing
+│   ├── show_clauses.rs        #   SHOW clauses → catalog WHERE / LIMIT suffix, shared messages
 │   └── mod.rs
 ├── grammar/                   # DuckDB 2.0 grammar productions (Phase 3): rule text + transforms to SQL
 │   ├── tree.rs                #   decodes the parse subtree the C++ bridge serialises
@@ -89,7 +88,7 @@ src/
 │   │                          #   parse::lower_action, returned to DuckDB as one MultiStatement)
 │   ├── create.rs              #   CREATE [OR REPLACE] SEMANTIC VIEW: the body is taken by DuckDB's
 │   │                          #   any-token matcher (ANY_TOKEN rules), rebuilt at its query offsets
-│   │                          #   and planned by parse::plan_rewrite (TECH-DEBT #100)
+│   │                          #   and planned by parse::plan_create (TECH-DEBT #100)
 │   ├── query.rs               #   SEMANTIC_VIEW(...) in FROM (a table reference, an InnerTableRef
 │   │                          #   alternative), lowered to a semantic_view() call
 │   ├── ffi.rs                 #   FFI entry points: sv_grammar_changes_rust / sv_grammar_transform_rust
@@ -134,7 +133,7 @@ src/
 fuzz/                          # Fuzz testing (independent Cargo crate; depends on semantic_views + "arbitrary")
 ├── fuzz_targets/              #   Nine targets — see the Fuzzing section for what each covers
 │   ├── fuzz_json_parse.rs fuzz_yaml_parse.rs fuzz_ddl_parse.rs fuzz_keyword_body.rs
-│   ├── fuzz_sql_expand.rs fuzz_query_names.rs fuzz_render_roundtrip.rs fuzz_parser_override_ffi.rs
+│   ├── fuzz_sql_expand.rs fuzz_query_names.rs fuzz_render_roundtrip.rs fuzz_create_text.rs
 │   └── fuzz_where_predicate.rs
 ├── seeds/                     #   Committed seed inputs (per target)
 └── corpus/                    #   Fuzzer-discovered inputs (gitignored)
@@ -161,28 +160,23 @@ test/
 
 ### Data Flow
 
-Every recognised DDL form is rewritten into native SQL that DuckDB then plans and executes on the caller's connection, by one of two routes that share the planning code. A statement sent on its own goes through `parser_override`. Anything the override declines — a statement in a multi-statement string, one nested in a query (`SHOW` / `DESCRIBE` as a subquery), or any statement while `allow_parser_override_extension` is not `'FALLBACK'` — reaches DuckDB's own grammar, where `src/grammar/` adds the semantic-view statements as productions. The parse stub (`parse_function` → `sv_parse_stub`) is left only for the error messages of a statement neither route takes (TECH-DEBT #85, #98). There is no longer a `sv_ddl_internal` table-function fallback (deleted in the v0.8.0 architectural unification (Phase 59) — see CHANGELOG).
+Every semantic-view statement is a production of DuckDB's own PEG grammar: `src/grammar/` adds them to DuckDB 2.0's grammar at load, so DuckDB splits a multi-statement string, finds our statements wherever its own DDL may appear (at the top level, or `SHOW` / `DESCRIBE` as a subquery), and reports a malformed one as its own syntax error. Each matched statement is lowered to native SQL that DuckDB then plans and executes on the caller's connection. There is no parser override, parse stub or `sv_ddl_internal` table-function fallback any more (the last was deleted in the v0.8.0 architectural unification (Phase 59) — see CHANGELOG; the override and stub in the Phase 3 deletion PR).
 
 ```
 DDL (CREATE / DROP / ALTER / DESCRIBE / SHOW / GET_DDL / READ_YAML / FROM YAML FILE)
-   └── C++ parser_override hook (cpp/src/shim.cpp::sv_parser_override)
-   └── Rust FFI trampoline (src/parse/ffi.rs::sv_parser_override_rust)
-   └── rewrite_to_native_sql (src/parse/rewrite.rs)
-         ├── validate_and_rewrite (canonical body parser → table-function-call SQL or sentinel)
-         ├── rewrite_create / rewrite_yaml_file_create  (writes: INSERT/UPDATE/DELETE on _definitions)
-         ├── drop / alter rewrite                        (writes: with race-guard SELECT prefix)
-         └── (read-side pass-through: SELECT * FROM <read_side_fn>(...))
-   └── publish_owned_sql → C++ Parser::ParseQuery (DEFAULT_OVERRIDE so the hook does not recurse)
-   └── DuckDB executes the resulting SQLStatement(s) on the caller's connection.
-
-The same DDL, declined by the override (DuckDB 2.0 builds)
-   └── DuckDB's PEG grammar matches an Sv* production (rules from src/grammar/, registered at load)
-   └── C++ grammar bridge (cpp/src/shim.cpp::sv_grammar_lower): serialises the match tree and
-       tokens, plus the override's recorded query when it is this query (sv_grammar_has_source)
+   └── DuckDB's PEG grammar matches an Sv* production (rules from src/grammar/, registered at load
+       and activated per connection: see "Grammar activation" below)
+   └── C++ grammar bridge (cpp/src/shim.cpp::sv_grammar_lower): serialises the match tree and the
+       statement's own tokens (sv_grammar_span)
    └── Rust FFI (src/grammar/ffi.rs::sv_grammar_transform_rust) → grammar::transform
-         └── the override's planners: plan_rewrite (CREATE), lower_action (DROP / ALTER),
-             lower_show / lower_name_only_read (SHOW / DESCRIBE)
-   └── C++ Parser::ParseQuery of the lowered SQL; DuckDB runs the statement(s) as above.
+         ├── CREATE: text rebuilt from the tokens → parse::plan_create (body parser, then
+         │   INSERT/UPDATE/DELETE on _definitions)
+         ├── DROP / ALTER: parse::lower_action (writes, with race-guard SELECT prefix)
+         └── SHOW / DESCRIBE: lower_show / lower_name_only_read (SELECT * FROM <read_side_fn>(...))
+       An invalid statement is rc=1 with the whole message on the heap and a byte offset, thrown
+       as a ParserException with a QueryLocation, which DuckDB renders as `LINE n: … ^`.
+   └── C++ Parser::ParseQuery of the lowered SQL (the builtin parser, which runs no extension
+       grammar); DuckDB runs the statement(s) on the caller's connection.
 
 semantic_view('shop', dimensions := [...], metrics := [...])
    └── bind_replace table function. Bind reads the definition via catalog::CatalogReader
@@ -212,10 +206,15 @@ GROUP BY
 
 Every table and scalar function is registered through the C++ Catalog API helpers in `cpp/src/shim.cpp` (`sv_register_table_function_core` and `sv_register_scalar_function_set`). Each one attaches a `FunctionDescription` (description, parameter names, examples, categories) looked up by function name in `sv_function_docs`, so agents and tools can discover the function over SQL. **A function with no entry in that table fails to register**: adding a new function means adding its doc entry in the same change. A function that a SQL statement lowers to (the `SHOW` / `DESCRIBE` family) should say "Backs `<statement>`" and tell the caller to use the statement instead. `test/sql/function_descriptions.test` pins the rendered result and runs every example; extend its function list when you add one.
 
-#### Two FALLBACK_OVERRIDE quirks worth knowing
+#### Grammar activation
 
-1. **DuckDB silently drops `DISPLAY_EXTENSION_ERROR` from `parser_override` in FALLBACK mode** (`ParseInternal`, found on v1.5.2). The success path is unaffected — `parser_override` rewrites recognised DDL into native SQL on the caller's connection. For *validation* errors (e.g. `semantic view 'X' does not exist`, unknown clause), `parser_override` instead returns `DISPLAY_ORIGINAL_ERROR`; the default parser then fails on the unrecognised DDL prefix; DuckDB calls our registered `parse_function` (`sv_parse_stub` in `cpp/src/shim.cpp`), which re-runs validation (`sv_parse_function_rust` in `src/parse/ffi.rs`) and fails the parse with the error. On DuckDB 1.5 the stub got the statement text and returned `DISPLAY_EXTENSION_ERROR` with `error_location`, and `ParserException::SyntaxError` formatted the caret. On 2.0 the stub gets tokens without offsets and DuckDB shows no location for a parser error outside the ClientContext path, so the stub does it itself: it finds the failed statement's tokens in the query the override recorded (`sv_override_query`, via `sv_locate_tail`). 2.0 runs a string's earlier statements before it parses the later ones, so a semantic-view read among them runs before the DDL is parsed; its catalog reads plan in the caller's context with the built-in parser, so they never reach the hooks and leave the record alone. The record is also keyed to the database whose hooks wrote it (`sv_parser_hook_database`), because an earlier statement that fails as it runs leaves it unread. Having located the tokens, the stub validates that exact text and renders the caret with `QueryErrorContext::Format`. When the tokens cannot be located (the override is off, so nothing was recorded) it validates text rebuilt from the tokens and shows no caret. (TECH-DEBT 22 was resolved by this mechanism in Phase 62; the older `sql_throwing` / synthesised-`SELECT error('...')` workaround was deleted.)
-2. **Setting `allow_parser_override_extension` back to `DEFAULT` silently bypasses our hook.** The extension installs `FALLBACK` on load; a session that resets it parses semantic-view DDL with DuckDB's grammar, where the extension's grammar productions (`src/grammar/`) run it (`test/sql/peg_compat.test`, section 4). Errors then show no caret in the Python client (TECH-DEBT #99), and a CREATE body loses its tabs and blank lines (TECH-DEBT #100). On DuckDB 1.5, `CALL disable_peg_parser()` did that reset as a side effect (TECH-DEBT item 21); 2.0 removed the PEG toggles.
+DuckDB keeps the active grammar extensions per connection (`active_grammar_extensions`, settable only locally), so loading the extension does not by itself change how other connections parse. `sv_register_grammar` (`cpp/src/shim.cpp`) registers the productions once per database, then activates them three ways:
+
+1. **The loading connection**, directly.
+2. **Connections opened later**, from the extension callback's `OnConnectionOpened`, on their own thread.
+3. **Connections already open**, through a `SemanticViewsGrammarPending` `ClientContextState` registered on each (that registry is mutex-synchronised). Its `QueryBegin` / `QueryEnd` runs on the connection's own thread, activates the grammar there and removes itself. Nothing writes another connection's `ClientConfig` from the loading thread (TECH-DEBT #103).
+
+DuckDB parses a query before `QueryBegin`, so a connection of the third kind parses its **next** query without the grammar: a semantic-view statement there fails as a DuckDB syntax error, and every query after it parses with the grammar. Running `LOAD semantic_views` on that connection activates it at once. `test_connection_open_before_load` in `test/integration/test_load_extension_twice_idempotent.py` pins this; DuckDB offers no pre-parse hook that would avoid it.
 
 ### Feature Flag Split
 
@@ -236,7 +235,7 @@ Definitions live in `semantic_layer._definitions` (a regular DuckDB table that p
 
 Writes and reads both happen in the caller's transaction:
 
-- **Writes.** `parser_override` (or the grammar bridge) produces `INSERT / UPDATE / DELETE ... RETURNING ...` SQL, and DuckDB runs it on the caller's connection, in whatever transaction the caller has open.
+- **Writes.** The grammar bridge produces `INSERT / UPDATE / DELETE ... RETURNING ...` SQL, and DuckDB runs it on the caller's connection, in whatever transaction the caller has open.
 - **Reads** (`semantic_view()`, `explain_semantic_view()`, `describe_*`, `show_*`, `list_*`, `read_yaml_*`, `get_ddl`). The C++ bind or scalar callback names the caller's `ClientContext` for the call (`SvCallerScope`), and the Rust dispatcher reads through `read_ffi::caller_definitions` / `caller_describe` / `caller_explain`, backed by the shim's `sv_caller_*`: a storage-layer scan of `_definitions` with the caller's `DuckTransaction` (its uncommitted rows and deletes included), and binds / plans with the caller's context for member typing and `explain_semantic_view`. None of them runs a statement: `ClientContext::Query` from inside the caller's own bind would self-deadlock on its `context_lock` (TECH-DEBT #19). Reads look the table up in the database new connections start in, whatever the caller has `USE`-d (#26).
 
 The in-memory `CatalogState` HashMap mirror was removed in v0.8.0 (Phase 58).
@@ -367,18 +366,17 @@ Fix: `rustup update stable`
 | `just test-rust` | Unit tests (model, catalog, expand) | Runs `cargo nextest run` with bundled DuckDB -- fast, no extension loading |
 | `just test-sql` | SQL logic tests (DDL + query round-trips) | Builds the extension, loads it in DuckDB, and runs the `.test` files **enumerated in `test/sql/TEST_LIST`** — the runner takes `--file-list`, not a directory glob, so a file missing from that list is silently skipped. `just check-test-list` makes that a hard error. The runner is invoked through `scripts/run_sqllogictest.py` (the Makefile's `TEST_RUNNER`), which fails the run when `require semantic_views` cannot be met (a missing or renamed extension file — the bare runner SKIPs every file and exits 0), when a listed file never runs (unparseable), when a file is SKIPPED for any reason other than a `require` of something else (e.g. `require windows`, listed loudly), when a file reports SUCCESS having executed zero statements, when any statement raised an `INTERNAL Error` (even one a `statement error` block matched: DuckDB keeps the original message inside the INTERNAL wrapper, e.g. for a scalar function that throws without being marked fallible), and when a file hits an error the runner silently ignores ("HTTP", "Unable to connect" — upstream counts those as a pass; under the local `SV_OFFLINE_EXTENSIONS=1` opt-in too: the files that need a downloaded extension are left out of the list before the wrapper runs, see below). It ends with `sqllogictest: N file(s) ran, M statements/queries executed`. |
 | `just test-sql-prebuilt` | The above, minus the build | Same body as `test-sql` (which is defined as `build` + this), for callers that already have `build/debug/semantic_views.duckdb_extension`. CI's `SQL logic tests` job uses it because it downloads a prebuilt artifact; running `test-sql` there would rebuild what it just downloaded. |
-| `just test-sql-grammar` | SQL logic tests with the grammar productions | Builds, then runs `test-sql`'s file list with `SV_ROUTE_TO_GRAMMAR=1`: the wrapper runs every statement the grammar productions cover (`GRAMMAR_OWNED` in `scripts/run_sqllogictest.py`) with `allow_parser_override_extension = 'DEFAULT'`, so DuckDB's grammar and `src/grammar/` parse it instead of the parser override. A statement whose expected error pins a caret (`LINE 1:`) stays on the override (`CARET_EXPECTED`, TECH-DEBT #99). It holds both implementations to the same tests, the DDL corpus included, while they coexist. The summary adds `N routed to the grammar`, and a run that routes none fails. CI's `SQL logic tests` job runs `test-sql-prebuilt` both ways. |
 | `just test-ducklake-ci` | DuckLake integration (synthetic data) | Builds extension, runs the Python DuckLake CI test — the leg included in `test-all`. With `SV_OFFLINE_EXTENSIONS=1` (local only, see below) it prints a `SKIPPED` line and exits 0 when the `ducklake` extension cannot be downloaded. |
 | `just test-ducklake` | DuckLake integration (real jaffle-shop data) | Builds extension, runs the Python test against DuckLake tables; requires `just setup-ducklake` first |
 | `just test-integration` | Python integration suites | Runs the full `test/integration/*.py` suite list (caret, ADBC, multi-db, concurrency, differential, interrupt, …), plus `test-examples`, `test-sqllogictest-guards` and `test-multi-statement-error` |
 | `just test-examples` | Every `examples/*.py` | Builds the extension, then `scripts/run_examples.py` runs each example under `uv run --script` (so each gets its own PEP 723 dependencies — `transactional_ddl.py` gets `adbc-driver-manager`/`pyarrow`) from the repo root, and fails on any non-zero exit. Every file prints `PASS`/`FAIL`/`SKIPPED`/`XFAIL`/`XPASS`; nothing is skipped silently. Two explicit allow-lists in the script: `NEEDS_DOWNLOADED_EXTENSION` (examples that download a DuckDB extension at run time, none at present; such a file runs normally, `SKIPPED` only under `SV_OFFLINE_EXTENSIONS=1`, which is refused when `CI` is set) and `EXPECTED_FAILURES` (must fail with its recorded error and cite TECH-DEBT; a different error is a `FAIL`, a pass is a loud `XPASS` warning so the entry gets deleted). Pass file names to run a subset. Part of `test-integration`. |
 | `just test-sqllogictest-guards` | The sqllogictest wrapper itself | Drives the real `make test_debug` with a one-file `TEST_LIST` per scenario and asserts each silent-skip case — missing extension, renamed extension, zero statements executed, unparseable file, `halt`, a query failing with an "HTTP" / "Unable to connect" error (which the runner's `ignore_error_messages` counts as a pass), and an expected-error block that matched an INTERNAL error — now exits non-zero with its own reason, and that a normal file, an expected-error block on an ordinary error, and a `require windows` platform skip still exit 0. The offline scenarios drive the wrapper directly: under `SV_OFFLINE_EXTENSIONS=1` only a file passed as `--offline-excused` may hit a network error, reported as `SKIPPED` (`make` passes none; it leaves `OFFLINE_EXTENSION_TESTS` out of the list instead); any other file still fails, and the variable is refused when `CI` is set (`test/integration/test_sqllogictest_guards.py`). Part of `test-integration`. |
-| `just test-multi-statement-error` | Multi-statement DDL (TECH-DEBT #85) | Semantic-view DDL inside a multi-statement `execute()` string runs through the grammar productions, an error in it shows a caret on its own line, and a later query on another connection never borrows the recorded query's text or caret. Part of `test-integration`. |
+| `just test-multi-statement-error` | Multi-statement DDL (TECH-DEBT #85) | Semantic-view DDL inside a multi-statement `execute()` string runs through the grammar productions, an error in it shows a caret on its own line, an unquoted reserved-word name is refused and `GET_DDL` quotes it, and each statement costs only its own length. Part of `test-integration`. |
 | `just test-interrupt` | Query cancellation (TECH-DEBT #42) | Builds the extension and fires `con.interrupt()` from a second thread mid-query; asserts `semantic_view()` aborts early (not just eventually) and reports a bare `Interrupted!`, then the same for the SHOW / DESCRIBE member-type probes (single-view, DIMENSIONS FOR METRIC and cross-view) over a source whose bind expands thousands of globs. Every check runs a second time under DuckDB 2.0's `SET max_execution_time` deadline, which must surface as the engine's bare "Query exceeded maximum execution time". DuckDB checks the deadline only once execution starts, so where the slow part is a bind DuckDB runs in the caller's context (`semantic_view()`'s own bind, a member-type probe, `explain_semantic_view()`'s plan), the deadline case is held to a plain query of the same source (documented under the reference's Time Limits). Part of `test-integration`. |
 | `just test-load-version-guard` | The load-time DuckDB version check | Builds the extension and `LOAD`s it, in a child process, into a DuckDB other than `.duckdb-version` (DuckDB 1.5.6, the last 1.5 release, whose C API is the one we declare; pinned in the `test-load-version-guard` recipe via `uv run --with`). Asserts the load fails with the check's message from `src/load_guard.rs` rather than loading or crashing; without the check a v1.5.6 build segfaulted a 2.0 host. When the build moves to a new DuckDB, repin the recipe to a different release. Part of `test-integration`. |
 | `just test-engine-pins` | The wheel pin against the engine pin | Runs under the wheel `.duckdb-pypi-version` names and checks it is that release, that its engine reports `.duckdb-version`, and, while BuildAll / BuildQuick pin the engine by commit, that it was built from that commit. The engine is built from this wheel's sdist under `.duckdb-version`'s label, and nothing in the source could contradict a wrong pair. No build needed. Part of `test-integration`. |
 | `just test-legacy-schema-spelling` | Legacy-catalog migration (TECH-DEBT #44) | Builds a real pre-scoping database file (`_definitions` keyed on `name` alone), opens it through a real `LOAD`, and asserts the migration records the **catalog's** spelling of a schema rather than the row's — then that `CREATE OR REPLACE` replaces the migrated row instead of duplicating it. Part of `test-integration`. |
-| `just test-all` | Rust + SQL logic (both routes) + DuckLake CI + integration | Runs `test-rust`, `test-sql`, `test-sql-grammar`, `test-ducklake-ci`, and `test-integration` sequentially |
+| `just test-all` | Rust + SQL logic + DuckLake CI + integration | Runs `test-rust`, `test-sql`, `test-ducklake-ci`, and `test-integration` sequentially |
 
 #### Offline runs: `SV_OFFLINE_EXTENSIONS=1` (local only)
 
@@ -425,7 +423,7 @@ Net: treat the 80% figure as a floor on the bundled core's line coverage, not as
 SV_SKIP_CPP_BUILD=1 cargo clippy --no-default-features --features extension -- -D warnings
 ```
 
-`SV_SKIP_CPP_BUILD` makes `build.rs` skip the C++ shim compile and the DuckDB engine link. Clippy only type-checks (it never links the final `cdylib`), so the C++ half is irrelevant and the check needs no engine build — it runs in seconds. Use the same command locally before touching any FFI (`src/query/{table_function,explain}.rs`, `src/ddl/*_ffi.rs`, `src/parse/ffi.rs`) code. Do **not** set `SV_SKIP_CPP_BUILD` for a real `just build` — the extension won't link without the C++ shim.
+`SV_SKIP_CPP_BUILD` makes `build.rs` skip the C++ shim compile and the DuckDB engine link. Clippy only type-checks (it never links the final `cdylib`), so the C++ half is irrelevant and the check needs no engine build — it runs in seconds. Use the same command locally before touching any FFI (`src/query/{table_function,explain}.rs`, `src/ddl/*_ffi.rs`, `src/grammar/ffi.rs`) code. Do **not** set `SV_SKIP_CPP_BUILD` for a real `just build` — the extension won't link without the C++ shim.
 
 **This is also what the pre-commit hook runs** (`just lint-fast` / `.cargo-husky/hooks/pre-commit`). The default-features `cargo clippy -- -D warnings` compiles the bundled DuckDB amalgamation — a ~10 min COLD build (its cargo profile differs from `cargo test`'s, so a green `cargo test` does not warm it, and tight disk evicts it between runs), which used to stall every `git commit`. The extension-feature clippy lints the same production code with no C++ build, because every `#[cfg(not(feature = "extension"))]` item in `src/` is either inside a `#[cfg(test)]` module (clippy without `--tests` skips it) or the `test_helpers` module (which carries `#[allow(clippy::pedantic, ...)]`). CI's default-features `Clippy (pedantic lints, deny warnings)` step remains the authoritative full-coverage gate.
 
@@ -721,13 +719,13 @@ cargo +nightly fuzz list          # see available targets
 |--------|---------------|-----------------|
 | `fuzz_json_parse` | Feeds arbitrary bytes to `SemanticViewDefinition::from_json()` | Panics in JSON parsing, unexpected serde behavior on malformed input |
 | `fuzz_yaml_parse` | Feeds arbitrary bytes to the YAML import path | Panics / serde surprises in YAML deserialization |
-| `fuzz_ddl_parse` | Arbitrary bytes → `plan_rewrite` (the full CREATE/DDL front door) | Panics or hangs in DDL parsing on malformed statements |
+| `fuzz_ddl_parse` | Arbitrary bytes → `plan_create` (the CREATE planner the grammar's CREATE production calls) | Panics or hangs in DDL parsing on malformed statements |
 | `fuzz_keyword_body` | Arbitrary bytes → `parse_keyword_body` (bypasses prefix detection) | Panics in the clause-body parser; asserts anything parsed also renders |
 | `fuzz_render_roundtrip` | Generated definitions → normalize once via `parse(render(def))` → assert `render` is idempotent on the parser-produced def | Grammar drift between `render_ddl` and the body parser (dropped field, reordered clause, mis-quoted identifier). Uses the converge-once invariant, not the strong `render(parse(render(def))) == render(def)` fixpoint — that is unsatisfiable on arbitrary defs (a free-form `expr`'s surrounding whitespace is trimmed by the parser and cannot be quote-protected) |
 | `fuzz_sql_expand` | Arbitrary `SemanticViewDefinition` + name arrays → `expand()` | Panics/assertion failures in SQL generation; quote/paren imbalance in the emitted SQL |
 | `fuzz_query_names` | Fuzzes dimension/metric name strings against a fixed known-good definition | SQL injection via user-supplied column names, quoting bugs, name resolution panics |
 | `fuzz_where_predicate` | Arbitrary `SemanticViewDefinition` + an arbitrary `where_clause` predicate → `expand()`, across the metric and fact paths | Corruption of the pre-aggregation predicate splice — the one place arbitrary user text is interpolated verbatim into generated SQL. Same balanced-in/balanced-out oracle as `fuzz_sql_expand`, with the predicate added to the precondition (an unbalanced predicate legitimately yields unbalanced SQL). This is the seam issue #145 came from |
-| `fuzz_parser_override_ffi` | Drives the `parser_override` FFI entry path with fuzzed input | Panics crossing the FFI boundary; unexpected rc / error propagation |
+| `fuzz_create_text` | Arbitrary CREATE text (prefixed with `CREATE SEMANTIC VIEW fuzz_view AS ` unless it already is one) → `plan_create`; anything that plans must render, plan again, and render to the same text | Definitions the parser accepts but `GET_DDL` cannot replay (TECH-DEBT #60, #59): the direction `fuzz_render_roundtrip` cannot search. Panics in the CREATE planner |
 
 > **Adding a target:** a fuzz target is registered in three places — the `fuzz/fuzz_targets/<name>.rs` file, a `[[bin]]` entry in `fuzz/Cargo.toml`, and the `Fuzz.yml` matrix. `just fuzz-all` needs no update: it derives its list from `cargo fuzz list` (the manifest). The matrix must be hand-written, because GitHub resolves it before any job starts, so `just check-fuzz-list` (and the matching CodeQuality step) fails the build when the three disagree. That drift is not hypothetical: `fuzz_where_predicate` was in the CI matrix but missing from the old hardcoded `fuzz-all` list from #172 until 2026-08-04, so it fuzzed on every push and never locally.
 
@@ -1093,7 +1091,7 @@ Do **not** set a directory-level nightly override (`rustup override set nightly`
 | **BuildQuick** | Pull requests (skips doc-only changes) | Fast feedback: extension **build** on Linux x86_64 only, via the DuckDB extension-ci-tools reusable workflow. No `push` trigger (runs on PRs + manual dispatch) — `main` gets the full platform matrix from BuildAll. It invokes `make test_release`, but that runs **no tests** here: `linux_amd64` is on upstream's `SKIP_TESTS` list (see the note below), so this workflow is build-only. Both build workflows call extension-ci-tools' `v2.0-cyanoptera` branch with the engine pinned in `.duckdb-version`; while that is an untagged pre-release they pass its commit as `duckdb_version` plus `duckdb_tag: <release>`, which the Makefile's `set_duckdb_tag` turns into a tag on the clone so the engine is built under its release label. |
 | **BuildAll** | Push to `main` (skips doc-only changes) | Full build across 5 platforms: Linux x86_64/arm64, macOS x86_64/arm64, Windows x86_64. Excludes WASM, musl, mingw variants. **Runs the full sqllogictest suite on `windows_amd64` and `osx_arm64`** (release build, ~30–55 s each). The other three do not test: `linux_amd64` and `linux_arm64` are skipped by upstream, and `osx_amd64` is cross-compiled on an arm64 runner so its binary cannot be executed. |
 | **CodeQuality** | Push to `main` + pull requests (skips doc-only changes) | `TEST_LIST` sync check; fuzz-target registration sync check (`.rs` files vs `fuzz/Cargo.toml` `[[bin]]` entries vs the `Fuzz.yml` matrix); `cargo fmt --check`; clippy (default **and** `--features extension`); doctests (default + the FFI `compile_fail` ABI guard); extension-feature unit tests; `cargo-deny` (license/advisory audit); 80%-line coverage floor via `cargo-llvm-cov`. Runs as **three parallel jobs** — `Lint & format`, `Doctests & extension unit tests`, `Coverage (80% minimum)` — so their three separate cold compiles of the bundled DuckDB amalgamation (clippy=check, doctests=build, coverage=instrumented) overlap on different runners instead of running serially (~32 min → ~12 min). |
-| **IntegrationChecks** | Push to `main` + pull requests (skips doc-only changes) | Four jobs. `Build debug extension` runs `make configure debug` **once** and uploads the binary; the DuckLake CI test and the **sqllogictest suite** `needs:` it and download that artifact instead of rebuilding. The sqllogictest job runs the suite twice: `just test-sql-prebuilt`, then the same recipe with `SV_ROUTE_TO_GRAMMAR=1` ("Run SQL logic tests through the grammar", the CI form of `just test-sql-grammar`). The Python integration job builds its own, because every leaf recipe under `just test-integration` declares `build` as a dependency, so its recipe graph re-enters `make debug` regardless; that job also runs **every example** (`just test-examples`) and the sqllogictest-wrapper guards (`just test-sqllogictest-guards`) and the multi-statement DDL error check (`just test-multi-statement-error`), all via `test-integration`. This is the authoritative sqllogictest gate for pull requests. Both building jobs cache `.engine/` (the DuckDB engine build, keyed on the engine pins and `scripts/ensure_engine.py`), so only a pin change pays for an engine build. |
+| **IntegrationChecks** | Push to `main` + pull requests (skips doc-only changes) | Four jobs. `Build debug extension` runs `make configure debug` **once** and uploads the binary; the DuckLake CI test and the **sqllogictest suite** `needs:` it and download that artifact instead of rebuilding. The sqllogictest job runs `just test-sql-prebuilt`. The Python integration job builds its own, because every leaf recipe under `just test-integration` declares `build` as a dependency, so its recipe graph re-enters `make debug` regardless; that job also runs **every example** (`just test-examples`) and the sqllogictest-wrapper guards (`just test-sqllogictest-guards`) and the multi-statement DDL error check (`just test-multi-statement-error`), all via `test-integration`. This is the authoritative sqllogictest gate for pull requests. Both building jobs cache `.engine/` (the DuckDB engine build, keyed on the engine pins and `scripts/ensure_engine.py`), so only a pin change pays for an engine build. |
 | **DocsCheck** | Pull requests | Sphinx docs build with `-W` (warnings as errors). Deliberately **not** path-filtered, so documentation/text-only changes are still validated when the heavier workflows skip. No `push` trigger (runs on PRs + manual dispatch) — `main` gets the build+deploy from Docs. |
 | **Docs** | Push to `main` | Same `-W` Sphinx build, then deploys the site to GitHub Pages. |
 | **Fuzz** | Push touching `src/**`, `fuzz/**`, or the Cargo manifests | Runs all nine fuzz targets for 10 minutes each. Detects crashes via artifact files (not exit codes), uploads them, opens a `bug`/`fuzzing` issue, and fails the job on any crash. A `changes` guard job re-checks the push's **net** diff and skips the matrix when the trigger fired only because of the push-range quirk below. |

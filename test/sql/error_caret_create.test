@@ -1,20 +1,18 @@
 # Phase 62 Wave 3 — caret rendering coverage for CREATE error paths.
 #
-# Plans 02-03 restored caret rendering via parse_function on FALLBACK_OVERRIDE
-# deferral. parser_override returns rc=2 on validation errors; the default
-# parser fails on the unrecognised DDL prefix; DuckDB calls our
-# parse_function which returns DISPLAY_EXTENSION_ERROR with error_location
-# (byte offset into the user input). ParserException::SyntaxError renders
-# `LINE 1: ... ^`.
+# The CREATE grammar production plans the body and reports a body error as a
+# ParserException at its byte offset in the query, which DuckDB renders as
+# `LINE 1: ... ^`. A statement no production matches (a misspelt prefix) gets
+# DuckDB's own syntax error, also with a caret.
 #
 # Behavioural properties pinned (from RESEARCH.md §6):
 #   B1: caret renders for malformed CREATE (missing '(')
 #   B2: caret renders for clause typo (`TBLES` → suggest `TABLES`)
-#   B3: caret renders for prefix near-miss (`CRETAE`)
+#   B3: caret renders for a misspelt prefix (`CRETAE`)
 #
 # sqllogictest matches the substring of the FULL rendered error
 # including the caret line. Substring `LINE 1:` proves caret rendering is
-# happening; substring `Did you mean` pins the near-miss helper text.
+# happening.
 
 require semantic_views
 
@@ -36,8 +34,13 @@ CREATE SEMANTIC VIEW v_bad_kw AS TBLES (t);
 ----
 did you mean 'TABLES'
 
-# B3: prefix near-miss (CRETAE -> CREATE)
+# B3: misspelt prefix (CRETAE) -- DuckDB's syntax error, caret on CRETAE
 statement error
 CRETAE SEMANTIC VIEW v_typo AS TABLES (t);
 ----
-Did you mean 'CREATE SEMANTIC VIEW'
+syntax error at or near "CRETAE"
+
+statement error
+CRETAE SEMANTIC VIEW v_typo AS TABLES (t);
+----
+LINE 1:

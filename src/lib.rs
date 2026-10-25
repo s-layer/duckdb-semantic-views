@@ -321,8 +321,8 @@ pub mod ddl;
 ///
 /// Uses `C_STRUCT` ABI (`semantic_views_init_c_api`) for the `DuckDB` handshake.
 /// After Rust-side initialization (catalog, DDL functions, query functions),
-/// calls a C++ helper (`sv_register_parser_hooks`) to register parser extension
-/// hooks that require C++ types (`ParserExtension`, `DBConfig`).
+/// calls a C++ helper (`sv_register_grammar_hooks`) to register the grammar
+/// productions, which need C++ types (`GrammarExtension`, `DBConfig`).
 ///
 /// This is "Option A" from Phase 15: keep `C_STRUCT` entry, call C++ helper.
 /// Option B (CPP entry via `DUCKDB_CPP_EXTENSION_ENTRY`) was tried first but
@@ -377,19 +377,18 @@ mod extension {
             /// Ordered `(human label, C++ registration wrapper)` table, iterated
             /// by `init_extension`.
             ///
-            /// LIFE-2: the parser hook is registered **last**. The read-side
+            /// LIFE-2: the grammar is registered **last**. The read-side
             /// registrations are mutually independent and are pure `DuckDB`
-            /// Catalog-API calls, so none of them needs the hook; the
-            /// dependency runs the other way, because the hook's rewrites emit
+            /// Catalog-API calls, so none of them needs the grammar; the
+            /// dependency runs the other way, because its productions lower to
             /// calls to those very functions (`list_semantic_views()`,
             /// `describe_semantic_view(...)`,
             /// `__sv_compute_create_from_yaml(...)`). Since `init_extension`
             /// returns `Err` on the first failure and rolls nothing back,
-            /// registering the hook first meant a partial LOAD left
-            /// `parser_override` live — and
-            /// `allow_parser_override_extension` flipped to `FALLBACK` — with
-            /// the functions it rewrites to missing. Going last makes semantic
-            /// DDL inert on a failed LOAD instead of half-working.
+            /// registering the grammar first would leave a partial LOAD
+            /// parsing semantic-view statements into calls to functions that
+            /// are missing. Going last makes semantic DDL inert on a failed
+            /// LOAD instead of half-working.
             /// `tests/registration_order_guard.rs` pins the order.
             const REGISTRATIONS: &[(&str, RegisterFn)] = &[ $( ($label, $sym) ),+ ];
         };
@@ -444,7 +443,7 @@ mod extension {
         ("semantic_view", sv_register_semantic_view),
         ("explain_semantic_view", sv_register_explain_semantic_view),
         // LIFE-2: must stay last — see the doc comment on `REGISTRATIONS`.
-        ("parser hooks", sv_register_parser_hooks),
+        ("grammar", sv_register_grammar_hooks),
     ];
 
     /// Decode a `[0u8; 1024]` registration error buffer into an owned `String`,
@@ -529,7 +528,7 @@ mod extension {
         init_catalog(con, &db_path, is_read_only)?;
 
         // Phase 65 Plan 06: H1 catalog_conn allocation RETIRED. The
-        // parser_override path is now pure-SQL on the caller's connection
+        // DDL path is pure SQL on the caller's connection
         // — existence checks use a `SELECT CASE WHEN NOT EXISTS THEN
         // error() ELSE TRUE END; <DML>` two-statement guard that runs
         // snapshot-consistent with the DML within an explicit caller
@@ -540,12 +539,12 @@ mod extension {
         // that fails CI if anyone re-introduces one.
 
         // Register every read-side table function / scalar and then the
-        // parser_override hook via the C++ Catalog-API wrappers.
+        // grammar via the C++ Catalog-API wrappers.
         //
         // LIFE-2: the loop returns on the first failure and rolls nothing back,
-        // so `REGISTRATIONS` puts the parser hook LAST — the read-side
-        // registrations are independent of it, while its own rewrites emit
-        // calls to them. See the `REGISTRATIONS` doc comment for the full
+        // so `REGISTRATIONS` puts the grammar LAST — the read-side
+        // registrations are independent of it, while its productions lower
+        // to calls to them. See the `REGISTRATIONS` doc comment for the full
         // argument and `tests/registration_order_guard.rs` for the guard.
         //
         // Each wrapper writes a diagnostic into `error_buf` on failure, decoded

@@ -23,8 +23,8 @@ the extension persisted DDL on its own auto-commit ``persist_conn`` /
 ``ddl_conn``, so an ADBC client that issued a DDL statement followed by
 ``rollback()`` would still find the view in the catalog after rollback.
 
-After v0.8.0 the parser_override hook rewrites DDL into native SQL that runs
-on the caller's connection, so commit/rollback honour the transaction
+Since v0.8.0 DDL lowers to native SQL that runs on the caller's connection
+(through the grammar productions since Phase 3 of the PEG epic), so commit/rollback honour the transaction
 boundary.
 
 This test exercises:

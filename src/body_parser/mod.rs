@@ -1006,7 +1006,7 @@ mod tests {
         // The parse layer sees comments already blanked to spaces (length
         // preserving), so this must parse identically to the comment-free
         // form. NOTE: parse_keyword_body itself does not blank — callers
-        // (plan_rewrite) do — so exercise the blank-then-parse pipeline.
+        // (plan_create) do — so exercise the blank-then-parse pipeline.
         let raw = "AS TABLES (o AS orders PRIMARY KEY (id)) /* between */ DIMENSIONS (o.a AS o.a)";
         let blanked = crate::util::blank_sql_comments(raw);
         let kb = parse_keyword_body(&blanked, 0).unwrap();

@@ -15,7 +15,7 @@
 #   B5: ALTER+ROLLBACK leaves the comment field intact (D-21 transactional
 #       semantics on the json_merge_patch UPDATE).
 #
-# Requirements covered: LIFE-02 (parser_override has zero catalog reads
+# Requirements covered: LIFE-02 (DDL planning has zero catalog reads
 # under the read-elimination architecture; only catalog.exists remains
 # for the friendly "does not exist" pre-check, retired by Plan 06).
 #

@@ -1,6 +1,6 @@
 # Resolution of an unqualified semantic-view name follows the caller's search
-# path in every read function, including the two scalars and a table function
-# that reaches DuckDB without passing through the parser override.
+# path in every read function, including the two scalars and the table
+# functions called directly rather than through a statement.
 #
 # The read functions now take the path from the caller's ClientContext at bind
 # (scalars: at execution), instead of a `search_path :=` argument the parser
@@ -75,13 +75,10 @@ SELECT read_yaml_from_semantic_view('v') LIKE '%from sp1%';
 ----
 true
 
-# --- a table function the parser override never sees ----------------------------
-# With overrides off, the statement reaches DuckDB's own parser untouched, so no
-# `search_path :=` argument was ever spliced in and the call fell back to the
-# ambiguity error.
-
-statement ok
-SET allow_parser_override_extension = 'DEFAULT';
+# --- table functions called directly ----------------------------------------
+# No statement lowers these calls, so nothing could ever splice a
+# `search_path :=` argument in (the parser override once did, for the
+# statements it saw); the path comes from the caller's context at bind.
 
 query TI
 SELECT * FROM semantic_view('v', dimensions := ['region'], metrics := ['n']);
@@ -121,9 +118,6 @@ query T rowsort
 SELECT name FROM show_semantic_dimensions_for_metric('v', 'n');
 ----
 region
-
-statement ok
-SET allow_parser_override_extension = 'FALLBACK';
 
 # --- a prepared statement (TECH-DEBT #101) ------------------------------------
 # DuckDB resolves its own tables on the path in effect at EXECUTE. So does the

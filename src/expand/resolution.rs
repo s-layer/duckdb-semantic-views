@@ -26,6 +26,9 @@ pub fn quote_ident(ident: &str) -> String {
 /// resolves to a different view or fails to parse (RT-2, code-review
 /// 2026-07-02).
 ///
+/// A keyword `DuckDB` refuses as a bare name (`select`, `order`, `left`) is
+/// quoted too, as the extension's own DDL refuses it bare.
+///
 /// Used by `render_ddl` for the stored (bare, quote-stripped) view name so
 /// `get_ddl` output re-parses to the same catalog key while common
 /// lowercase names keep rendering unquoted.
@@ -36,7 +39,8 @@ pub fn quote_ident_if_needed(ident: &str) -> String {
         && !bytes[0].is_ascii_digit()
         && bytes
             .iter()
-            .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || *b == b'_');
+            .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || *b == b'_')
+        && !crate::ident::is_refused_as_name(ident);
     if bare_safe {
         ident.to_string()
     } else {

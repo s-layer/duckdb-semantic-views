@@ -1,9 +1,8 @@
 # CREATE SEMANTIC VIEW through the grammar production.
 #
-# With parser overrides off, CREATE reaches DuckDB's own grammar, where the
-# extension adds it as an alternative of `Statement`. The production plans the
-# statement as the parser override does, so every form and every error is the
-# override's.
+# The extension adds CREATE SEMANTIC VIEW to DuckDB's own grammar as an
+# alternative of `Statement`. The production rebuilds the statement's text from
+# its tokens and plans the body from that text.
 
 require semantic_views
 
@@ -12,9 +11,6 @@ CREATE TABLE gc_t (id INTEGER, region VARCHAR, amount INTEGER);
 
 statement ok
 INSERT INTO gc_t VALUES (1, 'n', 10), (2, 's', 20), (3, 'n', 5);
-
-statement ok
-SET allow_parser_override_extension = 'DEFAULT';
 
 # --- the forms -----------------------------------------------------------------
 
@@ -75,7 +71,7 @@ SELECT region FROM semantic_view('gc_y', dimensions := ['region']);
 n
 s
 
-# --- errors are the override's --------------------------------------------------
+# --- body errors ---------------------------------------------------------------
 
 statement error
 CREATE SEMANTIC VIEW gc_e AS TABLES gc_t;
@@ -86,6 +82,65 @@ statement error
 CREATE SEMANTIC VIEW gc_e AS TABLES (t AS gc_t PRIMARY KEY (id)) DIMENSIONS (t.region AS region) DIMENSIONS (t.id AS id);
 ----
 Duplicate clause keyword 'DIMENSIONS'
+
+# --- reserved words as names ---------------------------------------------------
+
+# The name is a DuckDB `ColId`, as in DROP, ALTER, DESCRIBE and SHOW, and as in
+# DuckDB's own DDL: a reserved word must be quoted, and so must a type or
+# function-name keyword such as `left`.
+statement error
+CREATE SEMANTIC VIEW select AS TABLES (t AS gc_t PRIMARY KEY (id)) DIMENSIONS (t.region AS region);
+----
+syntax error at or near "select"
+
+statement error
+CREATE SEMANTIC VIEW IF NOT EXISTS order AS TABLES (t AS gc_t PRIMARY KEY (id)) DIMENSIONS (t.region AS region);
+----
+syntax error at or near "order"
+
+statement error
+CREATE SEMANTIC VIEW left AS TABLES (t AS gc_t PRIMARY KEY (id)) DIMENSIONS (t.region AS region);
+----
+syntax error at or near "left"
+
+# A keyword DuckDB takes as a name needs no quotes.
+statement ok
+CREATE SEMANTIC VIEW if AS TABLES (t AS gc_t PRIMARY KEY (id)) DIMENSIONS (t.region AS region);
+
+statement ok
+DROP SEMANTIC VIEW if;
+
+statement ok
+CREATE SEMANTIC VIEW "select" AS TABLES (t AS gc_t PRIMARY KEY (id)) DIMENSIONS (t.region AS region);
+
+statement ok
+CREATE SEMANTIC VIEW "left" AS TABLES (t AS gc_t PRIMARY KEY (id)) DIMENSIONS (t.region AS region);
+
+# GET_DDL quotes both, so its output runs.
+query T
+SELECT get_ddl('SEMANTIC_VIEW', 'select') LIKE 'CREATE OR REPLACE SEMANTIC VIEW "select" AS%';
+----
+true
+
+query T
+SELECT get_ddl('SEMANTIC_VIEW', 'left') LIKE 'CREATE OR REPLACE SEMANTIC VIEW "left" AS%';
+----
+true
+
+statement ok
+DROP SEMANTIC VIEW "select";
+
+statement ok
+DROP SEMANTIC VIEW "left";
+
+# The keywords `crate::ident::is_refused_as_name` lists come from these: all
+# of them but `columns`, `generated`, `map`, `struct`, `try_cast` and `tuple`.
+# An engine bump that changes them fails here: update KEYWORDS_REFUSED_AS_NAMES
+# in src/ident.rs to match.
+query T
+SELECT string_agg(lower(keyword_name), ' ' ORDER BY lower(keyword_name)) FROM duckdb_keywords() WHERE keyword_category IN ('reserved', 'type_function');
+----
+all analyse analyze and anti any array as asc asof asymmetric at authorization binary both by case cast check collate collation column columns concurrently constraint create cross default deferrable desc describe distinct do else end except false fetch for foreign freeze from full generated glob group having ilike in initially inner intersect into is isnull join lambda lateral leading left like limit map natural not notnull null offset on only or order outer overlaps pivot pivot_longer pivot_wider placing positional primary qualify references returning right select semi show similar some struct summarize symmetric table tablesample then to trailing true try_cast tuple union unique unpack unpivot using variadic verbose when where window with
 
 # --- DuckDB's own statements are not shadowed -----------------------------------
 
@@ -118,11 +173,7 @@ DROP TABLE semantic2;
 
 # --- inside a multi-statement string (TECH-DEBT #85) ---------------------------
 
-# Back to the override as the extension loads it. It declines a string holding
-# several statements, and DuckDB's grammar splits it and runs each one.
-statement ok
-SET allow_parser_override_extension = 'FALLBACK';
-
+# DuckDB's grammar splits a string holding several statements and runs each one.
 statement ok
 SELECT 1; CREATE SEMANTIC VIEW gc_m AS TABLES (t AS gc_t PRIMARY KEY (id)) DIMENSIONS (t.region AS region); SELECT 2;
 
@@ -132,13 +183,18 @@ SELECT region FROM semantic_view('gc_m', dimensions := ['region']);
 n
 s
 
-# The override saw the query, so the production plans its source text: a tab
-# inside an expression is stored as written (TECH-DEBT #100).
+# The body is planned from text rebuilt from the tokens, so a tab inside an
+# expression becomes a space.
 statement ok
 SELECT 1; CREATE SEMANTIC VIEW gc_w AS TABLES (t AS gc_t PRIMARY KEY (id)) DIMENSIONS (t.r AS upper(	t.region));
 
 query T
-SELECT contains(GET_DDL('SEMANTIC_VIEW', 'gc_w'), 'upper(' || chr(9) || 't.region)');
+SELECT contains(GET_DDL('SEMANTIC_VIEW', 'gc_w'), chr(9));
+----
+false
+
+query T
+SELECT contains(GET_DDL('SEMANTIC_VIEW', 'gc_w'), 'upper( t.region)');
 ----
 true
 
@@ -153,3 +209,15 @@ query I
 SELECT count(*) FROM (SHOW SEMANTIC VIEWS) WHERE name LIKE 'gc_%';
 ----
 5
+
+# A metric entry with no name is refused whether or not a USING clause comes
+# first (TECH-DEBT #59).
+statement error
+CREATE SEMANTIC VIEW gc_n AS TABLES (t AS gc_t PRIMARY KEY (id)) DIMENSIONS (t.r AS t.region) METRICS (USING () AS COMMENT = '');
+----
+Missing metric name before 'AS'
+
+statement error
+CREATE SEMANTIC VIEW gc_n AS TABLES (t AS gc_t PRIMARY KEY (id)) DIMENSIONS (t.r AS t.region) METRICS (AS sum(t.amount));
+----
+Missing metric name before 'AS'

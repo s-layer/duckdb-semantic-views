@@ -143,10 +143,6 @@ DROP SEMANTIC VIEW
 ----
 
 # S-014: rewrite.rs::test_rewrite_name_with_single_quote — an unquoted name containing `'` is not a legal DuckDB identifier (DuckDB's own tokenizer reads `'s_a_view ...` as a string literal), and the grammar's CREATE and DROP refuse it as DuckDB does [text]
-# PRE-EXISTING (TECH-DEBT #98): the parser override's CREATE and DROP still accept it as a view name, which `test_rewrite_name_with_single_quote` pins. No row here can run that CREATE on the override, since `test-sql-grammar` routes every CREATE to the grammar.
-statement ok
-SET allow_parser_override_extension = 'DEFAULT';
-
 statement error
 CREATE SEMANTIC VIEW it's_a_view AS TABLES (o AS dcs_orders PRIMARY KEY (id)) DIMENSIONS (o.region AS o.region) METRICS (o.total AS SUM(o.amount));
 ----
@@ -156,9 +152,6 @@ statement error
 DROP SEMANTIC VIEW it's_a_view;
 ----
 unterminated string literal
-
-statement ok
-SET allow_parser_override_extension = 'FALLBACK';
 
 query TTT nosort
 SELECT * FROM dcs_views();
@@ -327,24 +320,24 @@ DROP SEMANTIC VIEW s;
 statement ok
 DROP SEMANTIC VIEW x;
 
-# --- near-miss prefixes on the non-CREATE forms ---
+# --- misspelt prefixes on the non-CREATE forms ---
 
-# S-050: rewrite.rs::test_near_miss_drop_semantc — `DROP SEMANTC VIEW` is rejected with a suggestion [text]
+# S-050: rewrite.rs::test_near_miss_drop_semantc — `DROP SEMANTC VIEW` gets DuckDB's syntax error at the misspelt keyword [text]
 statement error
 DROP SEMANTC VIEW sales
 ----
-Did you mean 'DROP SEMANTIC VIEW'?
+syntax error at or near "SEMANTC"
 
 # S-051: rewrite.rs::test_near_miss_show_semantic_view — `SHOW SEMANTIC VIEW` (singular) is rejected [syntax]
 statement error
 SHOW SEMANTIC VIEW
 ----
 
-# S-052: rewrite.rs::near_miss_show_materialization — `SHOW SEMANTIC MATERIALIZATION` (singular) is rejected [text]
+# S-052: rewrite.rs::near_miss_show_materialization — `SHOW SEMANTIC MATERIALIZATION` (singular) gets DuckDB's syntax error at that keyword [text]
 statement error
 SHOW SEMANTIC MATERIALIZATION
 ----
-Did you mean 'SHOW SEMANTIC MATERIALIZATIONS'?
+syntax error at or near "MATERIALIZATION"
 
 # --- comments around prefixes and names ---
 
@@ -598,11 +591,11 @@ ALTER SEMANTIC VIEW nope UNSET COMMENT
 ----
 semantic view 'nope' does not exist
 
-# S-087: rewrite.rs::test_validate_rewrite_alter_unsupported_operation, parse_error_position_points_at_offending_token — an unsupported ALTER sub-operation [text]
+# S-087: rewrite.rs::test_validate_rewrite_alter_unsupported_operation, parse_error_position_points_at_offending_token — an unsupported ALTER sub-operation gets DuckDB's syntax error at the operation [text]
 statement error
 ALTER SEMANTIC VIEW v TRUNCATE
 ----
-Unsupported ALTER operation
+syntax error at or near "TRUNCATE"
 
 # S-088: rewrite.rs::test_validate_rewrite_alter_missing_operation — ALTER with a name but no sub-operation [syntax]
 statement error

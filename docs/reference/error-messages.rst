@@ -1,5 +1,5 @@
 .. meta::
-   :description: Reference for all error messages produced by the extension, with causes and fixes for DDL, query, and near-miss detection errors
+   :description: Reference for all error messages produced by the extension, with causes and fixes for syntax, DDL, and query errors
 
 .. _ref-error-messages:
 
@@ -57,18 +57,6 @@ DDL Errors (CREATE SEMANTIC VIEW)
 =================================
 
 These errors occur at define time when creating or replacing a semantic view.
-
-
-Missing view name
------------------
-
-.. code-block:: text
-
-   Missing view name after DDL prefix.
-
-**Cause:** The :ref:`CREATE SEMANTIC VIEW <ref-create-semantic-view>` statement ends before a view name.
-
-**Fix:** Add a view name: ``CREATE SEMANTIC VIEW my_view AS ...``
 
 
 Expected AS or FROM YAML
@@ -220,32 +208,34 @@ Malformed quoted identifier
 **Fix:** Close the quote, or give the identifier a name. Quote only names that need it (spaces, special characters, reserved words): DuckDB matches identifiers case-insensitively whether they are quoted or not, so quoting does not change which name matches.
 
 
+.. _ref-err-syntax:
 .. _ref-err-one-statement:
 
-A reserved-word view name outside a statement of its own
---------------------------------------------------------
+Syntax errors in semantic-view statements
+-----------------------------------------
 
 .. versionchanged:: 0.16.0
 
-   Semantic-view DDL can now share a query string with other statements, and
-   runs with ``allow_parser_override_extension`` set to ``'DEFAULT'``. These
-   messages remain only for the case below.
+   A statement the grammar cannot match gets DuckDB's own syntax error. Earlier
+   releases answered some of them with the extension's messages, such as
+   ``Did you mean 'CREATE SEMANTIC VIEW'?``, ``Missing view name after DDL
+   prefix.`` or ``semantic-view DDL must be sent as its own statement``.
 
 .. code-block:: text
 
-   semantic_views: semantic-view DDL must be sent as its own statement, one
-   statement per call. This query string also contains other statements; send
-   each statement in a separate call (a single trailing ';' is fine).
+   Parser Error: syntax error at or near "CREAT"
 
-.. code-block:: text
+   LINE 1: CREAT SEMANTIC VIEW sales AS ...
+           ^^^^^
 
-   semantic_views: parser_override is not active for this connection
-   (allow_parser_override_extension is 'DEFAULT' or 'STRICT'). Re-enable with:
-   SET allow_parser_override_extension='FALLBACK';
+**Cause:** The semantic-view statements are part of DuckDB's grammar, so a statement that does not match any of them is a syntax error at the first token that does not fit, as for DuckDB's own SQL. Common causes:
 
-**Cause:** A ``DROP``, ``ALTER``, ``DESCRIBE`` or ``SHOW`` statement names a view with an unquoted reserved word, such as ``select``. DuckDB does not accept an unquoted reserved word as a name, so only the extension's parser hook can read the statement, and it reads only a query string that holds the one statement. The first message appears when the string holds other statements too; the second when ``allow_parser_override_extension`` is ``'DEFAULT'`` or ``'STRICT'``.
+- A misspelt keyword: ``CREAT SEMANTIC VIEW``, ``DROP SEMANTC VIEW``.
+- A missing view name, or an ``ALTER SEMANTIC VIEW`` with no operation.
+- A view name that is a DuckDB reserved word written without quotes, such as ``CREATE SEMANTIC VIEW select AS ...`` or ``DESCRIBE SEMANTIC VIEW order``. DuckDB accepts its reserved keywords, and most of its ``type_function`` keywords such as ``left`` and ``join``, as a name only when it is quoted; ``duckdb_keywords()`` lists both kinds.
+- A connection that was already open when another connection ran ``LOAD semantic_views``. Its first query after the ``LOAD`` is parsed without the semantic-view statements (see :ref:`explanation-txn-ddl-peg`).
 
-**Fix:** Quote the name (``DESCRIBE SEMANTIC VIEW "select"``). See :ref:`explanation-txn-ddl-one-statement`.
+**Fix:** Correct the token the pointer marks. Quote a reserved-word name (``CREATE SEMANTIC VIEW "select" AS ...``); ``GET_DDL`` quotes such names for you. On a connection opened before the ``LOAD``, run ``LOAD semantic_views`` on it, or run the statement again.
 
 
 .. _ref-err-name-uniqueness:
@@ -1158,19 +1148,3 @@ Unknown table alias in wildcard
 **Cause:** The table alias in a wildcard expression does not match any alias declared in the view's ``TABLES`` clause.
 
 **Fix:** Check the alias name against the declared table aliases. The error lists all available aliases.
-
-
-.. _ref-err-near-miss:
-
-Near-Miss DDL Detection
-========================
-
-The extension detects near-miss DDL statements and suggests the statement you meant:
-
-.. code-block:: text
-
-   Did you mean 'CREATE SEMANTIC VIEW'?
-
-   Did you mean 'DROP SEMANTIC VIEW'?
-
-This triggers when the input is close to a valid semantic-view DDL prefix but contains a typo (e.g., ``CREAT SEMANTIC VIEW`` or ``DROP SEMANTC VIEW``). The detection uses Levenshtein distance with a threshold of 3 edits.

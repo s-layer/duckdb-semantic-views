@@ -103,7 +103,9 @@ def make_view(conn, name, schema):
 
 def main():
     tmp = tempfile.mkdtemp()
-    primary = str(Path(tmp) / "primary.db")
+    # Not `primary.db`: a database is named after its file, and `primary` is a
+    # reserved word, which DuckDB (and so SHOW's scope name) refuses unquoted.
+    primary = str(Path(tmp) / "primary_db.db")
     conn = make_connection(primary)
     db = conn.execute("SELECT current_database()").fetchone()[0]
 

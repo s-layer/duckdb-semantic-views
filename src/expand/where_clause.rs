@@ -9,9 +9,9 @@
 //! Our query surface is a table function rather than a SQL construct, so the
 //! predicate arrives as the `where_clause := '…'` named parameter. (`where :=`
 //! is a parse error — `DuckDB` reserves the keyword in named-parameter position —
-//! and `"where" :=` would force quoting at every call site. If the
-//! `parser_override` hook ever accepts the real `SEMANTIC_VIEW(…)` construct,
-//! the genuine `WHERE` keyword arrives there, inside our own syntax.)
+//! and `"where" :=` would force quoting at every call site. The grammar's
+//! `SEMANTIC_VIEW(…)` construct (`crate::grammar`) takes the genuine `WHERE`
+//! keyword, inside our own syntax.)
 //!
 //! The predicate names declared *members*, not raw columns, so it is rewritten
 //! into their expressions before emission — the same splice the derived-metric

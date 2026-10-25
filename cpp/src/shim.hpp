@@ -23,66 +23,11 @@
 
 extern "C" {
 
-// Registers the parser_override + parse_function + plan_function hooks
-// plus the `__sv_compute_create_from_yaml` helper TF on the database's
-// `DBConfig` and system catalog.
-//
-// Phase 65 Plan 06: signature slimmed to `(db_handle)` after H1
-// catalog_conn retirement. AR-7: the C++ shim attaches an empty
-// `SemanticViewsParserInfo` marker to `ParserExtension::parser_info`
-// solely so the parser hooks can confirm ownership via `dynamic_cast`;
-// no per-DB Rust state and no long-lived `duckdb_connection` is owned by
-// the extension.
-//
-// Phase 65.1 Plan 10 (WR-06 D-12/D-13): trailing
-// `(char *error_buf, size_t error_buf_len)` pair surfaces both the
-// BORROW-contract runtime probe failure and the helper-TF registration
-// failure via the ABI-stable channel — matching the 17 read-side
-// dispatchers and the `sv_register_table_function` / `sv_register_scalar_function`
-// helpers.
-bool sv_register_parser_hooks(
-    duckdb_database db_handle,
-    char *error_buf, size_t error_buf_len);
-
-// Phase 65.1 Plan 12 Task 3 (D-21 + B-07 plan-checker fix): structural
-// verification helper for the WR-09 parser-hook dedup. Returns the count
-// of parser-extensions in the given DBConfig whose `parser_override`
-// function pointer matches the file-static `sv_parser_override` symbol.
-// Returns -1 on failure (with the underlying message in `error_buf`, per
-// the WR-02 ABI convention).
-//
-// We chose to expose this as a PUBLIC helper (option (a) per the
-// plan-checker B-07 fix in 65.1-12-PLAN.md) rather than gating behind
-// cfg(test)/cfg(debug_assertions) plumbing — read-only iteration over
-// `DBConfig::GetCallbackManager().ParserExtensions()` is harmless in
-// production binaries, and gating the helper would require conditional
-// compilation in the C++ shim for marginal benefit. The plan rejected
-// option (b) "behavioural-only with manual annotation" (the original
-// B-07 silent failure) and option (c) "private __sv_debug_* helper
-// gated behind cfg(test)" (awkward gating in the C++ TU + no real
-// production-safety win).
-//
-// This helper exists primarily so the Rust integration test
-// `tests/parser_hook_idempotent.rs` has a stable, named symbol to
-// reference structurally (the cargo-test FFI path cannot exercise the
-// extension binary directly — see that file's docstring for the
-// `duckdb/loadable-extension` stub constraint).
-//
-// Parameters:
-//   db_handle      — DuckDB C API database handle (unwrapped internally to
-//                    a `DatabaseInstance &`).
-//   error_buf      — caller-allocated writable buffer of `error_buf_len`
-//                    bytes. On failure (null db handle / std::exception),
-//                    the helper writes a NUL-terminated diagnostic via
-//                    snprintf (truncates within the cap). Pass a non-null
-//                    buffer; null + 0 is tolerated (diagnostic dropped).
-//   error_buf_len  — capacity of `error_buf` in bytes.
-//
-// Returns the count on success (>= 0); -1 on failure with the underlying
-// message in `error_buf`. Thread safety: read-only iteration over
-// `cbmgr.ParserExtensions()`, same as the dedup-check loop inside
-// `sv_register_parser_hooks` itself.
-int32_t sv_count_parser_extensions(
+// Registers the `__sv_compute_create_from_yaml` helper TF and the extension's
+// grammar productions on the database behind `db_handle`, then turns the
+// grammar on for every connection. Returns false with a diagnostic in
+// `error_buf` on failure, like the read-side dispatchers.
+bool sv_register_grammar_hooks(
     duckdb_database db_handle,
     char *error_buf, size_t error_buf_len);
 
@@ -91,9 +36,8 @@ int32_t sv_count_parser_extensions(
 //
 // Phase 65.1 Plan 02a (WR-02 D-08/D-09 + CR-02 D-05) — trailing
 // `(char *error_buf, size_t error_buf_len)` pair surfaces registration
-// failures via the same ABI-stable channel used by
-// `sv_parser_override_rust` (shim.cpp:57-61) and the 17 read-side
-// dispatchers. The caller MUST provide a writable buffer of
+// failures via the same ABI-stable channel the 17 read-side dispatchers
+// use. The caller MUST provide a writable buffer of
 // `error_buf_len` bytes; the helper truncates and NUL-terminates within
 // the cap. D-09: no stderr write occurs — `error_buf` is the only
 // channel (ADBC/JDBC/Python callers may have redirected stderr).
@@ -152,8 +96,8 @@ bool sv_register_table_function(
 //
 // Phase 65.1 Plan 02a (WR-02 D-08/D-09) — trailing
 // `(char *error_buf, size_t error_buf_len)` pair surfaces registration
-// failures via the same ABI-stable channel used by
-// `sv_parser_override_rust`. The caller MUST provide a writable buffer of
+// failures via the same ABI-stable channel as the table-function helper
+// above. The caller MUST provide a writable buffer of
 // `error_buf_len` bytes; the helper truncates and NUL-terminates within
 // the cap. D-09: no stderr write occurs — `error_buf` is the only
 // channel. NOTE: scalar functions have no `init_local` concept, so D-05

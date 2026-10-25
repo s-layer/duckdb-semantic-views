@@ -8,16 +8,16 @@
 """
 uv run examples/race_guards_and_unification.py
 
-Demonstrates v0.8.0 features:
+Demonstrates v0.8.0 features, as they work today:
   1. Architectural unification — every DDL form (CREATE / DROP / ALTER /
-     DESCRIBE / SHOW) goes through the same parser_override path, with one
-     net effect: it works under DuckDB 2.0's PEG parser as it did under Bison.
+     DESCRIBE / SHOW) goes through one parser path: today, productions the
+     extension adds to DuckDB 2.0's PEG grammar.
   2. DROP / ALTER race guards — a snapshot-consistent existence check on
      the caller's connection guarantees the user sees a clear error if a
      concurrent commit lands between the catalog pre-check and the DML.
   3. IF EXISTS keeps its silent-no-op contract on the same race.
-  4. Friendly validation errors flow through DuckDB's FALLBACK_OVERRIDE
-     mode, which used to silently drop them.
+  4. Friendly validation errors reach the user, with a caret; a misspelt
+     statement gets DuckDB's own syntax error.
 
 The race-guard scenario is simulated end-to-end by interleaving two
 connections to the same in-process database. We can't actually trigger a
@@ -90,7 +90,7 @@ def main() -> None:
         con.execute(CREATE_VIEW)
 
         # ------------------------------------------------------------------
-        # 1. Unified path: DESCRIBE / SHOW go through parser_override like
+        # 1. Unified path: DESCRIBE / SHOW are grammar productions like
         #    every other DDL form. Pre-v0.8.0 these forms required Bison;
         #    DuckDB 2.0 has only the PEG parser, and they work there too.
         # ------------------------------------------------------------------
@@ -119,20 +119,19 @@ def main() -> None:
         print(f"  no error raised; result rows: {rows}")
 
         # ------------------------------------------------------------------
-        # 4. Friendly validation error reaches the user.
-        #    Pre-v0.8.0 this would have surfaced as
-        #    `Parser Error: syntax error at or near "SEMANTIC"` because
-        #    DuckDB silently drops DISPLAY_EXTENSION_ERROR in FALLBACK mode.
+        # 4. Friendly validation error reaches the user. Pre-v0.8.0 this
+        #    surfaced as `Parser Error: syntax error at or near "SEMANTIC"`.
+        #    A misspelt prefix gets DuckDB's own syntax error.
         # ------------------------------------------------------------------
-        section("4. Validation error survives FALLBACK_OVERRIDE")
+        section("4. Validation errors reach the user")
         try:
             con.execute("ALTER SEMANTIC VIEW sales RENAME TO sales")  # same name
         except Exception as exc:
             print(f"  caught: {exc}")
         try:
-            con.execute("CREAT SEMANTIC VIEW typo AS TABLES (o)")  # near-miss
+            con.execute("CREAT SEMANTIC VIEW typo AS TABLES (o)")  # misspelt prefix
         except Exception as exc:
-            print(f"  near-miss caught: {exc}")
+            print(f"  misspelt prefix caught: {exc}")
 
         # ------------------------------------------------------------------
         # 5. Two-connection drop. Connection B drops the view; A's

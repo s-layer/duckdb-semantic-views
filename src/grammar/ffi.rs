@@ -32,8 +32,11 @@ pub unsafe extern "C" fn sv_grammar_changes_rust(out_ptr: *mut *mut u8, out_len:
 /// Returns:
 ///   0 = success: the SQL is written to `*sql_out_ptr` / `*sql_out_len`
 ///       (release with `sv_free_buffer`).
-///   1 = the statement is ours but invalid: the message is in `error_out`,
-///       and `*position_out` is its byte offset in the query, or `u32::MAX`.
+///   1 = the statement is ours but invalid: the whole message is also
+///       written to `*sql_out_ptr` / `*sql_out_len` (release with
+///       `sv_free_buffer`), because `error_out` is a fixed-size buffer that
+///       cuts long messages off; `error_out` holds the capped copy.
+///       `*position_out` is the error's byte offset in the query, or `u32::MAX`.
 ///       A bridge failure (a tree that does not decode) and a panic are also
 ///       rc=1, with an internal-error message, so the user sees a parser error
 ///       rather than an `InternalException`, which can invalidate the database.
@@ -84,6 +87,7 @@ pub unsafe extern "C" fn sv_grammar_transform_rust(
             }
             Err(err) => {
                 write_error_to_buffer(error_out, error_out_len, &err.message);
+                publish_owned_string(err.message, sql_out_ptr, sql_out_len);
                 if !position_out.is_null() {
                     *position_out = err
                         .position

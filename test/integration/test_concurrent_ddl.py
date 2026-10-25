@@ -11,8 +11,7 @@ attempt to CREATE the same semantic view name. DuckDB's primary-key constraint
 on `semantic_layer._definitions(name)` serializes the inserts, so exactly one
 thread must succeed and the other must see a clear conflict error.
 
-Without the parser_override path emitting an INSERT against `_definitions`
-(v0.8.0+), CREATE went through the legacy plan_function which committed
+Before CREATE lowered to an INSERT against `_definitions` (v0.8.0+), CREATE went through the legacy plan_function which committed
 out-of-band — concurrency semantics were undefined. v0.8.0 keeps the same
 serialization guarantee while collapsing onto a single execution path.
 
@@ -86,7 +85,7 @@ def worker(thread_conn, sql: str, result: WorkerResult, staged: threading.Barrie
     # leaving it to thread-scheduling luck.
     #
     # Each worker opens an explicit transaction, issues its CREATE (which
-    # parser_override rewrites to an INSERT [OR IGNORE] against
+    # lowers to an INSERT [OR IGNORE] against
     # `semantic_layer._definitions`), and only THEN waits on the shared
     # barrier. Both transactions take their MVCC snapshot at BEGIN — before
     # either has committed — so both see the target name absent and both stage

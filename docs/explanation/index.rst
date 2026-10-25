@@ -13,7 +13,7 @@ Background concepts and design context for DuckDB Semantic Views.
 - :ref:`explanation-metric-grain` -- Why each metric aggregates at the grain of its own table, how multi-grain queries are assembled, and which shapes are still refused.
 - :ref:`explanation-snowflake` -- Feature-by-feature comparison with Snowflake's SQL DDL semantic views and where this extension diverges.
 - :ref:`explanation-databricks` -- Feature-by-feature comparison with Databricks metric views and where this extension diverges.
-- :ref:`explanation-transactional-ddl` -- How transactional DDL works since 0.8.0 and the small set of caveats around read visibility, the parser override setting, and concurrent writers.
+- :ref:`explanation-transactional-ddl` -- How transactional DDL works since 0.8.0 and the small set of caveats around read visibility, loading the extension on an open connection, and concurrent writers.
 
 .. toctree::
    :hidden:

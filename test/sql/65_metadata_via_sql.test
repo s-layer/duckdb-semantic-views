@@ -1,13 +1,13 @@
 # Phase 65 (v0.10.0) Plan 03 — metadata-via-SQL upgrade for CREATE.
 #
 # CREATE-time metadata (created_on, database_name, schema_name) is no
-# longer populated by enrich_definition_for_create on the parser_override
-# side. Instead, the rewritten INSERT embeds a `json_merge_patch(<def>,
+# longer populated by enrich_definition_for_create while the DDL is
+# planned. Instead, the rewritten INSERT embeds a `json_merge_patch(<def>,
 # json_object('created_on', strftime(now(), '%Y-%m-%dT%H:%M:%SZ'),
 # 'database_name', current_database(), 'schema_name', current_schema()))`
 # sub-expression so DuckDB resolves the values on the caller's
 # connection at INSERT-time. This is the load-bearing change that lets
-# parser_override eliminate its catalog reads (D-16, read-elimination
+# DDL planning eliminate its catalog reads (D-16, read-elimination
 # architecture).
 #
 # Behavioural properties pinned:
@@ -19,7 +19,7 @@
 #       characters ('T' separator from ISO-8601, 'Z' suffix for UTC).
 #   B4: CREATE OR REPLACE re-captures metadata fresh on each replace.
 #
-# Requirements covered: LIFE-02 (parser_override has zero catalog reads
+# Requirements covered: LIFE-02 (DDL planning has zero catalog reads
 # under the read-elimination architecture).
 
 require semantic_views

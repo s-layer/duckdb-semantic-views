@@ -1,18 +1,10 @@
-// Parse detection and rewriting for semantic view DDL statements.
+// Text-level parsing behind the grammar productions for semantic-view DDL.
 //
-// This module provides two layers:
-// 1. Pure detection/rewrite functions (`detect_semantic_view_ddl`,
-//    `plan_rewrite`) testable under `cargo test`
-//    without the extension feature.
-// 2. FFI entry points (`sv_parser_override_rust`, `sv_free_buffer`)
-//    feature-gated on `extension`, with `catch_unwind` for panic safety.
-//
-// Prefix detection lives in the `detect` submodule; SHOW-clause filter
-// parsing in `show_clauses`; CREATE-body parsing in `create_body` (AR-1).
-// These are re-exported below so existing `crate::parse::*` call sites and
-// tests resolve unchanged. The rewrite-planning core (RewriteAction,
-// plan_rewrite, plan_ddl, ALTER handling) lives in the `rewrite` submodule
-// (AR-1); this module is a thin coordinator.
+// The grammar (`crate::grammar`) recognises every statement. What it hands
+// back here: CREATE's text, planned by [`plan_create`] (prefix detection in
+// `detect`, the body in `create_body`); the read-side lowering and shared
+// messages (`rewrite`, `show_clauses`); and the guarded native SQL for every
+// write (`native_sql`).
 
 mod create_body;
 pub(crate) use create_body::validate_create_body;
@@ -23,39 +15,26 @@ pub(crate) use create_body::{
 };
 
 mod detect;
-pub use detect::{detect_ddl_kind, detect_near_miss, detect_semantic_view_ddl};
-pub(crate) use detect::{detect_ddl_prefix, match_keyword_prefix, skip_leading_whitespace};
-
-mod ffi;
-#[cfg(feature = "extension")]
-pub use ffi::sv_free_buffer;
-#[cfg(test)]
-pub(crate) use ffi::sv_parse_function_rust;
-#[cfg(all(feature = "extension", test))]
-pub(crate) use ffi::sv_parser_override_rust;
+pub(crate) use detect::{detect_create_prefix, match_keyword_prefix, skip_leading_whitespace};
 
 mod native_sql;
 #[cfg(feature = "extension")]
-pub(crate) use native_sql::{lower_action, rewrite_to_native_sql};
+pub(crate) use native_sql::lower_action;
 
-mod show_clauses;
-pub(crate) use show_clauses::{build_filter_suffix, parse_show_filter_clauses};
 // The grammar productions use these; they compile with the extension or for tests.
 #[cfg(any(feature = "extension", test))]
-pub(crate) use show_clauses::{show_unexpected_tokens, ScopeName, ShowClauses};
+mod show_clauses;
+#[cfg(any(feature = "extension", test))]
+pub(crate) use show_clauses::{
+    build_filter_suffix, show_unexpected_tokens, ScopeName, ShowClauses,
+};
 
 mod rewrite;
-pub(crate) use rewrite::extract_quoted_string;
 #[cfg(any(feature = "extension", test))]
 pub(crate) use rewrite::messages;
 #[cfg(any(feature = "extension", test))]
 pub(crate) use rewrite::{lower_name_only_read, lower_show};
-pub use rewrite::{plan_rewrite, CreateMode, RewriteAction};
-
-/// Not our statement -- return `DISPLAY_ORIGINAL_ERROR`.
-pub const PARSE_NOT_OURS: u8 = 0;
-/// Detected a semantic view DDL statement -- return `PARSE_SUCCESSFUL`.
-pub const PARSE_DETECTED: u8 = 1;
+pub use rewrite::{plan_create, CreateMode, RewriteAction};
 
 // ---------------------------------------------------------------------------
 // DdlKind enum

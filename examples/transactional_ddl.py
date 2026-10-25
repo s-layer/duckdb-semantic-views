@@ -23,8 +23,8 @@ Two scenarios:
   1. Native DuckDB connection with explicit BEGIN / COMMIT / ROLLBACK.
   2. ADBC DBAPI connection (autocommit=False) using commit() / rollback().
 
-Both use the same parser_override mechanism under the hood — DDL is rewritten
-into native INSERT / UPDATE / DELETE against the catalog table and runs on
+Both use the same mechanism under the hood — DDL lowers to native
+INSERT / UPDATE / DELETE against the catalog table and runs on
 the caller's connection, so transaction semantics work exactly as you would
 expect for any other DML.
 """

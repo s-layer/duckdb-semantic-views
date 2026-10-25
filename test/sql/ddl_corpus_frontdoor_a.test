@@ -28,8 +28,7 @@ require semantic_views
 # file, so a CR cannot be written into a statement. A few rows instead wrap a
 # statement in query(...) to put a NUL, a 0x01, a CR or a 1 MB statement in
 # front of the parser: query() parses its argument through the same parser
-# (parser_override runs on it -- SHOW SEMANTIC VIEWS, which is not DuckDB SQL,
-# works inside it), so those are genuine parser inputs. Only SELECT-shaped
+# (the grammar productions run on it -- SHOW SEMANTIC VIEWS works inside it), so those are genuine parser inputs. Only SELECT-shaped
 # statements (SELECT, DESCRIBE, SHOW) can travel that way, so the CRLF CREATE
 # bodies of crlf_body_frontdoor.rs are NOT portable: only their LF twins are
 # here, and the CR axis is listed as unported in the case map.
@@ -478,39 +477,39 @@ SELECT one FROM dcf_plain_v;
 ----
 1
 
-# --- Near-miss prefixes ---
+# --- Misspelt prefixes ---
 
-# F-020: parse_proptest.rs::near_miss_detects_transposition — transposed prefix keywords (cretae / craete / dreop / descrbe / shwo) are rejected with a suggestion of the statement meant, as near misses of F-001 / F-010 / F-005 / F-008 [text]
+# F-020: parse_proptest.rs::near_miss_detects_transposition — transposed prefix keywords (cretae / craete / dreop / descrbe / shwo) get DuckDB's syntax error at the misspelt keyword, as near misses of F-001 / F-010 / F-005 / F-008 [text]
 statement error
 cretae semantic view dcf_nm AS TABLES (t AS dcf_orders PRIMARY KEY (id)) DIMENSIONS (t.region AS region);
 ----
-Did you mean 'CREATE SEMANTIC VIEW'?
+syntax error at or near "cretae"
 
 statement error
 craete semantic view dcf_nm AS TABLES (t AS dcf_orders PRIMARY KEY (id)) DIMENSIONS (t.region AS region);
 ----
-Did you mean 'CREATE SEMANTIC VIEW'?
+syntax error at or near "craete"
 
 statement error
 dreop semantic view dcf_nm;
 ----
-Did you mean 'DROP SEMANTIC VIEW'?
+syntax error at or near "dreop"
 
 statement error
 descrbe semantic view dcf_nm;
 ----
-Did you mean 'DESCRIBE SEMANTIC VIEW'?
+syntax error at or near "descrbe"
 
 statement error
 shwo semantic views;
 ----
-Did you mean 'SHOW SEMANTIC VIEWS'?
+syntax error at or near "shwo"
 
-# F-021: parse_proptest.rs::near_miss_position_at_start — a near miss after leading spaces is still rejected with the suggestion (caret position not asserted) [text]
+# F-021: parse_proptest.rs::near_miss_position_at_start — a near miss after leading spaces gets the same syntax error (caret position not asserted) [text]
 statement error
           cretae semantic view dcf_nm AS TABLES (t AS dcf_orders PRIMARY KEY (id)) DIMENSIONS (t.region AS region);
 ----
-Did you mean 'CREATE SEMANTIC VIEW'?
+syntax error at or near "cretae"
 
 # F-022: parse_proptest.rs::test_unicode_homoglyph — a Cyrillic С (U+0421) in place of the Latin C is not the CREATE SEMANTIC VIEW prefix; near miss of F-001 [syntax]
 statement error
@@ -678,7 +677,7 @@ SELECT count(*) FROM list_semantic_views();
 ----
 0
 
-# F-028: parse_proptest.rs::rewrite_quoted_hostile_names (keyword / grammar-colliding arm) — quoted names that spell SELECT, a DDL prefix, and an annotation clause are plain names in every name slot. GET_DDL leaves `select` unquoted (re-parseable today because the name slot takes any word) [text]
+# F-028: parse_proptest.rs::rewrite_quoted_hostile_names (keyword / grammar-colliding arm) — quoted names that spell SELECT, a DDL prefix, and an annotation clause are plain names in every name slot. GET_DDL quotes `select`, which DuckDB, and so CREATE, refuses bare as a name [text]
 statement ok
 CREATE SEMANTIC VIEW "SELECT" AS TABLES (t AS dcf_orders PRIMARY KEY (id)) DIMENSIONS (t.region AS region);
 
@@ -698,7 +697,7 @@ select
 query T nosort
 SELECT * FROM dcf_ddl('"select"');
 ----
-CREATE OR REPLACE SEMANTIC VIEW select AS
+CREATE OR REPLACE SEMANTIC VIEW "select" AS
 TABLES (
     t AS dcf_orders PRIMARY KEY (id)
 )

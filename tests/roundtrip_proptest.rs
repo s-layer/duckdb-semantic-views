@@ -15,7 +15,7 @@
 //!
 //! The hostile-shape generators live in `tests/common/mod.rs` (T-5,
 //! code-review 2026-07-11) so the SAME shapes also drive the full
-//! `plan_rewrite` CREATE front door in `create_front_door_proptest.rs`.
+//! `plan_create` CREATE front door in `create_front_door_proptest.rs`.
 //!
 //! Window metrics are exercised by the fixpoint fuzz target
 //! (`fuzz_render_roundtrip`) instead: their expression text is *rebuilt*

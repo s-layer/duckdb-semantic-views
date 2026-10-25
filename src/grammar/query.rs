@@ -467,7 +467,7 @@ fn error_at(node: Option<&Node>, message: String) -> ParseError {
 mod tests {
     use super::transform;
     use crate::grammar::tree::tests::n;
-    use crate::grammar::tree::{Kind, Node, Source, Token, Tree};
+    use crate::grammar::tree::{Kind, Node, Token, Tree};
 
     const L: Kind = Kind::List;
 
@@ -510,10 +510,6 @@ mod tests {
         Tree {
             root,
             tokens: tokens(sql),
-            source: Some(Source {
-                offset: 0,
-                text: sql.to_string(),
-            }),
         }
     }
 

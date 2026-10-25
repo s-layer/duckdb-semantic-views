@@ -1,16 +1,15 @@
-//! Structural guard: the parser hook must be the **last** entry in
+//! Structural guard: the grammar must be the **last** entry in
 //! `REGISTRATIONS` (LIFE-2, code-review 2026-08-08).
 //!
 //! `init_extension` registers everything in `REGISTRATIONS` order and returns
 //! `Err` on the first failure. Nothing rolls back, so whatever was registered
-//! before the failure stays live for the rest of the process. With the parser
-//! hook first, a failure in any read-side registration left the extension
-//! *half-active*: `sv_register_parser_hooks` had already installed
-//! `parser_override` / `parse_function` **and** flipped
-//! `allow_parser_override_extension` to `FALLBACK`
-//! (`cpp/src/shim.cpp::sv_register_parser_hooks`), while the table functions
-//! the hook's own rewrites call were missing. `SHOW SEMANTIC VIEWS` would then
-//! rewrite to `SELECT * FROM list_semantic_views()` and fail on an unresolved
+//! before the failure stays live for the rest of the process. With the
+//! semantic-view syntax registered first (then the parser hook, now the
+//! grammar productions, `cpp/src/shim.cpp::sv_register_grammar_hooks`), a
+//! failure in any read-side registration would leave the extension
+//! *half-active*: semantic-view statements would parse, but the table
+//! functions they lower to would be missing. `SHOW SEMANTIC VIEWS` would then
+//! lower to `SELECT * FROM list_semantic_views()` and fail on an unresolved
 //! function name, and `CREATE SEMANTIC VIEW` would write catalog rows nothing
 //! could read back — a worse end state than a LOAD that simply did nothing.
 //!
@@ -20,16 +19,16 @@
 //!   (`sv_register_table_function_core` / `sv_register_scalar_function_set`
 //!   build a `TableFunction` / `ScalarFunction` and hand it to
 //!   `Catalog::GetSystemCatalog(db)`). None of them parses SQL, so none of
-//!   them needs the parser hook.
-//! * The parser hook's *output* does need them: `plan_rewrite` lowers
+//!   them needs the grammar.
+//! * The grammar's *output* does need them: its productions lower
 //!   `SHOW SEMANTIC VIEWS` to `list_semantic_views()`, `DESCRIBE SEMANTIC VIEW`
 //!   to `describe_semantic_view(...)`, and `CREATE ... FROM YAML FILE` to
 //!   `__sv_compute_create_from_yaml(...)`.
 //!
-//! So registering the hook last is the safe order, and it is what this test
-//! pins. The window is not closed entirely — the catalog schema
-//! (`init_catalog`) is still created before the loop runs — but after this
-//! change a partial LOAD leaves semantic DDL *inert* (DuckDB's own
+//! So registering the grammar last is the safe order, and it is what this
+//! test pins. The window is not closed entirely — the catalog schema
+//! (`init_catalog`) is still created before the loop runs — but a partial
+//! LOAD leaves semantic DDL *inert* (DuckDB's own
 //! `syntax error at or near "SEMANTIC"`) rather than half-working.
 //!
 //! ## Known limitation
@@ -84,7 +83,7 @@ fn labels_in_order(tokens: &str) -> Vec<String> {
 }
 
 #[test]
-fn parser_hook_is_registered_last() {
+fn grammar_is_registered_last() {
     let src = std::fs::read_to_string("src/lib.rs").expect("read src/lib.rs");
     let file: syn::File = syn::parse_str(&src).expect("parse src/lib.rs");
 
@@ -101,20 +100,19 @@ fn parser_hook_is_registered_last() {
          is probably out of step with the macro's shape"
     );
     assert_eq!(
-        labels.iter().filter(|l| *l == "parser hooks").count(),
+        labels.iter().filter(|l| *l == "grammar").count(),
         1,
-        "expected exactly one \"parser hooks\" entry in REGISTRATIONS; got {labels:?}"
+        "expected exactly one \"grammar\" entry in REGISTRATIONS; got {labels:?}"
     );
     assert_eq!(
         labels.last().map(String::as_str),
-        Some("parser hooks"),
-        "LIFE-2: the parser hook must be the LAST entry in REGISTRATIONS. \
+        Some("grammar"),
+        "LIFE-2: the grammar must be the LAST entry in REGISTRATIONS. \
          `init_extension` returns Err on the first failing registration and \
-         rolls nothing back, so registering the hook earlier leaves a failed \
-         LOAD with parser_override installed and \
-         allow_parser_override_extension='FALLBACK' while the read table \
-         functions its own rewrites call are absent. Read-side registrations \
-         are pure Catalog-API calls and never need the hook, so the hook goes \
-         last. Order found: {labels:?}"
+         rolls nothing back, so registering the grammar earlier leaves a \
+         failed LOAD parsing semantic-view statements into calls to read \
+         table functions that are absent. Read-side registrations are pure \
+         Catalog-API calls and never need the grammar, so it goes last. \
+         Order found: {labels:?}"
     );
 }

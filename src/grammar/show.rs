@@ -1,9 +1,8 @@
 //! Transforms for the read statements: `SHOW SEMANTIC ...`, `SHOW COLUMNS IN
 //! SEMANTIC VIEW` and `DESCRIBE SEMANTIC VIEW`.
 //!
-//! Each lowers to the same query the parser override emits for it
-//! ([`lower_show`], [`lower_name_only_read`]), so the two paths cannot drift
-//! while both exist. Each is a query, so it can stand wherever `DuckDB`'s
+//! Each lowers to a query on the extension's read table functions
+//! ([`lower_show`], [`lower_name_only_read`]). Each is a query, so it can stand wherever `DuckDB`'s
 //! grammar accepts one: a subquery, a CTE, a view body (TECH-DEBT #77).
 
 use super::tree::{Kind, Node, Tree};
@@ -27,8 +26,7 @@ use crate::parse::{
 /// - `LIMIT` takes any single value, so a non-integer is our error with our
 ///   wording rather than a `LIMIT` modifier on the query `DuckDB` would bind.
 /// - `ACCOUNT`, `SCHEMA` and `DATABASE` are not reserved, so each can be a
-///   schema's name: `IN account.v` names a view, as it does for the override
-///   (`in_clause_is_scope` wants a space after the keyword). An ordered choice
+///   schema's name: `IN account.v` names a view. An ordered choice
 ///   commits to the first alternative that matches, and the scope keyword alone
 ///   would match, leaving `.v` unparsed, so a dotted view name is tried first.
 pub(super) const RULES: &str = r"
@@ -89,8 +87,8 @@ fn transform_show(tree: &Tree) -> Result<String, ParseError> {
         _ => "FACTS",
     };
 
-    // The clauses are read in the order the parser override reads them, so a
-    // statement with two faults gets the override's message for the first.
+    // The clauses are read in the order they are written, so a statement with
+    // two faults gets the message for the first.
     let like_pattern = root
         .find("SvShowLike")
         .map(|like| plain_string(tree, like, QUOTED))
@@ -152,12 +150,11 @@ fn transform_show(tree: &Tree) -> Result<String, ParseError> {
     lower_show(kind, &clauses, root.offset().unwrap_or(0))
 }
 
-/// The parser override's message for a pattern that is not a `'...'` literal.
+/// The message for a pattern that is not a `'...'` literal.
 const QUOTED: &str = "Expected single-quoted string";
 
-/// A name in a SHOW clause, which must be one run of text: the override ends
-/// it at whitespace and reports the rest of the statement with its usage
-/// message.
+/// A name in a SHOW clause, which must be one run of text: whitespace ends it,
+/// and the rest of the statement is reported with SHOW's usage message.
 fn show_name(tree: &Tree, node: &Node, kind: DdlKind) -> Result<String, ParseError> {
     name_or(tree, node, |rest| show_unexpected_tokens(kind, rest))
 }
@@ -248,8 +245,8 @@ fn name_parts(node: &Node) -> Vec<String> {
         .collect()
 }
 
-/// The view name of `DESCRIBE` / `SHOW COLUMNS`, reported as the override
-/// reports a name with whitespace inside it.
+/// The view name of `DESCRIBE` / `SHOW COLUMNS`; a name with whitespace inside
+/// it reports the rest of the statement.
 fn required(tree: &Tree, root: &Node, rule: &str) -> Result<String, ParseError> {
     let node = root
         .find(rule)

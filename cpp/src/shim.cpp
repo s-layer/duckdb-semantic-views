@@ -2,19 +2,11 @@
 //
 // The Rust entry point (semantic_views_init_c_api, C_STRUCT ABI) owns the
 // DuckDB handshake and function registration. After init, it calls
-// sv_register_parser_hooks() here to install:
-//
-//   * parser_override (sv_parser_override) — the success path. Recognised
-//     CREATE / DROP / ALTER / DESCRIBE / SHOW DDL is rewritten to native SQL
-//     and re-parsed on the caller's connection (transactional behaviour).
-//   * parse_function (sv_parse_stub) — Phase 62 Plan 03 error-reporting
-//     layer. Called by DuckDB after the default parser fails on an
-//     unrecognised prefix; re-runs validation and returns
-//     DISPLAY_EXTENSION_ERROR with `error_location` so
-//     ParserException::SyntaxError can render `LINE 1: … ^` (caret).
-//   * plan_function (sv_plan_unreachable) — required sibling of
-//     parse_function; should never fire because sv_parse_stub never returns
-//     PARSE_SUCCESSFUL.
+// sv_register_grammar_hooks() here, which registers the extension's grammar
+// productions (DuckDB's PEG grammar extension) and the helper table function
+// CREATE ... FROM YAML FILE lowers to. Every semantic-view statement is parsed
+// by DuckDB's own parser through those productions; there is no parser
+// override and no parse_function.
 //
 // All DuckDB C++ symbols come from the DuckDB engine linked statically into
 // the extension (`duckdb_static`, built by scripts/ensure_engine.py; see
@@ -65,71 +57,24 @@ extern "C" const char *sv_compiled_duckdb_version() {
 }
 
 // ---------------------------------------------------------------------------
-// Rust FFI declarations (defined in src/parse.rs)
+// Rust FFI declarations (defined under src/)
 // ---------------------------------------------------------------------------
 extern "C" {
-    // Parser-override DDL rewrite. For recognized semantic-view DDL emits
-    // native SQL (INSERT/DELETE/UPDATE on _definitions for write-side DDL,
-    // or `SELECT * FROM <read_side_table_function>(...)` pass-through for
-    // DESCRIBE/SHOW). Returns:
-    //   0 = success: heap-owned (ptr, len) written to *sql_out_ptr/*sql_out_len.
-    //                Caller takes ownership and MUST release via sv_free_buffer.
-    //                Buffer is NOT NUL-terminated — read exactly *sql_out_len bytes.
-    //   1 = error:   message written to error_out (NUL-terminated, capped at
-    //                error_out_len-1 bytes); *sql_out_ptr left untouched.
-    //                (Phase 62: unused — Err branches now return rc=2 and
-    //                let parse_function render caret via DISPLAY_EXTENSION_ERROR.)
-    //   2 = not ours: defer to default parser.
-    //
-    // AR-7: the opaque Box<OverrideContext>* context parameter was removed.
-    // It was empty after Phase 65 Plan 06 moved catalog pre-checks into the
-    // emitted SQL, so the hook no longer needs any per-DB state.
-    uint8_t sv_parser_override_rust(
-        const char *query_ptr, size_t query_len,
-        char **sql_out_ptr, size_t *sql_out_len,
-        char *error_out, size_t error_out_len);
-
-    // Phase 62 Plan 03: parse_function callback. Called by DuckDB after the
-    // default parser fails on an unrecognised prefix. Re-runs validation
-    // and returns rc + error message + byte-offset position so
-    // ParserException::SyntaxError can render `LINE 1: ... ^`.
-    // Return codes:
-    //   0 = success/unreachable (defensive)
-    //   1 = ours-but-invalid (validation error or near-miss). error_buf
-    //       gets the message, position_out gets the byte offset (or
-    //       UINT32_MAX if no position is available). FF-16: a panic inside
-    //       the Rust hook also lands here (message
-    //       "internal error: panic inside sv_parse_function_rust",
-    //       position UINT32_MAX) so an extension bug surfaces as our own
-    //       error instead of DuckDB's generic prefix syntax error.
-    //   2 = not ours; defer (DISPLAY_ORIGINAL_ERROR on the C++ side).
-    //   3 = valid DDL but parser_override didn't fire (e.g. override
-    //       setting reset by disable_peg_parser). error_buf gets an
-    //       actionable hint; position_out gets 0.
-    uint8_t sv_parse_function_rust(
-        const char *query_ptr, size_t query_len,
-        char *error_buf, size_t error_buf_len,
-        uint32_t *position_out);
-
     // Grammar bridge (src/grammar/ffi.rs). The changes to register, as text
     // released with sv_free_buffer: 0 = ok, 1 = failed.
     uint8_t sv_grammar_changes_rust(char **out_ptr, size_t *out_len);
     // Lower one matched statement rule (its serialised parse subtree) to SQL:
     // 0 = ok (SQL in *sql_out_*, release with sv_free_buffer), 1 = invalid
-    // statement (message in error_out, byte offset in *position_out or
-    // UINT32_MAX), 2 = bridge failure (message in error_out).
+    // statement (the whole message in *sql_out_* when the statement itself is
+    // invalid, a capped copy in error_out either way; byte offset in
+    // *position_out or UINT32_MAX), 2 = bridge failure (message in error_out).
     uint8_t sv_grammar_transform_rust(
         const uint8_t *tree_ptr, size_t tree_len,
         char **sql_out_ptr, size_t *sql_out_len,
         char *error_out, size_t error_out_len,
         uint32_t *position_out);
 
-    // The database of the parser hook call about to be made on this thread
-    // (its SemanticViewsParserInfo pointer): a record of the user's query is
-    // read only on the database it was made on (src/parse/ffi.rs).
-    void sv_parser_hook_database(uintptr_t key);
-
-    // Releases a buffer previously produced by sv_parser_override_rust.
+    // Releases a buffer the Rust side returned (SQL, rule text, read results).
     // Safe to call with a null pointer (no-op). ptr/len must be the exact
     // pair the Rust side returned.
     void sv_free_buffer(char *ptr, size_t len);
@@ -141,7 +86,7 @@ extern "C" {
     // parses + enriches the YAML on the Rust side, returning the
     // metadata-less JSON definition as a heap-owned (ptr, len) buffer.
     //
-    // The outer parser_override INSERT wraps `new_def` with json_merge_patch
+    // The outer INSERT the CREATE lowers to wraps `new_def` with json_merge_patch
     // to add now()/current_database()/current_schema() on the caller's
     // connection (matching the metadata-via-SQL pattern landed in Plan 03
     // for the inline CREATE path).
@@ -168,7 +113,7 @@ extern "C" {
     //   3 — internal error (panic across FFI, allocation failure, etc.);
     //       error_buf populated.
     // Phase 65.1 Plan 07 (IN-04 D-24): `kind` parameter removed — the outer
-    // parser_override INSERT shape (OR IGNORE / OR REPLACE / plain) already
+    // INSERT shape the CREATE lowers to (OR IGNORE / OR REPLACE / plain) already
     // encodes ON CONFLICT behaviour, so the helper itself does not branch on
     // it. Three-arg helper TF signature matches: (file_path, view_name,
     // comment).
@@ -333,27 +278,6 @@ extern "C" {
         char *error_buf, size_t error_buf_len);
 }
 
-// ---------------------------------------------------------------------------
-// SemanticViewParseData — Phase 62 Plan 03
-// ---------------------------------------------------------------------------
-// Concrete subclass of ParserExtensionParseData required by the
-// ParserExtensionParseResult(unique_ptr<...>) constructor. We never return
-// PARSE_SUCCESSFUL from sv_parse_stub (its sole purpose is rendering errors
-// via DISPLAY_EXTENSION_ERROR), so this type is structurally needed only
-// for layout / type-system reasons. If we ever do produce a parse_data,
-// sv_plan_unreachable below would fire.
-struct SemanticViewParseData : public ParserExtensionParseData {
-    string query;
-    explicit SemanticViewParseData(string q) : query(std::move(q)) {}
-
-    unique_ptr<ParserExtensionParseData> Copy() const override {
-        return make_uniq<SemanticViewParseData>(query);
-    }
-    string ToString() const override {
-        return query;
-    }
-};
-
 // RAII guard for heap-owned buffers returned by the Rust FFI. Ensures the
 // buffer is released even if a downstream call (Parser::ParseQuery) throws.
 struct SvOwnedBuffer {
@@ -384,382 +308,6 @@ struct SvOwnedBuffer {
         return ptr ? string(ptr, len) : string();
     }
 };
-
-// Per-extension-load marker attached to ParserExtension::parser_info. AR-7:
-// this used to carry an opaque Box<OverrideContext>* (rust_state), but the
-// OverrideContext was empty after Phase 65 Plan 06's H1 catalog_conn
-// retirement, so it now holds no state. It is kept purely as the
-// `dynamic_cast<SemanticViewsParserInfo *>` marker type that `sv_parser_override`
-// uses to confirm the parser_info is ours. (`sv_parse_stub` no longer consults
-// parser_info at all — validation needs no per-DB state — so it ignores the
-// marker.)
-struct SemanticViewsParserInfo : public ParserExtensionInfo {};
-
-#ifdef SV_DUCKDB_2
-// The query the last parser_override call on this thread saw. DuckDB 2.0's
-// parse_function gets tokens without source offsets; when it runs, it is inside
-// the same Parser::ParseQuery as the override call that recorded this, so the
-// tokens can be located in it (sv_locate_tail). It is kept only while the stub
-// may still need it: the override clears it when its rewrite of the query
-// parses, and the stub whenever it runs, since its answer ends the parse.
-// Otherwise a connection whose override is off, which records nothing, would
-// quote an earlier query on this thread that ended with the same statement.
-static thread_local std::string sv_override_query;
-// The database (parser_info) sv_override_query was recorded on. DuckDB 2.0
-// leaves a record unread when an earlier statement of its string fails as it
-// runs, so the stub reads it only on that database.
-static thread_local const ParserExtensionInfo *sv_override_info = nullptr;
-#endif
-
-// ---------------------------------------------------------------------------
-// Parser-override hook: sv_parser_override
-// ---------------------------------------------------------------------------
-// The sole DDL entry point. Runs *before* the default parser. Recognized
-// semantic-view DDL is rewritten into native SQL by the Rust side and
-// re-parsed via DuckDB's own Parser, producing SQLStatement ASTs that DuckDB
-// then plans and executes on the caller's connection — so write-side DDL
-// participates in the caller's transaction.
-//
-// For non-matching queries returns DISPLAY_ORIGINAL_ERROR so DuckDB falls
-// through to the default parser.
-static ParserOverrideResult sv_parser_override(
-    ParserExtensionInfo *info, const string &query, ParserOptions &) {
-
-    // Confirm this is our parser_info. info is the per-extension-load
-    // SemanticViewsParserInfo attached at registration time; if it isn't ours
-    // (dynamic_cast fails) defer to the default parser. AR-7: there is no
-    // longer any per-DB Rust state to route through.
-    auto *sv_info = dynamic_cast<SemanticViewsParserInfo *>(info);
-    if (!sv_info) {
-        return ParserOverrideResult();
-    }
-    sv_parser_hook_database(reinterpret_cast<uintptr_t>(info));
-#ifdef SV_DUCKDB_2
-    sv_override_query = query;
-    sv_override_info = info;
-#endif
-
-    SvOwnedBuffer sql_buf;
-    char error_buf[1024];
-    memset(error_buf, 0, sizeof(error_buf));
-
-    uint8_t rc = sv_parser_override_rust(
-        query.c_str(), query.size(),
-        &sql_buf.ptr, &sql_buf.len,
-        error_buf, sizeof(error_buf));
-
-    if (rc == 2) {
-        // Not our query — let DuckDB's default parser handle it.
-        return ParserOverrideResult();
-    }
-
-    if (rc == 1) {
-        // Phase 62 Plan 03: defer to default parser. parse_function
-        // (registered as sv_parse_stub) re-runs validation and returns
-        // DISPLAY_EXTENSION_ERROR with caret position. The Rust side
-        // currently always returns rc=2 on the error path, so this
-        // branch is defensive — kept to match the documented contract.
-        return ParserOverrideResult();
-    }
-
-    // rc == 0: native SQL produced. Once it parses, no stub runs for this
-    // query, so its recorded text is dropped. Re-parse via DuckDB's Parser. Use
-    // default-constructed ParserOptions so parser_override doesn't recurse
-    // (DEFAULT_OVERRIDE skips parser_override hooks entirely). The
-    // rewritten SQL is read by exact length, so size is unbounded.
-    string native_sql = sql_buf.to_string();
-    try {
-        Parser parser = sv_compat::builtin_parser();
-        parser.ParseQuery(native_sql);
-#ifdef SV_DUCKDB_2
-        sv_override_query.clear();
-#endif
-        return ParserOverrideResult(std::move(parser.statements));
-    } catch (std::exception &e) {
-        return ParserOverrideResult(e);
-    }
-}
-
-// ---------------------------------------------------------------------------
-// Parse-function hook: sv_parse_stub  (Phase 62 Plan 03)
-// ---------------------------------------------------------------------------
-// Called by DuckDB's Parser::ParseQuery after the default parser fails on
-// an unrecognised prefix. Sole purpose is rendering caret-aware errors via
-// ParserException::SyntaxError(query, msg, error_location).
-//
-// parser_override remains the success path — it rewrites recognized DDL
-// to native SQL, re-parses on the caller's connection, and returns
-// PARSE_SUCCESSFUL (transactional behaviour preserved). For error cases
-// parser_override now ALWAYS returns DISPLAY_ORIGINAL_ERROR (rc=2 from
-// Rust), letting the default parser fail and DuckDB call this stub.
-//
-// We re-run validation through sv_parse_function_rust which returns:
-//   0 — defensive internal error; render as DISPLAY_EXTENSION_ERROR
-//   1 — ours-but-invalid: error_buf populated; position is byte offset.
-//       FF-16: also covers a panic inside the Rust hook (position
-//       UINT32_MAX) — an extension bug must not masquerade as the user's
-//       syntax error, which is what rc=2 on panic used to produce.
-//   2 — not ours: DISPLAY_ORIGINAL_ERROR (let the default parser's error stand)
-//   3 — valid-but-override-disabled: actionable hint; position=0
-//
-// `query` is one statement: v1.5 hands parse_function each `;`-separated
-// statement the default parser failed on (trimmed, `;` re-appended when it had
-// one). The registered parse_function is the version-specific `sv_parse_stub`
-// below, which feeds this.
-static ParserExtensionParseResult sv_parse_statement(const string &query) {
-    // AR-7: sv_parse_function_rust no longer takes a context pointer — the
-    // validation path never needed the catalog — so the SemanticViewsParserInfo
-    // marker is not consulted here.
-    char error_buf[1024];
-    std::memset(error_buf, 0, sizeof(error_buf));
-    uint32_t position = UINT32_MAX;
-
-    uint8_t rc = sv_parse_function_rust(
-        query.c_str(), query.size(),
-        error_buf, sizeof(error_buf),
-        &position);
-
-    switch (rc) {
-        case 2:
-            // Not ours — DISPLAY_ORIGINAL_ERROR (default parser's error
-            // text + caret stands).
-            return ParserExtensionParseResult();
-
-        case 1:
-        case 3: {
-            // ours-but-invalid OR valid-but-override-disabled. Both want
-            // DISPLAY_EXTENSION_ERROR with caret position, just different
-            // message text. Construct the std::string explicitly first to
-            // dodge C++'s "most vexing parse" — `ParserExtensionParseResult
-            // result(string(error_buf));` would otherwise be parsed as a
-            // function declaration.
-            string msg(error_buf);
-            ParserExtensionParseResult result(std::move(msg));
-            if (position != UINT32_MAX) {
-                result.error_location = optional_idx(position);
-            }
-            return result;
-        }
-
-        case 0: {
-            // Defensive — sv_parse_function_rust currently never returns 0.
-            // Map to DISPLAY_EXTENSION_ERROR with an internal-error message
-            // rather than letting a silent default-parser error escape.
-            return ParserExtensionParseResult(string(
-                "semantic_views: internal error — sv_parse_function_rust "
-                "returned rc=0 (please report this bug)"));
-        }
-
-        default: {
-            // Defensive — unknown rc. Same handling as rc=0.
-            return ParserExtensionParseResult(string(
-                "semantic_views: internal error — unknown rc from "
-                "sv_parse_function_rust"));
-        }
-    }
-}
-
-#ifdef SV_DUCKDB_2
-// DuckDB 2.0 changed parse_function_t from `(info, const string &query)` to
-// `(info, const vector<SimpleToken> &tokens)`: when the PEG parser fails on a
-// statement, Parser::TryParseExtensionStatement hands every parse_function the
-// token stream from the start of the failed statement to the end of the query
-// (one SimpleToken — raw source text + TokenType — per token; comments are not
-// tokens; `;` is a TERMINATOR token; an END_OF_INPUT sentinel ends it), and
-// reads the answer from `ParserExtensionParseResult::consumed_tokens` rather
-// than `type`:
-//   < 0  throw ParserException::SyntaxError(query, error, error_location) —
-//        the same call v1.5 made for DISPLAY_EXTENSION_ERROR;
-//   == 0 not claimed: the next extension is tried and then the PEG error is
-//        rethrown — v1.5's DISPLAY_ORIGINAL_ERROR;
-//   > 0  claimed (v1.5's PARSE_SUCCESSFUL), which sv_parse_statement never
-//        returns.
-//
-// So the stub recovers the statement text v1.5 passed (from the first token up
-// to and including the TERMINATOR, as v1.5's statement splitter did) and maps
-// the result onto consumed_tokens.
-//
-// SimpleToken carries the raw source text of each token but no offset, so the
-// statement is found in the query the override recorded (sv_locate_tail): the
-// tokens run to the end of the query, which pins where they start. With the
-// statement's own text, the Rust validator sees exactly what the user wrote,
-// error positions are offsets into the real query, and the #85 multi-statement
-// lookup finds the statement as a substring.
-//
-// The caret is rendered into the message here rather than left to
-// `error_location`: 2.0 only renders a parser error's location on the
-// ClientContext query path, so the Python client (and the sqllogictest runner
-// built on it) would show none, for DuckDB's own syntax errors as for ours.
-//
-// When the tokens cannot be located (parser_override switched off, so nothing
-// was recorded) the text is rebuilt from the tokens instead: one space between
-// tokens, none around `.` or inside brackets, no comments. A position in that
-// text is not one in the query, so no caret is shown then.
-// `newline`, when given, is set if the skipped trivia held a line break, as
-// DuckDB's tokenizer reports on the token after it (preceded_by_newline).
-static bool sv_skip_trivia(const std::string &q, idx_t &pos, bool *newline = nullptr) {
-    auto note_newlines = [&](idx_t from, idx_t to) {
-        for (idx_t i = from; newline != nullptr && i < to; i++) {
-            if (StringUtil::CharacterIsNewline(q[i])) {
-                *newline = true;
-            }
-        }
-    };
-    while (pos < q.size()) {
-        char c = q[pos];
-        if (StringUtil::CharacterIsSpace(c)) {
-            note_newlines(pos, pos + 1);
-            pos++;
-        } else if (c == '-' && pos + 1 < q.size() && q[pos + 1] == '-') {
-            while (pos < q.size() && q[pos] != '\n') {
-                pos++;
-            }
-        } else if (c == '/' && pos + 1 < q.size() && q[pos + 1] == '*') {
-            auto close = q.find("*/", pos + 2);
-            if (close == std::string::npos) {
-                return false;
-            }
-            note_newlines(pos, close);
-            pos = close + 2;
-        } else {
-            break;
-        }
-    }
-    return true;
-}
-
-static bool sv_is_end_token(const SimpleToken &token) {
-    return token.type == TokenType::END_OF_INPUT ||
-           token.type == TokenType::END_OF_INPUT_AUTOCOMPLETE;
-}
-
-// Where `tokens` -- the tail of `query` from the failed statement to its end --
-// starts in `query`, with the offset just past the statement's TERMINATOR (or
-// the end of its last token when there is none). False when they do not match
-// the query's suffix token for token.
-static bool sv_locate_tail(const std::string &query, const vector<SimpleToken> &tokens,
-                           idx_t &start, idx_t &statement_end) {
-    if (tokens.empty() || sv_is_end_token(tokens[0]) || tokens[0].text.empty()) {
-        return false;
-    }
-    const std::string &first = tokens[0].text;
-    for (auto candidate = query.rfind(first); candidate != std::string::npos;
-         candidate = candidate == 0 ? std::string::npos : query.rfind(first, candidate - 1)) {
-        idx_t pos = candidate;
-        idx_t end = std::string::npos;
-        bool matched = true;
-        for (idx_t i = 0; i < tokens.size(); i++) {
-            const auto &token = tokens[i];
-            if (sv_is_end_token(token) || token.text.empty()) {
-                continue;
-            }
-            if (i > 0 && !sv_skip_trivia(query, pos)) {
-                matched = false;
-                break;
-            }
-            if (query.compare(pos, token.text.size(), token.text) != 0) {
-                matched = false;
-                break;
-            }
-            pos += token.text.size();
-            if (end == std::string::npos && token.type == TokenType::TERMINATOR) {
-                end = pos;
-            }
-        }
-        if (matched && sv_skip_trivia(query, pos) && pos == query.size()) {
-            start = candidate;
-            statement_end = end == std::string::npos ? pos : end;
-            return true;
-        }
-    }
-    return false;
-}
-
-static std::string sv_statement_from_tokens(const vector<SimpleToken> &tokens) {
-    auto glue_left = [](const std::string &t) {  // no space before these
-        return t == "." || t == "," || t == ")" || t == "]";
-    };
-    auto glue_right = [](const std::string &t) {  // no space after these
-        return t == "." || t == "(" || t == "[";
-    };
-    std::string text;
-    const std::string *prev = nullptr;
-    for (const auto &token : tokens) {
-        if (sv_is_end_token(token)) {
-            break;
-        }
-        if (token.type == TokenType::TERMINATOR) {
-            text += ';';
-            break;
-        }
-        if (token.type == TokenType::COMMENT) {
-            continue;  // the tokenizer drops comments; defensive
-        }
-        if (prev != nullptr && !glue_right(*prev) && !glue_left(token.text)) {
-            text += ' ';
-        }
-        text += token.text;
-        prev = &token.text;
-    }
-    return text;
-}
-
-static ParserExtensionParseResult sv_parse_stub(
-    ParserExtensionInfo *info, const vector<SimpleToken> &tokens) {
-    sv_parser_hook_database(reinterpret_cast<uintptr_t>(info));
-    // The user's query, recorded on this database.
-    idx_t start = 0;
-    idx_t statement_end = 0;
-    const std::string &query = sv_override_query;
-    bool located = sv_override_info == info &&
-                   sv_locate_tail(query, tokens, start, statement_end);
-    auto result = sv_parse_statement(located ? query.substr(start, statement_end - start)
-                                             : sv_statement_from_tokens(tokens));
-    // DISPLAY_EXTENSION_ERROR -> throw; DISPLAY_ORIGINAL_ERROR keeps the
-    // default 0 (not claimed). PARSE_SUCCESSFUL is never produced.
-    if (result.type == ParserExtensionResultType::DISPLAY_EXTENSION_ERROR) {
-        result.consumed_tokens = -1;
-        if (located && result.error_location.IsValid()) {
-            result.error = QueryErrorContext::Format(query, result.error,
-                                                     start + result.error_location.GetIndex());
-        }
-        result.error_location = optional_idx();
-    }
-    // Whatever the answer, this query's parse is over for us: an error is
-    // thrown, and an unclaimed statement makes DuckDB rethrow its own error.
-    // (Only another extension claiming the statement lets the parse go on;
-    // a later failing statement then gets no caret, as with the override off.)
-    sv_override_query.clear();
-    return result;
-}
-#else
-static ParserExtensionParseResult sv_parse_stub(
-    ParserExtensionInfo *info, const string &query) {
-    sv_parser_hook_database(reinterpret_cast<uintptr_t>(info));
-    return sv_parse_statement(query);
-}
-#endif
-
-// ---------------------------------------------------------------------------
-// Plan-function hook: sv_plan_unreachable  (Phase 62 Plan 03)
-// ---------------------------------------------------------------------------
-// ParserExtension carries a sibling `plan_function` pointer alongside
-// `parse_function`. The plan function only fires when parse_function returns
-// PARSE_SUCCESSFUL, which sv_parse_stub never does — every code path goes
-// through DISPLAY_EXTENSION_ERROR or DISPLAY_ORIGINAL_ERROR. Provide a
-// hard-fail stub so a contract violation surfaces loudly rather than silently.
-//
-// Signature must match plan_function_t in parser_extension_compat.hpp:
-//   ParserExtensionPlanResult (*)(ParserExtensionInfo *, ClientContext &,
-//                                  unique_ptr<ParserExtensionParseData>);
-static ParserExtensionPlanResult sv_plan_unreachable(
-    ParserExtensionInfo * /*info*/,
-    ClientContext & /*context*/,
-    unique_ptr<ParserExtensionParseData> /*parse_data*/) {
-    throw InternalException(
-        "semantic_views: sv_plan_unreachable called — sv_parse_stub never "
-        "returns PARSE_SUCCESSFUL (please report this bug)");
-}
 
 // ---------------------------------------------------------------------------
 // duckdb_functions() documentation (GitHub issue #233)
@@ -1030,7 +578,7 @@ static std::vector<std::pair<std::string, LogicalType>> sv_semantic_named_params
         // An explicit schema resolution order. Without it the bind reads the
         // caller's search path off its ClientContext (`sv_caller_search_path`).
         // Kept, reserved, because views stored by earlier releases carry the
-        // `search_path := …` argument the parser override used to splice in
+        // `search_path := …` argument the extension's parser hook used to splice in
         // (TECH-DEBT #19); an explicit value still decides.
         {"search_path", list_varchar},
     };
@@ -1181,8 +729,7 @@ static bool sv_register_table_function_core(
 // Header declaration in cpp/src/shim.hpp.
 // Phase 65.1 Plan 02a (WR-02 D-08/D-09 + CR-02 D-05) — registration
 // failures surface via the `(error_buf, error_buf_len)` trailing pair,
-// the same ABI-stable channel used by `sv_parser_override_rust`
-// (shim.cpp:57-61). Per D-09 there is NO stderr write — ADBC/JDBC/Python
+// the same ABI-stable channel the read-side dispatchers use. Per D-09 there is NO stderr write — ADBC/JDBC/Python
 // callers may have redirected stderr; `error_buf` is the only reliable
 // path. D-05: `init_cb == nullptr` is rejected at registration time
 // (forces every TF onto the single-shot-via-local-state path so the
@@ -1411,7 +958,7 @@ extern "C" {
 // retain the `"FROM YAML FILE failed: "` prefix pinned by
 // `test/sql/phase53_yaml_file.test`.
 //
-// The outer parser_override INSERT (src/parse.rs::rewrite_yaml_file_create,
+// The outer INSERT the CREATE lowers to (src/parse/native_sql.rs,
 // landed in Task 4) wraps the helper TF's row via `json_merge_patch(new_def,
 // json_object('created_on', strftime(now(), '%Y-%m-%dT%H:%M:%SZ'),
 // 'database_name', current_database(), 'schema_name', current_schema()))`
@@ -2101,10 +1648,9 @@ static std::vector<uint8_t> sv_serialise_string_list(const Value &list_val,
 // varchar-list wire format: the schemas `SET search_path` / `USE` put on the
 // path, then the current schema. That is what
 // `list_concat(current_schemas(false), [current_schema()])` evaluates to, the
-// expression the parser override used to splice into every read call (#19 /
+// expression the extension's parser hook used to splice into every read call (#19 /
 // #25). It is read off the caller's `ClientContext`, a plain field read that
-// takes no lock, so it works from a bind or a scalar's execution alike, and
-// for calls that never pass through the parser override.
+// takes no lock, so it works from a bind or a scalar's execution alike.
 //
 // `current_schemas(true)` is deliberately not mirrored: it prepends the temp
 // schema, itself named `main`, which would shadow a real schema of that name.
@@ -3772,23 +3318,18 @@ extern "C" {
     }
 }
 
-#ifdef SV_DUCKDB_2
 // ---------------------------------------------------------------------------
 // Grammar productions (DuckDB 2.0 PEG parser)
 // ---------------------------------------------------------------------------
-// The parser override above sees a whole statement's text, so it can only
-// rewrite statements that *start* with our syntax. A grammar extension adds
-// rules to DuckDB's own PEG grammar instead, so our syntax can sit anywhere
-// the grammar allows: `SELECT ... FROM (SHOW SEMANTIC VIEWS)`, a CTE, a view
+// A grammar extension adds rules to DuckDB's own PEG grammar, so our syntax
+// can sit anywhere the grammar allows: `SELECT ... FROM (SHOW SEMANTIC VIEWS)`, a CTE, a view
 // body (TECH-DEBT #77).
 //
 // The rules and their transforms live in Rust (src/grammar/). This side only
 // bridges: it registers the rules Rust lists, and when a statement rule
 // matches it serialises the matched subtree with the statement's tokens
 // (wire format in src/grammar/tree.rs), has Rust lower it to SQL, and parses
-// that SQL with the builtin parser. The override still runs first and owns
-// every statement that starts with our syntax; with overrides off
-// (allow_parser_override_extension = 'DEFAULT') every statement comes here.
+// that SQL with the builtin parser.
 
 static const char *SV_GRAMMAR_NAME = "semantic_views";
 
@@ -3858,56 +3399,11 @@ static void sv_wire_node(string &out, ParseResult &pr) {
     }
 }
 
-// Whether the query the parser override recorded on this thread
-// (sv_override_query) is the one being parsed: every token is that query's
-// text at the token's offset, and everything else in it (before the first
-// token, between tokens, after the last) is whitespace or comments. The
-// iterator holds the whole query's tokens, so together that is the query, up
-// to the trivia the tokenizer drops. Each gap must also hold a line break
-// exactly when the tokenizer says this query's gap did (preceded_by_newline),
-// so a record never lends its line structure to an error's caret or to the
-// stored body. A transform gets only the tokens, so the record is how it
-// learns the source text: sv_grammar_span_has_source below checks the
-// statement's own span the same way, and this whole-query check guards the
-// caret, which quotes the query around the statement. With the override on,
-// the override saw this query and declined it just before the grammar ran.
-// With it off nothing was recorded, and an earlier query on this thread is
-// left over: matching tokens alone would take its text where the offsets line
-// up, so a body with spaces where the earlier one had `+o.b` would store the
-// earlier body. What still passes is a gap of the same length with the same
-// line breaks, such as a tab for a space (TECH-DEBT #100).
-static bool sv_grammar_has_source(TokenIterator &tokens) {
-    const std::string &query = sv_override_query;
-    if (query.empty()) {
-        return false;
-    }
-    idx_t pos = 0;
-    bool first = true;
-    for (idx_t i = 0; i < tokens.Size(); i++) {
-        auto &tok = tokens.GetToken(i);
-        if (tok.text.empty()) {
-            continue;
-        }
-        bool newline = false;
-        if (!sv_skip_trivia(query, pos, &newline) || pos != tok.offset ||
-            query.compare(tok.offset, tok.text.size(), tok.text) != 0) {
-            return false;
-        }
-        // The tokenizer leaves the flag unset on the first token.
-        if (!first && newline != tok.preceded_by_newline) {
-            return false;
-        }
-        first = false;
-        pos = tok.offset + tok.text.size();
-    }
-    return sv_skip_trivia(query, pos) && pos == query.size();
-}
-
 // The matched statement's own part of the query: its byte span [start, end)
 // and the tokens wholly inside it, [first, last). The iterator holds the whole
-// query's tokens, so a transform that got all of them, and the record with
-// them, would cost every statement of a K-statement string the length of the
-// whole string (TECH-DEBT #85). Without a span the statement is the query.
+// query's tokens, so a transform that got all of them would cost every
+// statement of a K-statement string the length of the whole string. Without a
+// span the statement is the query.
 struct SvGrammarSpan {
     idx_t start = 0;
     idx_t end = 0;
@@ -3948,42 +3444,8 @@ static SvGrammarSpan sv_grammar_span(TokenIterator &tokens, ParseResult &pr) {
     return span;
 }
 
-// Whether the record holds this statement: what sv_grammar_has_source checks
-// for the whole query, for the statement's span alone. Each token is the
-// record's text at its offset, the gaps between them are whitespace or
-// comments holding a line break exactly where this query's do, and so is
-// whatever lies between the last token and the end of the span. The gap
-// before the first token is outside the span and is not checked.
-static bool sv_grammar_span_has_source(TokenIterator &tokens, const SvGrammarSpan &span) {
-    const std::string &query = sv_override_query;
-    if (query.empty() || span.end > query.size() || span.start > span.end) {
-        return false;
-    }
-    idx_t pos = span.start;
-    bool first = true;
-    for (idx_t i = span.first; i < span.last; i++) {
-        auto &tok = tokens.GetToken(i);
-        if (tok.text.empty()) {
-            continue;
-        }
-        bool newline = false;
-        if (!sv_skip_trivia(query, pos, &newline) || pos != tok.offset ||
-            query.compare(tok.offset, tok.text.size(), tok.text) != 0) {
-            return false;
-        }
-        if (!first && newline != tok.preceded_by_newline) {
-            return false;
-        }
-        first = false;
-        pos = tok.offset + tok.text.size();
-    }
-    return pos >= span.end || (sv_skip_trivia(query, pos) && pos >= span.end);
-}
-
-// The statement's tree, its own tokens, and its part of the record when the
-// record holds it.
-static string sv_grammar_serialise(PEGTransformer &transformer, ParseResult &pr, const SvGrammarSpan &span,
-                                   bool has_source) {
+// The statement's tree and its own tokens (the wire format is in src/grammar/tree.rs).
+static string sv_grammar_serialise(PEGTransformer &transformer, ParseResult &pr, const SvGrammarSpan &span) {
     string out;
     sv_wire_node(out, pr);
     auto &tokens = transformer.token_iterator;
@@ -3995,21 +3457,15 @@ static string sv_grammar_serialise(PEGTransformer &transformer, ParseResult &pr,
         out.push_back(tok.preceded_by_newline ? 1 : 0);
         sv_wire_str(out, tok.text);
     }
-    sv_wire_u32(out, static_cast<uint32_t>(span.start));
-    sv_wire_str(out, has_source ? sv_override_query.substr(span.start, span.end - span.start) : string());
     return out;
 }
 
-// Have Rust lower a matched statement rule to SQL, and parse the SQL. With the
-// source text, an error's caret is rendered into its message, as the parse stub
-// renders it, since 2.0 shows a parser error's location only on the
-// ClientContext path (TECH-DEBT #99). The caret quotes the whole query, so it
-// needs the record to be the whole query, which is checked only then: an error
-// ends the parse, so the check runs at most once per query.
+// Have Rust lower a matched statement rule to SQL, and parse the SQL. An
+// invalid statement is a parser error at the offset Rust reports, which DuckDB
+// renders as `LINE n: ... ^` like its own syntax errors.
 static vector<unique_ptr<SQLStatement>> sv_grammar_lower(PEGTransformer &transformer, ParseResult &pr) {
     auto span = sv_grammar_span(transformer.token_iterator, pr);
-    bool has_source = sv_grammar_span_has_source(transformer.token_iterator, span);
-    auto wire = sv_grammar_serialise(transformer, pr, span, has_source);
+    auto wire = sv_grammar_serialise(transformer, pr, span);
     SvOwnedBuffer sql_buf;
     char error_buf[1024];
     memset(error_buf, 0, sizeof(error_buf));
@@ -4017,13 +3473,13 @@ static vector<unique_ptr<SQLStatement>> sv_grammar_lower(PEGTransformer &transfo
     uint8_t rc = sv_grammar_transform_rust(reinterpret_cast<const uint8_t *>(wire.data()), wire.size(),
                                            &sql_buf.ptr, &sql_buf.len, error_buf, sizeof(error_buf), &position);
     if (rc == 1) {
-        if (position != UINT32_MAX && has_source && sv_grammar_has_source(transformer.token_iterator)) {
-            throw ParserException("%s", QueryErrorContext::Format(sv_override_query, string(error_buf), position));
-        }
+        // The heap copy is the whole message; error_buf would cut a long one
+        // (a duplicate 600-character name, say) off mid-name.
+        string message = sql_buf.len > 0 ? sql_buf.to_string() : string(error_buf);
         if (position != UINT32_MAX) {
-            throw ParserException(QueryLocation(position, 0), "%s", string(error_buf));
+            throw ParserException(QueryLocation(position, 0), "%s", message);
         }
-        throw ParserException("%s", string(error_buf));
+        throw ParserException("%s", message);
     }
     if (rc != 0) {
         throw InternalException("semantic_views grammar bridge: %s", string(error_buf));
@@ -4238,9 +3694,10 @@ static vector<GrammarChange> sv_grammar_changes() {
 }
 
 // Turn the grammar on for one connection. `active_grammar_extensions` is a
-// per-connection setting, so a LOAD reaches the connections that exist now
-// (sv_grammar_activate_all) and an ExtensionCallback reaches the ones opened
-// later.
+// per-connection setting, and `SetLocal` replaces the connection's compiled
+// grammar unsynchronised, so this only ever runs on the connection's own thread:
+// from an ExtensionCallback for a connection opened after LOAD, and from
+// SemanticViewsGrammarPending for one that already existed.
 static void sv_grammar_activate(ClientContext &context) {
     auto &config = ClientConfig::GetConfig(context);
     vector<Value> names;
@@ -4261,7 +3718,42 @@ public:
     }
 };
 
-// Register the grammar once per database and activate it on every connection.
+static constexpr const char *SV_GRAMMAR_PENDING_KEY = "semantic_views_grammar_pending";
+
+// Activates the grammar on a connection that was open when the extension
+// loaded, the next time that connection begins or ends a query: both run on
+// its own thread, under its own lock (TECH-DEBT #103). The connection that ran
+// LOAD gets it when the LOAD ends, so the next statement, in the same query
+// string or a later one, parses with the grammar. Any other connection gets it
+// when its running query ends, or when its next query begins; DuckDB parses a
+// statement before the query begins, so the first statement such a connection
+// sends after the LOAD is parsed without the grammar.
+class SemanticViewsGrammarPending final : public ClientContextState {
+public:
+    void QueryBegin(ClientContext &context) override {
+        Activate(context);
+    }
+    void QueryEnd(ClientContext &context) override {
+        Activate(context);
+    }
+
+private:
+    static void Activate(ClientContext &context) {
+        try {
+            sv_grammar_activate(context);
+        } catch (...) {
+            // Leave the state registered: the next query tries again.
+            return;
+        }
+        context.registered_state->Remove(SV_GRAMMAR_PENDING_KEY);
+    }
+};
+
+// Register the grammar once per database, and activate it on every connection:
+// those opened later through the ExtensionCallback, and those open now through
+// SemanticViewsGrammarPending. The registry each connection keeps its states in
+// is synchronised, so registering one from the loading thread is safe, where
+// changing the connection's settings from here is not.
 static void sv_register_grammar(DatabaseInstance &db) {
     auto &config = DBConfig::GetConfig(db);
     if (!config.GetCallbackManager().FindGrammarExtension(SV_GRAMMAR_NAME)) {
@@ -4269,27 +3761,19 @@ static void sv_register_grammar(DatabaseInstance &db) {
         ExtensionCallback::Register(config, make_shared_ptr<SemanticViewsGrammarActivation>());
     }
     for (auto &context : db.GetConnectionManager().GetConnectionList()) {
-        sv_grammar_activate(*context);
+        context->registered_state->GetOrCreate<SemanticViewsGrammarPending>(SV_GRAMMAR_PENDING_KEY);
     }
 }
-#endif
 
 // ---------------------------------------------------------------------------
-// sv_register_parser_hooks -- called from Rust after C API init
+// sv_register_grammar_hooks -- called from Rust after C API init
 // ---------------------------------------------------------------------------
-// Extracts DatabaseInstance& from the C API handle and registers the
-// parser_override hook on DBConfig. Phase 65 Plan 06: signature slimmed
-// to `(db_handle)` after H1 catalog_conn retirement. AR-7: the
-// SemanticViewsParserInfo carries no Rust state anymore — it is just the
-// dynamic_cast marker used by sv_parser_override / sv_parse_stub to confirm
-// the parser_info is ours.
-//
-// Phase 65.1 Plan 10 (WR-06 D-12/D-13): the signature carries the trailing
-// `(char *error_buf, size_t error_buf_len)` pair, matching the read-side
-// dispatchers, so registration failures surface through the ABI-stable
-// channel into the Rust caller's diagnostic.
+// Registers the `__sv_compute_create_from_yaml` helper table function, then
+// the grammar productions (sv_register_grammar), on the database behind the
+// C API handle. A failure is written to `error_buf`, as the read-side
+// dispatchers report theirs.
 extern "C" {
-    bool sv_register_parser_hooks(
+    bool sv_register_grammar_hooks(
         duckdb_database db_handle,
         char *error_buf, size_t error_buf_len) {
         try {
@@ -4299,46 +3783,16 @@ extern "C" {
                 db_handle->internal_ptr);
             auto &db = *wrapper->database->instance;
 
-            // Phase 65 Plan 04 (Task 2 Step B): register the
-            // `__sv_compute_create_from_yaml` helper TF via the C++ Catalog
-            // API so its bind callback receives a native `ClientContext &`
-            // to read the YAML file through. The outer parser_override INSERT in
-            // src/parse.rs::rewrite_yaml_file_create wraps the helper TF's
-            // `new_def` row with json_merge_patch + json_object to add
-            // now()/current_database()/current_schema() on the caller's
-            // connection, preserving D-21 transactional contract.
-            //
-            // LIFE-2 (code-review 2026-08-08): this block runs BEFORE the
-            // parser-extension registration below, for the same reason
-            // `REGISTRATIONS` in src/lib.rs puts the whole hook last — the
-            // dependency is one-way. The helper TF is a pure Catalog-API
-            // registration that never needs the hook, while the hook's own
-            // rewrite of `CREATE SEMANTIC VIEW ... FROM YAML FILE` emits a
-            // call to this TF. Registering the hook first meant a failure
-            // here returned false with `parser_override` already installed
-            // and `allow_parser_override_extension` already flipped to
-            // FALLBACK, so the YAML-file DDL form parsed and then failed on
-            // an unresolved function name.
+            // The helper TF goes first: `CREATE SEMANTIC VIEW ... FROM YAML
+            // FILE` lowers to a call to it, so the grammar must not be live
+            // without it (LIFE-2). Its bind reads the file through DuckDB's
+            // FileSystem with the caller's ClientContext.
             {
-                // Phase 65.1 Plan 07 (IN-04 D-24): helper TF slimmed to
-                // 3 args — (file_path, view_name, comment). The previous
-                // `kind` INTEGER parameter was redundant with the outer
-                // parser_override INSERT shape (OR IGNORE / OR REPLACE /
-                // plain) and the Rust helper ignored it.
                 LogicalType arg_types[] = {
                     LogicalType::VARCHAR,  // file_path
                     LogicalType::VARCHAR,  // view_name
                     LogicalType::VARCHAR,  // comment (empty = none)
                 };
-                // Phase 65.1 Plan 02a: sv_register_table_function requires a
-                // `(error_buf, error_buf_len)` trailing pair.
-                //
-                // Phase 65.1 Plan 10 (WR-06 D-13): sv_register_parser_hooks
-                // now carries its own error_buf; forward the helper TF's
-                // diagnostic into the parent buffer so the Rust caller
-                // surfaces it through `decode_register_err_buf`. The local
-                // buffer is needed because the helper writes via snprintf
-                // and may truncate independently of our outer buffer's size.
                 char helper_err[1024];
                 std::memset(helper_err, 0, sizeof(helper_err));
                 if (!sv_register_table_function(
@@ -4351,7 +3805,7 @@ extern "C" {
                         helper_err, sizeof(helper_err))) {
                     if (error_buf != nullptr && error_buf_len > 0) {
                         snprintf(error_buf, error_buf_len,
-                            "sv_register_parser_hooks: failed to register "
+                            "sv_register_grammar_hooks: failed to register "
                             "__sv_compute_create_from_yaml helper TF: %s",
                             helper_err);
                     }
@@ -4359,179 +3813,14 @@ extern "C" {
                 }
             }
 
-            auto &config = DBConfig::GetConfig(db);
-
-            // Phase 65.1 Plan 12 (WR-09 D-21): idempotence check across
-            // same-process repeat LOAD semantic_views. `ParserExtension::Register`
-            // unconditionally appends to `DBConfig::parser_extensions` (no dedup
-            // API), so without this guard every LOAD grows the list by one entry
-            // pointing at the same `sv_parser_override` — an unbounded "soft leak"
-            // surfaced by 65-REVIEW.md WR-09.
-            //
-            // We iterate the public read-side iterator
-            // `DBConfig::GetCallbackManager().ParserExtensions()`
-            // (cpp/include/duckdb.cpp:281157) and compare each existing entry's
-            // `parser_override` function pointer against the file-static
-            // `sv_parser_override` symbol. Function-pointer equality is portable
-            // ISO C++ here because `sv_parser_override` is a file-static C++
-            // function defined in this same TU — both sides of the `==` see the
-            // identical pointer value.
-            //
-            // CRITICAL: the entire `ParserExtension ext; ...; Register(...)` block
-            // — including the `SemanticViewsParserInfo` allocation — must be
-            // guarded. `Register` unconditionally appends to
-            // `DBConfig::parser_extensions`; on the skip path re-registering
-            // would grow the list unboundedly across repeated re-LOAD cycles
-            // (the precise leak shape WR-09 / CR-01 (65.1) was meant to fix).
-            //
-            // The target is same-process repeat LOAD (e.g. a long-lived host
-            // re-invoking `LOAD semantic_views` across sessions, or partial-failure
-            // retries during `init_extension`). The theoretical concurrent-thread
-            // LOAD race between the iterator check and `Register` is documented
-            // as out of scope for v0.10.0 — see WR-09 Pitfall 3 / RESEARCH.md
-            // lines 668-714. Hitting it would require user code to LOAD the
-            // extension from two threads simultaneously, which is atypical for
-            // DuckDB's extension-load API.
-            //
-            // The helper-TF registration above uses
-            // `OnCreateConflict::ALTER_ON_CONFLICT` and is naturally
-            // idempotent — no analog guard needed there.
-            auto &cbmgr = config.GetCallbackManager();
-            bool already_registered = false;
-            for (auto &existing : cbmgr.ParserExtensions()) {
-                if (existing.parser_override == sv_parser_override) {
-                    already_registered = true;
-                    break;
-                }
-            }
-
-            if (!already_registered) {
-                // Phase 65.1 CR-01 / WR-09: the `ParserExtension ext; ...;
-                // Register(...)` block — including the `SemanticViewsParserInfo`
-                // allocation — must stay INSIDE the dedup guard.
-                // `ParserExtension::Register` unconditionally appends to
-                // `DBConfig::parser_extensions` (no dedup API), so on the
-                // `already_registered` skip path we must not Register (or
-                // allocate) again — otherwise every redundant LOAD grows the
-                // list by one entry, an unbounded soft leak over a long-lived
-                // host process. AR-7: there is no longer a separate
-                // `sv_make_override_context()` allocation to guard here.
-                ParserExtension ext;
-                ext.parser_override = sv_parser_override;
-                // Phase 62 Plan 03: parse_function is the error-reporting layer.
-                // parser_override owns the success path (rewrite + re-parse on the
-                // caller's connection — transactional). When parser_override
-                // defers (rc=2), the default parser fails on the unrecognised
-                // prefix and DuckDB calls sv_parse_stub, which re-runs validation
-                // and returns DISPLAY_EXTENSION_ERROR with `error_location` so
-                // ParserException::SyntaxError renders `LINE 1: … ^` (caret).
-                // sv_plan_unreachable is the required sibling — sv_parse_stub
-                // never returns PARSE_SUCCESSFUL so it should never fire.
-                ext.parse_function  = sv_parse_stub;
-                ext.plan_function   = sv_plan_unreachable;
-                // duckdb::shared_ptr<T> doesn't have an upcast constructor, so we
-                // build the std::shared_ptr<ParserExtensionInfo> first (allocates
-                // the SemanticViewsParserInfo and immediately upcasts) then hand
-                // it to duckdb::shared_ptr's std-interop constructor.
-                std::shared_ptr<ParserExtensionInfo> info_std(
-                    new SemanticViewsParserInfo());
-                ext.parser_info = duckdb::shared_ptr<ParserExtensionInfo>(info_std);
-                ParserExtension::Register(config, ext);
-
-                // FALLBACK_OVERRIDE: hook runs before default parser; misses
-                // fall through cleanly. Caret regression (TECH-DEBT 22) is
-                // resolved by parse_function above — sv_parse_stub renders
-                // `LINE 1: ... ^` for every CREATE/DROP/ALTER validation error.
-                config.SetOption("allow_parser_override_extension", Value("FALLBACK"));
-            }
-
-#ifdef SV_DUCKDB_2
             sv_register_grammar(db);
-#endif
-
             return true;
         } catch (const std::exception &e) {
             if (error_buf != nullptr && error_buf_len > 0) {
                 snprintf(error_buf, error_buf_len,
-                    "sv_register_parser_hooks failed: %s", e.what());
+                    "sv_register_grammar_hooks failed: %s", e.what());
             }
             return false;
-        }
-    }
-}
-
-// ---------------------------------------------------------------------------
-// sv_count_parser_extensions -- Phase 65.1 Plan 12 Task 3 (D-21 + B-07
-// plan-checker fix) structural verification helper.
-// ---------------------------------------------------------------------------
-// Counts entries in `DBConfig::GetCallbackManager().ParserExtensions()`
-// whose `parser_override` function pointer equals the file-static
-// `sv_parser_override` symbol. Used by
-// `tests/parser_hook_idempotent.rs` as a stable, named symbol the
-// structural test can reference (the cargo-test FFI path cannot
-// exercise the extension binary directly under the
-// `duckdb/loadable-extension` stubs; see that test's docstring).
-//
-// Option (a) per the B-07 plan-checker fix in 65.1-12-PLAN.md: PUBLIC
-// helper (no cfg(test) gating). Read-only iteration is harmless in
-// production binaries and gating would require conditional-compilation
-// plumbing in the C++ TU for marginal benefit.
-//
-// Returns >= 0 on success (the count); -1 on failure with the message
-// in `error_buf`. Same error_buf convention as the WR-02 ABI.
-extern "C" {
-    int32_t sv_count_parser_extensions(
-        duckdb_database db_handle,
-        char *error_buf, size_t error_buf_len) {
-        try {
-            if (db_handle == nullptr) {
-                if (error_buf != nullptr && error_buf_len > 0) {
-                    snprintf(error_buf, error_buf_len,
-                        "sv_count_parser_extensions: null db_handle");
-                }
-                return -1;
-            }
-            auto *wrapper = reinterpret_cast<duckdb::DatabaseWrapper *>(
-                db_handle->internal_ptr);
-            if (wrapper == nullptr) {
-                if (error_buf != nullptr && error_buf_len > 0) {
-                    snprintf(error_buf, error_buf_len,
-                        "sv_count_parser_extensions: null DatabaseWrapper");
-                }
-                return -1;
-            }
-            auto &db = *wrapper->database->instance;
-            auto &config = DBConfig::GetConfig(db);
-            auto &cbmgr = config.GetCallbackManager();
-            // Phase 65.1 IN-02: saturate the counter at INT32_MAX rather
-            // than wrapping. The documented contract is "returns >= 0 on
-            // success; -1 on failure" — silent wrap to a negative value
-            // would be misinterpreted as a registration failure by the
-            // structural test. Reaching INT32_MAX is only plausible if
-            // WR-09's dedup guard fails badly and the list grows
-            // unbounded across re-LOAD cycles, but the saturation is
-            // cheap defence-in-depth.
-            int32_t count = 0;
-            for (auto &existing : cbmgr.ParserExtensions()) {
-                if (existing.parser_override == sv_parser_override) {
-                    if (count < INT32_MAX) {
-                        ++count;
-                    }
-                }
-            }
-            return count;
-        } catch (const std::exception &e) {
-            if (error_buf != nullptr && error_buf_len > 0) {
-                snprintf(error_buf, error_buf_len,
-                    "sv_count_parser_extensions failed: %s", e.what());
-            }
-            return -1;
-        } catch (...) {
-            if (error_buf != nullptr && error_buf_len > 0) {
-                snprintf(error_buf, error_buf_len,
-                    "sv_count_parser_extensions failed: unknown C++ exception");
-            }
-            return -1;
         }
     }
 }

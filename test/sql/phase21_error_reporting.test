@@ -1,8 +1,10 @@
 # Phase 21: Error location reporting integration tests
 # Rewritten for AS-body keyword syntax (CLN-01: paren-body syntax removed).
 #
-# Verifies error messages flow through DuckDB's parser extension error path
-# with character positions (ERR-02) and "did you mean" suggestions (ERR-03).
+# Verifies error messages carry character positions (ERR-02) and "did you
+# mean" suggestions for misspelt clause keywords (ERR-03). A misspelt
+# statement prefix matches no grammar production and gets DuckDB's own syntax
+# error instead.
 # Paren-body error tests (bracket validation, clause scanning) are removed --
 # those code paths no longer exist.
 
@@ -32,7 +34,7 @@ Expected 'AS' or 'FROM YAML' after view name
 statement error
 CREATE SEMANTIC VIEW;
 ----
-Missing view name
+syntax error at or near ";"
 
 # Missing view name -- just name keyword with no body
 statement error
@@ -41,20 +43,20 @@ CREATE SEMANTIC VIEW x
 Expected 'AS'
 
 # ============================================================
-# Section 3: ERR-03 -- "Did you mean" suggestions (near-miss)
+# Section 3: Misspelt statement prefixes get DuckDB's syntax error
 # ============================================================
 
 # Typo in DDL prefix: "CREAT" instead of "CREATE"
 statement error
 CREAT SEMANTIC VIEW test_view AS TABLES (t AS t PRIMARY KEY (id)) DIMENSIONS (t.x AS x) METRICS (t.y AS SUM(1));
 ----
-Did you mean
+syntax error at or near "CREAT"
 
-# Another near-miss: "DROP SEMANTC VIEW" (missing 'I')
+# Another misspelling: "DROP SEMANTC VIEW" (missing 'I')
 statement error
 DROP SEMANTC VIEW some_view;
 ----
-Did you mean
+syntax error at or near "SEMANTC"
 
 # ============================================================
 # Section 4: AS-body clause errors
