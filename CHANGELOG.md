@@ -43,8 +43,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   expression uses metrics, and aggregates of the dimensions and facts of one table, each
   computed over its own table. An expression item is grouped, joined and checked for fan
   traps as a member declared on its table would be, so `COUNT(DISTINCT ...)`, ratios and
-  metrics of different tables come out right. Without an alias, the column is named by
-  the expression as written.
+  metrics of different tables come out right. An expression reads only the view's members:
+  any other name is refused, so an item cannot read a column the view does not declare,
+  such as the one under a `PRIVATE` fact. Keywords, numbers, lambda parameters, named
+  arguments and collations are fine. Without an alias, the column is named by the
+  expression as written.
 
 - **Output names and column order for `semantic_view()`.** A `dimensions`, `metrics` or
   `facts` item can name its output column with `AS`, as in `'o.region AS r'`, and the new
@@ -72,7 +75,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - A view name that is a DuckDB reserved word, such as `select`, `order` or `left`, has
     to be quoted in every statement, `CREATE` included, as DuckDB requires for its own
     names: `CREATE SEMANTIC VIEW "select" AS …`. `CREATE` used to accept it unquoted.
-    `GET_DDL` now quotes such a name, so its output runs as written.
+    `GET_DDL` now quotes such a name, so its output runs as written. It also quotes a
+    member or table alias named `AS` or `USING`, which it used to write bare
+    (`o.AS AS o.region`), so that `CREATE` split it at the wrong `AS`.
   - `CREATE SEMANTIC VIEW` stores each expression as DuckDB's tokens spell it: a tab
     becomes a space, a run of blank lines one line break, and comments are dropped. So
     `GET_DDL` and `DESCRIBE` show that spelling. The query a view expands to is the same.
@@ -89,9 +94,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   view name now resolves through the session's `search_path`, as it already did for the
   DDL statements and `semantic_view()`: when several schemas hold a view of that name,
   the first one on the path wins, where before these two raised an ambiguity error
-  whatever the path said. Table functions called without going through the extension's
-  parser hook (with `allow_parser_override_extension` set to `DEFAULT`, or from DuckDB's
-  Python relational API) follow the path too, instead of requiring a unique match.
+  whatever the path said. Called from DuckDB's Python relational API, they follow the
+  path too, instead of requiring a unique match.
 
 - **CREATE rejects an empty view.** A view with no tables (`TABLES ()`, or a YAML
   definition with `tables: []` or no `tables`), or whose `DIMENSIONS` and `METRICS`
@@ -125,7 +129,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   subquery's own tables, as in Snowflake, where the `WHERE` clause takes uncorrelated
   subqueries. A subquery sees none of the semantic view's tables, so a name its own tables
   lack is DuckDB's `Referenced column ... not found` error. Write a condition on the member
-  outside the subquery.
+  outside the subquery. This also fixes a silent wrong filter: a name inside a subquery,
+  such as `amt` in `amt IN (SELECT amt FROM targets)`, was replaced with the member of that
+  name, so the subquery compared each row with itself and filtered nothing, or failed to
+  parse.
 
 - **`SET max_execution_time` counts from when a `semantic_view()` query starts running.**
   As with DuckDB's own queries, time DuckDB spends planning a source that is slow to bind,
@@ -165,11 +172,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   macOS (Apple silicon) build in the community registry failed that way, so `INSTALL
   semantic_views` found no v0.15.0 binary for DuckDB 2.0 on any platform.
 
-- **A YAML member expression holding a bare `COMMENT`, `LABELS` or `WITH SYNONYMS` is
-  refused.** In DDL those words, outside brackets and quotes, end a member's expression and
-  start its annotations, so such a YAML view imported and then gave a `GET_DDL` that
-  `CREATE` refused. Quote the word if it names a column (`o."comment"`); `o.comment` and
-  the word inside brackets or a string are unaffected.
+- **A YAML member expression holding a bare `COMMENT`, `LABELS` or `WITH SYNONYMS`, or a
+  metric expression naming a bare `USING`, is refused.** In DDL those words, outside
+  brackets and quotes, end a member's expression and start its annotations (`USING`, after
+  a metric's `AS`, opens its relationship list), so such a YAML view imported and then gave
+  a `GET_DDL` that `CREATE` refused. Quote the word if it names a column (`o."comment"`);
+  `o.comment` and the word inside brackets or a string are unaffected.
 
 - **A `$` inside a name is part of the name.** A column such as `price$usd$` used in a
   semantic view's expression was read as the start of a `$usd$ … $usd$` string, so
@@ -181,12 +189,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   or relationship name such as `o.(region)`, though DuckDB never reads a bracket as part of
   a name, and an unbalanced one (`o.(region AS …`) silently pulled the following entries
   into that one. `CREATE` now says to quote the name (`o."(region)"`).
-
-- **A subquery in `where_clause` keeps its own names.** A name inside a subquery, such as
-  `amt` in `amt IN (SELECT amt FROM targets)`, was replaced with the member of that name, so
-  the subquery compared each row with itself and filtered nothing, or failed to parse. Names
-  inside a subquery now refer to the subquery's own tables, as in Snowflake, where the
-  `WHERE` clause takes uncorrelated subqueries.
 
 - **`semantic_view()` sees your open transaction.** Rows you insert, update or delete
   inside a transaction are now counted by a semantic-view query in that transaction.
