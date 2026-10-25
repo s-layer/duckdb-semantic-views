@@ -204,6 +204,28 @@ pub(crate) fn identifier_slot_error(slot: &str) -> Option<String> {
     crate::ident::parse_qualified_identifier(s).err()
 }
 
+/// [`identifier_slot_error`] for a slot read from DDL text, which also refuses
+/// an unquoted bracket. The clause scan that split the text into entries has
+/// already counted that bracket as nesting, so an entry holding one runs on to
+/// a close bracket that belonged to the clause (`o.(egion AS …` swallowed the
+/// rest of DIMENSIONS), and the render, which quotes the name, no longer reads
+/// back as the same entries. A YAML value has no clause scan in front of it and
+/// the render quotes it, so YAML keeps [`identifier_slot_error`].
+pub(crate) fn ddl_identifier_slot_error(slot: &str) -> Option<String> {
+    identifier_slot_error(slot).or_else(|| {
+        let s = slot.trim();
+        let mut in_quotes = false;
+        s.bytes()
+            .find(|&b| {
+                if b == b'"' {
+                    in_quotes = !in_quotes;
+                }
+                !in_quotes && matches!(b, b'(' | b')' | b'[' | b']' | b'{' | b'}')
+            })
+            .map(|b| format!("'{s}' holds an unquoted '{}'; quote the name", b as char))
+    })
+}
+
 // ---------------------------------------------------------------------------
 // Render-side round-trip guards (RT-4, fuzz_render_roundtrip 2026-07-18)
 //

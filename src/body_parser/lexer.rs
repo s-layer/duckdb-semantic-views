@@ -167,7 +167,8 @@ pub(super) fn lex(src: &str) -> Vec<Token> {
             }
             _ if is_ident_byte(b) => {
                 let start = i;
-                while i < bytes.len() && is_ident_byte(bytes[i]) {
+                // A `$` continues the name (`price$usd$`), as in DuckDB.
+                while i < bytes.len() && crate::util::is_ident_continue(bytes[i]) {
                     i += 1;
                 }
                 toks.push(Token {
@@ -547,5 +548,13 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn dollar_inside_a_name_continues_the_identifier() {
+        let toks = lex("price$usd$ x");
+        assert_eq!(toks.len(), 2);
+        assert_eq!(toks[0].kind, TokenKind::Ident { quoted: false });
+        assert_eq!((toks[0].start, toks[0].end), (0, 10));
     }
 }

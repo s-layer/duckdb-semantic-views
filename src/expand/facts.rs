@@ -749,7 +749,7 @@ fn scan_aggregate_calls(expr: &str, mut visit: impl FnMut(&str, (usize, usize)) 
         // over the run leaves `quotes` in the same (idle) state.
         let word_start = pos;
         let mut word_end = pos;
-        while word_end < bytes.len() && crate::util::is_ident_byte(bytes[word_end]) {
+        while word_end < bytes.len() && crate::util::is_ident_continue(bytes[word_end]) {
             word_end += 1;
         }
         pos = word_end;
@@ -1779,6 +1779,12 @@ mod tests {
         assert!(rewrite_count_star("'COUNT(*)'", "x").is_none());
         // `miscount(*)` is not `count` at a word boundary.
         assert!(rewrite_count_star("miscount(*)", "x").is_none());
+    }
+
+    #[test]
+    fn rewrite_count_star_skips_a_name_continued_by_a_dollar() {
+        // `x$count` is one function name in DuckDB, not a call to COUNT.
+        assert!(rewrite_count_star("x$count(*)", "x").is_none());
     }
 
     // EXP-16: this scanner tracked only single quotes, so `count(*)` occurring

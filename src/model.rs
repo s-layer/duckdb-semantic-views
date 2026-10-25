@@ -823,7 +823,30 @@ fn member_expr(kind: &str, name: &str, expr: &str) -> Result<(), String> {
     // shape the fuzzer found, `AS )   P ; rip`), no depth-0 comma (which would
     // split one member into two), and no surrounding whitespace (which the
     // parser trims, silently storing a different expression than the one given).
-    free_expr_common(kind, &format!("'{name}' has an expression"), expr)
+    free_expr_common(kind, &format!("'{name}' has an expression"), expr)?;
+    // After `AS`, the keyword grammar ends the expression at the first
+    // depth-0 `COMMENT`, `LABELS` or `WITH SYNONYMS` and reads the rest as
+    // the entry's annotations, so an expression holding one renders to DDL
+    // that no longer plans (fuzz_create_text, CI run 40184213171). Window
+    // arguments are not checked: they sit inside `OVER (…)`, below depth 0.
+    if let Some(at) = crate::body_parser::find_annotation_start(expr) {
+        let word = expr[at..]
+            .split(|c: char| !c.is_ascii_alphabetic())
+            .next()
+            .unwrap_or_default();
+        // `WITH` starts annotations only as `WITH SYNONYMS`; name both words.
+        let keyword = if word.eq_ignore_ascii_case("WITH") {
+            format!("{word} SYNONYMS")
+        } else {
+            word.to_string()
+        };
+        return Err(format!(
+            "{kind} '{name}' has an expression the DDL grammar cannot carry ('{expr}'); \
+             '{keyword}' at depth 0 starts the entry's annotations. Quote it as an \
+             identifier if it names a column"
+        ));
+    }
+    Ok(())
 }
 
 /// `output_type` has NO DDL surface: no clause declares it and
@@ -1635,6 +1658,72 @@ mod tests {
         );
         SemanticViewDefinition::from_yaml_with_size_cap("v", &yaml)
             .expect("a double dash inside a string literal is not a comment");
+    }
+
+    // --- An annotation keyword at depth 0 in a member expression ---
+    //
+    // After `AS`, the keyword grammar ends the expression at the first depth-0
+    // `COMMENT`, `LABELS` or `WITH SYNONYMS`, so a YAML expression holding one
+    // rendered a GET_DDL that CREATE refuses (fuzz_create_text).
+
+    #[test]
+    fn yaml_expression_with_a_depth0_annotation_keyword_is_rejected() {
+        for (expr, keyword) in [
+            ("o.a COMMENT 'x'", "COMMENT"),
+            ("o.a labels", "labels"),
+            ("o.a WITH SYNONYMS", "WITH SYNONYMS"),
+        ] {
+            let yaml = format!(
+                "{VALID_TABLES}dimensions:\n  - name: d\n    expr: \"{expr}\"\n    source_table: o\n\
+                 metrics:\n  - name: total\n    expr: sum(o.amount)\n    source_table: o\n"
+            );
+            let e = yaml_err(&yaml);
+            assert!(
+                e.contains("dimension 'd'") && e.contains(&format!("'{keyword}' at depth 0")),
+                "the error must name the member and the keyword: {e}"
+            );
+        }
+        // Facts and metrics go through the same rule.
+        let fact = format!(
+            "{VALID_TABLES}facts:\n  - name: f\n    expr: \"o.a COMMENT 'x'\"\n    source_table: o\n\
+             dimensions:\n  - name: d\n    expr: o.d\n    source_table: o\n\
+             metrics:\n  - name: total\n    expr: sum(o.amount)\n    source_table: o\n"
+        );
+        let e = yaml_err(&fact);
+        assert!(
+            e.contains("fact 'f'") && e.contains("'COMMENT' at depth 0"),
+            "{e}"
+        );
+        let metric = format!(
+            "{VALID_TABLES}dimensions:\n  - name: d\n    expr: o.d\n    source_table: o\n\
+             metrics:\n  - name: total\n    expr: \"sum(o.amount) COMMENT 'x'\"\n    source_table: o\n"
+        );
+        let e = yaml_err(&metric);
+        assert!(
+            e.contains("metric 'total'") && e.contains("'COMMENT' at depth 0"),
+            "{e}"
+        );
+    }
+
+    #[test]
+    fn yaml_expression_with_an_annotation_word_below_depth0_still_imports() {
+        // Controls: the keyword grammar splits none of these, so neither may
+        // the YAML rule.
+        for expr in [
+            "o.comment",
+            "o.\\\"comment\\\"",
+            "coalesce(o.a, comment)",
+            "o.a || ' COMMENT '",
+            "o.comment_count",
+            "o.a WITH_X",
+        ] {
+            let yaml = format!(
+                "{VALID_TABLES}dimensions:\n  - name: d\n    expr: \"{expr}\"\n    source_table: o\n\
+                 metrics:\n  - name: total\n    expr: sum(o.amount)\n    source_table: o\n"
+            );
+            SemanticViewDefinition::from_yaml_with_size_cap("v", &yaml)
+                .unwrap_or_else(|e| panic!("{expr} must import: {e}"));
+        }
     }
 
     // --- MODEL-1: semantic cross-references ---

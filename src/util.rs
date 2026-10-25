@@ -48,6 +48,15 @@ pub fn is_ident_byte(b: u8) -> bool {
     b.is_ascii_alphanumeric() || b == b'_' || b >= 0x80
 }
 
+/// Whether `b` continues an identifier that has already started: an
+/// [`is_ident_byte`], or `$`. `DuckDB` reads `price$usd$` as one name, but a
+/// `$` cannot start one (`$1` is a parameter, `$tag$` a dollar quote), so a
+/// scanner starts a name on [`is_ident_byte`] and extends it with this.
+#[must_use]
+pub fn is_ident_continue(b: u8) -> bool {
+    is_ident_byte(b) || b == b'$'
+}
+
 /// Whether the `'` at `quote` opens a `DuckDB` **escape string** (`E'…'`).
 ///
 /// `DuckDB` accepts the Postgres spelling in which `\'` is an escaped quote, so
@@ -114,12 +123,13 @@ pub fn byte_offset_within(outer: &str, inner: &str) -> usize {
     inner_start - outer_start
 }
 
-/// Is `b` a word-boundary byte — i.e. NOT an [`is_ident_byte`]? The
+/// Is `b` a word-boundary byte — i.e. NOT an [`is_ident_continue`] byte? The
 /// primitive used by the `expand::facts` COUNT / name matchers so they share
-/// the parser's notion of an identifier boundary.
+/// the parser's notion of an identifier boundary: `count` in `x$count(` is part
+/// of the name `x$count`, not a call to `COUNT`.
 #[must_use]
 pub fn is_word_boundary_char(b: u8) -> bool {
-    !is_ident_byte(b)
+    !is_ident_continue(b)
 }
 
 /// Does `s` start with the ASCII keyword `kw`, case-insensitively?
@@ -148,7 +158,9 @@ pub fn starts_with_keyword_ci(s: &str, kw: &str) -> bool {
 /// is the opener (e.g. `$$`, `$yaml$`). The tag body is ASCII alphanumerics and
 /// `_` and may **not** start with a digit — `$1` is a positional parameter, not
 /// a dollar-quote tag — matching `PostgreSQL`/`DuckDB`. The empty tag `$$` is
-/// valid; the returned length includes both `$` delimiters.
+/// valid; the returned length includes both `$` delimiters. A `$` that
+/// follows an identifier byte (with only `$`s between) is part of that
+/// identifier and opens nothing.
 ///
 /// **Single source of truth for dollar-quote tags** (P-6, code-review
 /// 2026-07-11), shared by [`blank_sql_comments`] and the CREATE-body
@@ -160,6 +172,16 @@ pub fn starts_with_keyword_ci(s: &str, kw: &str) -> bool {
 #[must_use]
 pub fn read_dollar_tag_len(bytes: &[u8], start: usize) -> Option<usize> {
     if start >= bytes.len() || bytes[start] != b'$' {
+        return None;
+    }
+    // A `$` inside an identifier continues it (`v$a$`, `v$$x$$`), as in
+    // DuckDB's scanner, so no dollar quote opens after an identifier byte,
+    // with any `$`s between.
+    let mut k = start;
+    while k > 0 && bytes[k - 1] == b'$' {
+        k -= 1;
+    }
+    if k > 0 && is_ident_byte(bytes[k - 1]) {
         return None;
     }
     let mut j = start + 1;
@@ -315,8 +337,19 @@ impl QuoteState {
 /// (2026-07-15) evaluated folding it into the body-parser lexer and declined
 /// — see the decision record in `crate::body_parser::lexer`'s module docs.
 #[must_use]
-#[allow(clippy::too_many_lines)]
 pub fn blank_sql_comments(input: &str) -> std::borrow::Cow<'_, str> {
+    blank_sql_comments_tracking(input).0
+}
+
+/// [`blank_sql_comments`], also returning the byte offset of the `'`, `"` or
+/// `$tag$` that opens a quoted region still open at the end of `input`.
+///
+/// The pass cannot tell a comment from string content after an unterminated
+/// quote, so it blanks nothing past one. A caller that plans the text (as
+/// `plan_create` does) must refuse it rather than plan comment text as code.
+#[must_use]
+#[allow(clippy::too_many_lines)]
+pub fn blank_sql_comments_tracking(input: &str) -> (std::borrow::Cow<'_, str>, Option<usize>) {
     #[derive(PartialEq)]
     enum St {
         Code,
@@ -329,6 +362,7 @@ pub fn blank_sql_comments(input: &str) -> std::borrow::Cow<'_, str> {
     let mut st = St::Code;
     let mut string_is_escape = false;
     let mut dollar_tag: Option<&[u8]> = None;
+    let mut open_at = 0;
     let mut i = 0;
 
     while i < bytes.len() {
@@ -372,15 +406,18 @@ pub fn blank_sql_comments(input: &str) -> std::borrow::Cow<'_, str> {
                 b'\'' => {
                     st = St::InString;
                     string_is_escape = opens_escape_string(bytes, i);
+                    open_at = i;
                     i += 1;
                 }
                 b'"' => {
                     st = St::InIdent;
+                    open_at = i;
                     i += 1;
                 }
                 b'$' => {
                     if let Some(len) = read_dollar_tag_len(bytes, i) {
                         dollar_tag = Some(&bytes[i..i + len]);
+                        open_at = i;
                         i += len;
                     } else {
                         i += 1;
@@ -429,14 +466,16 @@ pub fn blank_sql_comments(input: &str) -> std::borrow::Cow<'_, str> {
         }
     }
 
-    match out {
+    let unterminated = (st != St::Code || dollar_tag.is_some()).then_some(open_at);
+    let text = match out {
         // Only whole comment regions (bounded by ASCII delimiters) were
         // overwritten with ASCII spaces, so the buffer remains valid UTF-8.
         Some(buf) => std::borrow::Cow::Owned(
             String::from_utf8(buf).expect("blanking comment bytes preserves UTF-8 validity"),
         ),
         None => std::borrow::Cow::Borrowed(input),
-    }
+    };
+    (text, unterminated)
 }
 
 /// Failure modes of [`extract_single_quoted_prefix`]. Callers map these onto
@@ -608,11 +647,17 @@ mod tests {
 
     #[test]
     fn ident_byte_is_the_single_boundary_definition() {
-        // is_word_boundary_char is exactly the inverse of is_ident_byte, and
-        // the classification is: ASCII alnum / `_` / all non-ASCII bytes are
-        // identifier bytes; ASCII punctuation and whitespace are boundaries.
+        // is_word_boundary_char is exactly the inverse of is_ident_continue,
+        // which adds only `$` to is_ident_byte, and the classification is:
+        // ASCII alnum / `_` / all non-ASCII bytes are identifier bytes; ASCII
+        // punctuation and whitespace are boundaries.
         for b in 0u8..=255 {
-            assert_eq!(is_word_boundary_char(b), !is_ident_byte(b), "byte {b}");
+            assert_eq!(is_word_boundary_char(b), !is_ident_continue(b), "byte {b}");
+            assert_eq!(
+                is_ident_continue(b),
+                is_ident_byte(b) || b == b'$',
+                "byte {b}"
+            );
         }
         for &b in b"aZ0_" {
             assert!(is_ident_byte(b));
@@ -774,6 +819,36 @@ mod tests {
         // An apostrophe inside a comment must not open a string region.
         let out = blank_sql_comments("a -- don't\nb 'lit'");
         assert_eq!(out, "a         \nb 'lit'");
+    }
+
+    #[test]
+    fn blank_comments_tracking_reports_an_unterminated_quote() {
+        let open = |s: &str| blank_sql_comments_tracking(s).1;
+        assert_eq!(open("v' AS x -- a"), Some(1));
+        assert_eq!(open("a \"b -- c"), Some(2));
+        assert_eq!(open("a 'it''s' \"q\"\"\" b"), None);
+        // Quotes inside a comment or a dollar-quoted string open nothing.
+        assert_eq!(open("a -- don't\nb"), None);
+        assert_eq!(open("a /* ' */ b"), None);
+        assert_eq!(open("$$ it's $$"), None);
+        assert_eq!(open("x $a$ y -- c"), Some(2));
+        // A `$` inside an identifier opens nothing, so nothing is unterminated.
+        assert_eq!(open("v$a$ x -- c"), None);
+    }
+
+    #[test]
+    fn dollar_tag_does_not_open_inside_an_identifier() {
+        // DuckDB reads `v$a$` and `v$$x$$` as identifiers: a `$` right after an
+        // identifier byte continues it, so no dollar quote opens there.
+        assert_eq!(read_dollar_tag_len(b"v$a$", 1), None);
+        assert_eq!(read_dollar_tag_len(b"v$$x$$", 1), None);
+        assert_eq!(read_dollar_tag_len(b"v$$x$$", 2), None);
+        assert_eq!(read_dollar_tag_len(b"price_9$usd$", 7), None);
+        // At a token start it still opens.
+        assert_eq!(read_dollar_tag_len(b"x $a$", 2), Some(3));
+        assert_eq!(read_dollar_tag_len(b"($a$", 1), Some(3));
+        // So a comment after such an identifier is still blanked.
+        assert_eq!(blank_sql_comments("v$a$ x -- c"), "v$a$ x     ");
     }
 
     #[test]

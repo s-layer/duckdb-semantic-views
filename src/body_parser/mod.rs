@@ -24,6 +24,7 @@ use crate::model::{
 
 use clause_bounds::find_clause_bounds;
 
+pub(crate) use annotations::find_annotation_start;
 pub(crate) use entries::parse_qualified_entries;
 pub(crate) use materializations::parse_materializations_clause;
 pub(crate) use metrics::parse_metrics_clause;
@@ -4507,6 +4508,68 @@ mod tests {
         let result =
             parse_qualified_entries("o.\"order date\" AS o.d", 0, false, "dimensions").unwrap();
         assert_eq!(result[0].name, "\"order date\"");
+    }
+
+    // --- A bracket in a name slot: the clause scan already counted it as an
+    // open bracket, so the entry runs on to the next close (fuzz_create_text,
+    // run 40191639265). Each slot reports on its own; TABLES already refuses
+    // a bracket while it reads the alias and table name. ---
+
+    fn assert_bracket_refused(result: Result<impl std::fmt::Debug, ParseError>) {
+        let err = result.expect_err("an unquoted bracket in a name slot is refused");
+        assert!(err.message.contains("unquoted '('"), "got: {}", err.message);
+    }
+
+    #[test]
+    fn bracket_in_dimension_name_rejected() {
+        assert_bracket_refused(parse_qualified_entries(
+            "o.(egion AS o.region)",
+            0,
+            false,
+            "dimensions",
+        ));
+    }
+
+    #[test]
+    fn bracket_in_dimension_alias_rejected() {
+        assert_bracket_refused(parse_qualified_entries(
+            "(o).region AS o.region",
+            0,
+            false,
+            "dimensions",
+        ));
+    }
+
+    #[test]
+    fn bracket_in_fact_name_rejected() {
+        assert_bracket_refused(parse_qualified_entries("o.(f) AS o.v", 0, true, "facts"));
+    }
+
+    #[test]
+    fn bracket_in_metric_name_rejected() {
+        assert_bracket_refused(parse_metrics_clause("o.(n) AS COUNT(*)", 0));
+    }
+
+    #[test]
+    fn bracket_in_metric_alias_rejected() {
+        assert_bracket_refused(parse_metrics_clause("(o).n AS COUNT(*)", 0));
+    }
+
+    #[test]
+    fn bracket_in_derived_metric_name_rejected() {
+        assert_bracket_refused(parse_metrics_clause("(t) AS 1", 0));
+    }
+
+    #[test]
+    fn bracket_in_relationship_name_rejected() {
+        assert_bracket_refused(parse_relationships_clause("(r) AS o(cid) REFERENCES c", 0));
+    }
+
+    #[test]
+    fn quoted_bracket_in_name_still_valid() {
+        let result =
+            parse_qualified_entries("o.\"(egion\" AS o.region", 0, false, "dimensions").unwrap();
+        assert_eq!(result[0].name, "\"(egion\"");
     }
 
     // --- F-11: an empty quoted identifier `""` in a name/alias slot ---

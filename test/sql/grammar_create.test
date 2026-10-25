@@ -221,3 +221,59 @@ statement error
 CREATE SEMANTIC VIEW gc_n AS TABLES (t AS gc_t PRIMARY KEY (id)) DIMENSIONS (t.r AS t.region) METRICS (AS sum(t.amount));
 ----
 Missing metric name before 'AS'
+
+# A `$` inside an identifier continues it, as in DuckDB, so `price$usd$` is a
+# column name, not the start of a dollar-quoted string.
+statement ok
+CREATE TABLE gc_d (id INTEGER, price$usd$ INTEGER);
+
+statement ok
+INSERT INTO gc_d VALUES (1, 10), (2, 32);
+
+statement ok
+CREATE SEMANTIC VIEW gc_dv AS TABLES (d AS gc_d PRIMARY KEY (id)) DIMENSIONS (d.p AS d.price$usd$) METRICS (d.total AS sum(d.price$usd$));
+
+query I
+SELECT total FROM semantic_view('gc_dv', metrics := ['total']);
+----
+42
+
+query T
+SELECT contains(GET_DDL('SEMANTIC_VIEW', 'gc_dv'), 'sum(d.price$usd$)');
+----
+true
+
+# A fact whose name is part of that column name is not inlined into it.
+statement ok
+CREATE SEMANTIC VIEW gc_dp AS TABLES (d AS gc_d PRIMARY KEY (id)) FACTS (d.price AS d.id * 100) METRICS (d.total AS sum(d.price$usd$));
+
+query I
+SELECT total FROM semantic_view('gc_dp', metrics := ['total']);
+----
+42
+
+statement ok
+CREATE SEMANTIC VIEW gc_du AS TABLES (d AS gc_d PRIMARY KEY (id)) FACTS (d.usd AS d.id * 100) METRICS (d.total AS sum(d.price$usd$));
+
+query I
+SELECT total FROM semantic_view('gc_du', metrics := ['total']);
+----
+42
+
+# An unquoted bracket is not part of a name: it is refused, not stored.
+statement error
+CREATE SEMANTIC VIEW gc_br AS TABLES (d AS gc_d PRIMARY KEY (id)) DIMENSIONS (d.(p) AS d.id) METRICS (d.total AS sum(d.id));
+----
+'(p)' holds an unquoted '('; quote the name
+
+statement error
+CREATE SEMANTIC VIEW gc_br AS TABLES (d AS gc_d PRIMARY KEY (id)) DIMENSIONS (d.p AS d.id) METRICS (d.(total) AS sum(d.id));
+----
+'(total)' holds an unquoted '('; quote the name
+
+# Quoted, the same name is accepted.
+statement ok
+CREATE SEMANTIC VIEW gc_br AS TABLES (d AS gc_d PRIMARY KEY (id)) DIMENSIONS (d."(p)" AS d.id) METRICS (d.total AS sum(d.id));
+
+statement ok
+DROP SEMANTIC VIEW gc_br;

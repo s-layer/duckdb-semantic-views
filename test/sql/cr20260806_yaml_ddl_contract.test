@@ -67,6 +67,41 @@ empty expression
 # ============================================================
 
 # A member name the DDL grammar cannot spell.
+# A bare COMMENT, LABELS or WITH SYNONYMS in an expression. After `AS`, the
+# DDL grammar ends the expression at that word and reads the rest as the
+# member's annotations, so GET_DDL would give DDL that CREATE refuses.
+statement error
+CREATE SEMANTIC VIEW cr0806y_annot FROM YAML $$
+tables:
+  - alias: o
+    table: cr0806y_orders
+    pk_columns: [id]
+dimensions:
+  - name: region
+    expr: "o.region COMMENT 'x'"
+    source_table: o
+metrics: []
+$$
+----
+'COMMENT' at depth 0 starts the entry's annotations
+
+# Quoted, the word is a column name and the view imports.
+statement ok
+CREATE SEMANTIC VIEW cr0806y_annot FROM YAML $$
+tables:
+  - alias: o
+    table: cr0806y_orders
+    pk_columns: [id]
+dimensions:
+  - name: region
+    expr: 'o."comment"'
+    source_table: o
+metrics: []
+$$
+
+statement ok
+DROP SEMANTIC VIEW cr0806y_annot
+
 statement error
 CREATE SEMANTIC VIEW cr0806y_spacename FROM YAML $$
 tables:

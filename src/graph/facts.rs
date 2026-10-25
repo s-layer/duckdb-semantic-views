@@ -436,4 +436,20 @@ mod tests {
         // A genuine ASCII boundary still matches.
         assert_eq!(find_fact_references("Ω id", &["id"]), vec!["id"]);
     }
+
+    // `price$usd$` is one column name: neither `price` nor `usd` is a fact
+    // reference inside it.
+    #[test]
+    fn find_fact_references_no_match_before_a_dollar_in_a_name() {
+        assert!(find_fact_references("SUM(price$usd$)", &["price"]).is_empty());
+    }
+
+    #[test]
+    fn find_fact_references_no_match_after_a_dollar_in_a_name() {
+        assert!(find_fact_references("SUM(price$usd$)", &["usd"]).is_empty());
+        assert_eq!(
+            find_fact_references("SUM(price$usd$) + usd", &["usd"]),
+            vec!["usd"]
+        );
+    }
 }

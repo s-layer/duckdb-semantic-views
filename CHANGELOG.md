@@ -130,6 +130,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **A long error message reaches you whole.** An error from a semantic-view statement
   used to be cut off after 1023 bytes, so a message quoting a long name lost its end.
 
+- **A YAML member expression holding a bare `COMMENT`, `LABELS` or `WITH SYNONYMS` is
+  refused.** In DDL those words, outside brackets and quotes, end a member's expression and
+  start its annotations, so such a YAML view imported and then gave a `GET_DDL` that
+  `CREATE` refused. Quote the word if it names a column (`o."comment"`); `o.comment` and
+  the word inside brackets or a string are unaffected.
+
+- **A `$` inside a name is part of the name.** A column such as `price$usd$` used in a
+  semantic view's expression was read as the start of a `$usd$ … $usd$` string, so
+  `CREATE` failed with an unrelated syntax error. As in DuckDB, a `$` right after a
+  letter, digit or `_` now continues the name, and a dollar-quoted string opens only at
+  the start of a token. A fact named `price` or `usd` is not mistaken for part of it.
+
+- **An unquoted bracket in a name is refused.** `CREATE` accepted a dimension, fact, metric
+  or relationship name such as `o.(region)`, though DuckDB never reads a bracket as part of
+  a name, and an unbalanced one (`o.(region AS …`) silently pulled the following entries
+  into that one. `CREATE` now says to quote the name (`o."(region)"`).
+
 - **A subquery in `where_clause` keeps its own names.** A name inside a subquery, such as
   `amt` in `amt IN (SELECT amt FROM targets)`, was replaced with the member of that name, so
   the subquery compared each row with itself and filtered nothing, or failed to parse. Names

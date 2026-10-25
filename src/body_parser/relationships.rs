@@ -68,7 +68,7 @@ fn parse_single_relationship_entry(entry: &str, entry_offset: usize) -> Result<J
     // F-9 / F-11 (code-review 2026-07-16): the relationship name must be a
     // single well-formed identifier — `foo bar AS ...` previously stored the
     // two-word name `"foo bar"`, and an empty quoted `""` slid through.
-    if let Some(reason) = super::scan::identifier_slot_error(rel_name) {
+    if let Some(reason) = super::scan::ddl_identifier_slot_error(rel_name) {
         return Err(cur.err(
             0,
             format!("Invalid relationship name in entry '{entry}': {reason}."),
