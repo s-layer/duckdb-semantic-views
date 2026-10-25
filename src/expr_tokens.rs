@@ -793,9 +793,16 @@ pub(crate) fn find_parameters(expr: &str) -> Vec<(usize, &str)> {
                     i = end;
                     continue;
                 }
-                let end = run_end(i + 1, crate::util::is_ident_byte);
+                // A `$` continues the token, as it does an identifier
+                // (`$3$$` is one token, no `$3`): a caller that rewrote only
+                // the `$3` would leave a `$$` that opens a dollar quote.
+                let named = bytes
+                    .get(i + 1)
+                    .copied()
+                    .is_some_and(crate::util::is_ident_byte);
+                let end = run_end(i + 1, crate::util::is_ident_continue);
                 let starts_word = i == 0 || !crate::util::is_ident_byte(bytes[i - 1]);
-                if starts_word && end > i + 1 {
+                if starts_word && named {
                     out.push((i, &expr[i..end]));
                     i = end;
                 } else {
