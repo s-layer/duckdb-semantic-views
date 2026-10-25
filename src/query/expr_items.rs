@@ -910,12 +910,17 @@ fn word_after(text: &str, at: usize) -> &str {
 }
 
 /// Whether `r`, a name in `text` that is no member of the view, is not a
-/// column reference: text inside a comment, a number, a keyword or another
-/// word of the expression grammar, a collation, a function's named argument,
-/// or a parameter of a lambda it is inside.
+/// column reference: text inside a comment, a number, a field of an
+/// expression's value, a keyword or another word of the expression grammar, a
+/// collation, a function's named argument, or a parameter of a lambda it is
+/// inside.
 fn is_not_a_column(text: &str, r: &IdentRef<'_>, lambdas: &[LambdaScope]) -> bool {
     let blanked = crate::util::blank_sql_comments(text);
     if blanked[r.start..r.end].trim().is_empty() || r.raw.as_bytes()[0].is_ascii_digit() {
+        return true;
+    }
+    // A field of an expression's value: `struct_pack(k := x).k`, `(s).k`.
+    if r.start > 0 && text.as_bytes()[r.start - 1] == b'.' {
         return true;
     }
     if word_before(text, r.start).eq_ignore_ascii_case("collate") {
@@ -1234,6 +1239,7 @@ mod tests {
             "list_transform([amount], x -> x + 1)",
             "list_reduce([amount], (a, b) -> a + b)",
             "struct_pack(k := region)",
+            "struct_pack(k := region).k || (struct_pack(k := region)).k",
             "region IN ('EU', 'US')",
             "MAP {'a': amount}",
             "amount * 2 /* tier */",
