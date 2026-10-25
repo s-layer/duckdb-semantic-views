@@ -294,6 +294,16 @@ CREATE SEMANTIC VIEW dcc_c012 AS TABLES (o AS dcc_orders PRIMARY KEY (id)) FACTS
 ----
 fact 'share' must not contain the aggregate function 'sum'
 
+# A windowed aggregate is one value per row, so a fact or dimension may hold one.
+statement ok
+CREATE SEMANTIC VIEW dcc_c012w AS TABLES (o AS dcc_orders PRIMARY KEY (id)) FACTS (o.share AS o.amount / SUM(o.amount) OVER (PARTITION BY o.region)) DIMENSIONS (o.region AS o.region, o.n AS COUNT(*) OVER (PARTITION BY o.cust_id));
+
+# Every DuckDB aggregate counts, not only the standard SQL ones.
+statement error
+CREATE SEMANTIC VIEW dcc_c012a AS TABLES (o AS dcc_orders PRIMARY KEY (id)) DIMENSIONS (o.top AS arg_max(o.region, o.amount));
+----
+dimension 'top' must not contain the aggregate function 'arg_max'
+
 # C-013: body_parser/mod.rs::parse_qualified_entries_nested_parens — nested parens in the expression are kept verbatim
 statement ok
 CREATE SEMANTIC VIEW dcc_c013 AS TABLES (o AS dcc_orders PRIMARY KEY (id)) FACTS (o.disc_price AS ROUND(o.price * (1 - o.discount))) DIMENSIONS (o.region AS o.region);

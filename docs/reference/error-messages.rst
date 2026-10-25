@@ -409,17 +409,34 @@ LABELS on a metric
 **Fix:** Remove ``LABELS`` from the metric. To reuse a filter condition, declare it as a fact or dimension with ``LABELS = (FILTER)``. See :ref:`howto-annotations-filters`.
 
 
-Aggregate in FACTS
-------------------
+Aggregate in a dimension or fact
+--------------------------------
 
 .. code-block:: text
 
-   Fact '<name>' contains aggregate function '<func>'. Facts must be
-   row-level expressions. Move aggregation to METRICS.
+   semantic view: dimension '<name>' must not contain the aggregate function
+   '<func>'. A dimension is a row-level value; define a metric for the aggregate.
 
-**Cause:** A fact expression uses an aggregate function like ``SUM``, ``COUNT``, or ``AVG``.
+   semantic view: fact '<name>' must not contain the aggregate function
+   '<func>'. A fact is a row-level value; define a metric for the aggregate.
 
-**Fix:** Move the aggregation to the ``METRICS`` clause. Facts are for row-level calculations only.
+**Cause:** A dimension or fact expression calls an aggregate function such as ``SUM``, ``COUNT``, ``AVG`` or ``arg_max``. A query groups by a dimension, and a metric aggregates a fact, so neither can hold an aggregate of its own.
+
+**Fix:** Move the aggregation to the ``METRICS`` clause. An aggregate inside a subquery (``(SELECT max(t) FROM tiers)``) and a windowed aggregate (``SUM(o.amount) OVER (PARTITION BY o.region)``) are one value per row and are allowed.
+
+
+Parameter in a member
+---------------------
+
+.. code-block:: text
+
+   semantic view: dimension '<name>' holds the prepared statement parameter $1,
+   which has no value inside the view's definition. Use parameters in the WHERE
+   clause of a SEMANTIC_VIEW(...) query instead.
+
+**Cause:** A dimension, fact or metric expression (or a window metric's arguments, ``ORDER BY`` or frame) holds a prepared statement parameter: ``?``, ``?1``, ``$1`` or ``$name``. A member is expanded inside the view's own query, where no parameter has a value. The message names ``fact`` or ``metric`` for those members.
+
+**Fix:** Write the value into the expression, or filter with a parameter in the query's ``WHERE`` clause. See :ref:`ref-sv-pre-agg-filtering`.
 
 
 Circular fact or metric references

@@ -265,6 +265,59 @@ $$;
 ----
 dimension 'p' holds the prepared statement parameter $1, which has no value
 
+# A window metric's arguments and frame go into the query beside its
+# expression, so a parameter there is refused too.
+
+statement error
+CREATE SEMANTIC VIEW svp_held FROM YAML $$
+tables:
+  - alias: c
+    table: svp_customers
+    pk_columns: [id]
+dimensions:
+  - name: region
+    expr: c.region
+    source_table: c
+metrics:
+  - name: n
+    expr: COUNT(*)
+    source_table: c
+  - name: w
+    expr: AVG(n) OVER ()
+    source_table: c
+    window_spec:
+      window_function: AVG
+      inner_metric: n
+      extra_args: ['$1']
+$$;
+----
+metric 'w' holds the prepared statement parameter $1, which has no value
+
+statement error
+CREATE SEMANTIC VIEW svp_held FROM YAML $$
+tables:
+  - alias: c
+    table: svp_customers
+    pk_columns: [id]
+dimensions:
+  - name: region
+    expr: c.region
+    source_table: c
+metrics:
+  - name: n
+    expr: COUNT(*)
+    source_table: c
+  - name: w
+    expr: AVG(n) OVER ()
+    source_table: c
+    window_spec:
+      window_function: AVG
+      inner_metric: n
+      frame_clause: 'ROWS BETWEEN $1 PRECEDING AND CURRENT ROW'
+$$;
+----
+metric 'w' holds the prepared statement parameter $1, which has no value
+
 # A definition stored before CREATE refused this (planted here past the
 # parser) is still refused at query time rather than given a value.
 

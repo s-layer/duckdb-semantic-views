@@ -306,6 +306,28 @@ pub(crate) fn scan_function_heads(expr: &str) -> Vec<IdentRef<'_>> {
     scan_chains(expr, ChainKind::FunctionHead)
 }
 
+/// Whether the call that `head` (from [`scan_function_heads`]) opens is a
+/// window call: its argument list, and a `FILTER (…)` clause if one follows,
+/// is followed by `OVER`. A windowed aggregate (`SUM(x) OVER (…)`) yields one
+/// value per row, so it is not an aggregate in the grouping sense. Comments
+/// between the parts are skipped.
+pub(crate) fn call_is_windowed(expr: &str, head: &IdentRef<'_>) -> bool {
+    let bytes = expr.as_bytes();
+    let open = skip_whitespace_and_comments(bytes, head.end);
+    if bytes.get(open) != Some(&b'(') {
+        return false;
+    }
+    let mut after = skip_whitespace_and_comments(bytes, skip_balanced(bytes, open, b'(', b')'));
+    if let Some(filter_end) = match_words(bytes, after, &["filter"]) {
+        let filter_open = skip_whitespace_and_comments(bytes, filter_end);
+        if bytes.get(filter_open) == Some(&b'(') {
+            after =
+                skip_whitespace_and_comments(bytes, skip_balanced(bytes, filter_open, b'(', b')'));
+        }
+    }
+    match_words(bytes, after, &["over"]).is_some()
+}
+
 /// Is the next non-whitespace byte at or after `pos` an opening `(`? Used to
 /// classify an identifier chain as a function call rather than a name reference.
 fn followed_by_open_paren(bytes: &[u8], pos: usize) -> bool {
