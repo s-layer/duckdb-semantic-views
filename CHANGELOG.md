@@ -159,6 +159,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **A long error message reaches you whole.** An error from a semantic-view statement
   used to be cut off after 1023 bytes, so a message quoting a long name lost its end.
 
+- **A registry build no longer fails on one network error while it installs Rust.** The
+  build installs the pinned Rust toolchain itself before compiling, retrying a failed
+  download, instead of leaving it to a single attempt inside `cargo build`. v0.15.0's
+  macOS (Apple silicon) build in the community registry failed that way, so `INSTALL
+  semantic_views` found no v0.15.0 binary for DuckDB 2.0 on any platform.
+
 - **A YAML member expression holding a bare `COMMENT`, `LABELS` or `WITH SYNONYMS` is
   refused.** In DDL those words, outside brackets and quotes, end a member's expression and
   start its annotations, so such a YAML view imported and then gave a `GET_DDL` that
@@ -255,6 +261,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `adbc_driver_duckdb` cannot `INSTALL` or `LOAD` any extension, this one included, unless
   the `duckdb` Python module has been imported in the same process first. Add
   `import duckdb` before you import the ADBC driver.
+
+## [0.14.2] - 2026-10-25
+
+### Fixed
+
+- **The extension can be installed from the community registry on DuckDB 1.5.6 again.** The
+  registry's Windows build of v0.14.1 failed, and the registry publishes a release only when
+  every platform builds, so `INSTALL semantic_views` on DuckDB 1.5.6 still fetched v0.13.0 on
+  every platform. The registry generates DuckDB's single-file source on
+  Windows with Windows line endings, which the build's Windows-only source patch did not
+  expect. The build now accepts either line ending. This release is for DuckDB 1.5 only;
+  DuckDB 2.0 users stay on 0.15.0 and later.
 
 ## [0.14.1] - 2026-10-16
 
@@ -1036,6 +1054,7 @@ Connection-lifecycle and ADBC fixes. Two downstream regressions reported against
 
 [Unreleased]: https://github.com/s-layer/duckdb-semantic-views/compare/v0.15.0...HEAD
 [0.15.0]: https://github.com/s-layer/duckdb-semantic-views/compare/v0.14.1...v0.15.0
+[0.14.2]: https://github.com/s-layer/duckdb-semantic-views/compare/v0.14.1...v0.14.2
 [0.14.1]: https://github.com/s-layer/duckdb-semantic-views/compare/v0.14.0...v0.14.1
 [0.14.0]: https://github.com/s-layer/duckdb-semantic-views/compare/v0.13.0...v0.14.0
 [0.13.0]: https://github.com/s-layer/duckdb-semantic-views/compare/v0.12.1...v0.13.0

@@ -18,7 +18,7 @@ Then you query by picking which dimensions and metrics you want. The extension g
 
 ## Quick start
 
-Requires DuckDB 2.0. Each release of the extension loads only in the DuckDB release it was built for; on DuckDB 1.5, stay on v0.14.1.
+Requires DuckDB 2.0. Each release of the extension loads only in the DuckDB release it was built for; on DuckDB 1.5, use v0.14.2.
 
 ```sql
 INSTALL semantic_views FROM community;

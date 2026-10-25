@@ -171,7 +171,7 @@ SELECT READ_YAML_FROM_SEMANTIC_VIEW('sales');
 query T
 SELECT array_to_string(examples, ' || ') FROM sv_fns WHERE function_name = 'list_semantic_views';
 ----
-SHOW SEMANTIC VIEWS; || SELECT GET_DDL('SEMANTIC_VIEW', '"' || replace(schema_name, '"', '""') || '"."' || replace(name, '"', '""') || '"') FROM list_semantic_views();
+SHOW SEMANTIC VIEWS; || SELECT GET_DDL('SEMANTIC_VIEW', '"' || replace(schema_name, '"', '""') || '"."' || replace(name, '"', '""') || '"') FROM (SHOW SEMANTIC VIEWS);
 
 statement ok
 SHOW SEMANTIC VIEWS;
@@ -259,7 +259,7 @@ CREATE SEMANTIC VIEW staging.sales AS
   METRICS (o.revenue AS SUM(o.amount));
 
 query I
-SELECT count(*) FROM (SELECT GET_DDL('SEMANTIC_VIEW', '"' || replace(schema_name, '"', '""') || '"."' || replace(name, '"', '""') || '"') FROM list_semantic_views())
+SELECT count(*) FROM (SELECT GET_DDL('SEMANTIC_VIEW', '"' || replace(schema_name, '"', '""') || '"."' || replace(name, '"', '""') || '"') FROM (SHOW SEMANTIC VIEWS))
 ----
 2
 

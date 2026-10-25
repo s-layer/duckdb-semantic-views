@@ -1,0 +1,117 @@
+# The SHOW / DESCRIBE subquery examples in the docs, run as written
+# (TECH-DEBT #77). They were removed in v0.13.0 because no test ran them and
+# none parsed; this keeps the restored ones honest. Each query is the one on
+# the page named above it, and each result is the output the page shows.
+
+require semantic_views
+
+statement ok
+CREATE TABLE orders (id INTEGER, region VARCHAR, amount DECIMAL(10,2), customer_id INTEGER);
+
+statement ok
+CREATE TABLE customers (id INTEGER, name VARCHAR);
+
+statement ok
+CREATE TABLE revenue_by_region AS
+SELECT 'EU'::VARCHAR AS region, 1::DECIMAL(38,2) AS revenue, 1::BIGINT AS order_count;
+
+# docs/reference/describe-semantic-view.rst, "View with materializations".
+statement ok
+CREATE SEMANTIC VIEW order_metrics AS
+TABLES (
+    o AS orders PRIMARY KEY (id)
+)
+DIMENSIONS (
+    o.region AS o.region
+)
+METRICS (
+    o.revenue     AS SUM(o.amount),
+    o.order_count AS COUNT(*)
+)
+MATERIALIZATIONS (
+    region_agg AS (
+        TABLE revenue_by_region,
+        DIMENSIONS (region),
+        METRICS (revenue, order_count)
+    )
+);
+
+# describe-semantic-view.rst "Filtering the output", and how-to/materializations.rst.
+query TTT nosort
+SELECT object_name, property, property_value
+FROM (DESCRIBE SEMANTIC VIEW order_metrics)
+WHERE object_kind = 'MATERIALIZATION';
+----
+region_agg	TABLE	revenue_by_region
+region_agg	DIMENSIONS	["region"]
+region_agg	METRICS	["revenue","order_count"]
+
+query TTT nosort
+SELECT object_name, property, property_value
+FROM (DESCRIBE SEMANTIC VIEW order_metrics)
+WHERE object_kind = 'DIMENSION';
+----
+region	TABLE	orders
+region	EXPRESSION	o.region
+region	DATA_TYPE	VARCHAR
+
+query TI nosort
+SELECT object_kind, count(DISTINCT object_name) AS objects
+FROM (DESCRIBE SEMANTIC VIEW order_metrics)
+GROUP BY object_kind
+ORDER BY object_kind;
+----
+DIMENSION	1
+MATERIALIZATION	1
+METRIC	2
+TABLE	1
+
+statement ok
+CREATE SEMANTIC VIEW shop AS
+TABLES (
+    o AS orders PRIMARY KEY (id),
+    c AS customers PRIMARY KEY (id)
+)
+RELATIONSHIPS (
+    order_customer AS o(customer_id) REFERENCES c
+)
+DIMENSIONS (
+    c.name AS c.name
+)
+METRICS (
+    o.revenue AS SUM(o.amount)
+);
+
+query TTT nosort
+SELECT object_name, property, property_value
+FROM (DESCRIBE SEMANTIC VIEW shop)
+WHERE object_kind = 'RELATIONSHIP';
+----
+order_customer	TABLE	orders
+order_customer	REF_TABLE	customers
+order_customer	FOREIGN_KEY	["customer_id"]
+order_customer	REF_KEY	["id"]
+
+# docs/reference/show-semantic-views.rst, "Selecting and filtering columns".
+statement ok
+ALTER SEMANTIC VIEW order_metrics SET COMMENT = 'Revenue analytics';
+
+query TT
+SELECT name, schema_name
+FROM (SHOW SEMANTIC VIEWS)
+WHERE comment <> '';
+----
+order_metrics	main
+
+# docs/reference/get-ddl.rst, the dump-every-view recipe.
+query I
+SELECT count(*) FROM (
+SELECT GET_DDL(
+         'SEMANTIC_VIEW',
+         '"' || replace(schema_name, '"', '""') || '"."'
+             || replace(name, '"', '""') || '"',
+         true) AS ddl
+FROM (SHOW SEMANTIC VIEWS)
+) WHERE ddl LIKE 'CREATE OR REPLACE SEMANTIC VIEW main.%';
+----
+2

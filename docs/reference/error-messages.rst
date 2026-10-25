@@ -26,7 +26,7 @@ Built for a different DuckDB release
 .. versionchanged:: 0.15.0
 
    This release is built for DuckDB 2.0. Earlier releases were built for
-   DuckDB 1.5, and v0.14.1 is the last of them.
+   DuckDB 1.5, and v0.14.2 is the latest release for 1.5.
 
 .. code-block:: text
 
@@ -46,7 +46,7 @@ DuckDB prefixes the message with ``An error was thrown during initialization of 
    FORCE INSTALL semantic_views FROM community;
    LOAD semantic_views;
 
-If no build for ``<host>`` has been published yet, the install fails. Until one is, run DuckDB ``<built>``. DuckDB 1.5 gets no release newer than v0.14.1.
+If no build for ``<host>`` has been published yet, the install fails. Until one is, run DuckDB ``<built>``. The latest release for DuckDB 1.5 is v0.14.2.
 
 When ``<host>`` is a development or nightly DuckDB build (its version contains a ``-``, such as ``v2.0.1-dev42``), the message ends with ``Load a semantic_views build compiled against this DuckDB.`` instead. The community repository only has builds for tagged releases, so build the extension from source against that DuckDB.
 
