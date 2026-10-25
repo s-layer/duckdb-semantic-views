@@ -344,9 +344,9 @@ enum Resolved<'a> {
     /// names the member alone).
     RowLevel(Member<'a>, String, usize),
     Metric(&'a Metric),
-    /// Nothing declared: left as written, as in `where_clause`, for `DuckDB` to
-    /// read (a keyword, a function's argument such as `'year'`, or a name it
-    /// reports as unknown).
+    /// Nothing declared. Left as written when it is not a column reference
+    /// ([`is_not_a_column`]: a keyword, a number, a lambda's parameter, …),
+    /// and refused otherwise ([`Lowering::refuse_undeclared`]).
     Unknown,
 }
 
@@ -439,6 +439,7 @@ impl<'d> Lowering<'d, '_> {
         let mut out = Splice::new(text);
         let mut names_any = !aggregates.is_empty();
         let mut next_aggregate = aggregates.iter().zip(&bases).peekable();
+        let lambdas = lambda_scopes(text);
         for r in scan_references(text) {
             while let Some((span, base)) = next_aggregate.next_if(|(s, _)| s.start <= r.start) {
                 out.replace(span.clone(), &quote_ident(base));
@@ -459,7 +460,7 @@ impl<'d> Lowering<'d, '_> {
                         member.kind()
                     )));
                 }
-                Resolved::Unknown => {}
+                Resolved::Unknown => self.refuse_undeclared(text, &r, &lambdas, text)?,
             }
         }
         for (span, base) in next_aggregate {
@@ -493,6 +494,7 @@ impl<'d> Lowering<'d, '_> {
         let part = &text[span];
         let mut replacements: HashMap<String, String> = HashMap::new();
         let mut table: Option<(String, String)> = None;
+        let lambdas = lambda_scopes(part);
         for r in scan_references(part) {
             let (member, member_table, field_at) = match self.resolve(&r, false)? {
                 Resolved::RowLevel(member, member_table, field_at) => {
@@ -504,7 +506,10 @@ impl<'d> Lowering<'d, '_> {
                         m.name
                     )));
                 }
-                Resolved::Unknown => continue,
+                Resolved::Unknown => {
+                    self.refuse_undeclared(part, &r, &lambdas, text)?;
+                    continue;
+                }
             };
             match &table {
                 Some((t, first)) if *t != member_table => {
@@ -585,6 +590,28 @@ impl<'d> Lowering<'d, '_> {
             }
             None => Ok(Resolved::Unknown),
         }
+    }
+
+    /// Refuse `r`, a name in `scanned` (part of the item `item`) that is no
+    /// member of the view, unless it is not a column reference at all
+    /// ([`is_not_a_column`]). An expression item reads only the view's
+    /// members: any other name would read a column of a table the query joins
+    /// that the view does not expose, such as the column under a private fact.
+    fn refuse_undeclared(
+        &self,
+        scanned: &str,
+        r: &IdentRef<'_>,
+        lambdas: &[LambdaScope],
+        item: &str,
+    ) -> Result<(), ItemError> {
+        if is_not_a_column(scanned, r, lambdas) {
+            return Ok(());
+        }
+        Err(invalid(format!(
+            "'{}' in '{item}' is not a dimension, fact or metric of semantic view '{}'; an \
+             expression item can only read the view's members",
+            r.raw, self.view_name
+        )))
     }
 
     /// A dimension or fact as [`Resolved::RowLevel`], refused when it is a
@@ -739,6 +766,179 @@ fn check_one_expression(text: &str) -> Result<(), ItemError> {
         )));
     }
     Ok(())
+}
+
+/// Words `DuckDB` reads as syntax in an expression although it also accepts
+/// them as names, so [`crate::ident::is_refused_as_name`] does not list them,
+/// and the functions it calls without parentheses. Sorted.
+const SYNTAX_WORDS: &[&str] = &[
+    "between",
+    "current_date",
+    "current_time",
+    "current_timestamp",
+    "localtime",
+    "localtimestamp",
+    "map",
+];
+
+/// A lambda in an expression: its parameters' keys, and the span from its
+/// parameter list to the end of its body, where they name the parameters.
+struct LambdaScope {
+    params: Vec<String>,
+    span: std::ops::Range<usize>,
+}
+
+/// The lambdas in `text`, in both spellings: `lambda x, y: body` and
+/// `x -> body` / `(x, y) -> body`. A `->` followed by a string or a number is
+/// the JSON operator (`j->'a'`), not a lambda, and `->>` is always JSON.
+fn lambda_scopes(text: &str) -> Vec<LambdaScope> {
+    let bytes = text.as_bytes();
+    let blanked = crate::util::blank_sql_comments(text);
+    let live = blanked.as_bytes();
+    let refs = scan_references(text);
+    let mut out = Vec::new();
+    for r in &refs {
+        if !r.raw.eq_ignore_ascii_case("lambda") {
+            continue;
+        }
+        let mut params = Vec::new();
+        let mut i = r.end;
+        loop {
+            i = skip_spaces(live, i);
+            let Some(param) = refs.iter().find(|p| p.start == i) else {
+                break;
+            };
+            params.push(param.key());
+            i = skip_spaces(live, param.end);
+            match live.get(i) {
+                Some(b',') => i += 1,
+                Some(b':') if live.get(i + 1) != Some(&b':') => {
+                    out.push(LambdaScope {
+                        params,
+                        span: r.start..body_end(bytes, i + 1),
+                    });
+                    break;
+                }
+                _ => break,
+            }
+        }
+    }
+    let mut quotes = crate::util::QuoteState::default();
+    let mut i = 0;
+    while i < live.len() {
+        let (next, is_live) = quotes.step(live, i);
+        if is_live && live[i] == b'-' && live.get(i + 1) == Some(&b'>') {
+            let after = skip_spaces(live, i + 2);
+            let json = matches!(live.get(i + 2), Some(b'>'))
+                || matches!(live.get(after), Some(b'\'' | b'0'..=b'9'));
+            if !json {
+                let before = text[..i].trim_end().len();
+                let params_at = if live.get(before.wrapping_sub(1)) == Some(&b')') {
+                    matching_open(live, before - 1)
+                } else {
+                    refs.iter().find(|p| p.end == before).map(|p| p.start)
+                };
+                if let Some(start) = params_at {
+                    out.push(LambdaScope {
+                        params: refs
+                            .iter()
+                            .filter(|p| p.start >= start && p.end <= before)
+                            .map(IdentRef::key)
+                            .collect(),
+                        span: start..body_end(bytes, i + 2),
+                    });
+                }
+            }
+        }
+        i = next;
+    }
+    out
+}
+
+fn skip_spaces(bytes: &[u8], mut i: usize) -> usize {
+    while bytes.get(i).is_some_and(u8::is_ascii_whitespace) {
+        i += 1;
+    }
+    i
+}
+
+/// Where a lambda body starting at `from` ends: at the bracket that closes
+/// the list it is in, or at a `,` beside it.
+fn body_end(bytes: &[u8], from: usize) -> usize {
+    let mut quotes = crate::util::QuoteState::default();
+    let mut depth = 0usize;
+    let mut i = from;
+    while i < bytes.len() {
+        let (next, live) = quotes.step(bytes, i);
+        if live {
+            match bytes[i] {
+                b'(' | b'[' | b'{' => depth += 1,
+                b')' | b']' | b'}' | b',' if depth == 0 => return i,
+                b')' | b']' | b'}' => depth -= 1,
+                _ => {}
+            }
+        }
+        i = next;
+    }
+    bytes.len()
+}
+
+/// The `(` that the `)` at `close` closes, in a lambda's parameter list
+/// (names and commas only).
+fn matching_open(bytes: &[u8], close: usize) -> Option<usize> {
+    bytes[..close].iter().rposition(|&b| b == b'(')
+}
+
+/// The word that ends just before `at` in `text`, skipping whitespace.
+fn word_before(text: &str, at: usize) -> &str {
+    let head = text[..at].trim_end();
+    let start = head
+        .bytes()
+        .rposition(|b| !crate::util::is_ident_byte(b))
+        .map_or(0, |p| p + 1);
+    &head[start..]
+}
+
+/// The word that starts just after `at` in `text`, skipping whitespace.
+fn word_after(text: &str, at: usize) -> &str {
+    let tail = text[at..].trim_start();
+    let end = tail
+        .bytes()
+        .position(|b| !crate::util::is_ident_byte(b))
+        .unwrap_or(tail.len());
+    &tail[..end]
+}
+
+/// Whether `r`, a name in `text` that is no member of the view, is not a
+/// column reference: text inside a comment, a number, a keyword or another
+/// word of the expression grammar, a collation, a function's named argument,
+/// or a parameter of a lambda it is inside.
+fn is_not_a_column(text: &str, r: &IdentRef<'_>, lambdas: &[LambdaScope]) -> bool {
+    let blanked = crate::util::blank_sql_comments(text);
+    if blanked[r.start..r.end].trim().is_empty() || r.raw.as_bytes()[0].is_ascii_digit() {
+        return true;
+    }
+    if word_before(text, r.start).eq_ignore_ascii_case("collate") {
+        return true;
+    }
+    if !r.is_bare() || r.raw.starts_with('"') {
+        return false;
+    }
+    let word = r.raw.to_ascii_lowercase();
+    let after = text[r.end..].trim_start();
+    crate::ident::is_refused_as_name(&word)
+        || SYNTAX_WORDS.binary_search(&word.as_str()).is_ok()
+        || (word == "nulls" && {
+            let next = word_after(text, r.end);
+            next.eq_ignore_ascii_case("first") || next.eq_ignore_ascii_case("last")
+        })
+        || ((word == "first" || word == "last")
+            && word_before(text, r.start).eq_ignore_ascii_case("nulls"))
+        || after.starts_with(":=")
+        || after.starts_with("=>")
+        || lambdas
+            .iter()
+            .any(|l| l.span.contains(&r.start) && l.params.contains(&word))
 }
 
 fn window_refused(text: &str) -> ItemError {
@@ -955,6 +1155,101 @@ mod tests {
             msg.contains("'o.nope' is not a dimension, fact or metric"),
             "{msg}"
         );
+    }
+
+    /// The message refusing `name`, a column the view does not declare.
+    fn undeclared(name: &str, msg: &str) -> bool {
+        msg.contains(&format!("'{name}' in '"))
+            && msg.contains("is not a dimension, fact or metric of semantic view 'v'")
+    }
+
+    #[test]
+    fn an_undeclared_column_in_a_dimension_expression_is_refused() {
+        let msg = refused(&["region || tier"], &[], &[]);
+        assert!(undeclared("tier", &msg), "{msg}");
+    }
+
+    #[test]
+    fn an_undeclared_column_in_a_facts_expression_is_refused() {
+        let msg = refused(&[], &[], &["amount + salt"]);
+        assert!(undeclared("salt", &msg), "{msg}");
+    }
+
+    #[test]
+    fn an_undeclared_column_beside_a_fact_in_an_aggregate_is_refused() {
+        // The column under the private fact `secret`, read through a public
+        // fact's aggregate.
+        let msg = refused(&[], &["sum(amount * 0 + secret_col)"], &[]);
+        assert!(undeclared("secret_col", &msg), "{msg}");
+    }
+
+    #[test]
+    fn an_undeclared_column_outside_an_aggregate_is_refused() {
+        let msg = refused(&[], &["revenue + tier"], &[]);
+        assert!(undeclared("tier", &msg), "{msg}");
+    }
+
+    #[test]
+    fn a_quoted_undeclared_column_is_refused() {
+        let msg = refused(&["region || \"tier\""], &[], &[]);
+        assert!(undeclared("\"tier\"", &msg), "{msg}");
+    }
+
+    #[test]
+    fn a_field_of_an_undeclared_column_is_refused() {
+        let msg = refused(&["region || info.tier"], &[], &[]);
+        assert!(undeclared("info.tier", &msg), "{msg}");
+    }
+
+    #[test]
+    fn an_undeclared_column_read_as_json_is_refused() {
+        let msg = refused(&["region || (tier->'a')"], &[], &[]);
+        assert!(undeclared("tier", &msg), "{msg}");
+    }
+
+    #[test]
+    fn an_undeclared_column_named_like_a_lambda_parameter_elsewhere_is_refused() {
+        // `x` is a parameter inside the lambda only.
+        let msg = refused(
+            &["list_transform([amount], lambda x: x + 1)[1] + x"],
+            &[],
+            &[],
+        );
+        assert!(undeclared("x", &msg), "{msg}");
+    }
+
+    #[test]
+    fn syntax_words_numbers_and_local_names_are_not_columns() {
+        for dimension in [
+            "CASE WHEN region = 'EU' THEN 1 ELSE 0 END",
+            "region IS NOT NULL AND NOT (region IS DISTINCT FROM 'x') OR TRUE",
+            "amount BETWEEN 1 AND 1.5e3",
+            "CAST(amount AS INTEGER) + amount::DOUBLE",
+            "order_date + INTERVAL 1 DAY + INTERVAL '2' HOUR",
+            "EXTRACT(year FROM order_date)",
+            "region COLLATE nocase",
+            "region LIKE 'E%' ESCAPE '!' OR region ILIKE 'e%'",
+            "current_date - order_date",
+            "list_transform([amount], lambda x: x + 1)",
+            "list_transform([amount], x -> x + 1)",
+            "list_reduce([amount], (a, b) -> a + b)",
+            "struct_pack(k := region)",
+            "region IN ('EU', 'US')",
+            "MAP {'a': amount}",
+            "amount * 2 /* tier */",
+            "amount * 2 -- tier\n",
+        ] {
+            lower_expression_items("v", &def(), items(&[dimension], &[], &[]))
+                .unwrap_or_else(|e| panic!("{dimension}: {e:?}"));
+        }
+        for metric in [
+            "string_agg(region, ',' ORDER BY region DESC NULLS LAST)",
+            "count(DISTINCT region)",
+            "count(amount) FILTER (WHERE region = 'EU')",
+        ] {
+            lower_expression_items("v", &def(), items(&[], &[metric], &[]))
+                .unwrap_or_else(|e| panic!("{metric}: {e:?}"));
+        }
     }
 
     #[test]

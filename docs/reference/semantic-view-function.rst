@@ -255,6 +255,8 @@ What an expression may use depends on its list:
 
 A member is named in an expression as it is as an item: by its name, or qualified by its table, where a member declared without a table is on the base table. A field of a ``STRUCT`` dimension or fact is read from it, so ``upper(o.address.city)``, or the item ``address.city``, is the field ``city`` of the dimension ``address``.
 
+An expression reads only the view's members. Any other name is refused, so an item cannot read a column of a table the query joins that the view does not declare, such as the column under a ``PRIVATE`` fact. Keywords, numbers, a lambda's parameters (``lambda x: x * 2``), named arguments and collations are not names of this kind. The ``WHERE`` clause differs: it can still filter on such a column (see :ref:`ref-sv-filtering`).
+
 No item holds a subquery, a window function (declare a :ref:`window metric <howto-window-metrics>` instead) or a prepared statement parameter, and a ``PRIVATE`` fact or metric cannot be used, as anywhere else in a query. An item is one expression: separate two with a comma, in two items.
 
 Without an alias, the column is named by the expression as written, so ``DIMENSIONS lower(region)`` gives a column named ``lower(region)``. An error about an expression item, such as a fan trap, names the expression as written.
