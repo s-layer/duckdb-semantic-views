@@ -158,7 +158,7 @@ Troubleshooting
    The table alias must match an alias declared in the ``TABLES`` clause. The error lists available aliases: ``unknown table alias 'x' in wildcard 'x.*'. Available aliases: [o, c, li]``.
 
 **Empty expansion**
-   A wildcard for an alias with no public items of that kind expands to nothing. If every list in the query ends up empty, the query fails with ``specify at least dimensions := [...], metrics := [...], or facts := [...]``. If another list still has items, the query runs without the empty one: ``DIMENSIONS region METRICS c.*`` on a view with no metrics on ``c`` returns the distinct ``region`` values only. Check the alias's members with :ref:`SHOW COLUMNS IN SEMANTIC VIEW <ref-show-columns>`.
+   A wildcard for an alias with no public items of that kind expands to nothing. If every list in the query ends up empty, the query fails with ``specify at least one of DIMENSIONS, METRICS or FACTS``. If another list still has items, the query runs without the empty one: ``DIMENSIONS region METRICS c.*`` on a view with no metrics on ``c`` returns the distinct ``region`` values only. Check the alias's members with :ref:`SHOW COLUMNS IN SEMANTIC VIEW <ref-show-columns>`.
 
 **A derived metric is missing from, or included in, an alias wildcard**
    Derived metrics have no table alias, so only the first declared table's ``alias.*`` includes them. List a derived metric by name to query it next to another alias's wildcard.

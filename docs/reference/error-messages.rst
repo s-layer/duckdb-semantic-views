@@ -825,8 +825,8 @@ Empty request
 
 .. code-block:: text
 
-   semantic view '<name>': specify at least dimensions := [...], metrics := [...],
-   or facts := [...].
+   semantic view '<name>': specify at least one of DIMENSIONS, METRICS or FACTS
+   (dimensions := [...], metrics := [...] or facts := [...]).
    Run DESCRIBE SEMANTIC VIEW <name> to see available dimensions, metrics, and facts.
 
 **Cause:** Neither ``dimensions``, ``metrics``, nor ``facts`` was specified in the query.
@@ -1037,7 +1037,7 @@ Cannot combine facts and metrics
 .. code-block:: text
 
    semantic view '<view>': cannot combine facts and metrics in the same query.
-   Use facts := [...] OR metrics := [...], not both.
+   Use FACTS or METRICS (facts := [...] or metrics := [...]), not both.
 
 **Cause:** The query includes both ``FACTS`` and ``METRICS`` (``facts := [...]`` and ``metrics := [...]``). Facts are row-level expressions; metrics are aggregated. These modes are mutually exclusive.
 
