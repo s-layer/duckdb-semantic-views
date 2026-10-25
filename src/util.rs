@@ -315,8 +315,21 @@ impl QuoteState {
 /// (2026-07-15) evaluated folding it into the body-parser lexer and declined
 /// — see the decision record in `crate::body_parser::lexer`'s module docs.
 #[must_use]
-#[allow(clippy::too_many_lines)]
 pub fn blank_sql_comments(input: &str) -> std::borrow::Cow<'_, str> {
+    blank_sql_comments_tracking(input).0
+}
+
+/// [`blank_sql_comments`], also returning the byte offset of the `'` or `"`
+/// that opens a quoted region still open at the end of `input`.
+///
+/// The pass cannot tell a comment from string content after an unterminated
+/// quote, so it blanks nothing past one. A caller that plans the text (as
+/// `plan_create` does) must refuse it rather than plan comment text as code.
+/// An unterminated `$tag$` is not reported: `$` is also an identifier byte,
+/// so `$a$` inside a name is not reliably an opener.
+#[must_use]
+#[allow(clippy::too_many_lines)]
+pub fn blank_sql_comments_tracking(input: &str) -> (std::borrow::Cow<'_, str>, Option<usize>) {
     #[derive(PartialEq)]
     enum St {
         Code,
@@ -329,6 +342,7 @@ pub fn blank_sql_comments(input: &str) -> std::borrow::Cow<'_, str> {
     let mut st = St::Code;
     let mut string_is_escape = false;
     let mut dollar_tag: Option<&[u8]> = None;
+    let mut open_at = 0;
     let mut i = 0;
 
     while i < bytes.len() {
@@ -372,10 +386,12 @@ pub fn blank_sql_comments(input: &str) -> std::borrow::Cow<'_, str> {
                 b'\'' => {
                     st = St::InString;
                     string_is_escape = opens_escape_string(bytes, i);
+                    open_at = i;
                     i += 1;
                 }
                 b'"' => {
                     st = St::InIdent;
+                    open_at = i;
                     i += 1;
                 }
                 b'$' => {
@@ -429,14 +445,16 @@ pub fn blank_sql_comments(input: &str) -> std::borrow::Cow<'_, str> {
         }
     }
 
-    match out {
+    let unterminated = (st != St::Code).then_some(open_at);
+    let text = match out {
         // Only whole comment regions (bounded by ASCII delimiters) were
         // overwritten with ASCII spaces, so the buffer remains valid UTF-8.
         Some(buf) => std::borrow::Cow::Owned(
             String::from_utf8(buf).expect("blanking comment bytes preserves UTF-8 validity"),
         ),
         None => std::borrow::Cow::Borrowed(input),
-    }
+    };
+    (text, unterminated)
 }
 
 /// Failure modes of [`extract_single_quoted_prefix`]. Callers map these onto
@@ -774,6 +792,20 @@ mod tests {
         // An apostrophe inside a comment must not open a string region.
         let out = blank_sql_comments("a -- don't\nb 'lit'");
         assert_eq!(out, "a         \nb 'lit'");
+    }
+
+    #[test]
+    fn blank_comments_tracking_reports_an_unterminated_quote() {
+        let open = |s: &str| blank_sql_comments_tracking(s).1;
+        assert_eq!(open("v' AS x -- a"), Some(1));
+        assert_eq!(open("a \"b -- c"), Some(2));
+        assert_eq!(open("a 'it''s' \"q\"\"\" b"), None);
+        // Quotes inside a comment or a dollar-quoted string open nothing.
+        assert_eq!(open("a -- don't\nb"), None);
+        assert_eq!(open("a /* ' */ b"), None);
+        assert_eq!(open("$$ it's $$"), None);
+        // An unterminated dollar quote is not reported (see the docs).
+        assert_eq!(open("$a$ x"), None);
     }
 
     #[test]

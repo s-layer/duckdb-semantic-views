@@ -252,7 +252,7 @@ pub fn plan_create(query: &str) -> Result<Option<RewriteAction>, ParseError> {
     // PA-7: blank comments once at the entry point (byte-length-preserving,
     // so every error-caret position stays valid for the original text).
     // Downstream scanners and captured expressions never see comment text.
-    let blanked = crate::util::blank_sql_comments(query);
+    let (blanked, unterminated) = crate::util::blank_sql_comments_tracking(query);
     let query = blanked.as_ref();
     let lead = skip_leading_whitespace(query);
     let trimmed = query[lead..].trim_end();
@@ -261,7 +261,24 @@ pub fn plan_create(query: &str) -> Result<Option<RewriteAction>, ParseError> {
     let Some((kind, plen)) = detect_create_prefix(trimmed_no_semi) else {
         return Ok(None);
     };
-    validate_create_body(trimmed_no_semi, lead, plen, kind)
+    let planned = validate_create_body(trimmed_no_semi, lead, plen, kind)?;
+    // Past an unterminated quote the pass blanked nothing, so a comment there
+    // would have been planned as code. The body parser refuses a stray quote
+    // in the body with its own message; one where it does not look (a bare
+    // view name such as `v'`) is refused here, as `DuckDB`'s tokenizer refuses
+    // it before the grammar sees it.
+    if let Some(pos) = unterminated {
+        let message = if query.as_bytes()[pos] == b'"' {
+            "Unterminated quoted identifier."
+        } else {
+            "Unterminated string literal."
+        };
+        return Err(ParseError {
+            message: message.to_string(),
+            position: Some(pos),
+        });
+    }
+    Ok(planned)
 }
 
 // Cardinality inference (Phase 33) now lives in `crate::graph::cardinality`
@@ -315,6 +332,41 @@ mod tests {
                 .any(|d| d.expr.contains("region code") || d.name.contains("region code")),
             "comment text leaked into stored dimension: {def:?}"
         );
+    }
+
+    #[test]
+    fn test_unterminated_quote_is_refused_not_planned() {
+        // Past a stray quote the comment pass blanks nothing, so `-- a` was
+        // planned into the key column, and re-planning the rendered DDL
+        // (where the quote is gone) dropped it: a render that was not a
+        // fixpoint (fuzz_create_text, CI run 40187299120).
+        let text = "CREATE SEMANTIC VIEW v' AS TABLES (o AS t PRIMARY KEY (x -- a\n y)) \
+                    METRICS (o.n AS COUNT(*))";
+        let err = plan_create(text).expect_err("a stray quote in the name is refused");
+        assert_eq!(err.message, "Unterminated string literal.");
+        assert_eq!(err.position, Some(text.find('\'').unwrap()));
+        // Text that is not a CREATE is still not ours, quote or no quote.
+        assert!(matches!(plan_create("SELECT 'open"), Ok(None)));
+    }
+
+    #[test]
+    fn test_unterminated_quote_in_body_keeps_body_parser_message() {
+        // The body parser already refuses a stray quote where it looks, with
+        // a message naming the clause; the entry-point check must not
+        // replace it.
+        for (text, message) in [
+            (
+                "CREATE SEMANTIC VIEW v AS TABLES (o AS t PRIMARY KEY (x)) COMMENT = 'open",
+                "Unclosed single-quoted string.",
+            ),
+            (
+                "CREATE SEMANTIC VIEW v AS TABLES (o AS \"t PRIMARY KEY (x))",
+                "Unterminated quoted identifier in clause 'TABLES'.",
+            ),
+        ] {
+            let err = plan_create(text).expect_err(text);
+            assert_eq!(err.message, message, "{text}");
+        }
     }
 
     // ===================================================================

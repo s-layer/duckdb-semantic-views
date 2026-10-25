@@ -24,6 +24,7 @@ use crate::model::{
 
 use clause_bounds::find_clause_bounds;
 
+pub(crate) use annotations::find_annotation_start;
 pub(crate) use entries::parse_qualified_entries;
 pub(crate) use materializations::parse_materializations_clause;
 pub(crate) use metrics::parse_metrics_clause;

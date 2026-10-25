@@ -131,40 +131,13 @@ fn parse_label_list(content: &str, base_offset: usize) -> Result<bool, ParseErro
     Ok(is_filter)
 }
 
-/// Separate the SQL expression from trailing COMMENT / WITH SYNONYMS annotations.
+/// Byte offset in `text` where an entry's trailing annotations begin: the
+/// first depth-0, unquoted `COMMENT`, `LABELS` or `WITH SYNONYMS` keyword at a
+/// word boundary. Everything before it is the entry's expression.
 ///
-/// Input: the text after "AS" in an entry (e.g., "SUM(o.amount) COMMENT = 'test' WITH SYNONYMS = ('a')")
-/// Output: (`clean_expression`, `ParsedAnnotations`)
-///
-/// Handles:
-/// - COMMENT = 'string with ''escaped'' quotes'
-/// - WITH SYNONYMS = ('syn1', 'syn2')
-/// - LABELS = (FILTER)
-/// - Any order (the clauses must tile the annotation region, but not in a fixed sequence)
-/// - No annotations at all (returns original expression with empty annotations)
-/// - COMMENT as an identifier inside expressions (only matches at depth-0 with word boundaries)
-///
-/// Once the annotation region begins, it must be tiled exactly by recognized
-/// clauses separated by whitespace: a duplicate `COMMENT` / `WITH SYNONYMS`, a
-/// malformed clause, or any leftover text is an error (P-2) — none of it is
-/// silently dropped.
-///
-/// `base_offset` is the absolute byte offset of `text[0]` in the original
-/// query; every error caret in this subtree is recovered from the offending
-/// token's position within `text` (F-15, code-review 2026-07-16).
-#[allow(clippy::too_many_lines)]
-pub(super) fn parse_trailing_annotations(
-    text: &str,
-    base_offset: usize,
-) -> Result<(String, ParsedAnnotations), ParseError> {
-    // Re-anchor past any leading whitespace `trim` will drop, so `base_offset`
-    // remains the absolute offset of `text[0]` after trimming.
-    let base_offset = base_offset + (text.len() - text.trim_start().len());
-    let text = text.trim();
-    // Absolute caret for any subslice of `text` (F-15).
-    let pos_of = |sub: &str| base_offset + crate::util::byte_offset_within(text, sub);
-    let upper = text.to_ascii_uppercase();
-
+/// Shared with the YAML choke point (`crate::model`), which must refuse an
+/// expression the keyword grammar would split here.
+pub(crate) fn find_annotation_start(text: &str) -> Option<usize> {
     // Find the FIRST occurrence of COMMENT or WITH SYNONYMS at depth-0 with word boundaries.
     // Scan forward tracking depth to find annotation region start. Quote-aware
     // (PA-6/PA-9): keyword text inside `'...'` string literals or `"..."`
@@ -173,6 +146,7 @@ pub(super) fn parse_trailing_annotations(
     let mut depth: i32 = 0;
     let mut st = QuoteState::default();
     let bytes = text.as_bytes();
+    let upper = text.to_ascii_uppercase();
     let upper_bytes = upper.as_bytes();
     let mut annotation_start: Option<usize> = None;
     let mut i = 0;
@@ -220,6 +194,42 @@ pub(super) fn parse_trailing_annotations(
         }
         i = next;
     }
+    annotation_start
+}
+
+/// Separate the SQL expression from trailing COMMENT / WITH SYNONYMS annotations.
+///
+/// Input: the text after "AS" in an entry (e.g., "SUM(o.amount) COMMENT = 'test' WITH SYNONYMS = ('a')")
+/// Output: (`clean_expression`, `ParsedAnnotations`)
+///
+/// Handles:
+/// - COMMENT = 'string with ''escaped'' quotes'
+/// - WITH SYNONYMS = ('syn1', 'syn2')
+/// - LABELS = (FILTER)
+/// - Any order (the clauses must tile the annotation region, but not in a fixed sequence)
+/// - No annotations at all (returns original expression with empty annotations)
+/// - COMMENT as an identifier inside expressions (only matches at depth-0 with word boundaries)
+///
+/// Once the annotation region begins, it must be tiled exactly by recognized
+/// clauses separated by whitespace: a duplicate `COMMENT` / `WITH SYNONYMS`, a
+/// malformed clause, or any leftover text is an error (P-2) — none of it is
+/// silently dropped.
+///
+/// `base_offset` is the absolute byte offset of `text[0]` in the original
+/// query; every error caret in this subtree is recovered from the offending
+/// token's position within `text` (F-15, code-review 2026-07-16).
+#[allow(clippy::too_many_lines)]
+pub(super) fn parse_trailing_annotations(
+    text: &str,
+    base_offset: usize,
+) -> Result<(String, ParsedAnnotations), ParseError> {
+    // Re-anchor past any leading whitespace `trim` will drop, so `base_offset`
+    // remains the absolute offset of `text[0]` after trimming.
+    let base_offset = base_offset + (text.len() - text.trim_start().len());
+    let text = text.trim();
+    // Absolute caret for any subslice of `text` (F-15).
+    let pos_of = |sub: &str| base_offset + crate::util::byte_offset_within(text, sub);
+    let annotation_start = find_annotation_start(text);
 
     let (expr_text, annotation_text) = if let Some(start) = annotation_start {
         (text[..start].trim(), &text[start..])

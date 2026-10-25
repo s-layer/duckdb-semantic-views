@@ -130,6 +130,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **A long error message reaches you whole.** An error from a semantic-view statement
   used to be cut off after 1023 bytes, so a message quoting a long name lost its end.
 
+- **A YAML member expression holding a bare `COMMENT`, `LABELS` or `WITH SYNONYMS` is
+  refused.** In DDL those words, outside brackets and quotes, end a member's expression and
+  start its annotations, so such a YAML view imported and then gave a `GET_DDL` that
+  `CREATE` refused. Quote the word if it names a column (`o."comment"`); `o.comment` and
+  the word inside brackets or a string are unaffected.
+
 - **A subquery in `where_clause` keeps its own names.** A name inside a subquery, such as
   `amt` in `amt IN (SELECT amt FROM targets)`, was replaced with the member of that name, so
   the subquery compared each row with itself and filtered nothing, or failed to parse. Names
