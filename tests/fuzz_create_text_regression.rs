@@ -104,3 +104,20 @@ fn paren_in_dimension_name() {
          DIMENSIONS (o.\"(egion\" AS o.region, o.tier AS o.tier) METRICS (o.n AS COUNT(*))",
     );
 }
+
+/// Run 40189930546 (on main): the same bracket, `o.(o AS …`, in a dimension
+/// name, balanced this time by a `)` in the expression.
+#[test]
+fn balanced_paren_in_dimension_name() {
+    let text = "CREATE SEMANTIC VIEW v COMMENT = 'orders analqtics' AS TABLES \
+                (o\x01\0\0\0\0\0\0\x04\0\0\x03\0\0\0\0\0\0\0ers PRIMARY KEY (id), c AS customers \
+                PRIMARY KEY (id)) RELATIONSHIPS (order_cusJtomer AS o(customer_id) REFERENCES c) \
+                DIMENSIONS (o.(o AS orders PRIMARY KEY .amount), os\0 .order_count AS \
+                CODUNT(*));\n";
+    let err = plan_create(text).expect_err("an unquoted bracket in a name is refused");
+    assert!(
+        err.message.contains("'(o' holds an unquoted '('"),
+        "{}",
+        err.message
+    );
+}
