@@ -242,3 +242,21 @@ query T
 SELECT contains(GET_DDL('SEMANTIC_VIEW', 'gc_dv'), 'sum(d.price$usd$)');
 ----
 true
+
+# An unquoted bracket is not part of a name: it is refused, not stored.
+statement error
+CREATE SEMANTIC VIEW gc_b AS TABLES (d AS gc_d PRIMARY KEY (id)) DIMENSIONS (d.(p) AS d.id) METRICS (d.total AS sum(d.id));
+----
+'(p)' holds an unquoted '('; quote the name
+
+statement error
+CREATE SEMANTIC VIEW gc_b AS TABLES (d AS gc_d PRIMARY KEY (id)) DIMENSIONS (d.p AS d.id) METRICS (d.(total) AS sum(d.id));
+----
+'(total)' holds an unquoted '('; quote the name
+
+# Quoted, the same name is accepted.
+statement ok
+CREATE SEMANTIC VIEW gc_b AS TABLES (d AS gc_d PRIMARY KEY (id)) DIMENSIONS (d."(p)" AS d.id) METRICS (d.total AS sum(d.id));
+
+statement ok
+DROP SEMANTIC VIEW gc_b;

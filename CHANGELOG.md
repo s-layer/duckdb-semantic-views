@@ -142,6 +142,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   letter, digit or `_` now continues the name, and a dollar-quoted string opens only at
   the start of a token.
 
+- **An unquoted bracket in a name is refused.** `CREATE` accepted a dimension, fact, metric
+  or relationship name such as `o.(region)`, though DuckDB never reads a bracket as part of
+  a name, and an unbalanced one (`o.(region AS …`) silently pulled the following entries
+  into that one. `CREATE` now says to quote the name (`o."(region)"`).
+
 - **A subquery in `where_clause` keeps its own names.** A name inside a subquery, such as
   `amt` in `amt IN (SELECT amt FROM targets)`, was replaced with the member of that name, so
   the subquery compared each row with itself and filtered nothing, or failed to parse. Names

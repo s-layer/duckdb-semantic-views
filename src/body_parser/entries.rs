@@ -138,13 +138,13 @@ fn parse_single_qualified_entry(
     // identifier — `o.d junk AS x` previously stored the two-word name
     // `"d junk"`, and an empty quoted `""` slid through. Report with the caret
     // at the offending slot.
-    if let Some(reason) = super::scan::identifier_slot_error(&source_alias) {
+    if let Some(reason) = super::scan::ddl_identifier_slot_error(&source_alias) {
         return Err(cur.err(
             0,
             format!("Invalid source alias in {clause_name} entry '{entry}': {reason}."),
         ));
     }
-    if let Some(reason) = super::scan::identifier_slot_error(&bare_name) {
+    if let Some(reason) = super::scan::ddl_identifier_slot_error(&bare_name) {
         return Err(cur.err(
             dot_tok.end,
             format!("Invalid name in {clause_name} entry '{entry}': {reason}."),

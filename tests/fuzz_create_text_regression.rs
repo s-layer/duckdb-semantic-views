@@ -79,3 +79,28 @@ fn yaml_expression_with_a_bare_comment_keyword() {
     // With the word quoted, the expression imports and renders to a fixpoint.
     assert_fixpoint(&text.replacen("v COMMENT '= '", "v \"COMMENT\" '= '", 1));
 }
+
+/// Run 40191639265: a `(` inside a dimension name, `o.(egion`. The clause
+/// splitter counted it as an open paren, so the entry ran on to the next
+/// unmatched `)`, and the name was stored as `(egion`. The render quoted the
+/// name and kept the expression's stray `)`, which then closed DIMENSIONS
+/// early. A name slot now refuses an unquoted bracket.
+#[test]
+fn paren_in_dimension_name() {
+    let text = "CREATE SEMANTIC VIEW v COMMENT = 'orders analytics' AS TABLES (o AS orders \
+                PRIMARY KEY (id), c AS customers PRIMARY KEY (id)) RELATIONSHIPS \
+                (order_customer AS o(customer_id) REFERENCES c) DIMENSIONS (o.(egion AS \
+                o.region COGMENT =\x16'sales region', c.tier AS c.tier) METRICS (o.revenue \
+                A\x03\0\0\0\0\0\0\0amounu), o.order_count AS COUNT(*));\n";
+    let err = plan_create(text).expect_err("an unquoted bracket in a name is refused");
+    assert!(
+        err.message.contains("'(egion' holds an unquoted '('"),
+        "{}",
+        err.message
+    );
+    // Quoted, the name is one identifier and the clause splits as written.
+    assert_fixpoint(
+        "CREATE SEMANTIC VIEW v AS TABLES (o AS orders PRIMARY KEY (id)) \
+         DIMENSIONS (o.\"(egion\" AS o.region, o.tier AS o.tier) METRICS (o.n AS COUNT(*))",
+    );
+}
