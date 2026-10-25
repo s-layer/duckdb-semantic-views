@@ -66,12 +66,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - `CREATE SEMANTIC VIEW` stores each expression as DuckDB's tokens spell it: a tab
     becomes a space, a run of blank lines one line break, and comments are dropped. So
     `GET_DDL` and `DESCRIBE` show that spelling. The query a view expands to is the same.
-  - A connection that was already open when another connection ran
-    `LOAD semantic_views` picks up the semantic-view statements from its next query
-    onwards. Its first query after the `LOAD` parses without them, so a semantic-view
-    statement there fails as a syntax error; running `LOAD semantic_views` on that
-    connection first avoids this. Before, the loading connection switched the others
-    over itself, from its own thread, which could race with a query they were parsing.
+  - Loading the extension no longer switches other open connections over from the
+    loading connection's thread, which could race with a query they were parsing.
+    Each one now switches itself when it next starts or finishes a query (see Known
+    limitations).
 
 - **The unclosed-bracket error names its clause like the others.** It now reads
   `Unclosed '(' in clause 'METRICS'.`, as the other bracket and quote errors for a clause
@@ -163,6 +161,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **A prepared `semantic_view()` query follows a later `SET search_path`.** `EXECUTE`
   now looks the view up on the search path in effect when it runs, as DuckDB does for
   its own tables. Before, it kept the view found when the statement was prepared.
+
+### Known limitations
+
+- **A connection open before another one runs `LOAD semantic_views` needs one ordinary
+  statement first.** Until it starts or finishes a query, it parses without the
+  semantic-view statements, so `CREATE` / `SHOW SEMANTIC …` and the rest fail there with
+  a syntax error, and a statement that fails to parse never starts a query, so retrying
+  it fails the same way. Running any statement DuckDB parses on its own, such as
+  `LOAD semantic_views` or `SELECT 1`, switches that connection over. Connections opened
+  after the `LOAD`, and the connection that ran it, are not affected.
 
 ## [0.15.0] - 2026-10-21
 

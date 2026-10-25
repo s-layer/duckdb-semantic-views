@@ -21,7 +21,8 @@ grammar on in three ways:
   * a connection already open, when it next begins or ends a query. DuckDB
     parses a statement before its query begins, and a statement that fails to
     parse begins none, so that connection parses without the grammar until it
-    runs a query (any query, LOAD semantic_views included).
+    runs a statement that parses without it (SELECT 1, LOAD semantic_views),
+    TECH-DEBT #108.
 
 Exit codes:
     0 = test passed (including pytest SKIP convention if run directly)

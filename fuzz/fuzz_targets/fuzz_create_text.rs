@@ -3,8 +3,12 @@
 //! accepts must render back to DDL that plans to the same definition.
 //!
 //! In the extension the grammar's CREATE production rebuilds the statement's
-//! text from `DuckDB`'s tokens and hands it to `plan_create`, so this is the
-//! entry every CREATE goes through. Input that is not already a CREATE gets a
+//! text from `DuckDB`'s tokens (`Tree::text`) and hands it to `plan_create`,
+//! so `plan_create` is the planner every CREATE goes through. This target
+//! fuzzes it on raw text: the token rebuild itself needs `DuckDB`'s tokenizer
+//! and is not exercised here, and raw input can hold trivia (a tab, a comment)
+//! that the rebuild would have normalised away, so it searches a superset of
+//! the texts production plans. Input that is not already a CREATE gets a
 //! `CREATE SEMANTIC VIEW fuzz_view AS ` prefix, so the fuzzer spends its time
 //! in the body. Anything that fails to plan is skipped: arbitrary bytes
 //! legitimately are not DDL. Anything that plans must:

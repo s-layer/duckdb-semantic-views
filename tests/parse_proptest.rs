@@ -388,6 +388,37 @@ proptest! {
 // ---------------------------------------------------------------------------
 
 #[test]
+fn test_large_input_no_panic() {
+    // 1 MB of non-DDL text must be refused as "not a CREATE" quickly, not
+    // scanned to the end or panicked on.
+    let s: String = std::iter::repeat('A').take(1_000_000).collect();
+    let start = std::time::Instant::now();
+    let result = plan_create(&s);
+    let elapsed = start.elapsed();
+    assert!(
+        matches!(result, Ok(None)),
+        "1MB non-DDL should not plan as a CREATE, got {result:?}"
+    );
+    assert!(
+        elapsed.as_millis() < 50,
+        "1MB scan took {}ms, expected <50ms",
+        elapsed.as_millis()
+    );
+}
+
+#[test]
+fn test_unicode_homoglyph() {
+    // Cyrillic 'С' (U+0421) looks like Latin 'C' but is a different byte
+    // sequence. The ASCII-only prefix matcher must not read it as CREATE.
+    let query =
+        "СREATE SEMANTIC VIEW x AS TABLES (t AS t PRIMARY KEY (id)) DIMENSIONS (t.a AS t.a)";
+    assert!(
+        matches!(plan_create(query), Ok(None)),
+        "Cyrillic С prefix must not plan as a CREATE"
+    );
+}
+
+#[test]
 fn test_null_byte_in_name() {
     // Null bytes are valid UTF-8 in Rust but may truncate C strings at the FFI boundary.
     // The parser must not panic. It may return Ok (if null byte in name is tolerated)

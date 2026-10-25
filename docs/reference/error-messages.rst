@@ -233,9 +233,9 @@ Syntax errors in semantic-view statements
 - A misspelt keyword: ``CREAT SEMANTIC VIEW``, ``DROP SEMANTC VIEW``.
 - A missing view name, or an ``ALTER SEMANTIC VIEW`` with no operation.
 - A view name that is a DuckDB reserved word written without quotes, such as ``CREATE SEMANTIC VIEW select AS ...`` or ``DESCRIBE SEMANTIC VIEW order``. DuckDB accepts its reserved keywords, and most of its ``type_function`` keywords such as ``left`` and ``join``, as a name only when it is quoted; ``duckdb_keywords()`` lists both kinds.
-- A connection that was already open when another connection ran ``LOAD semantic_views``. Its first query after the ``LOAD`` is parsed without the semantic-view statements (see :ref:`explanation-txn-ddl-peg`).
+- A connection that was already open when another connection ran ``LOAD semantic_views``. It parses without the semantic-view statements until it runs a statement DuckDB parses on its own, so retrying the failed statement fails again (see :ref:`explanation-txn-ddl-peg`).
 
-**Fix:** Correct the token the pointer marks. Quote a reserved-word name (``CREATE SEMANTIC VIEW "select" AS ...``); ``GET_DDL`` quotes such names for you. On a connection opened before the ``LOAD``, run ``LOAD semantic_views`` on it, or run the statement again.
+**Fix:** Correct the token the pointer marks. Quote a reserved-word name (``CREATE SEMANTIC VIEW "select" AS ...``); ``GET_DDL`` quotes such names for you. On a connection opened before the ``LOAD``, run ``LOAD semantic_views`` (or any other statement, such as ``SELECT 1``) on it first, then the semantic-view statement.
 
 
 .. _ref-err-name-uniqueness:

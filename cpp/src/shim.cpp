@@ -3726,8 +3726,9 @@ static constexpr const char *SV_GRAMMAR_PENDING_KEY = "semantic_views_grammar_pe
 // LOAD gets it when the LOAD ends, so the next statement, in the same query
 // string or a later one, parses with the grammar. Any other connection gets it
 // when its running query ends, or when its next query begins; DuckDB parses a
-// statement before the query begins, so the first statement such a connection
-// sends after the LOAD is parsed without the grammar.
+// statement before the query begins, and a statement that fails to parse
+// begins none, so such a connection parses without the grammar until it runs a
+// statement that parses without it (TECH-DEBT #108).
 class SemanticViewsGrammarPending final : public ClientContextState {
 public:
     void QueryBegin(ClientContext &context) override {

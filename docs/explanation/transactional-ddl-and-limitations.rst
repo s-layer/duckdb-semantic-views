@@ -285,7 +285,7 @@ Two things follow from DuckDB reading the statement as tokens:
 - ``CREATE SEMANTIC VIEW`` stores each expression as DuckDB's tokens spell it: a tab becomes a space, a run of blank lines one line break, and comments are dropped. ``GET_DDL`` and ``DESCRIBE`` show that spelling. The view behaves the same.
 - A view name that is a reserved word must be quoted, as above.
 
-DuckDB keeps the grammar a connection parses with per connection. The connection that runs ``LOAD semantic_views``, and every connection opened after it, can use the statements at once. A connection that was **already open** when another connection loaded the extension picks them up from its next query onwards: that first query is parsed without them, so a semantic-view statement there fails as a syntax error, and every query after it works. To avoid that, run ``LOAD semantic_views`` on the connection first (it is a no-op on a database that has the extension loaded), or open the connection after the ``LOAD``.
+DuckDB keeps the grammar a connection parses with per connection. The connection that runs ``LOAD semantic_views``, and every connection opened after it, can use the statements at once. A connection that was **already open** when another connection loaded the extension picks them up only when it next starts or finishes a query. A statement that fails to parse never starts one, so until that connection runs a statement DuckDB parses on its own, such as ``SELECT 1``, every semantic-view statement on it fails as a syntax error, and retrying it fails the same way. To avoid that, run ``LOAD semantic_views`` on the connection first (it is a no-op on a database that has the extension loaded), or open the connection after the ``LOAD``.
 
 .. code-block:: python
 
@@ -309,7 +309,7 @@ The other items on this page only matter in specific situations:
 
 - Concurrent ``CREATE IF NOT EXISTS`` from two connections can produce a constraint or commit-conflict error on one of them; catch it and treat as success.
 - Semantic views are single-catalog: run their DDL from the database you loaded the extension into, not from a ``USE``-d attached database.
-- A connection that was already open when another one ran ``LOAD semantic_views`` needs one query, such as its own ``LOAD semantic_views``, before it parses semantic-view statements.
+- A connection that was already open when another one ran ``LOAD semantic_views`` needs one statement DuckDB parses on its own, such as its own ``LOAD semantic_views``, before it parses semantic-view statements. Retrying a failed semantic-view statement does not help.
 
 See also:
 

@@ -208,8 +208,9 @@ per database, and then:
   grammar on that connection's own thread and then removes itself.
 
 The loading connection activates when its `LOAD` ends. Another connection that was
-already open parses its next query without the grammar, because DuckDB parses before
-`QueryBegin`. That limitation is accepted and documented. See
+already open parses without the grammar until it runs a statement that parses without
+it, because DuckDB parses before `QueryBegin` and a statement that fails to parse
+begins no query (TECH-DEBT #108). See
 [Grammar activation](../MAINTAINER.md#grammar-activation).
 
 ## 6. How a statement is lowered
