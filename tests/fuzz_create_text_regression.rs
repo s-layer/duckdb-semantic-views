@@ -137,3 +137,19 @@ fn dollar_quote_glued_to_as() {
     let err = plan_create(text).expect_err("an entry with no `AS` is refused");
     assert!(err.message.contains("Expected 'AS'"), "{}", err.message);
 }
+
+/// `fuzz_ddl_parse`, run 40198249801: leading non-breaking spaces, which
+/// `str::trim` strips but the ASCII lead count does not, put the view-name
+/// offset inside a character and the slice panicked. The target's own check
+/// follows: what plans must render.
+#[test]
+fn unicode_space_before_create() {
+    let text = format!(
+        "{}CREATE SEMANTIC VIEW v\u{a0} AS \u{a8}TABLES (o AS orders PRIMARY KEY (id)) \
+         FACTS (o.net_price AS o.net_p.tax_rate) DIMENSIONS ()",
+        "\u{a0}".repeat(15)
+    );
+    if let Ok(Some(RewriteAction::Create { name, def, .. })) = plan_create(&text) {
+        render_create_ddl(&name.name, &def).expect("an accepted definition renders");
+    }
+}

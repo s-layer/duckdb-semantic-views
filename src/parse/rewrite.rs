@@ -267,8 +267,9 @@ pub fn plan_create(query: &str) -> Result<Option<RewriteAction>, ParseError> {
     // `"` in the name, which `parse_view_ref` owns) gets its own message from
     // it. A `'` or `$tag$` in a bare name is read by nothing, so it is refused
     // first, before the body parser trips on comment text left in place.
-    let after_prefix = &trimmed_no_semi[plen..];
-    let name_start = lead + plen + (after_prefix.len() - after_prefix.trim_start().len());
+    // Measured from the slice itself: `trim` also strips leading non-ASCII
+    // whitespace, which `lead` does not count.
+    let name_start = crate::util::byte_offset_within(query, trimmed_no_semi[plen..].trim_start());
     let name_end = name_start + crate::ident::find_identifier_end(&query[name_start..], true);
     if let Some(pos) = unterminated.filter(|&p| p < name_end && query.as_bytes()[p] != b'"') {
         return Err(unterminated_quote(query, pos));
