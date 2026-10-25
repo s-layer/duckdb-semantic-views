@@ -253,6 +253,8 @@ What an expression may use depends on its list:
 - In ``DIMENSIONS`` and ``FACTS``, an expression uses dimensions and facts, and all of them must belong to one table. It is a row-level value, so it holds no aggregate and no metric.
 - In ``METRICS``, an expression uses metrics, and aggregates of dimensions and facts. Each aggregate is computed as a metric of its table, so its dimensions and facts must belong to one table; ``count(DISTINCT c.region)`` counts customers over the customer table, whatever else the query asks for. A dimension or fact outside an aggregate is refused, and so is an aggregate of a metric.
 
+A member is named in an expression as it is as an item: by its name, or qualified by its table, where a member declared without a table is on the base table. A field of a ``STRUCT`` dimension or fact is read from it, so ``upper(o.address.city)``, or the item ``address.city``, is the field ``city`` of the dimension ``address``.
+
 No item holds a subquery, a window function (declare a :ref:`window metric <howto-window-metrics>` instead) or a prepared statement parameter, and a ``PRIVATE`` fact or metric cannot be used, as anywhere else in a query. An item is one expression: separate two with a comma, in two items.
 
 Without an alias, the column is named by the expression as written, so ``DIMENSIONS lower(region)`` gives a column named ``lower(region)``. An error about an expression item, such as a fan trap, names the expression as written.

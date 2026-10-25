@@ -256,11 +256,11 @@ unsafe fn semantic_view_bind_body(
             .collect(),
     };
     let expanded_sql = expand(&view_name, def, &req)
-        .map_err(|e| lowered.relabel(&QueryError::from(e).to_string()))?;
+        .map_err(|e| lowered.relabel(&QueryError::from(lowered.for_request(e)).to_string()))?;
 
     // Lay the columns out as the items ask (aliases, column_order).
     let column_names = crate::expand::output_column_names(&view_name, def, &req)
-        .map_err(|e| lowered.relabel(&QueryError::from(e).to_string()))?;
+        .map_err(|e| lowered.relabel(&QueryError::from(lowered.for_request(e)).to_string()))?;
     let output = OutputColumns::new(
         &column_names,
         [&dimension_aliases, &metric_aliases, &fact_aliases],

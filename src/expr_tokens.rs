@@ -89,6 +89,24 @@ impl IdentRef<'_> {
         first_part_len(self.raw) == self.raw.len()
     }
 
+    /// Where each part of the chain ends, as byte offsets into [`raw`], the
+    /// last being its length: `o.addr.city` → `[1, 6, 11]`. A dot inside a
+    /// quoted part does not end one.
+    ///
+    /// [`raw`]: IdentRef::raw
+    pub(crate) fn part_ends(&self) -> Vec<usize> {
+        let mut ends = Vec::new();
+        let mut at = 0;
+        loop {
+            at += first_part_len(&self.raw[at..]);
+            ends.push(at);
+            if self.raw.as_bytes().get(at) != Some(&b'.') {
+                return ends;
+            }
+            at += 1;
+        }
+    }
+
     /// The normalized key of the chain's **first** part — the qualifier:
     /// `o.amount` → `o`, `o.address.city` → `o`, and `"My Tbl".c` → `my tbl`.
     /// A bare chain returns its whole key.
@@ -1204,6 +1222,13 @@ mod tests {
     }
 
     // ----- is_bare / scan_function_heads / rewrite_qualifier -----
+
+    #[test]
+    fn part_ends_splits_on_dots_outside_quotes() {
+        let refs = scan_references(r#"o.addr.city + "a.b".c + x"#);
+        let ends: Vec<Vec<usize>> = refs.iter().map(IdentRef::part_ends).collect();
+        assert_eq!(ends, vec![vec![1, 6, 11], vec![5, 7], vec![1]]);
+    }
 
     #[test]
     fn is_bare_distinguishes_qualified_chains() {

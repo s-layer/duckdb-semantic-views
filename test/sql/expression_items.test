@@ -163,6 +163,13 @@ SELECT explain_output FROM explain_semantic_view('exi', dimensions := ['lower(re
 -- Dimensions: lower(region)
 -- Metrics: sum(o.amt) / orders
 
+# As in a query, a wildcard takes in the view's metrics only.
+
+query T
+SELECT explain_output FROM explain_semantic_view('exi', metrics := ['o.*', 'max(o.amt) / revenue']) WHERE explain_output LIKE '-- Metrics%';
+----
+-- Metrics: revenue, orders, avg_order, max(o.amt) / revenue
+
 # What an item may not hold.
 
 statement error
@@ -292,3 +299,94 @@ query I
 SELECT * FROM SEMANTIC_VIEW(exi_air METRICS dep_elev + flights AS x);
 ----
 5463
+
+# A member declared without a table is on the base table, so the base table's
+# alias qualifies it inside an expression, as it does as an item: avg_order is
+# 220.00 / 3.
+
+query R
+SELECT * FROM SEMANTIC_VIEW(exi METRICS round(o.avg_order * 2, 2) AS twice);
+----
+146.67
+
+# An unknown item's error lists the view's members, not the members an
+# expression item became.
+
+statement error
+SELECT * FROM SEMANTIC_VIEW(exi DIMENSIONS lower(region), nope METRICS revenue);
+----
+Available: [region, order_date]
+
+# A wildcard takes in the view's members only, not the metric an aggregate
+# inside an expression item became.
+
+query T
+SELECT column_name FROM (DESCRIBE SELECT * FROM SEMANTIC_VIEW(exi METRICS o.*, max(o.amt) / revenue AS share));
+----
+revenue
+orders
+avg_order
+share
+
+# A struct field of a dimension is read from the dimension, in an expression
+# and as an item of its own.
+
+statement ok
+CREATE TABLE exi_sites (id INTEGER, address STRUCT(city VARCHAR, zip VARCHAR));
+
+statement ok
+INSERT INTO exi_sites VALUES
+  (1, {'city': 'Paris', 'zip': '75001'}),
+  (2, {'city': 'Lyon', 'zip': '69001'}),
+  (3, {'city': 'Paris', 'zip': '75002'});
+
+statement ok
+CREATE SEMANTIC VIEW exi_struct AS
+  TABLES (s AS exi_sites PRIMARY KEY (id))
+  DIMENSIONS (s.addr AS s.address)
+  METRICS (s.sites AS count(*));
+
+query TI
+SELECT * FROM SEMANTIC_VIEW(exi_struct DIMENSIONS upper(s.addr.city) AS city METRICS sites) ORDER BY city;
+----
+LYON	1
+PARIS	2
+
+query TI
+SELECT * FROM SEMANTIC_VIEW(exi_struct DIMENSIONS addr.city METRICS sites) ORDER BY 1;
+----
+Lyon	1
+Paris	2
+
+# A query with an expression item is not routed to a materialization, since
+# none lists the member it became. The materialization's numbers are wrong on
+# purpose, so a routed query shows them.
+
+statement ok
+CREATE TABLE exi_by_date (order_date DATE, revenue DECIMAL(10,2));
+
+statement ok
+INSERT INTO exi_by_date VALUES (DATE '2023-06-01', 999.00), (DATE '2024-01-15', 999.00), (DATE '2024-03-02', 999.00);
+
+statement ok
+CREATE SEMANTIC VIEW exi_mat AS
+  TABLES (o AS exi_orders PRIMARY KEY (id))
+  DIMENSIONS (o.order_date AS o.ordered_at)
+  METRICS (o.revenue AS sum(o.amount))
+  MATERIALIZATIONS (by_date AS (TABLE exi_by_date, DIMENSIONS (order_date), METRICS (revenue)));
+
+query R
+SELECT sum(revenue) FROM SEMANTIC_VIEW(exi_mat DIMENSIONS order_date METRICS revenue);
+----
+2997.00
+
+query IR
+SELECT * FROM SEMANTIC_VIEW(exi_mat DIMENSIONS year(order_date) AS y METRICS revenue) ORDER BY y;
+----
+2023	50.00
+2024	170.00
+
+query R
+SELECT sum(r) FROM SEMANTIC_VIEW(exi_mat DIMENSIONS order_date METRICS revenue * 1 AS r);
+----
+220.00

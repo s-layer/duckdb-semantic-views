@@ -68,6 +68,54 @@ impl LoweredItems {
         }
         out
     }
+
+    /// An error from expanding the lowered request, about the request as
+    /// written: an added member is not offered as an available name or a
+    /// suggestion (it is one of the request's own items), and is named by its
+    /// item where the error lists the query's metrics. Where the message
+    /// quotes one, [`relabel`](Self::relabel) names it.
+    #[must_use]
+    pub fn for_request(&self, mut e: ExpandError) -> ExpandError {
+        let item_of = |name: &str| {
+            self.labels
+                .iter()
+                .find(|(added, _)| added == name)
+                .map(|(_, text)| text)
+        };
+        match &mut e {
+            ExpandError::UnknownDimension {
+                available,
+                suggestion,
+                ..
+            }
+            | ExpandError::UnknownMetric {
+                available,
+                suggestion,
+                ..
+            }
+            | ExpandError::UnknownFact {
+                available,
+                suggestion,
+                ..
+            } => {
+                available.retain(|n| item_of(n).is_none());
+                if suggestion.as_deref().and_then(item_of).is_some() {
+                    *suggestion = None;
+                }
+            }
+            ExpandError::WindowAggregateMixing {
+                aggregate_metrics, ..
+            } => {
+                for n in aggregate_metrics.iter_mut() {
+                    if let Some(text) = item_of(n) {
+                        n.clone_from(text);
+                    }
+                }
+            }
+            _ => {}
+        }
+        e
+    }
 }
 
 /// Why an item was refused: a message for the request, or an expansion error
@@ -144,8 +192,12 @@ fn is_expression(index: &MemberIndex<'_>, member: &str) -> bool {
         return false;
     }
     let refs = scan_references(text);
-    if matches!(refs.as_slice(), [r] if r.start == 0 && r.end == text.len()) {
-        return false;
+    // One name is an item, unless it is a struct field of a member
+    // (`o.addr.city`), which is read from the member as in an expression.
+    if let [r] = refs.as_slice() {
+        if r.start == 0 && r.end == text.len() {
+            return index.lookup(r).is_empty() && index.field_path(r).is_some();
+        }
     }
     !index.by_key.contains_key(&normalize_ident_part(text))
 }
@@ -205,6 +257,11 @@ impl<'a> MemberIndex<'a> {
         for (member, name, table) in members {
             index.names.insert(normalize_ident_part(name));
             let mut keys = vec![normalize_ident_part(name)];
+            // A member declared without a table is on the base table, so
+            // `<base>.<name>` names it, as it does as a plain item.
+            let table = table
+                .as_deref()
+                .or_else(|| def.tables.first().map(|t| t.alias.as_str()));
             if let Some(t) = table {
                 keys.push(normalize_ident_part(&format!("{t}.{name}")));
             }
@@ -225,7 +282,36 @@ impl<'a> MemberIndex<'a> {
 
     /// The members `r` can name.
     fn lookup(&self, r: &IdentRef<'_>) -> &[Member<'a>] {
-        self.by_key.get(&r.key()).map_or(&[], Vec::as_slice)
+        self.lookup_key(&r.key())
+    }
+
+    /// The members `key` names.
+    fn lookup_key(&self, key: &str) -> &[Member<'a>] {
+        self.by_key.get(key).map_or(&[], Vec::as_slice)
+    }
+
+    /// A struct field of a dimension or fact, as in `o.addr.city` or
+    /// `addr.city` for a dimension `addr`: the dimension (else the fact) named
+    /// by the longest leading parts of `r` that name one, and where the field
+    /// path after them starts. A table's alias alone is not a member, so a
+    /// chain that starts with one needs two parts to name one.
+    fn field_path(&self, r: &IdentRef<'_>) -> Option<(Member<'a>, usize)> {
+        let ends = r.part_ends();
+        let fewest = if self.tables.contains(&r.first_part_key()) {
+            2
+        } else {
+            1
+        };
+        (fewest..ends.len()).rev().find_map(|parts| {
+            let end = ends[parts - 1];
+            let key = normalize_ident_part(&r.raw[..end]);
+            let candidates = self.lookup_key(&key);
+            candidates
+                .iter()
+                .find(|m| matches!(m, Member::Dimension(_)))
+                .or_else(|| candidates.iter().find(|m| matches!(m, Member::Fact(_))))
+                .map(|&m| (m, end))
+        })
     }
 
     /// The table a member is on, as a key.
@@ -253,8 +339,10 @@ struct Lowering<'d, 'i> {
 
 /// What one reference in an expression item names.
 enum Resolved<'a> {
-    /// A dimension or fact, with its table.
-    RowLevel(Member<'a>, String),
+    /// A dimension or fact, with its table, and where in the reference a
+    /// struct field path after it starts (the reference's length when it
+    /// names the member alone).
+    RowLevel(Member<'a>, String, usize),
     Metric(&'a Metric),
     /// Nothing declared: left as written, as in `where_clause`, for `DuckDB` to
     /// read (a keyword, a function's argument such as `'year'`, or a name it
@@ -363,7 +451,7 @@ impl<'d> Lowering<'d, '_> {
                     names_any = true;
                     out.replace(r.start..r.end, &quote_ident(&m.name));
                 }
-                Resolved::RowLevel(member, _) => {
+                Resolved::RowLevel(member, _, _) => {
                     return Err(invalid(format!(
                         "'{}' in '{text}' is a {}; in METRICS a dimension or fact can only be \
                          used inside an aggregate",
@@ -406,8 +494,10 @@ impl<'d> Lowering<'d, '_> {
         let mut replacements: HashMap<String, String> = HashMap::new();
         let mut table: Option<(String, String)> = None;
         for r in scan_references(part) {
-            let (member, member_table) = match self.resolve(&r, false)? {
-                Resolved::RowLevel(member, member_table) => (member, member_table),
+            let (member, member_table, field_at) = match self.resolve(&r, false)? {
+                Resolved::RowLevel(member, member_table, field_at) => {
+                    (member, member_table, field_at)
+                }
                 Resolved::Metric(m) => {
                     return Err(invalid(format!(
                         "'{}' in '{text}' is a metric; {what} can only use dimensions and facts",
@@ -430,14 +520,22 @@ impl<'d> Lowering<'d, '_> {
             let replacement = match member {
                 Member::Dimension(d) => format!("({})", d.expr),
                 // A fact by its name, qualified when it has a table, as fact
-                // inlining keys it.
-                Member::Fact(f) => match &f.source_table {
-                    Some(t) => format!("{}.{}", quote_ident(t), quote_ident(&f.name)),
-                    None => quote_ident(&f.name),
-                },
+                // inlining keys it, and in brackets when a field path follows,
+                // so that inlining still sees the fact's name on its own.
+                Member::Fact(f) => {
+                    let name = match &f.source_table {
+                        Some(t) => format!("{}.{}", quote_ident(t), quote_ident(&f.name)),
+                        None => quote_ident(&f.name),
+                    };
+                    if field_at < r.raw.len() {
+                        format!("({name})")
+                    } else {
+                        name
+                    }
+                }
                 Member::Metric(_) => unreachable!("a metric is not row-level"),
             };
-            replacements.insert(r.key(), replacement);
+            replacements.insert(r.key(), replacement + &r.raw[field_at..]);
         }
         let Some((table, _)) = table else {
             return Err(invalid(format!(
@@ -455,6 +553,11 @@ impl<'d> Lowering<'d, '_> {
     /// metric is preferred; anywhere else a dimension, then a fact.
     fn resolve(&self, r: &IdentRef<'_>, metrics_first: bool) -> Result<Resolved<'d>, ItemError> {
         let candidates = self.index.lookup(r);
+        if candidates.is_empty() {
+            if let Some((member, field_at)) = self.index.field_path(r) {
+                return self.row_level_member(member, field_at);
+            }
+        }
         let pick = |want_metric: bool| {
             let rank = |m: &Member<'_>| match (m, want_metric) {
                 (Member::Metric(_), true) | (Member::Dimension(_), false) => 0,
@@ -473,22 +576,7 @@ impl<'d> Lowering<'d, '_> {
                 }
                 Ok(Resolved::Metric(m))
             }
-            Some(member @ Member::Fact(f)) => {
-                if f.access == AccessModifier::Private {
-                    return Err(ItemError::Expand(Box::new(ExpandError::PrivateFact {
-                        view_name: self.view_name.to_string(),
-                        name: f.name.clone(),
-                    })));
-                }
-                Ok(Resolved::RowLevel(
-                    member,
-                    self.index.table_of(f.source_table.as_deref()),
-                ))
-            }
-            Some(member @ Member::Dimension(d)) => Ok(Resolved::RowLevel(
-                member,
-                self.index.table_of(d.source_table.as_deref()),
-            )),
+            Some(member) => self.row_level_member(member, r.raw.len()),
             None if !r.is_bare() && self.index.tables.contains(&r.first_part_key()) => {
                 Err(invalid(format!(
                     "'{}' is not a dimension, fact or metric of semantic view '{}'",
@@ -497,6 +585,33 @@ impl<'d> Lowering<'d, '_> {
             }
             None => Ok(Resolved::Unknown),
         }
+    }
+
+    /// A dimension or fact as [`Resolved::RowLevel`], refused when it is a
+    /// private fact.
+    fn row_level_member(
+        &self,
+        member: Member<'d>,
+        field_at: usize,
+    ) -> Result<Resolved<'d>, ItemError> {
+        let table = match member {
+            Member::Fact(f) => {
+                if f.access == AccessModifier::Private {
+                    return Err(ItemError::Expand(Box::new(ExpandError::PrivateFact {
+                        view_name: self.view_name.to_string(),
+                        name: f.name.clone(),
+                    })));
+                }
+                &f.source_table
+            }
+            Member::Dimension(d) => &d.source_table,
+            Member::Metric(_) => unreachable!("only a dimension or fact is row-level"),
+        };
+        Ok(Resolved::RowLevel(
+            member,
+            self.index.table_of(table.as_deref()),
+            field_at,
+        ))
     }
 
     /// The `source_table` of an added member on `table`: the declared alias.
@@ -1024,5 +1139,75 @@ mod tests {
         .unwrap();
         let names: Vec<_> = lowered.labels.iter().map(|(n, _)| n.as_str()).collect();
         assert_eq!(names, ["__sv_expr_2", "__sv_expr_3"]);
+    }
+
+    /// A member declared without a table is on the base table, so the base
+    /// table's alias qualifies it inside an expression, as it does as an item.
+    #[test]
+    fn a_member_without_a_table_can_be_qualified_by_the_base_table() {
+        let lowered = lower(&[], &["o.per_order * 2 AS twice"], &[]);
+        assert_eq!(added_metrics(&lowered)[0].1, "\"per_order\" * 2");
+    }
+
+    /// `o.addr.city`, or `addr.city`, is the field `city` of the dimension
+    /// `addr`; a fact's field reads it through its name.
+    #[test]
+    fn a_struct_field_of_a_member_is_read_from_the_member() {
+        let mut def = def();
+        def.dimensions.push(dim("o", "addr", "o.address"));
+        def.facts
+            .push(fact("li", "size", "li.dims", AccessModifier::Public));
+        let lowered = lower_expression_items(
+            "v",
+            &def,
+            items(&["upper(o.addr.city)", "addr.zip"], &[], &["li.size.w * 2"]),
+        )
+        .unwrap();
+        let added = lowered.def.as_ref().unwrap();
+        let exprs: Vec<_> = added.dimensions[def.dimensions.len()..]
+            .iter()
+            .map(|d| d.expr.as_str())
+            .collect();
+        assert_eq!(exprs, ["(upper((o.address).city))", "((o.address).zip)"]);
+        assert_eq!(
+            added.facts.last().unwrap().expr,
+            "((\"li\".\"size\").w * 2)"
+        );
+        // A field of a table's column, with no member under it, is still not
+        // a member.
+        assert!(refused(&["upper(o.nope.city)"], &[], &[]).contains("'o.nope.city' is not"));
+    }
+
+    /// The added members are the request's own items: an unknown name's
+    /// error does not offer them, and an error listing the query's metrics
+    /// names them by their items.
+    #[test]
+    fn an_expansion_error_does_not_offer_the_added_members() {
+        let lowered = lower(&["lower(region)"], &["max(o.amount)"], &[]);
+        let unknown = lowered.for_request(ExpandError::UnknownDimension {
+            view_name: "v".to_string(),
+            name: "regio".to_string(),
+            available: vec![
+                "region".to_string(),
+                "__sv_expr_1".to_string(),
+                "order_date".to_string(),
+            ],
+            suggestion: Some("__sv_expr_1".to_string()),
+        });
+        assert!(matches!(
+            &unknown,
+            ExpandError::UnknownDimension { available, suggestion: None, .. }
+                if available == &["region", "order_date"]
+        ));
+        let mixing = lowered.for_request(ExpandError::WindowAggregateMixing {
+            view_name: "v".to_string(),
+            window_metrics: vec!["running".to_string()],
+            aggregate_metrics: vec!["revenue".to_string(), "__sv_expr_2".to_string()],
+        });
+        assert!(matches!(
+            &mixing,
+            ExpandError::WindowAggregateMixing { aggregate_metrics, .. }
+                if aggregate_metrics == &["revenue", "max(o.amount)"]
+        ));
     }
 }
