@@ -14,6 +14,10 @@ pub mod wire;
 // they ask for; pure, so always compiled.
 pub mod items;
 
+// Expression items (TECH-DEBT #76), lowered to members of the query's own
+// copy of the definition; pure, so always compiled.
+pub mod expr_items;
+
 // Raw C-API query helpers (schema inference, DESCRIBE, VARCHAR reads) shared by
 // `table_function`, `explain` and `member_types`; always compiled so `cargo
 // test` drives them against the bundled DuckDB.

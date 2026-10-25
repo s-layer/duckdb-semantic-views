@@ -36,6 +36,8 @@ use semantic_views::expand::{expand, DimensionName, MetricName, QueryRequest};
 use semantic_views::model::{
     AccessModifier, Cardinality, Dimension, Fact, Join, Metric, SemanticViewDefinition, TableRef,
 };
+use semantic_views::query::expr_items::lower_expression_items;
+use semantic_views::query::items::RequestItems;
 
 /// A generated star-schema instance: `n_u` parent rows and a list of child
 /// rows. Parent row `i` has id `i` (distinct, so the declared PK holds),
@@ -57,7 +59,14 @@ struct Instance {
 /// grouped by an unbindable `u.uw1` before the fix. Grouping by it also puts
 /// the inlined expression in a GROUP BY key rather than only a SELECT item,
 /// which is where a mis-splice changes which rows collapse together.
-const DIMS: [&str; 3] = ["td", "ucat", "uwd"];
+///
+/// `etd` and `eucat` (TECH-DEBT #76) are EXPRESSION items rather than declared
+/// members ([`item_text`]): `td * 2 + 1` on the child, and
+/// `coalesce(ucat, -1) + uw1` on the parent, which mixes a dimension and a fact
+/// of one table. Each becomes a dimension of the query's own copy of the
+/// definition, so it has to group, merge across grains and meet the fan-trap
+/// fence exactly as a declared dimension on its table does.
+const DIMS: [&str; 5] = ["td", "ucat", "uwd", "etd", "eucat"];
 /// `svf` (PAR-6) is a CHILD-grain metric whose expression reaches a fact
 /// declared on the PARENT: `sum(t.v - u.uw1)` where `uw1 = u.w + 1` lives on
 /// `u`. Before PAR-6 the fact was inlined but `u` was never joined, so this
@@ -72,7 +81,36 @@ const DIMS: [&str; 3] = ["td", "ucat", "uwd"];
 /// contributed `t` to grain/join resolution and was then emitted verbatim as a
 /// raw, unaggregated column. `graph/member_refs.rs` documents the qualified
 /// cross-table form as legal, so this spelling has to work.
-const METS: [&str; 5] = ["sv", "ct", "sw", "svf", "dsv"];
+///
+/// `esv`, `esw` and `edsv` (TECH-DEBT #76) are EXPRESSION items: `esv` is two
+/// aggregates of a child fact and a child dimension under one derived metric,
+/// `esw` an aggregate of a parent fact (so a parent-grain metric, like `sw`),
+/// and `edsv` an expression over the declared metrics `sv` and `ct`.
+const METS: [&str; 8] = ["sv", "ct", "sw", "svf", "dsv", "esv", "esw", "edsv"];
+
+/// The item each pool name is queried with: a declared member's name, or for
+/// the TECH-DEBT #76 entries an expression item named with `AS`.
+fn item_text(name: &str) -> String {
+    match name {
+        "etd" => "td * 2 + 1 AS etd",
+        "eucat" => "coalesce(ucat, -1) + uw1 AS eucat",
+        "esv" => "sum(tv1) - count(td) AS esv",
+        "esw" => "max(uw1) AS esw",
+        "edsv" => "sv + ct AS edsv",
+        other => other,
+    }
+    .to_string()
+}
+
+/// Whether a metric is aggregated at the PARENT grain (`u`).
+fn is_parent_metric(name: &str) -> bool {
+    matches!(name, "sw" | "esw")
+}
+
+/// Whether a dimension lives on the CHILD (`t`), below the parent's grain.
+fn is_child_dim(name: &str) -> bool {
+    matches!(name, "td" | "etd")
+}
 
 /// Members a generated `where_clause` may name (PBT-6), and which side of the
 /// join each lives on. `ftd` / `fucat` are `LABELS = (FILTER)` members whose
@@ -511,13 +549,16 @@ fn child_grain_sql(case: &Case) -> String {
             // NULL `fk` leaves `u.w` NULL, so the key is NULL -- which the
             // NULL-safe grouping below has to keep as its own group.
             "uwd" => "u.w + 1 AS uwd".to_string(),
+            // TECH-DEBT #76: the expression items, written out independently.
+            "etd" => "t.d * 2 + 1 AS etd".to_string(),
+            "eucat" => "coalesce(u.ucat, -1) + (u.w + 1) AS eucat".to_string(),
             other => unreachable!("unexpected dim {other}"),
         })
         .collect();
     let met_items: Vec<String> = case
         .sel_metrics
         .iter()
-        .filter(|&&i| METS[i] != "sw")
+        .filter(|&&i| !is_parent_metric(METS[i]))
         .map(|&i| match METS[i] {
             "sv" => "sum(t.v) AS sv".to_string(),
             "ct" => "count(*) AS ct".to_string(),
@@ -531,6 +572,9 @@ fn child_grain_sql(case: &Case) -> String {
             // the base aggregate, doubled. The expansion must inline `t.sv`
             // to the same thing rather than leaving the reference in the SQL.
             "dsv" => "sum(t.v) * 2 AS dsv".to_string(),
+            // TECH-DEBT #76: the expression items' aggregates and arithmetic.
+            "esv" => "sum(t.v + 1) - count(t.d) AS esv".to_string(),
+            "edsv" => "sum(t.v) + count(*) AS edsv".to_string(),
             other => unreachable!("unexpected child-grain metric {other}"),
         })
         .collect();
@@ -579,15 +623,25 @@ fn parent_grain_sql(case: &Case) -> String {
         .as_ref()
         .map_or_else(String::new, |p| format!(" WHERE {}", p.to_raw_sql()));
     let keys = parent_dim_items(case);
+    let metrics = parent_metric_names(case)
+        .iter()
+        .map(|m| match *m {
+            "sw" => "sum(u.w) AS sw",
+            // TECH-DEBT #76: `max(uw1)`, the fact written out.
+            "esw" => "max(u.w + 1) AS esw",
+            other => unreachable!("unexpected parent-grain metric {other}"),
+        })
+        .collect::<Vec<_>>()
+        .join(", ");
     if keys.is_empty() {
-        format!("SELECT sum(u.w) AS sw FROM u{where_sql}")
+        format!("SELECT {metrics} FROM u{where_sql}")
     } else {
         let group_by = (1..=keys.len())
             .map(|n| n.to_string())
             .collect::<Vec<_>>()
             .join(", ");
         format!(
-            "SELECT {}, sum(u.w) AS sw FROM u{where_sql} GROUP BY {group_by}",
+            "SELECT {}, {metrics} FROM u{where_sql} GROUP BY {group_by}",
             keys.join(", ")
         )
     }
@@ -602,6 +656,7 @@ fn parent_dim_items(case: &Case) -> Vec<String> {
         .filter_map(|&i| match DIMS[i] {
             "ucat" => Some("u.ucat AS ucat".to_string()),
             "uwd" => Some("u.w + 1 AS uwd".to_string()),
+            "eucat" => Some("coalesce(u.ucat, -1) + (u.w + 1) AS eucat".to_string()),
             _ => None,
         })
         .collect()
@@ -613,7 +668,16 @@ fn parent_dim_names(case: &Case) -> Vec<&'static str> {
     case.sel_dims
         .iter()
         .map(|&i| DIMS[i])
-        .filter(|d| matches!(*d, "ucat" | "uwd"))
+        .filter(|d| matches!(*d, "ucat" | "uwd" | "eucat"))
+        .collect()
+}
+
+/// The selected parent-grain metrics, in request order.
+fn parent_metric_names(case: &Case) -> Vec<&'static str> {
+    case.sel_metrics
+        .iter()
+        .map(|&i| METS[i])
+        .filter(|m| is_parent_metric(m))
         .collect()
 }
 
@@ -624,15 +688,15 @@ fn parent_dim_names(case: &Case) -> Vec<&'static str> {
 /// dimensionless case (one row each), `FULL OUTER JOIN` on the NULL-safe
 /// dimension key otherwise, so a `ucat` present at only one grain survives.
 fn oracle_sql(case: &Case) -> String {
-    let selects_parent_metric = case.sel_metrics.iter().any(|&i| METS[i] == "sw");
-    if !selects_parent_metric {
+    let parent_metrics = parent_metric_names(case);
+    if parent_metrics.is_empty() {
         return child_grain_sql(case);
     }
     let child_metrics: Vec<&str> = case
         .sel_metrics
         .iter()
         .map(|&i| METS[i])
-        .filter(|&m| m != "sw")
+        .filter(|&m| !is_parent_metric(m))
         .collect();
     let parent = parent_grain_sql(case);
     if child_metrics.is_empty() {
@@ -644,7 +708,7 @@ fn oracle_sql(case: &Case) -> String {
         for m in &child_metrics {
             items.push(format!("a.{m}"));
         }
-        items.push("b.sw".to_string());
+        items.extend(parent_metrics.iter().map(|m| format!("b.{m}")));
         let child = child_grain_sql(case);
         return format!(
             "SELECT {} FROM ({child}) a CROSS JOIN ({parent}) b",
@@ -661,7 +725,7 @@ fn oracle_sql(case: &Case) -> String {
     for m in &child_metrics {
         items.push(format!("a.{m}"));
     }
-    items.push("b.sw".to_string());
+    items.extend(parent_metrics.iter().map(|m| format!("b.{m}")));
     let child = child_grain_sql(case);
     let on = keys
         .iter()
@@ -679,25 +743,43 @@ proptest! {
 
     #[test]
     fn star_join_fence_and_aggregation(case in arb_case()) {
-        let def = build_def();
+        // TECH-DEBT #76: the items go through the same lowering
+        // `semantic_view()` gives them, so an expression item is planned as the
+        // member it becomes.
+        let texts = |sel: &[usize], pool: &[&str]| -> Vec<String> {
+            sel.iter().map(|&i| item_text(pool[i])).collect()
+        };
+        let items = RequestItems::parse(
+            &texts(&case.sel_dims, &DIMS),
+            &texts(&case.sel_metrics, &METS),
+            &[],
+            &[],
+        )
+        .expect("the pool's items parse");
+        let stored = build_def();
+        let lowered = lower_expression_items("star", &stored, items)
+            .unwrap_or_else(|e| panic!("the pool's expression items lower: {e:?}"));
+        let def = lowered.def.clone().unwrap_or(stored);
         let req = QueryRequest {
             where_clause: case.where_pred.as_ref().map(Pred::to_member_sql),
-            dimensions: case
-                .sel_dims
+            dimensions: lowered
+                .items
+                .dimensions
                 .iter()
-                .map(|&i| DimensionName::new(DIMS[i]))
+                .map(|it| DimensionName::new(it.member.clone()))
                 .collect(),
-            metrics: case
-                .sel_metrics
+            metrics: lowered
+                .items
+                .metrics
                 .iter()
-                .map(|&i| MetricName::new(METS[i]))
+                .map(|it| MetricName::new(it.member.clone()))
                 .collect(),
             // PIN: FACTS is oracled by child_grain_proptest and metamorphic_proptest; this harness oracles the fan-trap fence and per-grain math. TECH-DEBT #66
             facts: vec![],
         };
 
-        let selects_parent_metric = case.sel_metrics.iter().any(|&i| METS[i] == "sw");
-        let selects_child_dim = case.sel_dims.iter().any(|&i| DIMS[i] == "td");
+        let selects_parent_metric = case.sel_metrics.iter().any(|&i| is_parent_metric(METS[i]));
+        let selects_child_dim = case.sel_dims.iter().any(|&i| is_child_dim(DIMS[i]));
         let result = expand("star", &def, &req);
 
         if selects_parent_metric && selects_child_dim {
@@ -715,7 +797,8 @@ proptest! {
                 }
                 Ok(sql) => prop_assert!(
                     false,
-                    "SUM(u.w) grouped by the child dimension t.d must be rejected, got SQL:\n{sql}"
+                    "a parent-grain metric grouped by a child dimension must be rejected, \
+                     got SQL:\n{sql}"
                 ),
             }
             return Ok(());
@@ -756,6 +839,22 @@ proptest! {
                 unreachable!()
             }
         };
+        // The expansion names an expression item's column by its member;
+        // name each column as the pool does, as `semantic_view()`'s alias
+        // would.
+        let renamed = lowered
+            .items
+            .dimensions
+            .iter()
+            .chain(&lowered.items.metrics)
+            .map(|it| {
+                let member = it.member.trim_matches('"');
+                let name = it.alias.as_deref().unwrap_or(member);
+                format!("\"{member}\" AS {name}")
+            })
+            .collect::<Vec<_>>()
+            .join(", ");
+        let expanded = format!("SELECT {renamed} FROM ({expanded}) ex");
         let oracle = oracle_sql(&case);
 
         // Canonical projection (output columns sorted by name) so a column-order
@@ -838,6 +937,9 @@ fn generator_reaches_both_where_clause_branches() {
     let mut dsv_selected = 0usize;
     let mut dsv_oracled = 0usize;
     let mut svf_and_dsv_oracled = 0usize;
+    const EXPRESSION_ITEMS: [&str; 5] = ["etd", "eucat", "esv", "esw", "edsv"];
+    let mut expression_oracled = [0usize; 5];
+    let mut expression_fenced = 0usize;
     let mut distinct: HashSet<String> = HashSet::new();
 
     for _ in 0..400 {
@@ -845,8 +947,8 @@ fn generator_reaches_both_where_clause_branches() {
             .new_tree(&mut runner)
             .expect("strategy must produce a value")
             .current();
-        let selects_parent_metric = case.sel_metrics.iter().any(|&i| METS[i] == "sw");
-        let selects_child_dim = case.sel_dims.iter().any(|&i| DIMS[i] == "td");
+        let selects_parent_metric = case.sel_metrics.iter().any(|&i| is_parent_metric(METS[i]));
+        let selects_child_dim = case.sel_dims.iter().any(|&i| is_child_dim(DIMS[i]));
 
         // The two rejection branches of the property, mirrored: everything else
         // falls through to the differential comparison.
@@ -867,6 +969,17 @@ fn generator_reaches_both_where_clause_branches() {
         }
         if oracled && has("svf") && has("dsv") {
             svf_and_dsv_oracled += 1;
+        }
+        // TECH-DEBT #76: each expression item must reach the oracle, and the
+        // parent-grain one must also meet the fan-trap fence.
+        for (k, name) in EXPRESSION_ITEMS.iter().enumerate() {
+            let picked = case.sel_dims.iter().any(|&i| DIMS[i] == *name) || has(name);
+            if picked && oracled {
+                expression_oracled[k] += 1;
+            }
+        }
+        if has("esw") && selects_child_dim {
+            expression_fenced += 1;
         }
         match &case.where_pred {
             None => without_pred += 1,
@@ -954,6 +1067,18 @@ fn generator_reaches_both_where_clause_branches() {
         "`svf` and `dsv` were never oracled in the SAME query, so the \
          cross-table fact splice and the derived-metric substitution are never \
          exercised against each other"
+    );
+    for (name, n) in EXPRESSION_ITEMS.iter().zip(expression_oracled) {
+        assert!(
+            n > 0,
+            "the expression item `{name}` never reached the numeric comparison; \
+             TECH-DEBT #76 has no randomized coverage for it"
+        );
+    }
+    assert!(
+        expression_fenced > 0,
+        "the parent-grain expression metric `esw` never met a child dimension, \
+         so the fan-trap fence is never exercised on an expression item"
     );
     assert!(
         distinct.len() > 50,

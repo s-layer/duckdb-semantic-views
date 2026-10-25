@@ -5,6 +5,7 @@ use crate::model::SemanticViewDefinition;
 use crate::util::suggest_closest;
 
 use super::error::QueryError;
+use super::expr_items::{lower_expression_items, ItemError};
 use super::items::{aliases_for, OutputColumns, RequestItems};
 use crate::expand::wildcard::{expand_wildcards, WildcardItemType};
 
@@ -213,10 +214,20 @@ unsafe fn explain_semantic_view_bind_body(
     };
     let items =
         RequestItems::parse(&dimensions, &metrics, &facts, &column_order).map_err(invalid)?;
+    // An expression item becomes a member of the query's own copy of the
+    // definition (TECH-DEBT #76). Wildcards expand against the stored one, so
+    // that `o.*` takes in no expression item.
+    let lowered = lower_expression_items(&view_name, &def, items).map_err(|e| match e {
+        ItemError::Invalid(detail) => invalid(detail),
+        ItemError::Expand(e) => QueryError::from(*e).to_string(),
+    })?;
+    let items = &lowered.items;
+    let stored = &def;
+    let def = lowered.def.as_ref().unwrap_or(stored);
     // R-3 (code-review 2026-07-11): wildcard failures render through
     // QueryError::WildcardExpansion, matching semantic_view()'s wording.
     let expand_list = |list: &[crate::query::items::Item], kind: &WildcardItemType| {
-        expand_wildcards(&RequestItems::members(list), &def, kind).map_err(|e| {
+        expand_wildcards(&RequestItems::members(list), stored, kind).map_err(|e| {
             QueryError::WildcardExpansion {
                 view_name: view_name.clone(),
                 detail: e,
@@ -260,7 +271,7 @@ unsafe fn explain_semantic_view_bind_body(
                     .find(|m| crate::ident::ident_matches(&m.name, name))
             })
             .collect();
-        find_routing_materialization_name(&def, &dim_refs, &met_refs).map(String::from)
+        find_routing_materialization_name(def, &dim_refs, &met_refs).map(String::from)
     };
 
     let req = QueryRequest {
@@ -278,10 +289,10 @@ unsafe fn explain_semantic_view_bind_body(
             .map(|s| crate::expand::FactName::new(s.clone()))
             .collect(),
     };
-    let expanded_sql =
-        expand(&view_name, &def, &req).map_err(|e| QueryError::from(e).to_string())?;
-    let column_names = crate::expand::output_column_names(&view_name, &def, &req)
-        .map_err(|e| QueryError::from(e).to_string())?;
+    let expanded_sql = expand(&view_name, def, &req)
+        .map_err(|e| lowered.relabel(&QueryError::from(e).to_string()))?;
+    let column_names = crate::expand::output_column_names(&view_name, def, &req)
+        .map_err(|e| lowered.relabel(&QueryError::from(e).to_string()))?;
     OutputColumns::new(
         &column_names,
         [&dimension_aliases, &metric_aliases, &fact_aliases],
@@ -294,10 +305,24 @@ unsafe fn explain_semantic_view_bind_body(
     // assertions stay byte-identical.
     let mut lines: Vec<String> = Vec::new();
     lines.push(format!("-- Semantic View: {view_name}"));
-    lines.push(format!("-- Dimensions: {}", dimensions.join(", ")));
-    lines.push(format!("-- Metrics: {}", metrics.join(", ")));
+    // An expression item is shown as written, not as the member it became.
+    let shown = |names: &[String]| {
+        names
+            .iter()
+            .map(|n| {
+                lowered
+                    .labels
+                    .iter()
+                    .find(|(member, _)| crate::ident::ident_matches(member, n))
+                    .map_or(n.as_str(), |(_, text)| text.as_str())
+            })
+            .collect::<Vec<_>>()
+            .join(", ")
+    };
+    lines.push(format!("-- Dimensions: {}", shown(&dimensions)));
+    lines.push(format!("-- Metrics: {}", shown(&metrics)));
     if !facts.is_empty() {
-        lines.push(format!("-- Facts: {}", facts.join(", ")));
+        lines.push(format!("-- Facts: {}", shown(&facts)));
     }
     match mat_name {
         Some(ref n) => lines.push(format!("-- Materialization: {n}")),
@@ -312,7 +337,7 @@ unsafe fn explain_semantic_view_bind_body(
     }
     lines.push(String::new());
     lines.push("-- DuckDB Plan:".to_string());
-    let explain_lines = collect_explain_lines(&def, &expanded_sql);
+    let explain_lines = collect_explain_lines(def, &expanded_sql);
     lines.extend(explain_lines);
 
     // Serialise as 1-column VARCHAR rows.

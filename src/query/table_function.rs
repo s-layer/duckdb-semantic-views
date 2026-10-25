@@ -5,6 +5,7 @@ use crate::model::SemanticViewDefinition;
 use crate::util::suggest_closest;
 
 use super::error::QueryError;
+use super::expr_items::{lower_expression_items, ItemError};
 use super::items::{aliases_for, Item, OutputColumns, RequestItems};
 use super::wire::{build_projected_sql, frame_bind_payload, parse_varchar_list};
 
@@ -213,8 +214,18 @@ unsafe fn semantic_view_bind_body(
     };
     let items =
         RequestItems::parse(&dimensions, &metrics, &facts, &column_order).map_err(invalid)?;
+    // An expression item becomes a member of the query's own copy of the
+    // definition (TECH-DEBT #76). Wildcards expand against the stored one, so
+    // that `o.*` takes in no expression item.
+    let lowered = lower_expression_items(&view_name, &def, items).map_err(|e| match e {
+        ItemError::Invalid(detail) => invalid(detail),
+        ItemError::Expand(e) => QueryError::from(*e).to_string(),
+    })?;
+    let items = &lowered.items;
+    let stored = &def;
+    let def = lowered.def.as_ref().unwrap_or(stored);
     let expand_list = |list: &[Item], kind: &WildcardItemType| {
-        expand_wildcards(&RequestItems::members(list), &def, kind).map_err(|e| {
+        expand_wildcards(&RequestItems::members(list), stored, kind).map_err(|e| {
             QueryError::WildcardExpansion {
                 view_name: view_name.clone(),
                 detail: e,
@@ -244,19 +255,19 @@ unsafe fn semantic_view_bind_body(
             .map(|s| crate::expand::FactName::new(s.clone()))
             .collect(),
     };
-    let expanded_sql =
-        expand(&view_name, &def, &req).map_err(|e| QueryError::from(e).to_string())?;
+    let expanded_sql = expand(&view_name, def, &req)
+        .map_err(|e| lowered.relabel(&QueryError::from(e).to_string()))?;
 
     // Lay the columns out as the items ask (aliases, column_order).
-    let column_names = crate::expand::output_column_names(&view_name, &def, &req)
-        .map_err(|e| QueryError::from(e).to_string())?;
+    let column_names = crate::expand::output_column_names(&view_name, def, &req)
+        .map_err(|e| lowered.relabel(&QueryError::from(e).to_string()))?;
     let output = OutputColumns::new(
         &column_names,
         [&dimension_aliases, &metric_aliases, &fact_aliases],
         items.order,
     )
     .map_err(invalid)?;
-    let (database, schema) = crate::expand::body_qualifier(&def);
+    let (database, schema) = crate::expand::body_qualifier(def);
     Ok(frame_bind_payload(
         database,
         schema,

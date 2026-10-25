@@ -313,19 +313,31 @@ pub(crate) fn scan_function_heads(expr: &str) -> Vec<IdentRef<'_>> {
 /// between the parts are skipped.
 pub(crate) fn call_is_windowed(expr: &str, head: &IdentRef<'_>) -> bool {
     let bytes = expr.as_bytes();
+    call_end(expr, head).is_some_and(|end| {
+        match_words(bytes, skip_whitespace_and_comments(bytes, end), &["over"]).is_some()
+    })
+}
+
+/// The offset just past the call that `head` (from [`scan_function_heads`])
+/// opens: past its argument list, and past a `FILTER (…)` clause if one
+/// follows, since that belongs to the aggregate. An `OVER` after it is not
+/// included ([`call_is_windowed`]). `None` when no `(` follows the head.
+pub(crate) fn call_end(expr: &str, head: &IdentRef<'_>) -> Option<usize> {
+    let bytes = expr.as_bytes();
     let open = skip_whitespace_and_comments(bytes, head.end);
     if bytes.get(open) != Some(&b'(') {
-        return false;
+        return None;
     }
-    let mut after = skip_whitespace_and_comments(bytes, skip_balanced(bytes, open, b'(', b')'));
-    if let Some(filter_end) = match_words(bytes, after, &["filter"]) {
+    let mut end = skip_balanced(bytes, open, b'(', b')');
+    if let Some(filter_end) =
+        match_words(bytes, skip_whitespace_and_comments(bytes, end), &["filter"])
+    {
         let filter_open = skip_whitespace_and_comments(bytes, filter_end);
         if bytes.get(filter_open) == Some(&b'(') {
-            after =
-                skip_whitespace_and_comments(bytes, skip_balanced(bytes, filter_open, b'(', b')'));
+            end = skip_balanced(bytes, filter_open, b'(', b')');
         }
     }
-    match_words(bytes, after, &["over"]).is_some()
+    Some(end)
 }
 
 /// Is the next non-whitespace byte at or after `pos` an opening `(`? Used to
