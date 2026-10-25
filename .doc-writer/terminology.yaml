@@ -41,16 +41,17 @@ source_terms:
     variants: []
     source: "table function registered in src/lib.rs (ListSemanticViewsVTab)"
     note: >-
-      Backing function for SHOW SEMANTIC VIEWS. Prose uses the statement; the
-      function appears only as a FROM source (filter, join, aggregate), linked
-      to ref-functions-list. Explain the idiom as "DuckDB cannot use a
-      statement as a subquery, so FROM (SHOW ...) is a parser error".
+      Backing function for SHOW SEMANTIC VIEWS. Prose and examples use the
+      statement, also as a subquery to filter, join or aggregate its output
+      (FROM (SHOW SEMANTIC VIEWS), since TECH-DEBT #77); the function itself
+      is named only in the functions reference (ref-functions-list).
   - canonical: "describe_semantic_view()"
     variants: []
     source: "table function registered in src/lib.rs (DescribeSemanticViewVTab)"
     note: >-
-      Backing function for DESCRIBE SEMANTIC VIEW. Same FROM-source-only rule
-      as list_semantic_views(); link to ref-functions-describe.
+      Backing function for DESCRIBE SEMANTIC VIEW. Same rule as
+      list_semantic_views(): use FROM (DESCRIBE SEMANTIC VIEW v) to filter;
+      name the function only in ref-functions-describe.
   - canonical: "duckdb_functions()"
     variants: []
     source: "DuckDB built-in; every extension function carries the semantic_views category (reference/functions.rst)"
