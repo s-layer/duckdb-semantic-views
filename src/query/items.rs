@@ -2,12 +2,13 @@
 //! `metrics` and `facts` lists and the `SEMANTIC_VIEW(...)` clauses name, and
 //! the order their columns come out in.
 //!
-//! An item is a member reference with an optional output name, as Snowflake's
-//! `SEMANTIC_VIEW` construct writes it: `<member> [[AS] <alias>]`, or
-//! `<table>.*` for every public member of a table. The member half goes to the
-//! expansion as before; the alias and the column order only rename and reorder
-//! the expansion's output (see [`OutputColumns`]), so no emission path needs to
-//! know about them.
+//! An item is a member reference or an expression with an optional output
+//! name, as Snowflake's `SEMANTIC_VIEW` construct writes it:
+//! `<member> [[AS] <alias>]`, or `<table>.*` for every public member of a
+//! table. The member half goes to the expansion, an expression once it is
+//! lowered to a member (`super::expr_items`); the alias and the column order
+//! only rename and reorder the expansion's output (see [`OutputColumns`]), so
+//! no emission path needs to know about them.
 
 use crate::ident::parse_qualified_identifier_with_quoting;
 
@@ -27,8 +28,8 @@ pub struct Item {
 /// resolved as before: a member whose name has a space can still be written
 /// without quotes (`Total Revenue`). So, unlike the `SEMANTIC_VIEW(...)`
 /// construct, a list item names its column only with `AS`; the construct
-/// writes its bare aliases with one. Expressions are refused by the construct
-/// (TECH-DEBT #76); here one fails as an unknown member, as it always has.
+/// writes its bare aliases with one. An expression is kept as written for
+/// `super::expr_items` to lower.
 ///
 /// # Errors
 ///
@@ -483,10 +484,9 @@ mod tests {
         assert!(err.contains("wildcard"), "{err}");
     }
 
-    /// An expression is left for resolution to refuse as an unknown member,
-    /// as before items took an alias; the construct refuses it at the parse.
+    /// An expression is kept as written, for `expr_items` to lower.
     #[test]
-    fn an_expression_is_left_to_resolution() {
+    fn an_expression_is_kept_as_written() {
         assert_eq!(
             parse_item("upper(o.region) AS r").unwrap(),
             item("upper(o.region)", Some("r"))

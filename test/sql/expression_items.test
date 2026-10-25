@@ -1,0 +1,392 @@
+# Expression items (TECH-DEBT #76): a DIMENSIONS, METRICS or FACTS item may be
+# an expression over members, as in Snowflake's SEMANTIC_VIEW construct. A
+# dimension or fact expression uses members of one table; a metric expression
+# uses metrics, and aggregates of the dimensions and facts of one table.
+
+require semantic_views
+
+statement ok
+CREATE TABLE exi_customers (id INTEGER, region VARCHAR);
+
+statement ok
+CREATE TABLE exi_orders (id INTEGER, customer_id INTEGER, amount DECIMAL(10,2), ordered_at DATE);
+
+statement ok
+CREATE TABLE exi_lines (id INTEGER, order_id INTEGER, qty INTEGER);
+
+statement ok
+INSERT INTO exi_customers VALUES (1, 'EU'), (2, 'US'), (3, 'APAC');
+
+statement ok
+INSERT INTO exi_orders VALUES
+  (10, 1, 100.00, DATE '2024-01-15'),
+  (11, 1,  50.00, DATE '2023-06-01'),
+  (12, 2,  70.00, DATE '2024-03-02');
+
+statement ok
+INSERT INTO exi_lines VALUES (100, 10, 2), (101, 10, 3), (102, 12, 1);
+
+statement ok
+CREATE SEMANTIC VIEW exi AS
+  TABLES (
+    o AS exi_orders PRIMARY KEY (id),
+    c AS exi_customers PRIMARY KEY (id),
+    li AS exi_lines PRIMARY KEY (id)
+  )
+  RELATIONSHIPS (
+    order_customer AS o(customer_id) REFERENCES c,
+    line_order AS li(order_id) REFERENCES o
+  )
+  FACTS (
+    o.amt AS o.amount,
+    li.qty AS li.qty,
+    PRIVATE o.secret AS o.amount * 10
+  )
+  DIMENSIONS (
+    c.region AS c.region,
+    o.order_date AS o.ordered_at
+  )
+  METRICS (
+    o.revenue AS sum(o.amount),
+    o.orders AS count(*),
+    li.units AS sum(li.qty),
+    avg_order AS revenue / orders
+  );
+
+# Snowflake's example: a dimension expression, grouped by its value.
+
+query IT
+SELECT * FROM SEMANTIC_VIEW(exi DIMENSIONS DATE_PART('year', o.order_date) AS year METRICS o.revenue) ORDER BY year;
+----
+2023	50.00
+2024	170.00
+
+# semantic_view() takes the same items.
+
+query IT
+SELECT * FROM semantic_view('exi', dimensions := ['DATE_PART(''year'', o.order_date) AS year'], metrics := ['o.revenue']) ORDER BY year;
+----
+2023	50.00
+2024	170.00
+
+# Without an alias, the column is named by the expression.
+
+query TT
+SELECT "lower(region)", revenue FROM SEMANTIC_VIEW(exi DIMENSIONS lower(region) METRICS revenue) ORDER BY 1;
+----
+eu	150.00
+us	70.00
+
+# A metric expression over metrics is a derived metric: the same number as the
+# declared one.
+
+query TRR
+SELECT * FROM SEMANTIC_VIEW(exi DIMENSIONS region METRICS revenue / orders AS per_order, avg_order) ORDER BY 1;
+----
+EU	75.0	75.0
+US	70.0	70.0
+
+# An aggregate of a fact or a dimension is a metric of its table.
+
+query TT
+SELECT * FROM SEMANTIC_VIEW(exi DIMENSIONS region METRICS max(o.amt) AS biggest) ORDER BY 1;
+----
+EU	100.00
+US	70.00
+
+query TI
+SELECT * FROM SEMANTIC_VIEW(exi DIMENSIONS region METRICS count(DISTINCT o.order_date) AS days) ORDER BY 1;
+----
+EU	2
+US	1
+
+# An aggregate of a line-item fact is aggregated over the line items, so the
+# order totals beside it are not repeated once per line (EU's revenue is 150,
+# not 100 * 2 + 50).
+
+query TTI
+SELECT * FROM SEMANTIC_VIEW(exi DIMENSIONS region METRICS revenue, sum(li.qty) * 2 AS double_units) ORDER BY 1;
+----
+EU	150.00	10
+US	70.00	2
+
+# A customer-level aggregate counts every customer, the one with no orders too.
+
+query IT
+SELECT * FROM SEMANTIC_VIEW(exi METRICS count(DISTINCT c.region) AS regions, revenue);
+----
+3	220.00
+
+# The fan-trap check sees an expression item as it sees a declared member: a
+# customer-level aggregate grouped by an order-level expression is refused, and
+# the error names the items as written.
+
+statement error
+SELECT * FROM SEMANTIC_VIEW(exi DIMENSIONS DATE_PART('year', o.order_date) AS y METRICS count(c.region) AS n);
+----
+fan trap detected -- metric 'count(c.region)' (table 'c') would be duplicated when joined to dimension 'DATE_PART('year', o.order_date)' (table 'o')
+
+# A fact expression.
+
+query TT
+SELECT * FROM SEMANTIC_VIEW(exi DIMENSIONS region FACTS o.amt * 2 AS twice) ORDER BY 1, 2;
+----
+EU	100.00
+EU	200.00
+US	140.00
+
+# WHERE filters the rows an expression item is computed from.
+
+query IT
+SELECT * FROM SEMANTIC_VIEW(exi DIMENSIONS DATE_PART('year', o.order_date) AS year METRICS revenue WHERE region = 'EU') ORDER BY 1;
+----
+2023	50.00
+2024	100.00
+
+# A view over the construct expands its expression items each time it is read.
+
+statement ok
+CREATE VIEW exi_by_year AS
+SELECT * FROM SEMANTIC_VIEW(exi DIMENSIONS DATE_PART('year', o.order_date) AS year METRICS revenue, max(o.amt) AS biggest);
+
+query ITT
+SELECT * FROM exi_by_year ORDER BY year;
+----
+2023	50.00	50.00
+2024	170.00	100.00
+
+# explain_semantic_view() lists the items as written.
+
+query T
+SELECT explain_output FROM explain_semantic_view('exi', dimensions := ['lower(region) AS r'], metrics := ['sum(o.amt) / orders']) WHERE explain_output LIKE '-- %ensions%' OR explain_output LIKE '-- Metrics%';
+----
+-- Dimensions: lower(region)
+-- Metrics: sum(o.amt) / orders
+
+# As in a query, a wildcard takes in the view's metrics only.
+
+query T
+SELECT explain_output FROM explain_semantic_view('exi', metrics := ['o.*', 'max(o.amt) / revenue']) WHERE explain_output LIKE '-- Metrics%';
+----
+-- Metrics: revenue, orders, avg_order, max(o.amt) / revenue
+
+# What an item may not hold.
+
+statement error
+SELECT * FROM SEMANTIC_VIEW(exi DIMENSIONS region || o.order_date METRICS revenue);
+----
+'region || o.order_date' uses 'region' and 'o.order_date', which belong to different tables
+
+statement error
+SELECT * FROM SEMANTIC_VIEW(exi DIMENSIONS sum(o.amt) METRICS revenue);
+----
+'sum(o.amt)' in DIMENSIONS holds the aggregate function 'sum'; an aggregate goes in METRICS
+
+statement error
+SELECT * FROM SEMANTIC_VIEW(exi DIMENSIONS revenue * 2 METRICS orders);
+----
+'revenue' in 'revenue * 2' is a metric
+
+statement error
+SELECT * FROM SEMANTIC_VIEW(exi METRICS revenue + region);
+----
+'region' in 'revenue + region' is a dimension; in METRICS a dimension or fact can only be used inside an aggregate
+
+statement error
+SELECT * FROM SEMANTIC_VIEW(exi METRICS max(revenue));
+----
+'revenue' in 'max(revenue)' is a metric
+
+statement error
+SELECT * FROM SEMANTIC_VIEW(exi METRICS sum(o.amt * li.qty));
+----
+which belong to different tables
+
+statement error
+SELECT * FROM SEMANTIC_VIEW(exi METRICS count(*) + 1);
+----
+refers to no dimension or fact
+
+statement error
+SELECT * FROM SEMANTIC_VIEW(exi DIMENSIONS upper(o.nope) METRICS revenue);
+----
+'o.nope' is not a dimension, fact or metric of semantic view 'exi'
+
+statement error
+SELECT * FROM SEMANTIC_VIEW(exi METRICS sum(o.secret));
+----
+fact 'secret' is private
+
+statement error
+SELECT * FROM SEMANTIC_VIEW(exi METRICS sum(o.amt) OVER ());
+----
+holds a window function
+
+statement error
+SELECT * FROM SEMANTIC_VIEW(exi DIMENSIONS lower(region), lower(region) METRICS revenue);
+----
+two columns of the query are named 'lower(region)'
+
+statement error
+SELECT * FROM semantic_view('exi', dimensions := ['(SELECT 1)'], metrics := ['revenue']);
+----
+'(SELECT 1)' holds a subquery
+
+statement error
+SELECT * FROM semantic_view('exi', dimensions := ['lower(region), upper(region)'], metrics := ['revenue']);
+----
+is more than one expression; give each its own item
+
+statement error
+SELECT * FROM semantic_view('exi', dimensions := ['lower(region))'], metrics := ['revenue']);
+----
+has a ')' that closes no matching bracket
+
+statement error
+SELECT * FROM semantic_view('exi', dimensions := ['region = $1'], metrics := ['revenue']);
+----
+holds the parameter $1
+
+# Role-playing: an expression over a dimension of a role-played table takes the
+# role of the metric beside it, as the dimension does, and is refused as
+# ambiguous where the dimension is.
+
+statement ok
+CREATE TABLE exi_airports (airport_code VARCHAR, city VARCHAR, elevation INTEGER);
+
+statement ok
+INSERT INTO exi_airports VALUES ('SFO', 'San Francisco', 13), ('DEN', 'Denver', 5434);
+
+statement ok
+CREATE TABLE exi_flights (flight_id INTEGER, departure_code VARCHAR, arrival_code VARCHAR);
+
+statement ok
+INSERT INTO exi_flights VALUES (1, 'SFO', 'DEN'), (2, 'SFO', 'DEN'), (3, 'DEN', 'SFO');
+
+statement ok
+CREATE SEMANTIC VIEW exi_air AS
+  TABLES (
+    f AS exi_flights PRIMARY KEY (flight_id),
+    a AS exi_airports PRIMARY KEY (airport_code)
+  )
+  RELATIONSHIPS (
+    dep_airport AS f(departure_code) REFERENCES a,
+    arr_airport AS f(arrival_code) REFERENCES a
+  )
+  FACTS (
+    a.elev AS a.elevation
+  )
+  DIMENSIONS (
+    a.city AS a.city
+  )
+  METRICS (
+    f.dep_elev USING (dep_airport) AS SUM(a.elev),
+    f.flights AS COUNT(*)
+  );
+
+query TI
+SELECT * FROM SEMANTIC_VIEW(exi_air DIMENSIONS upper(city) METRICS dep_elev) ORDER BY 1;
+----
+DENVER	5434
+SAN FRANCISCO	26
+
+statement error
+SELECT * FROM SEMANTIC_VIEW(exi_air DIMENSIONS upper(city) METRICS flights);
+----
+dimension 'upper(city)' is ambiguous -- table 'a' is reached via multiple relationships: [dep_airport, arr_airport]
+
+query I
+SELECT * FROM SEMANTIC_VIEW(exi_air METRICS dep_elev + flights AS x);
+----
+5463
+
+# A member declared without a table is on the base table, so the base table's
+# alias qualifies it inside an expression, as it does as an item: avg_order is
+# 220.00 / 3.
+
+query R
+SELECT * FROM SEMANTIC_VIEW(exi METRICS round(o.avg_order * 2, 2) AS twice);
+----
+146.67
+
+# An unknown item's error lists the view's members, not the members an
+# expression item became.
+
+statement error
+SELECT * FROM SEMANTIC_VIEW(exi DIMENSIONS lower(region), nope METRICS revenue);
+----
+Available: [region, order_date]
+
+# A wildcard takes in the view's members only, not the metric an aggregate
+# inside an expression item became.
+
+query T
+SELECT column_name FROM (DESCRIBE SELECT * FROM SEMANTIC_VIEW(exi METRICS o.*, max(o.amt) / revenue AS share));
+----
+revenue
+orders
+avg_order
+share
+
+# A struct field of a dimension is read from the dimension, in an expression
+# and as an item of its own.
+
+statement ok
+CREATE TABLE exi_sites (id INTEGER, address STRUCT(city VARCHAR, zip VARCHAR));
+
+statement ok
+INSERT INTO exi_sites VALUES
+  (1, {'city': 'Paris', 'zip': '75001'}),
+  (2, {'city': 'Lyon', 'zip': '69001'}),
+  (3, {'city': 'Paris', 'zip': '75002'});
+
+statement ok
+CREATE SEMANTIC VIEW exi_struct AS
+  TABLES (s AS exi_sites PRIMARY KEY (id))
+  DIMENSIONS (s.addr AS s.address)
+  METRICS (s.sites AS count(*));
+
+query TI
+SELECT * FROM SEMANTIC_VIEW(exi_struct DIMENSIONS upper(s.addr.city) AS city METRICS sites) ORDER BY city;
+----
+LYON	1
+PARIS	2
+
+query TI
+SELECT * FROM SEMANTIC_VIEW(exi_struct DIMENSIONS addr.city METRICS sites) ORDER BY 1;
+----
+Lyon	1
+Paris	2
+
+# A query with an expression item is not routed to a materialization, since
+# none lists the member it became. The materialization's numbers are wrong on
+# purpose, so a routed query shows them.
+
+statement ok
+CREATE TABLE exi_by_date (order_date DATE, revenue DECIMAL(10,2));
+
+statement ok
+INSERT INTO exi_by_date VALUES (DATE '2023-06-01', 999.00), (DATE '2024-01-15', 999.00), (DATE '2024-03-02', 999.00);
+
+statement ok
+CREATE SEMANTIC VIEW exi_mat AS
+  TABLES (o AS exi_orders PRIMARY KEY (id))
+  DIMENSIONS (o.order_date AS o.ordered_at)
+  METRICS (o.revenue AS sum(o.amount))
+  MATERIALIZATIONS (by_date AS (TABLE exi_by_date, DIMENSIONS (order_date), METRICS (revenue)));
+
+query R
+SELECT sum(revenue) FROM SEMANTIC_VIEW(exi_mat DIMENSIONS order_date METRICS revenue);
+----
+2997.00
+
+query IR
+SELECT * FROM SEMANTIC_VIEW(exi_mat DIMENSIONS year(order_date) AS y METRICS revenue) ORDER BY y;
+----
+2023	50.00
+2024	170.00
+
+query R
+SELECT sum(r) FROM SEMANTIC_VIEW(exi_mat DIMENSIONS order_date METRICS revenue * 1 AS r);
+----
+220.00

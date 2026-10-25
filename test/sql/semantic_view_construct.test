@@ -361,10 +361,13 @@ SELECT * FROM SEMANTIC_VIEW(svc_sv DIMENSIONS c.* AS x METRICS revenue);
 ----
 gives a wildcard an alias
 
-statement error
-SELECT * FROM SEMANTIC_VIEW(svc_sv DIMENSIONS upper(region) METRICS revenue);
+# An item may be an expression (expression_items.test has the rest).
+
+query TT rowsort
+SELECT * FROM SEMANTIC_VIEW(svc_sv DIMENSIONS lower(region) METRICS revenue);
 ----
-expressions in a query item are not supported yet (TECH-DEBT #76)
+eu	150.00
+us	70.00
 
 # A query a materialization answers is renamed and reordered too. The
 # materialization's totals differ from the base rows', so the values show the

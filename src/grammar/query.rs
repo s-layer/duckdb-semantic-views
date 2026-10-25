@@ -373,19 +373,6 @@ fn item_text(
         ));
     }
     let expr = clean(&tree.text(item.expr));
-    let is_member = expr.ends_with('*') || {
-        let refs = crate::expr_tokens::scan_references(&expr);
-        matches!(refs.as_slice(), [r] if r.start == 0 && r.end == expr.len())
-    };
-    if !is_member {
-        return Err(error_at(
-            Some(item.expr),
-            format!(
-                "'{expr}' is not a member name; expressions in a query item are not \
-                 supported yet (TECH-DEBT #76)"
-            ),
-        ));
-    }
     Ok(match item.alias {
         None => expr,
         Some((alias, true)) => format!("{expr} AS {}", clean(&tree.text(alias))),
@@ -688,27 +675,28 @@ mod tests {
         assert_eq!(at, Some(31));
     }
 
+    /// An expression item goes to its list as written; `semantic_view()` reads
+    /// it (`crate::query::expr_items`).
     #[test]
-    fn an_expression_item_is_not_supported_yet() {
+    fn an_expression_item_goes_to_its_list() {
         let sql = "SEMANTIC_VIEW(v DIMENSIONS upper(o.region) AS r)";
-        let (message, at) = error(
-            sql,
-            &[(W, "DIMENSIONS"), (E, "upper(o.region)"), (A, "AS r")],
-        );
+        let parts = [(W, "DIMENSIONS"), (E, "upper(o.region)"), (A, "AS r")];
         assert_eq!(
-            message,
-            "'upper(o.region)' is not a member name; expressions in a query item are not \
-             supported yet (TECH-DEBT #76)"
+            transform(&construct(sql, "v", &parts, None)).unwrap(),
+            "SELECT * FROM semantic_view('v', dimensions := ['upper(o.region) AS r'])"
         );
-        assert_eq!(at, Some(27));
     }
 
-    /// An item ending in `*` is a wildcard only as `<table>.*`.
+    /// An item ending in `*` is a wildcard only as `<table>.*`; `count(*)` is an
+    /// expression.
     #[test]
     fn a_call_ending_in_a_star_is_an_expression() {
         let sql = "SEMANTIC_VIEW(v METRICS count(*))";
-        let (message, _) = error(sql, &[(W, "METRICS"), (E, "count(*)")]);
-        assert!(message.contains("TECH-DEBT #76"), "{message}");
+        let parts = [(W, "METRICS"), (E, "count(*)")];
+        assert_eq!(
+            transform(&construct(sql, "v", &parts, None)).unwrap(),
+            "SELECT * FROM semantic_view('v', metrics := ['count(*)'])"
+        );
     }
 
     #[test]

@@ -29,7 +29,7 @@ Syntax
        [ column_order := [ '<list_name>' [, ...] ] ]
    )
 
-Each item in ``dimensions``, ``metrics`` or ``facts`` is ``'<member_name>'``, ``'<member_name> AS <alias>'`` or ``'<table_alias>.*'``.
+Each item in ``dimensions``, ``metrics`` or ``facts`` is ``'<member_name>'``, ``'<expression>'``, either one followed by ``AS <alias>``, or ``'<table_alias>.*'``. See :ref:`ref-sv-expression-items` for what an expression may hold.
 
 
 .. _ref-sv-params:
@@ -49,13 +49,13 @@ Parameters
      - The name of the semantic view to query. Must match a registered view. The name is folded to lowercase and matched case-insensitively, quoted or not (``'Sales'``, ``'SALES'``, and ``'"sales"'`` all resolve to the same view), following DuckDB's identifier semantics. May carry a ``<schema>.`` (or ``<database>.<schema>.``) qualifier -- ``'analytics.sales'`` -- which pins the schema. An unqualified name resolves through the session's ``search_path``, exactly as an unqualified table reference does: the first schema on the path holding a view of that name wins. A view that is the only one of its name resolves whether or not its schema is on the path, so a single-schema setup needs no ``search_path`` at all (see :ref:`ref-create-semantic-view`).
    * - ``dimensions``
      - VARCHAR[] (named)
-     - Optional list of dimension names to include in the result. Each name must match a dimension defined in the semantic view. Supports ``alias.*`` wildcard patterns.
+     - Optional list of dimensions to include in the result. Each item names a dimension defined in the semantic view, or is an :ref:`expression <ref-sv-expression-items>`. Supports ``alias.*`` wildcard patterns.
    * - ``metrics``
      - VARCHAR[] (named)
-     - Optional list of metric names to include in the result. Each name must match a metric defined in the semantic view. Supports ``alias.*`` wildcard patterns.
+     - Optional list of metrics to include in the result. Each item names a metric defined in the semantic view, or is an :ref:`expression <ref-sv-expression-items>`. Supports ``alias.*`` wildcard patterns.
    * - ``facts``
      - VARCHAR[] (named)
-     - Optional list of fact names to include in the result. Each name must match a fact defined in the semantic view. Supports ``alias.*`` wildcard patterns.
+     - Optional list of facts to include in the result. Each item names a fact defined in the semantic view, or is an :ref:`expression <ref-sv-expression-items>`. Supports ``alias.*`` wildcard patterns.
    * - ``where_clause``
      - VARCHAR (named)
      - Optional predicate applied **before** metrics are aggregated -- the equivalent of Snowflake's ``SEMANTIC_VIEW( ... WHERE <predicate> )``. See :ref:`ref-sv-pre-agg-filtering`. An omitted, empty, or whitespace-only value is treated as absent.
@@ -234,6 +234,34 @@ If the generated SQL does not bind, for example because a metric names a column 
    names are unaffected.
 
 
+.. _ref-sv-expression-items:
+
+Expression Items
+================
+
+An item can be an expression over the view's members instead of a member's name, as in Snowflake. The expansion treats it as a member it adds for this query alone, so it is grouped, joined and checked for fan traps exactly as a member declared on its table would be:
+
+.. code-block:: sql
+
+   SELECT * FROM SEMANTIC_VIEW(shop
+       DIMENSIONS DATE_PART('year', o.order_date) AS year
+       METRICS o.revenue / o.order_count AS avg_order, max(o.amount) AS biggest
+   );
+
+What an expression may use depends on its list:
+
+- In ``DIMENSIONS`` and ``FACTS``, an expression uses dimensions and facts, and all of them must belong to one table. It is a row-level value, so it holds no aggregate and no metric.
+- In ``METRICS``, an expression uses metrics, and aggregates of dimensions and facts. Each aggregate is computed as a metric of its table, so its dimensions and facts must belong to one table; ``count(DISTINCT c.region)`` counts customers over the customer table, whatever else the query asks for. A dimension or fact outside an aggregate is refused, and so is an aggregate of a metric.
+
+A member is named in an expression as it is as an item: by its name, or qualified by its table, where a member declared without a table is on the base table. A field of a ``STRUCT`` dimension or fact is read from it, so ``upper(o.address.city)``, or the item ``address.city``, is the field ``city`` of the dimension ``address``.
+
+No item holds a subquery, a window function (declare a :ref:`window metric <howto-window-metrics>` instead) or a prepared statement parameter, and a ``PRIVATE`` fact or metric cannot be used, as anywhere else in a query. An item is one expression: separate two with a comma, in two items.
+
+Without an alias, the column is named by the expression as written, so ``DIMENSIONS lower(region)`` gives a column named ``lower(region)``. An error about an expression item, such as a fan trap, names the expression as written.
+
+.. versionadded:: 0.16.0
+
+
 .. _ref-sv-construct:
 
 The ``SEMANTIC_VIEW(...)`` Construct
@@ -251,7 +279,7 @@ Snowflake queries a semantic view with ``SEMANTIC_VIEW(...)`` in ``FROM``, and s
        [ WHERE <predicate> ]
    )
 
-where each ``<item>`` is ``<member_name> [ [AS] <alias> ]`` or ``<table_alias>.*``. The view name and the items are identifiers, not strings, and no comma follows the view name. The clauses can come in any order, each at most once, and the order you write them in is the order of the columns. ``WHERE`` takes one predicate and filters the rows the metrics aggregate, as ``where_clause`` does.
+where each ``<item>`` is ``<member_name> [ [AS] <alias> ]``, ``<expression> [ [AS] <alias> ]`` or ``<table_alias>.*``. The view name and the items are identifiers, not strings, and no comma follows the view name. The clauses can come in any order, each at most once, and the order you write them in is the order of the columns. ``WHERE`` takes one predicate and filters the rows the metrics aggregate, as ``where_clause`` does.
 
 .. code-block:: sql
 
@@ -264,7 +292,7 @@ where each ``<item>`` is ``<member_name> [ [AS] <alias> ]`` or ``<table_alias>.*
        column_order := ['metrics', 'dimensions']
    );
 
-The construct parses wherever a table can: in a join, a CTE, a subquery or a view body, with a table alias and column aliases. A view over it stores the ``semantic_view()`` call, so it expands against the semantic view's current definition each time it is queried. Items are member names for now: an expression is refused.
+The construct parses wherever a table can: in a join, a CTE, a subquery or a view body, with a table alias and column aliases. A view over it stores the ``semantic_view()`` call, so it expands against the semantic view's current definition each time it is queried.
 
 A prepared statement's parameter (``?``, ``$1`` or ``$name``) in the construct's ``WHERE`` is one of the statement's parameters, numbered in the order it is written along with the rest of the statement:
 
@@ -279,7 +307,7 @@ A prepared statement's parameter (``?``, ``$1`` or ``$name``) in the construct's
 
    EXECUTE by_region(DATE '2024-01-01', 'East');
 
-It lowers to ``where_clause := 'ordered_at >= $1 AND region = $2'`` with the parameters in ``params``. A parameter anywhere else in the construct is refused: an item names a member.
+It lowers to ``where_clause := 'ordered_at >= $1 AND region = $2'`` with the parameters in ``params``. A parameter anywhere else in the construct is refused.
 
 .. versionadded:: 0.16.0
 

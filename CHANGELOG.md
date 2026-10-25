@@ -31,10 +31,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   a table alias and column aliases. Clauses can come in any order, and the order you write
   them in is the order of the columns. `WHERE` filters the rows the metrics aggregate, as
   `where_clause` does. A view over the construct expands against the semantic view's
-  current definition each time it is queried. Items are member names or `<table>.*`
-  wildcards for now; expressions are not supported yet. A prepared statement's
+  current definition each time it is queried. A prepared statement's
   parameter (`?`, `$1`, `$name`) in its `WHERE` is one of the statement's parameters, as
   in `PREPARE p AS SELECT * FROM SEMANTIC_VIEW(sales METRICS o.revenue WHERE o.year = ?)`.
+
+- **Expressions as query items.** A `DIMENSIONS`, `METRICS` or `FACTS` item, in the
+  construct or in a `semantic_view()` list, can be an expression over the view's members,
+  as in Snowflake:
+  `SEMANTIC_VIEW(sales DIMENSIONS DATE_PART('year', o.order_date) AS year METRICS o.revenue / o.orders AS avg_order, max(o.amount) AS biggest)`.
+  A dimension or fact expression uses dimensions and facts of one table. A metric
+  expression uses metrics, and aggregates of the dimensions and facts of one table, each
+  computed over its own table. An expression item is grouped, joined and checked for fan
+  traps as a member declared on its table would be, so `COUNT(DISTINCT ...)`, ratios and
+  metrics of different tables come out right. Without an alias, the column is named by
+  the expression as written.
 
 - **Output names and column order for `semantic_view()`.** A `dimensions`, `metrics` or
   `facts` item can name its output column with `AS`, as in `'o.region AS r'`, and the new
