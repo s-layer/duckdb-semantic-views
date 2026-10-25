@@ -243,6 +243,23 @@ SELECT contains(GET_DDL('SEMANTIC_VIEW', 'gc_dv'), 'sum(d.price$usd$)');
 ----
 true
 
+# A fact whose name is part of that column name is not inlined into it.
+statement ok
+CREATE SEMANTIC VIEW gc_dp AS TABLES (d AS gc_d PRIMARY KEY (id)) FACTS (d.price AS d.id * 100) METRICS (d.total AS sum(d.price$usd$));
+
+query I
+SELECT total FROM semantic_view('gc_dp', metrics := ['total']);
+----
+42
+
+statement ok
+CREATE SEMANTIC VIEW gc_du AS TABLES (d AS gc_d PRIMARY KEY (id)) FACTS (d.usd AS d.id * 100) METRICS (d.total AS sum(d.price$usd$));
+
+query I
+SELECT total FROM semantic_view('gc_du', metrics := ['total']);
+----
+42
+
 # An unquoted bracket is not part of a name: it is refused, not stored.
 statement error
 CREATE SEMANTIC VIEW gc_br AS TABLES (d AS gc_d PRIMARY KEY (id)) DIMENSIONS (d.(p) AS d.id) METRICS (d.total AS sum(d.id));

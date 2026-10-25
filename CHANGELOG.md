@@ -140,7 +140,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   semantic view's expression was read as the start of a `$usd$ … $usd$` string, so
   `CREATE` failed with an unrelated syntax error. As in DuckDB, a `$` right after a
   letter, digit or `_` now continues the name, and a dollar-quoted string opens only at
-  the start of a token.
+  the start of a token. A fact named `price` or `usd` is not mistaken for part of it.
 
 - **An unquoted bracket in a name is refused.** `CREATE` accepted a dimension, fact, metric
   or relationship name such as `o.(region)`, though DuckDB never reads a bracket as part of

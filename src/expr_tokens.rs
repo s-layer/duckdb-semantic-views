@@ -563,7 +563,11 @@ fn scan_chain(bytes: &[u8], start: usize) -> usize {
             i = skip_quoted_part(bytes, i);
         } else {
             let part_start = i;
-            while i < len && crate::util::is_ident_byte(bytes[i]) {
+            // A `$` continues a part once it has started (`price$usd$`).
+            while i < len
+                && (crate::util::is_ident_byte(bytes[i])
+                    || (i > part_start && crate::util::is_ident_continue(bytes[i])))
+            {
                 i += 1;
             }
             if i == part_start {
@@ -616,7 +620,7 @@ fn first_part_len(chain: &str) -> usize {
         skip_quoted_part(bytes, 0)
     } else {
         let mut i = 0;
-        while i < bytes.len() && crate::util::is_ident_byte(bytes[i]) {
+        while i < bytes.len() && crate::util::is_ident_continue(bytes[i]) {
             i += 1;
         }
         i
@@ -1795,5 +1799,16 @@ mod tests {
             prop_assume!(head != tail);
             prop_assert_eq!(rewrite_qualifier(&expr, &tail, "<Q>"), expr);
         }
+    }
+
+    /// A `$` after the first byte continues a name, as in `DuckDB`, so
+    /// `o.price$usd$` is one chain, not `o.price`, `$`, `usd`, `$`.
+    #[test]
+    fn dollar_inside_a_name_continues_the_chain() {
+        let refs: Vec<&str> = scan_references("sum(o.price$usd$) + o.a$b")
+            .iter()
+            .map(|r| r.raw)
+            .collect();
+        assert_eq!(refs, vec!["o.price$usd$", "o.a$b"]);
     }
 }

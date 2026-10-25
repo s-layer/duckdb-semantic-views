@@ -48,6 +48,15 @@ pub fn is_ident_byte(b: u8) -> bool {
     b.is_ascii_alphanumeric() || b == b'_' || b >= 0x80
 }
 
+/// Whether `b` continues an identifier that has already started: an
+/// [`is_ident_byte`], or `$`. `DuckDB` reads `price$usd$` as one name, but a
+/// `$` cannot start one (`$1` is a parameter, `$tag$` a dollar quote), so a
+/// scanner starts a name on [`is_ident_byte`] and extends it with this.
+#[must_use]
+pub fn is_ident_continue(b: u8) -> bool {
+    is_ident_byte(b) || b == b'$'
+}
+
 /// Whether the `'` at `quote` opens a `DuckDB` **escape string** (`E'…'`).
 ///
 /// `DuckDB` accepts the Postgres spelling in which `\'` is an escaped quote, so
@@ -114,12 +123,13 @@ pub fn byte_offset_within(outer: &str, inner: &str) -> usize {
     inner_start - outer_start
 }
 
-/// Is `b` a word-boundary byte — i.e. NOT an [`is_ident_byte`]? The
+/// Is `b` a word-boundary byte — i.e. NOT an [`is_ident_continue`] byte? The
 /// primitive used by the `expand::facts` COUNT / name matchers so they share
-/// the parser's notion of an identifier boundary.
+/// the parser's notion of an identifier boundary: `count` in `x$count(` is part
+/// of the name `x$count`, not a call to `COUNT`.
 #[must_use]
 pub fn is_word_boundary_char(b: u8) -> bool {
-    !is_ident_byte(b)
+    !is_ident_continue(b)
 }
 
 /// Does `s` start with the ASCII keyword `kw`, case-insensitively?
@@ -637,11 +647,17 @@ mod tests {
 
     #[test]
     fn ident_byte_is_the_single_boundary_definition() {
-        // is_word_boundary_char is exactly the inverse of is_ident_byte, and
-        // the classification is: ASCII alnum / `_` / all non-ASCII bytes are
-        // identifier bytes; ASCII punctuation and whitespace are boundaries.
+        // is_word_boundary_char is exactly the inverse of is_ident_continue,
+        // which adds only `$` to is_ident_byte, and the classification is:
+        // ASCII alnum / `_` / all non-ASCII bytes are identifier bytes; ASCII
+        // punctuation and whitespace are boundaries.
         for b in 0u8..=255 {
-            assert_eq!(is_word_boundary_char(b), !is_ident_byte(b), "byte {b}");
+            assert_eq!(is_word_boundary_char(b), !is_ident_continue(b), "byte {b}");
+            assert_eq!(
+                is_ident_continue(b),
+                is_ident_byte(b) || b == b'$',
+                "byte {b}"
+            );
         }
         for &b in b"aZ0_" {
             assert!(is_ident_byte(b));
