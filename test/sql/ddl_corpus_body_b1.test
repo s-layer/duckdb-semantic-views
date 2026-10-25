@@ -264,22 +264,35 @@ DIMENSIONS (
 # --- qualified entries (DIMENSIONS / FACTS): alias.name AS expr ---
 
 # C-012: body_parser/mod.rs::parse_qualified_entries_simple — `o.revenue AS SUM(amount)` in DIMENSIONS splits into alias o, name revenue, expr SUM(amount)
-# PRE-EXISTING (TECH-DEBT #95): an aggregate DIMENSION expression is accepted at CREATE (DATA_TYPE
-# BIGINT), but no query can use it (GROUP BY cannot contain aggregates). Snowflake
-# rejects aggregates in a dimension at CREATE.
-statement ok
+# No query could use an aggregate dimension (GROUP BY cannot contain one), so
+# CREATE refuses it, as Snowflake does (TECH-DEBT #95). The message names the
+# entry's name and the function the expression calls.
+statement error
 CREATE SEMANTIC VIEW dcc_c012 AS TABLES (o AS dcc_orders PRIMARY KEY (id)) DIMENSIONS (o.revenue AS SUM(amount));
-
-query T nosort
-SELECT * FROM dcc_ddl('dcc_c012');
 ----
-CREATE OR REPLACE SEMANTIC VIEW dcc_c012 AS
-TABLES (
-    o AS dcc_orders PRIMARY KEY (id)
-)
-DIMENSIONS (
-    o.revenue AS SUM(amount)
-)
+dimension 'revenue' must not contain the aggregate function 'sum'
+
+# The YAML forms pass the same check.
+statement error
+CREATE SEMANTIC VIEW dcc_c012 FROM YAML $$
+tables:
+  - alias: o
+    table: dcc_orders
+    pk_columns: [id]
+dimensions:
+  - name: revenue
+    expr: SUM(o.amount)
+    source_table: o
+metrics: []
+$$
+----
+dimension 'revenue' must not contain the aggregate function 'sum'
+
+# A fact is a row-level value too, so it refuses an aggregate as well.
+statement error
+CREATE SEMANTIC VIEW dcc_c012 AS TABLES (o AS dcc_orders PRIMARY KEY (id)) FACTS (o.share AS o.amount / SUM(o.amount)) DIMENSIONS (o.region AS o.region);
+----
+fact 'share' must not contain the aggregate function 'sum'
 
 # C-013: body_parser/mod.rs::parse_qualified_entries_nested_parens — nested parens in the expression are kept verbatim
 statement ok

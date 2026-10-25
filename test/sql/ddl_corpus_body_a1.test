@@ -232,23 +232,15 @@ DIMENSIONS (
 )
 
 # B-007: body_parser/mod.rs::split_lone_dollar_is_live_not_a_tag — a positional `$1` is not a dollar-quote opener; the following comma still splits
-# PRE-EXISTING (TECH-DEBT #95): a `$1` dimension expression is stored; when #95 rejects it, move this split check to a `$1` the grammar still accepts.
-statement ok
+# CREATE refuses a parameter in a member (TECH-DEBT #95), so the split shows in
+# which refusal comes first: the aggregate check runs over every dimension
+# before the parameter check, and it names `a`, the entry after the comma.
+statement error
 CREATE SEMANTIC VIEW dcb_split_param AS
 TABLES (o AS dcb_orders PRIMARY KEY (id))
-DIMENSIONS (o.p AS $1, o.a AS o.a);
-
-query T nosort
-SELECT * FROM dcb_ddl('dcb_split_param');
+DIMENSIONS (o.p AS $1, o.a AS SUM(o.a));
 ----
-CREATE OR REPLACE SEMANTIC VIEW dcb_split_param AS
-TABLES (
-    o AS dcb_orders PRIMARY KEY (id)
-)
-DIMENSIONS (
-    o.p AS $1,
-    o.a AS o.a
-)
+dimension 'a' must not contain the aggregate function 'sum'
 
 # B-008: body_parser/mod.rs::split_trailing_comma_discarded — a single trailing comma is tolerated and adds no entry
 statement ok

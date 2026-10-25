@@ -91,6 +91,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   YAML export of a view stored in the legacy format, which lists no tables, can no longer be
   imported either; re-create that view with `CREATE OR REPLACE SEMANTIC VIEW`.
 
+- **CREATE rejects an aggregate in a dimension or fact, and a parameter in any member.** A
+  dimension such as `o.revenue AS SUM(o.amount)` is now refused, as Snowflake does: a
+  dimension is a row-level value that queries group by, so no query could use it. A fact
+  is refused the same way, as the CREATE reference already said it was. Define a metric
+  instead. An aggregate inside a scalar subquery, as in `(SELECT max(t) FROM tiers)`, is
+  still accepted. A prepared statement parameter (`?`, `$1`, `$name`) in a dimension, fact or
+  metric is refused too: it has no value inside the view, and before, every query that
+  used the member failed. Put parameters in the query's `WHERE` clause instead. A view
+  stored before this release with either shape still fails at query time as it did.
+
 - **A member named with the word `as` has to be quoted in a `semantic_view()` list item.**
   Since an item can now give its column an alias with `AS`, a member whose name contains
   the word `as` on its own (`Sales as of`) has to be quoted there (`'"Sales as of"'`).

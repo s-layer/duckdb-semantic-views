@@ -72,13 +72,14 @@ const AGGREGATE_FUNCTIONS: &[&str] = &[
 /// `None`.
 #[must_use]
 pub fn contains_aggregate_function(expr: &str) -> Option<&'static str> {
-    for head in crate::expr_tokens::scan_function_heads(expr) {
-        let name = head.last_part_key();
-        if let Some(&func) = AGGREGATE_FUNCTIONS.iter().find(|&&f| f == name.as_str()) {
-            return Some(func);
-        }
-    }
-    None
+    crate::expr_tokens::scan_function_heads(expr)
+        .into_iter()
+        .find_map(|head| aggregate_name(&head.last_part_key()))
+}
+
+/// `name` (a lowercase function-name key) if it is a known aggregate.
+pub(super) fn aggregate_name(name: &str) -> Option<&'static str> {
+    AGGREGATE_FUNCTIONS.iter().copied().find(|&f| f == name)
 }
 
 /// Validate derived metrics in a semantic view definition.

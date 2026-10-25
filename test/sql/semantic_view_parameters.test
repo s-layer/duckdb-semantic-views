@@ -223,14 +223,57 @@ SELECT * FROM semantic_view('svp_sv', dimensions := ['c.region'], metrics := ['o
 ----
 params must be a row of values
 
-# --- A parameter a stored member holds (TECH-DEBT #95) -----------------------
+# --- A parameter a member holds (TECH-DEBT #95) ------------------------------
 # Only the predicate's parameters take values. One that a member's expression
-# holds has none to take, so the query is refused rather than give it one.
+# holds has none to take, so CREATE refuses it, in any member and any form.
 
-statement ok
+statement error
 CREATE SEMANTIC VIEW svp_held AS
   TABLES (c AS svp_customers PRIMARY KEY (id))
   DIMENSIONS (c.p AS $1, c.region AS c.region);
+----
+dimension 'p' holds the prepared statement parameter $1, which has no value
+
+statement error
+CREATE SEMANTIC VIEW svp_held AS
+  TABLES (c AS svp_customers PRIMARY KEY (id))
+  FACTS (c.f AS c.id * ?)
+  DIMENSIONS (c.region AS c.region);
+----
+fact 'f' holds the prepared statement parameter ?, which has no value
+
+statement error
+CREATE SEMANTIC VIEW svp_held AS
+  TABLES (c AS svp_customers PRIMARY KEY (id))
+  DIMENSIONS (c.region AS c.region)
+  METRICS (c.n AS COUNT(*) + $n);
+----
+metric 'n' holds the prepared statement parameter $n, which has no value
+
+statement error
+CREATE SEMANTIC VIEW svp_held FROM YAML $$
+tables:
+  - alias: c
+    table: svp_customers
+    pk_columns: [id]
+dimensions:
+  - name: p
+    expr: $1
+    source_table: c
+metrics: []
+$$;
+----
+dimension 'p' holds the prepared statement parameter $1, which has no value
+
+# A definition stored before CREATE refused this (planted here past the
+# parser) is still refused at query time rather than given a value.
+
+statement ok
+INSERT INTO semantic_layer._definitions (schema_name, name, definition) VALUES (
+  'main',
+  'svp_held',
+  '{"tables":[{"alias":"c","table":"svp_customers","pk_columns":["id"]}],"dimensions":[{"name":"p","expr":"$1","source_table":"c"},{"name":"region","expr":"c.region","source_table":"c"}],"metrics":[],"schema_version":1}'
+)
 
 statement error
 SELECT * FROM semantic_view('svp_held', dimensions := ['p']);

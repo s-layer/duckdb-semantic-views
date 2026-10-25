@@ -68,8 +68,15 @@ METRICS (
 )
 
 # F-049: parse_proptest.rs::facts_clause_no_panic — one FACTS entry per expression shape of the generator (alias-qualified column, `a + b`, `alias.SUM(x)`, `a * (1 - b)`), stored verbatim (zero entries: F-048) [text]
+# The `alias.SUM(x)` shape calls the aggregate `sum`, which a fact refuses
+# (TECH-DEBT #95), so it is checked on its own; the other shapes are stored.
+statement error
+CREATE SEMANTIC VIEW dcf_f1 AS TABLES (t AS dcf_orders PRIMARY KEY (id)) FACTS (t.f_col AS t.amount, t.f_sum AS t.SUM(amount)) DIMENSIONS (t.region AS region) METRICS (t.rev AS SUM(amount));
+----
+fact 'f_sum' must not contain the aggregate function 'sum'
+
 statement ok
-CREATE SEMANTIC VIEW dcf_f1 AS TABLES (t AS dcf_orders PRIMARY KEY (id)) FACTS (t.f_col AS t.amount, t.f_add AS t.amount + id, t.f_sum AS t.SUM(amount), t.f_mul AS t.amount * (1 - id)) DIMENSIONS (t.region AS region) METRICS (t.rev AS SUM(amount));
+CREATE SEMANTIC VIEW dcf_f1 AS TABLES (t AS dcf_orders PRIMARY KEY (id)) FACTS (t.f_col AS t.amount, t.f_add AS t.amount + id, t.f_mul AS t.amount * (1 - id)) DIMENSIONS (t.region AS region) METRICS (t.rev AS SUM(amount));
 
 query T nosort
 SELECT * FROM dcf_ddl('dcf_f1');
@@ -81,7 +88,6 @@ TABLES (
 FACTS (
     t.f_col AS t.amount,
     t.f_add AS t.amount + id,
-    t.f_sum AS t.SUM(amount),
     t.f_mul AS t.amount * (1 - id)
 )
 DIMENSIONS (
