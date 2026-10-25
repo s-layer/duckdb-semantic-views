@@ -713,10 +713,97 @@ For example, a definition without a ``metrics`` key fails with:
 
 .. _ref-err-query:
 
-Query Errors (semantic_view)
-============================
+Query Errors
+============
 
-These errors occur at query time when calling :ref:`semantic_view() <ref-semantic-view-function>` or :ref:`explain_semantic_view() <ref-explain-semantic-view>`.
+These errors occur at query time, when querying with the :ref:`SEMANTIC_VIEW(...) <ref-sv-construct>` construct, :ref:`semantic_view() <ref-semantic-view-function>` or :ref:`explain_semantic_view() <ref-explain-semantic-view>`. The construct turns into a ``semantic_view()`` call, so a message that names a list such as ``metrics := [...]`` means the clause of the same name, ``METRICS``, when you wrote the construct.
+
+
+.. _ref-err-construct:
+
+Malformed SEMANTIC_VIEW(...)
+----------------------------
+
+.. versionadded:: 0.16.0
+
+.. code-block:: text
+
+   Parser Error: expected DIMENSIONS, METRICS, FACTS or WHERE after the view name in SEMANTIC_VIEW(...), got: ,
+
+   Parser Error: METRICS given twice in SEMANTIC_VIEW(...)
+
+   Parser Error: METRICS needs at least one item
+
+**Cause:** The construct's clauses are not where the grammar expects them. The usual slips are a comma after the view name (the construct has none), a clause written twice, and a clause with no items.
+
+**Fix:** Write the view name, then each clause at most once, each with at least one item: ``SEMANTIC_VIEW(shop DIMENSIONS region METRICS revenue, order_count)``. To add items, extend the one clause rather than repeating it.
+
+
+Parameter outside WHERE
+-----------------------
+
+.. versionadded:: 0.16.0
+
+.. code-block:: text
+
+   Parser Error: prepared statement parameters are only supported in the WHERE clause of SEMANTIC_VIEW(...)
+
+**Cause:** A prepared-statement parameter (``?``, ``$1``, ``$name``) appears in ``DIMENSIONS``, ``METRICS``, ``FACTS`` or the view name of the construct.
+
+**Fix:** Use parameters only in the construct's ``WHERE``. To choose the view, the dimensions or the metrics at run time, use :ref:`semantic_view() <ref-semantic-view-function>`, whose arguments can all be bound.
+
+
+Two columns with the same name
+------------------------------
+
+.. versionadded:: 0.16.0
+
+.. code-block:: text
+
+   semantic view '<view>': two columns of the query are named '<name>'; give one of them another name with AS
+
+**Cause:** Two items produce the same column name, through an alias or because an alias repeats a member's name.
+
+**Fix:** Give one of them another alias.
+
+
+.. _ref-err-expression-items:
+
+Expression item errors
+----------------------
+
+.. versionadded:: 0.16.0
+
+An :ref:`expression item <ref-sv-expression-items>` is checked against the rules for its clause. Each message quotes the expression as you wrote it:
+
+.. code-block:: text
+
+   '<name>' in '<expression>' is not a dimension, fact or metric of semantic view '<view>'; an expression item can only read the view's members
+
+   '<expression>' uses '<a>' and '<b>', which belong to different tables; the dimensions and facts of <item> must belong to one table
+
+   '<expression>' in DIMENSIONS holds the aggregate function '<function>'; an aggregate goes in METRICS
+
+   '<name>' in '<expression>' is a fact; in METRICS a dimension or fact can only be used inside an aggregate
+
+   '<name>' in '<expression>' is a metric; an aggregate in METRICS can only use dimensions and facts
+
+   '<expression>' refers to no dimension or fact; an aggregate in METRICS must use at least one
+
+   '<expression>' holds a window function; a query item cannot, so declare a window metric in the semantic view
+
+   '<expression>' holds a subquery; a query item cannot, only the WHERE clause can
+
+**Cause and fix**, in the same order:
+
+- The expression names a column the view does not declare, such as a raw table column. An expression reads only the view's members. Declare the column as a dimension or fact, or use the member that already wraps it.
+- A ``DIMENSIONS`` or ``FACTS`` expression, or one aggregate in ``METRICS``, mixes members of two tables. Its members must belong to one table, so query them as two items.
+- An aggregate in ``DIMENSIONS`` or ``FACTS``. Move the item to ``METRICS``.
+- A dimension or fact used bare in ``METRICS``. Wrap it in an aggregate (``max(amount)``), or move it to ``DIMENSIONS``.
+- An aggregate over a metric, as in ``sum(revenue)``. A metric is already aggregated; use it as it is, or aggregate the fact it is built from.
+- An aggregate that names no member, such as ``count(*)``, has no table to be computed over. Declare it as a metric in the view (``o.order_count AS COUNT(*)``) and query that.
+- A window function. Declare a :ref:`window metric <howto-window-metrics>`.
+- A subquery. Filter with a subquery in ``WHERE`` instead, or declare a member over it.
 
 
 View not found
@@ -744,7 +831,7 @@ Empty request
 
 **Cause:** Neither ``dimensions``, ``metrics``, nor ``facts`` was specified in the query.
 
-**Fix:** Add at least one of ``dimensions := [...]``, ``metrics := [...]``, or ``facts := [...]``.
+**Fix:** Add at least one of ``DIMENSIONS``, ``METRICS`` or ``FACTS`` (``dimensions := [...]``, ``metrics := [...]``, or ``facts := [...]``).
 
 
 Unknown dimension
@@ -922,7 +1009,7 @@ Private metric
    semantic view '<view>': metric '<name>' is private and cannot be queried
    directly. Private metrics can only be used in derived metric expressions.
 
-**Cause:** A metric marked ``PRIVATE`` was requested in the ``metrics := [...]`` list.
+**Cause:** A metric marked ``PRIVATE`` was requested in ``METRICS`` (the ``metrics := [...]`` list), or used in an expression item.
 
 **Fix:** Private metrics exist for internal composition only. Query a public derived metric that uses the private metric, or recreate the view without the ``PRIVATE`` keyword. See :ref:`howto-metadata-annotations`.
 
@@ -937,7 +1024,7 @@ Private fact
    semantic view '<view>': fact '<name>' is private and cannot be queried
    directly. Private facts can only be used in derived expressions.
 
-**Cause:** A fact marked ``PRIVATE`` was requested in the ``facts := [...]`` list.
+**Cause:** A fact marked ``PRIVATE`` was requested in ``FACTS`` (the ``facts := [...]`` list), or used in an expression item.
 
 **Fix:** Remove the ``PRIVATE`` keyword from the fact to make it queryable, or reference the fact only from metric expressions.
 
@@ -952,7 +1039,7 @@ Cannot combine facts and metrics
    semantic view '<view>': cannot combine facts and metrics in the same query.
    Use facts := [...] OR metrics := [...], not both.
 
-**Cause:** The query includes both ``facts := [...]`` and ``metrics := [...]``. Facts are row-level expressions; metrics are aggregated. These modes are mutually exclusive.
+**Cause:** The query includes both ``FACTS`` and ``METRICS`` (``facts := [...]`` and ``metrics := [...]``). Facts are row-level expressions; metrics are aggregated. These modes are mutually exclusive.
 
 **Fix:** Run two separate queries -- one for facts and one for metrics.
 
@@ -1050,7 +1137,7 @@ Query time limit exceeded
 
    INTERRUPT Error: Query exceeded maximum execution time
 
-**Cause:** The session has a per-query time limit (``SET max_execution_time``, in milliseconds), and the query ran past it. This is DuckDB's own error. It applies to ``semantic_view()`` and to the ``SHOW`` and ``DESCRIBE`` commands that report member data types (see :ref:`ref-sv-time-limits`).
+**Cause:** The session has a per-query time limit (``SET max_execution_time``, in milliseconds), and the query ran past it. This is DuckDB's own error. It applies to semantic-view queries and to the ``SHOW`` and ``DESCRIBE`` commands that report member data types (see :ref:`ref-sv-time-limits`).
 
 **Fix:** Raise the limit, or turn it off for the session:
 
@@ -1111,7 +1198,7 @@ Unqualified name that is not on the search path
 
 This applies to reads and writes alike, and ``IF EXISTS`` does not suppress it: that clause means "do not complain if the view is absent", and a view sitting off the path is not absent. Suppressing it would let a ``DROP`` silently remove one of several same-named views.
 
-**Fix:** Either qualify the reference (``DROP SEMANTIC VIEW analytics.sales``, ``semantic_view('analytics.sales')``) or put the schema on the path (``SET search_path = 'analytics'``). When several schemas hold the name, the first one on the path wins.
+**Fix:** Either qualify the reference (``DROP SEMANTIC VIEW analytics.sales``, ``SEMANTIC_VIEW(analytics.sales METRICS ...)``) or put the schema on the path (``SET search_path = 'analytics'``). When several schemas hold the name, the first one on the path wins.
 
 **Note:** A view that is the *only* one of its name resolves whether or not its schema is on the path, so this error only appears once a second view shares the name.
 
@@ -1151,7 +1238,7 @@ Unqualified wildcard
 
 **Cause:** A bare ``*`` was used without a table alias prefix.
 
-**Fix:** Use ``alias.*`` instead of ``*``. For example: ``dimensions := ['o.*']`` to select all dimensions from the ``o`` table alias.
+**Fix:** Use ``alias.*`` instead of ``*``. For example: ``DIMENSIONS o.*`` (``dimensions := ['o.*']``) to select all dimensions from the ``o`` table alias.
 
 
 Unknown table alias in wildcard

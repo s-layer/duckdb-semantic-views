@@ -47,7 +47,7 @@ Concept Mapping
      - ``METRICS`` clause
    * - Reusable row-level expressions
      - ``FACTS`` clause
-     - ``FACTS`` clause (queryable via ``facts := [...]``)
+     - ``FACTS`` clause (queryable with ``FACTS`` in ``SEMANTIC_VIEW(...)``)
    * - Metric composition
      - Derived metrics (metric referencing other metrics)
      - Derived metrics (same pattern)
@@ -67,11 +67,11 @@ Concept Mapping
      - Not part of Snowflake's ``CREATE SEMANTIC VIEW`` DDL
      - ``MATERIALIZATIONS`` clause for routing to pre-aggregated tables (see :ref:`howto-materializations`)
    * - Query interface
-     - Direct SQL with semantic resolution
-     - :ref:`semantic_view() <ref-semantic-view-function>` table function
+     - ``SEMANTIC_VIEW(...)`` construct, and direct SQL with semantic resolution
+     - The same :ref:`SEMANTIC_VIEW(...) <ref-sv-construct>` construct, and the :ref:`semantic_view() <ref-semantic-view-function>` table function it turns into; no direct SQL
    * - Wildcard selection
      - ``alias.*`` in query parameters
-     - ``alias.*`` in ``dimensions``, ``metrics``, ``facts`` parameters (see :ref:`howto-wildcard-selection`)
+     - ``alias.*`` in ``DIMENSIONS``, ``METRICS``, ``FACTS`` (see :ref:`howto-wildcard-selection`)
    * - View inspection
      - ``DESCRIBE`` / ``DESC SEMANTIC VIEW``
      - :ref:`DESCRIBE SEMANTIC VIEW <ref-describe-semantic-view>` (``DESC`` abbreviation also accepted)
@@ -433,7 +433,7 @@ Four boundaries apply:
   as the single-grain path already did. Without ``USING`` the query keeps the
   fan trap error, since a grain CTE would otherwise choose among the
   relationship instances by declaration order. This covers only a queried
-  dimension's own table -- a :ref:`where_clause <ref-sv-pre-agg-filtering>` member on a role-played table, a
+  dimension's own table -- a :ref:`WHERE <ref-sv-pre-agg-filtering>` member on a role-played table, a
   metric aggregated at one, or a table reachable only *through* one still error.
   A definition that merely *declares* role-playing does not lose per-grain
   emission: the test is what the query reaches, so unrelated grains in the same
@@ -465,14 +465,14 @@ Both systems allow facts to be queried directly as row-level columns. In Snowfla
 .. code-block:: sql
 
    -- DuckDB: query facts as row-level columns
-   SELECT * FROM semantic_view('analytics',
-       dimensions := ['region'],
-       facts := ['net_price']
+   SELECT * FROM SEMANTIC_VIEW(analytics
+       DIMENSIONS region
+       FACTS net_price
    );
 
 .. warning::
 
-   In both systems, facts and metrics cannot be combined in the same query. Use ``facts := [...]`` OR ``metrics := [...]``, not both.
+   In both systems, facts and metrics cannot be combined in the same query. Use ``FACTS`` or ``METRICS``, not both.
 
 
 Semi-Additive and Window Metrics
@@ -563,11 +563,11 @@ Snowflake ``CREATE SEMANTIC VIEW`` features that are commonly asked about, and w
    * - Direct SQL query interface
      - Not planned; query with the :ref:`SEMANTIC_VIEW(...) construct <ref-sv-construct>` or the :ref:`semantic_view() <ref-semantic-view-function>` table function
    * - Pre-aggregation ``WHERE`` -- ``SEMANTIC_VIEW( v METRICS ... DIMENSIONS ... WHERE <predicate> )``, where the predicate `may refer only to dimensions, facts, and expressions over them <https://docs.snowflake.com/en/sql-reference/constructs/semantic_view>`_ and "is applied before the metrics are computed"
-     - **Supported** as the :ref:`where_clause <ref-sv-pre-agg-filtering>` named parameter, written ``where_clause := '...'`` (``where`` is a reserved word in DuckDB's named-parameter position, so it cannot be spelled ``where :=``). The predicate names declared dimensions and facts, is substituted to their expressions, and is applied before aggregation on every emission path -- before the ``GROUP BY`` when the query is a single ``SELECT`` (one grain, dimensions only, or facts), inside *each* per-grain aggregate for multi-grain queries, inside the snapshot selection before the ``RANK`` for semi-additive metrics, and inside the inner aggregation before the window function. So "revenue for orders shipped after X" recomputes each group over the matching rows. Referencing a metric is rejected, matching Snowflake, and members the predicate names participate in the same reachability and fan-out checks as queried dimensions.
+     - **Supported**, written the same way in the :ref:`SEMANTIC_VIEW(...) construct <ref-sv-construct>`, and as the :ref:`where_clause <ref-sv-pre-agg-filtering>` named parameter of ``semantic_view()`` (``where`` is a reserved word in DuckDB's named-parameter position, so the parameter cannot be spelled ``where :=``). A prepared-statement parameter in the construct's ``WHERE`` is one of the statement's parameters. The predicate names declared dimensions and facts, is substituted to their expressions, and is applied before aggregation on every emission path -- before the ``GROUP BY`` when the query is a single ``SELECT`` (one grain, dimensions only, or facts), inside *each* per-grain aggregate for multi-grain queries, inside the snapshot selection before the ``RANK`` for semi-additive metrics, and inside the inner aggregation before the window function. So "revenue for orders shipped after X" recomputes each group over the matching rows. Referencing a metric is rejected, matching Snowflake, and members the predicate names participate in the same reachability and fan-out checks as queried dimensions.
    * - Query-time scalar expressions -- ``SEMANTIC_VIEW( v DIMENSIONS DATE_PART('year', orders.order_date) AS year )``, where a ``DIMENSIONS`` / ``FACTS`` item `may be a scalar expression over dimensions or facts of the same logical table <https://docs.snowflake.com/en/sql-reference/constructs/semantic_view>`_, a ``METRICS`` item may be an expression over metrics, and any item may take ``AS <alias>``
      - **Supported.** An item may be an expression, in the construct and in a ``semantic_view()`` list (``'DATE_PART(''year'', o.order_date) AS year'``), with Snowflake's rules: a ``DIMENSIONS`` or ``FACTS`` expression uses dimensions and facts of one table, and a ``METRICS`` expression uses metrics and aggregates of the dimensions and facts of one table. An expression item is planned as a member of its table, so ``COUNT(DISTINCT ...)``, ratios and per-grain metrics come out right, and the fan-trap checks apply to it. Any item may take ``AS <alias>`` (optional in the construct, as in Snowflake). See :ref:`ref-sv-expression-items`.
    * - Named filters -- ``LABELS = (FILTER)`` on a fact or dimension resolving to ``BOOLEAN``, referenced bare in a query's ``WHERE`` (`Snowflake GA May 2026 <https://docs.snowflake.com/en/user-guide/views-semantic/filters>`_)
-     - **Supported.** ``LABELS = (FILTER)`` is accepted on a fact or dimension entry, in any order among ``COMMENT`` / ``WITH SYNONYMS``, and survives ``GET_DDL``, YAML export, and ``DESCRIBE`` (as a ``LABELS`` property row valued ``["FILTER"]``). Referencing the member bare in ``where_clause`` works via the pre-aggregation predicate above -- a filter is an ordinary boolean member, so the label declares *intent* and drives introspection rather than gating resolution. The ``BOOLEAN`` requirement is enforced by DuckDB's binder at query time, not at ``CREATE``: typing an arbitrary expression needs a binder, so a non-boolean filter raises DuckDB's own type error when queried. Labels other than ``FILTER`` are rejected rather than silently dropped.
+     - **Supported.** ``LABELS = (FILTER)`` is accepted on a fact or dimension entry, in any order among ``COMMENT`` / ``WITH SYNONYMS``, and survives ``GET_DDL``, YAML export, and ``DESCRIBE`` (as a ``LABELS`` property row valued ``["FILTER"]``). Referencing the member bare in the query's ``WHERE`` works via the pre-aggregation predicate above -- a filter is an ordinary boolean member, so the label declares *intent* and drives introspection rather than gating resolution. The ``BOOLEAN`` requirement is enforced by DuckDB's binder at query time, not at ``CREATE``: typing an arbitrary expression needs a binder, so a non-boolean filter raises DuckDB's own type error when queried. Labels other than ``FILTER`` are rejected rather than silently dropped.
    * - Column-level security
      - Out of scope; DuckDB handles access control
    * - ``ASOF`` / temporal relationships

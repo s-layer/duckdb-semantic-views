@@ -90,7 +90,7 @@ Returns one row per reachable dimension with 4 columns:
      - The dimension name.
    * - ``data_type``
      - VARCHAR
-     - The type the member's column has in a :ref:`semantic_view() <ref-semantic-view-function>` query, in DuckDB's spelling (``VARCHAR``, ``BIGINT``, ``DECIMAL(38,2)``). Determined when the command runs, so it follows the current source columns. Empty when the member's source no longer binds (for example, its table was dropped), or when the member cannot be queried on its own because of a fan trap. See :ref:`Reported Data Types <explanation-sf-data-types>`.
+     - The type the member's column has in a :ref:`semantic-view query <ref-semantic-view-function>`, in DuckDB's spelling (``VARCHAR``, ``BIGINT``, ``DECIMAL(38,2)``). Determined when the command runs, so it follows the current source columns. Empty when the member's source no longer binds (for example, its table was dropped), or when the member cannot be queried on its own because of a fan trap. See :ref:`Reported Data Types <explanation-sf-data-types>`.
    * - ``required``
      - BOOLEAN
      - ``TRUE`` if the dimension is referenced in a window metric's ``PARTITION BY EXCLUDING``, ``PARTITION BY``, or ``ORDER BY`` clause (meaning it must be included in the query for that metric). ``FALSE`` for all other dimensions and for non-window metrics.

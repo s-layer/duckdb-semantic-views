@@ -102,9 +102,9 @@ Request revenue by customer. The extension joins only the ``customers`` table; `
 
 .. code-block:: sql
 
-   SELECT * FROM semantic_view('shop',
-       dimensions := ['customer'],
-       metrics := ['revenue', 'order_count']
+   SELECT * FROM SEMANTIC_VIEW(shop
+       DIMENSIONS customer
+       METRICS revenue, order_count
    ) ORDER BY revenue DESC;
 
 .. code-block:: text
@@ -138,9 +138,9 @@ Request dimensions from both ``customers`` and ``products``. The extension joins
 
 .. code-block:: sql
 
-   SELECT * FROM semantic_view('shop',
-       dimensions := ['customer', 'product'],
-       metrics := ['revenue']
+   SELECT * FROM SEMANTIC_VIEW(shop
+       DIMENSIONS customer, product
+       METRICS revenue
    ) ORDER BY customer, product;
 
 .. code-block:: text
@@ -165,9 +165,9 @@ The ``month`` dimension uses ``date_trunc('month', o.ordered_at)`` as its expres
 
 .. code-block:: sql
 
-   SELECT * FROM semantic_view('shop',
-       dimensions := ['month'],
-       metrics := ['revenue', 'order_count']
+   SELECT * FROM SEMANTIC_VIEW(shop
+       DIMENSIONS month
+       METRICS revenue, order_count
    ) ORDER BY month;
 
 .. code-block:: text

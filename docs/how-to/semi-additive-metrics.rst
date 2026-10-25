@@ -175,9 +175,9 @@ Snapshot selection depends on whether the non-additive dimensions are in the que
 .. code-block:: sql
 
    -- report_date not in query -> snapshot selection activated
-   SELECT * FROM semantic_view('account_metrics',
-       dimensions := ['customer_id'],
-       metrics := ['total_balance']
+   SELECT * FROM SEMANTIC_VIEW(account_metrics
+       DIMENSIONS customer_id
+       METRICS total_balance
    ) ORDER BY customer_id;
 
 .. code-block:: text
@@ -195,9 +195,9 @@ Snapshot selection depends on whether the non-additive dimensions are in the que
 .. code-block:: sql
 
    -- report_date in query -> standard aggregation
-   SELECT * FROM semantic_view('account_metrics',
-       dimensions := ['customer_id', 'report_date'],
-       metrics := ['total_balance']
+   SELECT * FROM SEMANTIC_VIEW(account_metrics
+       DIMENSIONS customer_id, report_date
+       METRICS total_balance
    ) ORDER BY customer_id, report_date;
 
 .. code-block:: text

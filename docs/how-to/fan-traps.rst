@@ -89,9 +89,9 @@ The relationship ``li_to_order`` is many-to-one from ``li`` to ``o``. Traversing
 
 .. code-block:: sql
 
-   SELECT * FROM semantic_view('sales',
-       dimensions := ['region'],
-       metrics := ['revenue']
+   SELECT * FROM SEMANTIC_VIEW(sales
+       DIMENSIONS region
+       METRICS revenue
    ) ORDER BY region;
 
 .. code-block:: text
@@ -110,9 +110,9 @@ To reach ``li.status``, the extension must traverse from ``o`` to ``li``, the re
 .. code-block:: sql
 
    -- This query is blocked with a fan trap error:
-   SELECT * FROM semantic_view('sales',
-       dimensions := ['status'],
-       metrics := ['order_count']
+   SELECT * FROM SEMANTIC_VIEW(sales
+       DIMENSIONS status
+       METRICS order_count
    );
 
 The error message identifies the metric, dimension, and relationship involved:
@@ -139,9 +139,9 @@ Query ``order_count`` with a dimension from the same table (``o``) or from a tab
 
 .. code-block:: sql
 
-   SELECT * FROM semantic_view('sales',
-       dimensions := ['region'],
-       metrics := ['order_count']
+   SELECT * FROM SEMANTIC_VIEW(sales
+       DIMENSIONS region
+       METRICS order_count
    );
 
 **2. Use a metric from the same table as the dimension**
@@ -150,9 +150,9 @@ Instead of ``o.order_count`` with ``li.status``, use ``li.revenue`` with ``li.st
 
 .. code-block:: sql
 
-   SELECT * FROM semantic_view('sales',
-       dimensions := ['status'],
-       metrics := ['revenue']
+   SELECT * FROM SEMANTIC_VIEW(sales
+       DIMENSIONS status
+       METRICS revenue
    );
 
 **3. Restructure the view**
@@ -177,9 +177,9 @@ the queried dimensions. In the ``sales`` view above, ``order_count`` (on
 
 .. code-block:: sql
 
-   SELECT * FROM semantic_view('sales',
-       dimensions := ['region'],
-       metrics := ['order_count', 'revenue']
+   SELECT * FROM SEMANTIC_VIEW(sales
+       DIMENSIONS region
+       METRICS order_count, revenue
    ) ORDER BY region;
 
 .. code-block:: text
@@ -307,9 +307,9 @@ Because ``order_id`` is the PK of ``order_details``, the relationship is one-to-
 
 .. code-block:: sql
 
-   SELECT * FROM semantic_view('order_details_sv',
-       dimensions := ['gift_wrap'],
-       metrics := ['order_count']
+   SELECT * FROM SEMANTIC_VIEW(order_details_sv
+       DIMENSIONS gift_wrap
+       METRICS order_count
    ) ORDER BY gift_wrap;
 
 .. code-block:: text
@@ -347,7 +347,7 @@ Troubleshooting
    relationship can be traversed in both directions.
 
 **The fan trap error names a member you only filtered on**
-   Tables that a ``where_clause`` predicate reaches are checked like a queried
+   Tables that a ``WHERE`` predicate inside the query reaches are checked like a queried
    dimension's. See the troubleshooting section of :ref:`howto-filtering`.
 
 **Some groups show NULL for one metric**
@@ -366,8 +366,8 @@ Troubleshooting
    gets no row unless a metric on the parent's own table is queried alongside.
    Earlier versions computed such a metric from the base table, so these
    numbers can differ after an upgrade. To leave orphan rows out, declare a
-   dimension on the parent's key, such as ``o.order_key AS o.id``, and pass
-   ``where_clause := 'order_key IS NOT NULL'``, which filters them before
+   dimension on the parent's key, such as ``o.order_key AS o.id``, and add
+   ``WHERE order_key IS NOT NULL`` to the query, which filters them before
    aggregation. It drops a line item whose ``order_id`` is ``NULL`` and one
    whose ``order_id`` names an order that does not exist, since neither finds
    an order to look up. Testing ``li.order_id IS NOT NULL`` instead would keep

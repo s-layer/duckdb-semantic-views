@@ -53,15 +53,15 @@ A semantic view stores a *model*, a set of dimensions, metrics, relationships, a
    );
 
    -- Revenue by region
-   SELECT * FROM semantic_view('order_metrics',
-       dimensions := ['region'],
-       metrics := ['revenue']
+   SELECT * FROM SEMANTIC_VIEW(order_metrics
+       DIMENSIONS region
+       METRICS revenue
    );
 
    -- Revenue by category (same view, different request)
-   SELECT * FROM semantic_view('order_metrics',
-       dimensions := ['category'],
-       metrics := ['revenue']
+   SELECT * FROM SEMANTIC_VIEW(order_metrics
+       DIMENSIONS category
+       METRICS revenue
    );
 
 One semantic view definition serves many different queries. The extension generates the appropriate SQL (SELECT, GROUP BY, and JOIN) based on which dimensions and metrics are requested.
@@ -96,7 +96,7 @@ Key Differences
      - Defined once, reused across all queries
    * - Query interface
      - ``SELECT * FROM view``
-     - :ref:`semantic_view('name', ...) <ref-semantic-view-function>`
+     - :ref:`SELECT * FROM SEMANTIC_VIEW(name DIMENSIONS ... METRICS ...) <ref-semantic-view-function>`
 
 
 .. _explanation-sv-why:
@@ -173,4 +173,4 @@ The ``MATERIALIZATIONS`` clause lets you optionally route queries to pre-aggrega
 
 This is not automatic caching or background refresh. You create and maintain the pre-aggregated table yourself (or use external tools like dbt). The extension routes matching queries to it. For queries that do not match any materialization, standard on-demand SQL generation continues as before.
 
-Materialization routing is transparent to the caller -- the :ref:`semantic_view() <ref-semantic-view-function>` interface does not change. See :ref:`howto-materializations` for a detailed guide.
+Materialization routing is transparent to the caller -- the :ref:`query <ref-semantic-view-function>` does not change. See :ref:`howto-materializations` for a detailed guide.

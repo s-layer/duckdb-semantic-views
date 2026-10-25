@@ -146,6 +146,24 @@ project_terms:
   - canonical: "where_clause"
     variants: []
     source: "named parameter on semantic_view() / explain_semantic_view()"
+    note: >-
+      Since v0.16.0 the docs lead with the WHERE inside SEMANTIC_VIEW(...)
+      ("the inner WHERE", "a WHERE inside SEMANTIC_VIEW(...)") and name
+      where_clause as its spelling in the function form. Never call the
+      construct's WHERE "where_clause".
+  - canonical: "SEMANTIC_VIEW(...)"
+    variants: ["the SEMANTIC_VIEW construct", "SEMANTIC_VIEW() construct"]
+    source: "src/grammar/query.rs (lowers to a semantic_view() call)"
+    note: >-
+      The query front door since v0.16.0: examples query with the construct.
+      Write it with the ellipsis in prose ("the SEMANTIC_VIEW(...) construct",
+      or "the construct" once introduced). semantic_view() stays documented as
+      the supported function form, used where application code builds or
+      binds the lists, or passes params / column_order, and by
+      explain_semantic_view().
+  - canonical: "expression item"
+    variants: ["expression query item", "ad-hoc expression"]
+    source: "src/query/expr_items.rs (reference anchor ref-sv-expression-items)"
   - canonical: "define-time inference pass"
     variants: ["CREATE-time typeof pass", "define-time type inference pass"]
     note: >-
@@ -175,7 +193,7 @@ conventions:
       define-time error and must appear in docs only as a counter-example.
   - rule: >-
       The data_type column (and DESCRIBE's DATA_TYPE rows) reports the type the
-      member's column has in a semantic_view() query, worked out when the
+      member's column has in a semantic-view query, worked out when the
       SHOW / DESCRIBE command runs (v0.14.0). It is empty when the member
       cannot be queried on its own: its source no longer binds, or the
       fan-trap check rejects it (a metric aggregating a parent table's column

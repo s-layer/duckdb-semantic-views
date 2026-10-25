@@ -1,5 +1,5 @@
 .. meta::
-   :description: Filter a semantic view query before aggregation with where_clause or after aggregation with an outer WHERE, and know which one a given filter needs
+   :description: Filter a semantic view query before aggregation with a WHERE inside SEMANTIC_VIEW(...) or after aggregation with an outer WHERE, and know which one a given filter needs
 
 .. _howto-filtering:
 
@@ -7,16 +7,22 @@
 How to Filter Semantic View Queries
 =========================================
 
-This guide shows how to filter a :ref:`semantic_view() <ref-semantic-view-function>`
+This guide shows how to filter a :ref:`SEMANTIC_VIEW(...) <ref-sv-construct>`
 query, and how to pick the right filter for the job. There are two of them and
 they run on opposite sides of the aggregation, so for anything except a filter
-on a dimension you are already grouping by, they return different numbers.
+on a dimension you are already grouping by, they return different numbers:
+
+- A ``WHERE`` **inside** ``SEMANTIC_VIEW(...)``, written as in Snowflake, filters
+  the rows before the metrics aggregate them. With the
+  :ref:`semantic_view() <ref-semantic-view-function>` table function, the same
+  filter is the ``where_clause`` parameter.
+- An ordinary ``WHERE`` **outside**, on the query around it, filters the rows
+  the query returns.
 
 **Prerequisites:**
 
 - A working semantic view you can query (see :ref:`tutorial-getting-started`)
-- Familiarity with the ``semantic_view()`` query modes (see
-  :ref:`ref-semantic-view-function`)
+- Familiarity with the query modes (see :ref:`ref-sv-modes`)
 
 
 .. _howto-filtering-which:
@@ -35,18 +41,18 @@ Which Filter to Use
      - Either
      - Same result
    * - A dimension or fact that is **not** in the output
-     - ``where_clause :=``
+     - ``WHERE`` inside ``SEMANTIC_VIEW(...)``
      - Before aggregation
    * - A date or segment scope for the numbers themselves
-     - ``where_clause :=``
+     - ``WHERE`` inside ``SEMANTIC_VIEW(...)``
      - Before aggregation
    * - A metric value (``revenue > 200``)
      - Outer ``WHERE``
      - After aggregation
 
-The rule behind the table: ``where_clause`` decides **which rows the metrics
-aggregate over**, and an outer ``WHERE`` decides **which of the resulting rows
-you keep**.
+The rule behind the table: the ``WHERE`` inside the construct decides **which
+rows the metrics aggregate over**, and an outer ``WHERE`` decides **which of the
+resulting rows you keep**.
 
 
 .. _howto-filtering-setup:
@@ -94,9 +100,9 @@ Unfiltered, revenue by region covers all five orders:
 
 .. code-block:: sql
 
-   SELECT * FROM semantic_view('order_metrics',
-       dimensions := ['region'],
-       metrics := ['revenue', 'order_count']
+   SELECT * FROM SEMANTIC_VIEW(order_metrics
+       DIMENSIONS region
+       METRICS revenue, order_count
    ) ORDER BY region;
 
 .. code-block:: text
@@ -114,14 +120,14 @@ Unfiltered, revenue by region covers all five orders:
 Filter the Result Rows with an Outer WHERE
 ==========================================
 
-Wrap the function call and add an ordinary SQL ``WHERE``. The predicate may name
-any column in the result -- that is, any dimension or metric you asked for.
+Add an ordinary SQL ``WHERE`` after the construct. The predicate may name any
+column in the result -- that is, any dimension or metric you asked for.
 
 .. code-block:: sql
 
-   SELECT * FROM semantic_view('order_metrics',
-       dimensions := ['region'],
-       metrics := ['revenue']
+   SELECT * FROM SEMANTIC_VIEW(order_metrics
+       DIMENSIONS region
+       METRICS revenue
    ) WHERE region = 'East';
 
 .. code-block:: text
@@ -140,28 +146,29 @@ metric has no value until it has been aggregated:
 
 .. code-block:: sql
 
-   SELECT * FROM semantic_view('order_metrics',
-       dimensions := ['region'],
-       metrics := ['revenue']
+   SELECT * FROM SEMANTIC_VIEW(order_metrics
+       DIMENSIONS region
+       METRICS revenue
    ) WHERE revenue > 500;
 
 
 .. _howto-filtering-pre-agg:
 
-Filter the Rows Behind a Metric with where_clause
-=================================================
+Filter the Rows Behind a Metric with an Inner WHERE
+===================================================
 
-Pass ``where_clause := '<predicate>'`` to apply the predicate **before** the
-metrics are aggregated. The predicate names declared dimensions and facts by
-their logical names, whether or not they appear in the output.
+Write ``WHERE <predicate>`` inside ``SEMANTIC_VIEW(...)``, after the lists, to
+apply the predicate **before** the metrics are aggregated. The predicate names
+declared dimensions and facts by their logical names, whether or not they
+appear in the output.
 
 .. code-block:: sql
    :emphasize-lines: 4
 
-   SELECT * FROM semantic_view('order_metrics',
-       dimensions := ['region'],
-       metrics := ['revenue', 'order_count'],
-       where_clause := 'ordered_at >= DATE ''2024-01-01'''
+   SELECT * FROM SEMANTIC_VIEW(order_metrics
+       DIMENSIONS region
+       METRICS revenue, order_count
+       WHERE ordered_at >= DATE '2024-01-01'
    ) ORDER BY region;
 
 .. code-block:: text
@@ -176,6 +183,16 @@ their logical names, whether or not they appear in the output.
 Each region's revenue has been recomputed over its 2024 orders only, and the
 counts follow. The result still has one row per region -- filtering by
 ``ordered_at`` did not add it to the output.
+
+With ``semantic_view()``, pass the same predicate as ``where_clause``:
+
+.. code-block:: sql
+
+   SELECT * FROM semantic_view('order_metrics',
+       dimensions := ['region'],
+       metrics := ['revenue', 'order_count'],
+       where_clause := 'ordered_at >= DATE ''2024-01-01'''
+   ) ORDER BY region;
 
 .. note::
 
@@ -198,21 +215,21 @@ show why.
 .. code-block:: sql
 
    -- Fails: `ordered_at` is not a column of the result
-   SELECT * FROM semantic_view('order_metrics',
-       dimensions := ['region'],
-       metrics := ['revenue']
+   SELECT * FROM SEMANTIC_VIEW(order_metrics
+       DIMENSIONS region
+       METRICS revenue
    ) WHERE ordered_at >= DATE '2024-01-01';
 
-The function returned ``region`` and ``revenue``, so DuckDB raises a binder error
+The query returned ``region`` and ``revenue``, so DuckDB raises a binder error
 for the unknown column. This failure is loud, which makes it the harmless case.
 
 **Attempt 2: add the column to the output so the filter binds.**
 
 .. code-block:: sql
 
-   SELECT * FROM semantic_view('order_metrics',
-       dimensions := ['region', 'ordered_at'],
-       metrics := ['revenue']
+   SELECT * FROM SEMANTIC_VIEW(order_metrics
+       DIMENSIONS region, ordered_at
+       METRICS revenue
    ) WHERE ordered_at >= DATE '2024-01-01'
    ORDER BY region, ordered_at;
 
@@ -234,10 +251,10 @@ a semi-additive snapshot) cannot be recovered that way at all.
 
 .. warning::
 
-   This is the failure mode ``where_clause`` exists to prevent. Attempt 2
+   This is the failure mode the inner ``WHERE`` exists to prevent. Attempt 2
    produces numbers, and they are wrong for the question asked. Whenever a
    filter scopes *what the metric measures* -- a date range, a customer segment,
-   a status -- it belongs in ``where_clause``.
+   a status -- it belongs inside ``SEMANTIC_VIEW(...)``.
 
 
 .. _howto-filtering-named:
@@ -247,7 +264,7 @@ Reuse a Predicate as a Named Filter
 
 .. versionadded:: 0.12.0
 
-Rather than repeating a predicate in every call, declare it once as a member
+Rather than repeating a predicate in every query, declare it once as a member
 annotated ``LABELS = (FILTER)``. The label records that the member exists to be
 filtered on rather than selected:
 
@@ -272,14 +289,14 @@ Queries then name the filter instead of restating the predicate:
 
 .. code-block:: sql
 
-   SELECT * FROM semantic_view('order_metrics',
-       dimensions := ['region'],
-       metrics := ['revenue'],
-       where_clause := 'is_2024'
+   SELECT * FROM SEMANTIC_VIEW(order_metrics
+       DIMENSIONS region
+       METRICS revenue
+       WHERE is_2024
    ) ORDER BY region;
 
-Named filters compose with ordinary SQL operators -- ``where_clause :=
-'is_2024 AND region = ''East'''``. Each member's expression is substituted
+Named filters compose with ordinary SQL operators -- ``WHERE is_2024 AND
+region = 'East'``. Each member's expression is substituted
 parenthesized, so a filter defined as an ``OR`` keeps its grouping when you
 ``AND`` it with something else. See :ref:`howto-annotations-filters` for the
 annotation itself.
@@ -290,15 +307,15 @@ annotation itself.
 Use Both Filters in One Query
 =============================
 
-The two filters compose, each doing its own job: ``where_clause`` scopes the
+The two filters compose, each doing its own job: the inner ``WHERE`` scopes the
 rows the metrics see, and the outer ``WHERE`` trims the assembled result.
 
 .. code-block:: sql
 
-   SELECT * FROM semantic_view('order_metrics',
-       dimensions := ['region'],
-       metrics := ['revenue'],
-       where_clause := 'ordered_at >= DATE ''2024-01-01'''
+   SELECT * FROM SEMANTIC_VIEW(order_metrics
+       DIMENSIONS region
+       METRICS revenue
+       WHERE ordered_at >= DATE '2024-01-01'
    ) WHERE revenue > 200
    ORDER BY revenue DESC;
 
@@ -320,9 +337,9 @@ predicate. Reversing the two filters would give a different answer: ``revenue >
 Verify Which Rows Were Aggregated
 =================================
 
-:ref:`explain_semantic_view() <ref-explain-semantic-view>` accepts
-``where_clause`` too, so you can inspect the exact statement an application will
-issue before shipping it:
+:ref:`explain_semantic_view() <ref-explain-semantic-view>` takes the inner
+``WHERE`` as its ``where_clause`` parameter, so you can inspect the exact
+statement an application will issue before shipping it:
 
 .. code-block:: sql
 
@@ -350,15 +367,15 @@ Pass a Request Value from Application Code
 
 When the filter value comes from outside your code -- a date range in an HTTP
 request, a segment picked in a dashboard -- keep that input out of the
-predicate's SQL text. Write the predicate yourself, refer to each value as
-``$1``, ``$2``, ..., and pass the values in ``params``. Each value goes into the
-query as a value of its own type, never as SQL, so nothing in it can change
-what the predicate does.
+predicate's SQL text. Write the predicate yourself and bind each value as a
+parameter. Each value goes into the query as a value of its own type, never as
+SQL, so nothing in it can change what the predicate does.
 
 .. danger::
 
-   A ``where_clause`` built by pasting request input into the string, whether
-   with an f-string or with ``'...' || ?`` in SQL, is open to SQL injection. The
+   A predicate built by pasting request input into the SQL, whether into the
+   construct's ``WHERE`` or into a ``where_clause`` string, with an f-string or
+   with ``'...' || ?`` in SQL, is open to SQL injection. The
    predicate runs with every right the connection has. Sent as the date in
    ``ordered_at >= DATE '...'``, the value ``2024-01-01' OR true --`` removes
    the date scope, and a subquery such as ``region IN (SELECT ... FROM
@@ -368,8 +385,9 @@ what the predicate does.
 
 Two patterns keep request input out of the SQL text.
 
-**Pass the value in params.** Bind each value as a prepared-statement
-parameter inside ``params``:
+**Bind the value in the construct's WHERE.** A prepared-statement parameter
+(``?``, ``$1`` or ``$name``) inside ``SEMANTIC_VIEW(...)``'s ``WHERE`` is a
+parameter of your statement:
 
 .. code-block:: python
 
@@ -384,11 +402,10 @@ parameter inside ``params``:
    def revenue_by_region(since):
        return con.execute(
            """
-           SELECT * FROM semantic_view('order_metrics',
-               dimensions := ['region'],
-               metrics := ['revenue', 'order_count'],
-               where_clause := 'ordered_at >= $1',
-               params := row(?)
+           SELECT * FROM SEMANTIC_VIEW(order_metrics
+               DIMENSIONS region
+               METRICS revenue, order_count
+               WHERE ordered_at >= ?
            ) ORDER BY region
            """,
            [since],
@@ -398,17 +415,19 @@ parameter inside ``params``:
    revenue_by_region(datetime.date(2024, 1, 1))
    # [('East', Decimal('300.00'), 2), ('West', Decimal('150.00'), 1)]
 
-The ``SEMANTIC_VIEW(...)`` construct takes the parameter directly in its
-``WHERE``, and passes it in ``params`` for you:
+With ``semantic_view()``, refer to each value in the ``where_clause`` text as
+``$1``, ``$2``, ..., and bind the values inside ``params``. This is what the
+construct does for you:
 
 .. code-block:: python
 
    con.execute(
        """
-       SELECT * FROM SEMANTIC_VIEW(order_metrics
-           DIMENSIONS region
-           METRICS revenue, order_count
-           WHERE ordered_at >= ?
+       SELECT * FROM semantic_view('order_metrics',
+           dimensions := ['region'],
+           metrics := ['revenue', 'order_count'],
+           where_clause := 'ordered_at >= $1',
+           params := row(?)
        ) ORDER BY region
        """,
        [datetime.date(2024, 1, 1)],
@@ -418,7 +437,8 @@ The ``SEMANTIC_VIEW(...)`` construct takes the parameter directly in its
 **Map request choices to named filters.** When the choices are a fixed set,
 declare each one as a :ref:`named filter <howto-filtering-named>` and look the
 request value up in an allowlist. The predicate is then always one of your own
-member names:
+member names. This pattern uses ``semantic_view()``, because the predicate itself
+is the bound value:
 
 .. code-block:: python
 
@@ -456,14 +476,15 @@ Troubleshooting
 ===============
 
 **A predicate on a metric is rejected**
-   ``where_clause := 'revenue > 200'`` is refused because the filter runs before
+   ``WHERE revenue > 200`` inside the construct, or
+   ``where_clause := 'revenue > 200'``, is refused because the filter runs before
    aggregation, where an aggregate has no value yet. Move that predicate to the
    outer ``WHERE``.
 
 **A binder error names a column that is not in the result**
    The filter is on the outer query but names a member the query did not
-   request. Move it into ``where_clause``, where any declared dimension or fact
-   resolves whether or not it is in the output.
+   request. Move it inside ``SEMANTIC_VIEW(...)``, where any declared dimension
+   or fact resolves whether or not it is in the output.
 
 **A fan trap error names a member you only filtered on**
    Tables the predicate reaches are joined in and checked exactly as a queried
@@ -483,14 +504,16 @@ Troubleshooting
    expression really evaluates to a boolean.
 
 **A parameter inside where_clause is refused**
-   A ``?`` or ``$name`` inside the predicate string would be one of the calling
-   statement's own parameters, so it is refused. Write ``$1``, ``$2``, ... and
-   pass the values in ``params``, as shown in :ref:`howto-filtering-app`.
+   A ``?`` or ``$name`` inside the ``where_clause`` string would be one of the
+   calling statement's own parameters, so it is refused. Write ``$1``, ``$2``,
+   ... and pass the values in ``params``, or use the construct, whose ``WHERE``
+   takes ``?`` directly, as shown in :ref:`howto-filtering-app`.
 
 **Quoting looks wrong**
    ``where_clause`` is a SQL string literal, so every single quote inside it is
    doubled: ``where_clause := 'region = ''East'''``. Double-quoted identifiers
-   inside the predicate need no escaping.
+   inside the predicate need no escaping. In the construct the predicate is
+   plain SQL, so it is written as usual: ``WHERE region = 'East'``.
 
 
 .. _howto-filtering-related:
@@ -502,6 +525,7 @@ Related
   numbers and a post-aggregation one cannot
 - :ref:`howto-annotations-filters` -- Declare reusable named filters with
   ``LABELS = (FILTER)``
-- :ref:`ref-sv-pre-agg-filtering` -- The full ``where_clause`` reference,
-  including where the predicate is injected on each emission path
+- :ref:`ref-sv-pre-agg-filtering` -- The full reference for the inner ``WHERE``
+  and ``where_clause``, including where the predicate is injected on each
+  emission path
 - :ref:`howto-fan-traps` -- Resolve the fan trap errors a predicate can trigger

@@ -1,5 +1,5 @@
 .. meta::
-   :description: A DuckDB extension that brings Snowflake-style semantic views to DuckDB -- define dimensions and metrics as DDL, query any combination with a table function
+   :description: A DuckDB extension that brings Snowflake-style semantic views to DuckDB -- define dimensions and metrics as DDL, query any combination with SEMANTIC_VIEW(...)
 
 .. _overview:
 
@@ -27,7 +27,7 @@ DuckDB Semantic Views
 
 A `Semantic Layer <https://www.databricks.com/blog/what-is-a-semantic-layer>`_ sits between your raw tables and the people querying them. Instead of everyone writing their own ``SUM(amount)`` and hoping they ``GROUP BY`` the same columns, you define each metric and dimension once, in one place. Analysts pick the ones they want; the system assembles the SQL.
 
-Snowflake and Databricks, along with dbt Cloud, Cube.dev and others, all ship semantic layers in different forms. Snowflake has `Semantic Views <https://docs.snowflake.com/en/user-guide/views-semantic/overview>`_ and Databricks has `Metric Views <https://docs.databricks.com/aws/en/uc-semantics/metric-views/>`_. Both expose the semantic layer as a SQL object: a view-like interface over metrics and dimensions that you can query in any combination. This extension brings the same idea to DuckDB, using DDL syntax modeled closely on Snowflake's ``CREATE SEMANTIC VIEW``.
+Snowflake and Databricks, along with dbt Cloud, Cube.dev and others, all ship semantic layers in different forms. Snowflake has `Semantic Views <https://docs.snowflake.com/en/user-guide/views-semantic/overview>`_ and Databricks has `Metric Views <https://docs.databricks.com/aws/en/uc-semantics/metric-views/>`_. Both expose the semantic layer as a SQL object: a view-like interface over metrics and dimensions that you can query in any combination. This extension brings the same idea to DuckDB, using DDL syntax modeled closely on Snowflake's ``CREATE SEMANTIC VIEW`` and querying with the same ``SEMANTIC_VIEW(...)`` construct.
 
 .. grid:: 1 2 3 3
    :gutter: 3

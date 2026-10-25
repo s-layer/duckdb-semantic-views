@@ -78,27 +78,27 @@ Query with USING Context
 
 .. code-block:: sql
 
-   SELECT * FROM semantic_view('flight_analytics',
-       dimensions := ['city'],
-       metrics := ['departure_count']
+   SELECT * FROM SEMANTIC_VIEW(flight_analytics
+       DIMENSIONS city
+       METRICS departure_count
    ) ORDER BY city;
 
 **Arrivals by city:** the ``arrival_count`` metric's USING context resolves ``city`` via ``arr_airport``:
 
 .. code-block:: sql
 
-   SELECT * FROM semantic_view('flight_analytics',
-       dimensions := ['city'],
-       metrics := ['arrival_count']
+   SELECT * FROM SEMANTIC_VIEW(flight_analytics
+       DIMENSIONS city
+       METRICS arrival_count
    ) ORDER BY city;
 
 **Non-ambiguous dimensions:** the ``carrier`` dimension comes from the ``flights`` table (not ``airports``), so it works with any metric without ambiguity:
 
 .. code-block:: sql
 
-   SELECT * FROM semantic_view('flight_analytics',
-       dimensions := ['carrier'],
-       metrics := ['departure_count', 'arrival_count']
+   SELECT * FROM SEMANTIC_VIEW(flight_analytics
+       DIMENSIONS carrier
+       METRICS departure_count, arrival_count
    ) ORDER BY carrier;
 
 
@@ -121,9 +121,9 @@ Derived metrics that reference USING-annotated metrics inherit the USING context
 
 .. code-block:: sql
 
-   SELECT * FROM semantic_view('flight_analytics',
-       dimensions := ['carrier'],
-       metrics := ['total_flights']
+   SELECT * FROM SEMANTIC_VIEW(flight_analytics
+       DIMENSIONS carrier
+       METRICS total_flights
    ) ORDER BY carrier;
 
 However, querying ``total_flights`` with the ambiguous ``city`` dimension fails. The extension cannot determine which single USING path should resolve ``city``.
@@ -191,9 +191,9 @@ arrival airports'. ``elev_climb`` composes both roles and keeps them apart:
 
 .. code-block:: sql
 
-   SELECT * FROM semantic_view('flight_elevation',
-       dimensions := ['carrier'],
-       metrics := ['dep_elev', 'arr_elev', 'elev_climb']
+   SELECT * FROM SEMANTIC_VIEW(flight_elevation
+       DIMENSIONS carrier
+       METRICS dep_elev, arr_elev, elev_climb
    ) ORDER BY carrier;
 
 .. code-block:: text

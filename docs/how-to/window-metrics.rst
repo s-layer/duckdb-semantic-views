@@ -177,9 +177,9 @@ Mixing Restriction
 .. code-block:: sql
 
    -- This fails: mixing window metric 'rolling_avg' with aggregate metric 'total_qty'
-   SELECT * FROM semantic_view('sales',
-       dimensions := ['store', 'date'],
-       metrics := ['total_qty', 'rolling_avg']
+   SELECT * FROM SEMANTIC_VIEW(sales
+       DIMENSIONS store, date
+       METRICS total_qty, rolling_avg
    );
 
 .. code-block:: text

@@ -1,38 +1,39 @@
-# Page Inventory -- v0.15.0 Content Refresh (DuckDB 2.0)
+# Page Inventory -- v0.16.0 Content Refresh (the SEMANTIC_VIEW(...) query surface)
 
-**Generated:** 2026-10-16
-**Mode:** Update, content refresh only (no new pages; gap scan found no new user-facing symbols)
-**Trigger:** v0.15.0 moves the extension to DuckDB 2.0. Source of truth: `git diff origin/main` and CHANGELOG `[Unreleased]`.
+**Generated:** 2026-10-25
+**Mode:** Update, content refresh plus new sections on existing pages (no new pages)
+**Trigger:** v0.16.0 makes the `SEMANTIC_VIEW(v DIMENSIONS ... METRICS ... FACTS ... WHERE ...)` construct the query front door, removes the parser-override hook, and adds expression items, `AS` aliases / `column_order`, `params`, prepared-statement parameters in the construct's `WHERE`, and SHOW / DESCRIBE as subqueries. Source of truth: `git log v0.15.0..HEAD` and CHANGELOG `[Unreleased]`. `semantic_view()` stays a supported function; the docs lead with the construct and keep the function form where it is the subject (binding lists, `params`, `column_order`, `explain_semantic_view()`).
 
-User-facing docs say "DuckDB 2.0", never the pre-release build id (`v2.0.0-alpha47600`); the pins move to GA `v2.0.0` on 2026-10-21.
+Every converted query was run against the built extension before and after the change (each page's sql blocks in order, results compared); new examples and their output tables were produced by running them.
 
 ## Content Refresh
 
 | # | Type | Title | Key Sections / Discrepancies | File Path |
 |---|------|-------|------------------------------|-----------|
-| 1 | (refresh) | Getting Started | Prerequisites and Install step: state that the extension needs DuckDB 2.0, that DuckDB 1.5 users stay on v0.14.0, and what a mismatched `LOAD` reports (link to the new load-error entry). | docs/tutorials/getting-started.rst |
-| 2 | (refresh) | Functions | "Discovering Functions over SQL": the "In DuckDB 1.5, duckdb_functions() has no column that names the extension" sentence. DuckDB 2.0 has `extension_name`, but it is NULL for this extension's functions; filtering on `categories` is still the way. | docs/reference/functions.rst |
-| 3 | (refresh) | Transactional DDL and Known Limitations | PEG-parser section (`explanation-txn-ddl-peg`): `enable_peg_parser()` / `disable_peg_parser()` are gone in 2.0. Rewrite around the remaining caveat (setting `allow_parser_override_extension` back to `DEFAULT` turns semantic-view DDL off until `FALLBACK` is restored). Update intro sentence and summary bullet. Keep the label. | docs/explanation/transactional-ddl-and-limitations.rst |
-| 4 | (refresh) | Explanation index | Abstract for the transactional page names "the PEG parser"; align with #3. | docs/explanation/index.rst |
-| 5 | (refresh) | Error Messages | Add a "Loading Errors" section (version-check message, cause, fix). Add a DDL entry for the two quoted-identifier errors now raised by DuckDB. Add a query entry for `Query exceeded maximum execution time`. | docs/reference/error-messages.rst |
-| 6 | (refresh) | semantic_view() | Add a short "Time Limits" section: `SET max_execution_time` applies to `semantic_view()` (and the type-probing SHOW / DESCRIBE commands). | docs/reference/semantic-view-function.rst |
-| 7 | (refresh) | README | Quick start: one-line DuckDB 2.0 requirement. Building: add CMake (the engine is built from source). | README.md |
+| 1 | (refresh) | SEMANTIC_VIEW(...) and semantic_view() | Retitled; intro and Syntax lead with the construct, the function follows with the clause-to-parameter mapping. Construct section moved up beside Syntax (composition in joins, column aliases, prepared parameters). Examples, Output, Filtering and Name Resolution in the construct. Expression-items example fixed to name the `shop` view's members (it named `o.order_date` / `o.amount`, which an expression item now refuses). New construct example for binding values from Python. | docs/reference/semantic-view-function.rst |
+| 2 | (refresh) | explain_semantic_view() | How to explain a construct query (clause = parameter, `WHERE` = `where_clause`); items may be expressions. | docs/reference/explain-semantic-view-function.rst |
+| 3 | (refresh) | Error Messages | Query Errors cover the construct. New entries: malformed construct, parameter outside `WHERE`, two columns with one name, expression item errors (incl. `count(*)` with no member). Function-list wording in existing entries names the clauses too. | docs/reference/error-messages.rst |
+| 4 | (refresh) | Getting Started | Queries in the construct; new step filtering inside the construct; note introducing `semantic_view()` as the function form. | docs/tutorials/getting-started.rst |
+| 5 | (refresh) | Building a Complete Model | Queries in the construct; new step trying `revenue - cost AS profit` as an expression item before declaring it. | docs/tutorials/building-a-model.rst |
+| 6 | (refresh) | Filtering | Leads with the `WHERE` inside the construct; `where_clause` shown as the function spelling; application section leads with `?` in the construct's `WHERE`. | docs/how-to/filtering.rst |
+| 7 | (refresh) | Query Facts | `FACTS` clause; new section on row-level expression items. | docs/how-to/query-facts.rst |
+| 8 | (refresh) | Snowflake / Databricks comparisons | Query-interface rows and the pre-aggregation `WHERE` parity row were stale (said `where_clause` only / "table function"). | docs/explanation/snowflake-comparison.rst, docs/explanation/databricks-comparison.rst |
+| 9 | (refresh) | Remaining tutorials, how-tos, explanation and reference pages | Query examples converted to the construct; prose naming `dimensions := [...]`, `facts := [...]` or `where_clause` updated to the clauses. | docs/**/*.rst |
+| 10 | (refresh) | README | Quick start and multi-table queries in the construct; expression items, SHOW as a subquery, and the function form shown once. | README.md |
 
-## Pages Verified -- No Changes Needed (pre-deselected)
+## Pages Verified -- No Changes Needed
 
 | Type | Title | Reason | File Path |
 |------|-------|--------|-----------|
-| (refresh) -- no changes needed | All other docs/ pages | No DuckDB version statements, no PEG-parser toggles, no arrow-lambda SQL, no quoted-identifier error text. Behaviour they describe is unchanged by the engine move. | docs/**/*.rst |
-| (refresh) -- no changes needed | Release notes | Includes CHANGELOG.md verbatim; out of scope. | docs/changelog.md |
+| (refresh) -- no changes needed | Functions | Lists the registered functions and their `duckdb_functions()` examples, which are the function form by design. | docs/reference/functions.rst |
+| (refresh) -- no changes needed | YAML pages | No query examples beyond `READ_YAML_FROM_SEMANTIC_VIEW()`. | docs/how-to/yaml-definitions.rst, docs/reference/yaml-format.rst, docs/reference/read-yaml-from-semantic-view.rst |
+| (refresh) -- no changes needed | Release notes | Includes CHANGELOG.md verbatim. | docs/changelog.md |
 
 ## API Reference Status
 
-Manual SQL reference under `docs/reference/` (config `api_reference: manual`). No new symbols; new prose links existing `:ref:` labels.
-
-## Audience Targeting
-
-Single persona: Data engineers exploring semantic views (intermediate). They know DuckDB basics, so "DuckDB 2.0", `SET`, and `LOAD` need no explanation; the version-lock behaviour (one exact DuckDB release) does.
+Manual SQL reference under `docs/reference/` (config `api_reference: manual`). New anchors: `ref-err-construct`, `ref-err-expression-items`, `howto-query-facts-expressions`.
 
 ## Coverage Gaps
 
-None introduced. Interrupt behaviour (Ctrl-C, `con.interrupt()`) was never documented; this refresh documents only the 2.0 time limit and does not open a cancellation page.
+- Errors raised from the expansion still name the function's lists (`Use facts := [...] OR metrics := [...]`, `specify at least dimensions := [...]`) when the query used the construct; the error reference says how to read them.
+- For a construct query whose expanded SQL fails to bind, DuckDB's caret points at the start of the query, not at the construct; documented in the reference Output section.
