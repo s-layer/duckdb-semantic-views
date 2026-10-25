@@ -127,6 +127,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **A `where_clause` parameter written straight against a `$` is refused.** In
+  `k = $3$$`, the `$` after `$3` continues the token, as it does in a name, so the token is
+  no `$<n>` and the query is refused as holding a parameter it cannot fill. It used to
+  take `$3` as a parameter all the same, which left the `$$` free to open a dollar-quoted
+  string and changed what the rest of the predicate meant.
+
 - **A long error message reaches you whole.** An error from a semantic-view statement
   used to be cut off after 1023 bytes, so a message quoting a long name lost its end.
 

@@ -1106,6 +1106,31 @@ mod tests {
         assert_eq!(show_params(&rename_params(raw)), raw);
     }
 
+    /// A `$` right after a parameter continues its token (`$3$$`), as a `$`
+    /// in an identifier does, so the token is no `$<n>`: it is not renamed,
+    /// and the predicate is refused for holding it.
+    /// Renaming its `$3` left the `$$` after a `)`, where it opens a dollar
+    /// quote, so text that was code became string and the expansion's quotes
+    /// no longer paired (a `fuzz_where_predicate` crash).
+    #[test]
+    fn a_parameter_glued_to_a_dollar_is_left_as_written() {
+        let raw = "k = $3$$ /* \" */";
+        assert_eq!(rename_params(raw), raw);
+        let got = expand_with("region = $1$");
+        assert!(
+            matches!(&got, Err(ExpandError::WhereClauseParameter { parameter, .. }) if parameter == "$1$"),
+            "{got:?}"
+        );
+    }
+
+    /// The input the fuzzer found, whose `/*` and `"` swapped roles after the
+    /// rename.
+    #[test]
+    fn the_fuzzed_glued_parameter_is_left_as_written() {
+        let raw = "3]\0\u{18}\0\0\0$3$$:$/*\0\0\0\0\0$$$\"$$$$$*$/*\0\0\0";
+        assert_eq!(rename_params(raw), raw);
+    }
+
     #[test]
     fn a_parameter_inside_a_subquery_is_refused() {
         let got = expand_with("region IN (SELECT r FROM t WHERE k = ?)");
