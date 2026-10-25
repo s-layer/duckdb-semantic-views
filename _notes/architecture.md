@@ -1,549 +1,446 @@
-# Architecture: DuckDB Semantic Views Extension
+# Architecture: DuckDB Semantic Views
 
-This document describes the internal architecture of the `duckdb-semantic-views` extension as of v0.5.4. The codebase spans 14,578 lines across 16 Rust source files and 1 C++ shim (297 lines), with 468 tests (376 unit + 36 integration + 44 property + 6 proptests + 5 output + 1 doc). The extension implements a declarative semantic layer for DuckDB: users define dimensions, metrics, relationships, facts, and hierarchies via `CREATE SEMANTIC VIEW` DDL, then query them via a `semantic_view()` table function that expands to SQL at runtime.
+This note explains how the `semantic_views` extension is put together and why it has
+that shape. It is for maintainers. File-by-file tables, the data-flow sketch and the
+build details live in [MAINTAINER.md](../MAINTAINER.md), which this note links to
+rather than repeats:
 
-## 1. High-Level Component Overview
+- [Source Tree](../MAINTAINER.md#source-tree) for what each module holds.
+- [Data Flow](../MAINTAINER.md#data-flow) for the call chain of each statement.
+- [Grammar activation](../MAINTAINER.md#grammar-activation) for how a connection gets
+  the grammar.
+- [Catalog Persistence](../MAINTAINER.md#catalog-persistence) for the catalog table.
+- [Which DuckDB the C++ shim compiles against](../MAINTAINER.md#which-duckdb-the-c-shim-compiles-against)
+  for the engine build.
+
+The note describes the extension on DuckDB 2.0, after the parser-override hook was
+removed. Every semantic-view statement is now a production of DuckDB's own PEG
+grammar.
+
+## 1. The shape in one picture
 
 ```mermaid
 flowchart TD
-    subgraph User["User SQL"]
-        DDL["CREATE SEMANTIC VIEW ..."]
-        Query["semantic_view('v', dimensions := [...], metrics := [...])"]
-    end
-
-    subgraph Parser["Parser Layer"]
-        CPP["C++ shim.cpp<br/>ParserExtension hooks"]
-        FFI["Rust FFI<br/>parse.rs + body_parser.rs"]
-    end
-
-    subgraph Model["Semantic Model"]
-        MOD["model.rs<br/>SemanticViewDefinition"]
-        GRP["graph.rs<br/>RelationshipGraph + validation"]
-    end
-
-    subgraph Engine["Query Engine"]
-        EXP["expand.rs<br/>SQL expansion pipeline"]
-    end
-
-    subgraph Storage["Storage"]
-        CAT["catalog.rs<br/>Arc&lt;RwLock&lt;HashMap&gt;&gt;<br/>+ semantic_layer._definitions"]
-    end
-
-    subgraph Exec["Execution"]
-        DEF["ddl/define.rs"]
-        DRP["ddl/drop.rs"]
-        LST["ddl/list.rs + describe.rs"]
-        TBL["query/table_function.rs"]
-        EXPL["query/explain.rs"]
-        ERR["query/error.rs"]
-    end
-
-    DDL --> CPP --> FFI --> MOD
-    FFI -->|rewritten SQL| CPP
-    CPP -->|ddl_conn| DEF
-    DEF --> GRP
-    DEF --> CAT
-
-    Query --> TBL --> CAT
-    TBL --> EXP --> GRP
-    EXP --> MOD
-
-    DRP --> CAT
-    LST --> CAT
-    EXPL --> EXP
-
-    style User fill:#e8f4fd,stroke:#2196f3
-    style Parser fill:#fff3e0,stroke:#ff9800
-    style Model fill:#e8f5e9,stroke:#4caf50
-    style Engine fill:#fce4ec,stroke:#e91e63
-    style Storage fill:#f3e5f5,stroke:#9c27b0
-    style Exec fill:#e0f2f1,stroke:#009688
+    SQL["SQL from any client"] --> PEG["DuckDB 2.0 PEG parser<br/>(builtin rules + semantic_views rules)"]
+    PEG -->|"an Sv* rule matched"| Bridge["C++ sv_grammar_lower<br/>serialises the match and its tokens"]
+    Bridge --> Transform["Rust sv_grammar_transform_rust<br/>grammar::transform, then parse::lower_action"]
+    Transform -->|"SQL text, or message + offset"| Bridge
+    Bridge -->|"builtin parser"| Ast["DuckDB statements, QueryNode or TableRef"]
+    Ast --> Exec["DuckDB binds, plans and runs it<br/>on the caller's connection"]
+    Exec -->|"INSERT / UPDATE / DELETE"| Cat[("semantic_layer._definitions")]
+    Exec -->|"bind of semantic_view(...)"| BindReplace["C++ sv_semantic_view_bind_replace"]
+    BindReplace --> Expand["Rust sv_semantic_view_bind_rust<br/>CatalogReader + expand/"]
+    Expand -->|"sv_caller_definitions,<br/>in the caller's transaction"| Cat
+    Expand -->|"expanded SELECT"| BindReplace
+    BindReplace -->|"SubqueryRef, planned inside the caller's query"| Exec
 ```
 
-**Cross-cutting: Three DuckDB connections** (`persist_conn`, `query_conn`, `ddl_conn`) work around the non-reentrant `ClientContext` lock. See [Section 6](#6-connection-management).
+Two ideas carry most of the design:
 
-## 2. Module Map with Line Counts
+1. **Every semantic-view statement becomes ordinary SQL before DuckDB plans it.** DDL
+   lowers to DML on a catalog table, introspection lowers to a call to a read-side
+   table function, and a query lowers to a subquery. DuckDB then does all the
+   planning, execution, transaction handling and error rendering.
+2. **Everything runs in the caller's context.** No statement runs on a connection the
+   extension owns. Writes are plain DML in the caller's transaction, reads scan the
+   catalog with the caller's transaction, and a query is planned as part of the
+   caller's query.
 
-```mermaid
-flowchart LR
-    subgraph core["Core Modules"]
-        model["model.rs<br/>836 lines"]
-        catalog["catalog.rs<br/>473 lines"]
-        parse["parse.rs<br/>1,518 lines"]
-        body["body_parser.rs<br/>2,107 lines"]
-        grph["graph.rs<br/>2,502 lines"]
-        expand["expand.rs<br/>4,490 lines"]
-    end
+## 2. Components
 
-    subgraph ddl["DDL (ddl/)"]
-        define["define.rs<br/>229 lines"]
-        drop["drop.rs<br/>139 lines"]
-        list["list.rs<br/>101 lines"]
-        describe["describe.rs<br/>164 lines"]
-    end
+The extension is one loadable binary built from two languages.
 
-    subgraph query["Query (query/)"]
-        table_fn["table_function.rs<br/>810 lines"]
-        explain["explain.rs<br/>260 lines"]
-        error["error.rs<br/>108 lines"]
-    end
+**The Rust crate (`src/`)** holds every semantic decision: the grammar rules and their
+transforms, the CREATE body parser, the data model, CREATE-time validation, the SQL
+that each statement lowers to, the catalog reader, and query expansion. Most of it is
+pure Rust with no DuckDB dependency, so `cargo test`, the proptests and the fuzz
+targets exercise it directly. The parts that call DuckDB through FFI are compiled only
+under the `extension` feature (see
+[Feature Flag Split](../MAINTAINER.md#feature-flag-split)).
 
-    subgraph other["Entry + Shim"]
-        lib["lib.rs<br/>535 lines"]
-        shim["shim.cpp<br/>297 lines"]
-    end
+**The C++ shim (`cpp/src/shim.cpp`)** does only what needs DuckDB's C++ internals,
+which the C API does not offer:
 
-    %% Dependency arrows (use crate::)
-    parse --> body
-    parse --> model
-    body --> model
-    body -.->|ParseError| parse
-    catalog --> model
-    grph --> model
-    grph -.->|suggest_closest| expand
-    expand --> grph
-    expand --> model
-    define --> catalog
-    drop --> catalog
-    list --> catalog
-    describe --> catalog
-    table_fn --> catalog
-    table_fn --> expand
-    table_fn --> model
-    explain --> expand
-    explain --> model
-    error --> expand
+- registering the grammar extension and activating it per connection;
+- the grammar bridge (`sv_grammar_lower`), which turns a matched rule into DuckDB AST
+  nodes;
+- registering every table and scalar function through the Catalog API, each with its
+  `duckdb_functions()` description;
+- the `bind_replace` of `semantic_view()`, which hands DuckDB a subquery to plan;
+- reads in the caller's context (`SvCallerScope` and the `sv_caller_*` functions),
+  and `SvTablePinner`, which pins the names in an expansion.
 
-    %% C++ -> Rust FFI
-    shim -.->|FFI| parse
+The shim does not interpret semantic-view syntax or definitions. When it needs a
+decision, it calls Rust. The rule is that new logic goes to Rust and the shim stays a
+bridge.
 
-    linkStyle 3 stroke:#f44336,stroke-dasharray:5
-    linkStyle 5 stroke:#f44336,stroke-dasharray:5
-```
+The FFI boundary uses one convention throughout. Data crosses as length-prefixed
+byte buffers (the wire formats are documented in `src/grammar/tree.rs`,
+`src/ddl/read_ffi.rs` and `src/query/wire.rs`). Rust returns heap buffers that C++
+releases through Rust. A return code says how the call went: 0 is success, 1 is a
+user-facing error, and 2 is an internal failure. Every Rust entry point wraps its body
+in `catch_unwind`, so a panic never unwinds into C++. The grammar bridge goes one step
+further and reports even an internal failure as rc 1, because the bridge throws rc 2
+as an `InternalException`, and that can invalidate the database for every later
+query.
 
-**Circular dependency:** `graph.rs` imports `expand::suggest_closest` and `expand.rs` imports `graph::RelationshipGraph`. The `suggest_closest` function is a generic Levenshtein utility that has no semantic dependency on the expansion engine.
+## 3. Loading
 
-## 3. DDL Flow -- CREATE SEMANTIC VIEW
+`semantic_views_init_c_api` in `src/lib.rs` is the only exported symbol. On `LOAD` it:
 
-The DDL path spans two languages and three phases: parse, plan, and bind/execute.
+1. initialises the duckdb-rs C API stubs (`duckdb_rs_extension_api_init`) against the
+   C API version the extension declares (`MINIMUM_DUCKDB_VERSION`);
+2. compares the host's `duckdb_library_version()` with the engine the shim was
+   compiled against (`sv_compiled_duckdb_version`), and refuses a mismatch through
+   `src/load_guard.rs` before anything touches host objects;
+3. opens a load-time `Connection` on the database handle and runs `init_catalog`,
+   which creates `semantic_layer._definitions` and runs any migrations (skipped on a
+   read-only database);
+4. calls each C++ registration wrapper in the `REGISTRATIONS` table, in order, and
+   stops at the first failure with the wrapper's message.
 
-```mermaid
-sequenceDiagram
-    participant User
-    participant DuckDB as DuckDB Parser
-    participant CPP as C++ shim.cpp
-    participant Rust as Rust parse.rs
-    participant Body as body_parser.rs
-    participant Plan as sv_plan_function
-    participant Bind as sv_ddl_bind
-    participant Rewrite as sv_rewrite_ddl_rust
-    participant DDL as ddl_conn
-    participant Define as DefineFromJsonVTab
-    participant Graph as graph.rs
-    participant Cat as catalog.rs
+The grammar is registered last (LIFE-2). Its productions lower to calls to the
+read-side functions and to the `__sv_compute_create_from_yaml` helper, and
+registration rolls nothing back on failure. Registering the grammar last means that a
+failed `LOAD` leaves semantic-view syntax unrecognised rather than half-working.
+`tests/registration_order_guard.rs` pins the order, and `tests/no_long_lived_conn.rs`
+fails if `init_extension` ever allocates a connection that outlives the load again.
 
-    User->>DuckDB: CREATE SEMANTIC VIEW sales AS ...
-    DuckDB->>DuckDB: Standard parser fails
-    DuckDB->>CPP: sv_parse_stub(query)
-    CPP->>Rust: sv_validate_ddl_rust(query)
-    Rust->>Rust: detect_ddl_prefix()
-    Rust->>Body: parse_keyword_body()
-    Body-->>Rust: Ok(SemanticViewDefinition)
-    Rust-->>CPP: rc=0 (PARSE_SUCCESSFUL)
-    CPP-->>DuckDB: SemanticViewParseData{query}
+## 4. Entry point and C++ linkage
 
-    DuckDB->>Plan: sv_plan_function(parse_data)
-    Plan-->>DuckDB: TableFunction{sv_ddl_bind, query}
+This section replaces the Phase 15 note `entry-point-decision.md`. The shape it chose
+still holds, though the engine copy is now built differently.
 
-    DuckDB->>Bind: sv_ddl_bind(query)
-    Bind->>Rewrite: sv_rewrite_ddl_rust(query)
-    Rewrite->>Body: parse_keyword_body()
-    Body-->>Rewrite: SemanticViewDefinition as JSON
-    Rewrite-->>Bind: SELECT * FROM create_semantic_view_from_json('sales', '{...}')
-    Bind->>DDL: duckdb_query(ddl_conn, rewritten_sql)
-    DDL->>Define: DefineFromJsonVTab::bind(name, json)
-    Define->>Graph: validate_graph()
-    Define->>Graph: validate_facts()
-    Define->>Graph: validate_hierarchies()
-    Define->>Graph: validate_derived_metrics()
-    Define->>Graph: validate_using_relationships()
-    Define->>Cat: catalog_insert / catalog_upsert
-    Define-->>DDL: Ok(view_name)
-    DDL-->>Bind: result rows
-    Bind-->>DuckDB: SvDdlBindData{rows}
-    DuckDB-->>User: view_name
-```
+**A Rust `C_STRUCT` entry point with a C++ helper.** The extension uses the C API
+entry point, and C++ is a helper called after Rust has initialised. The C++ entry point
+(`DUCKDB_CPP_EXTENSION_ENTRY` with `ExtensionLoader`) was tried first and failed. It
+references C++ symbols that are not inlined, and the Python DuckDB build compiles with
+`-fvisibility=hidden`, so those symbols did not resolve at load time. The `C_STRUCT`
+ABI has a second benefit: DuckDB passes the extension the C API function table, which
+`duckdb_rs_extension_api_init` installs, so every duckdb-rs call works normally. The
+C++ ABI skips that step.
 
-Key observations:
-- **Double parse**: Both `sv_validate_ddl_rust` (parse phase) and `sv_rewrite_ddl_rust` (plan/bind phase) call `body_parser::parse_keyword_body`. This is intentional -- no state carries between the C++ parse and plan callbacks, and DDL is infrequent enough that the cost is negligible.
-- **Error positioning**: The validate path tracks byte offsets through parsing so the C++ shim can set `error_location` on `ParserExtensionParseResult`, giving users caret-positioned error messages.
+**The extension carries its own copy of the engine code it calls.** Compiling the shim
+against the headers alone meant hand-writing stubs for each missing symbol
+(constructors and destructors of `Function`, `TableFunction` and friends,
+`DBConfig::GetConfig`). Each stub exposed the next missing one, and RTTI for
+`GlobalTableFunctionState` finally blocked it under Python DuckDB. The fix was to link
+real definitions into the extension. On DuckDB 1.x that meant compiling the
+`duckdb.cpp` amalgamation with the `cc` crate. DuckDB 2.0 ships no amalgamation, so
+`scripts/ensure_engine.py` now builds the engine's `duckdb_static` library from source
+and `build.rs` links it. The details are in
+[Which DuckDB the C++ shim compiles against](../MAINTAINER.md#which-duckdb-the-c-shim-compiles-against).
 
-## 4. Query Flow -- semantic_view()
+**Only the entry point is exported.** `build.rs` limits the binary's exported symbols
+to `semantic_views_init_c_api`, so the engine's C++ symbols and the Rust standard
+library stay local to the extension and cannot collide with the host's:
 
-```mermaid
-sequenceDiagram
-    participant User
-    participant DuckDB
-    participant VTab as SemanticViewVTab
-    participant Cat as catalog.rs
-    participant Exp as expand()
-    participant Graph as RelationshipGraph
-    participant QConn as query_conn
-    participant Stream as Zero-copy streaming
+- On Linux it passes `--dynamic-list`. rustc already writes a version script for a
+  cdylib, and GNU ld rejects a second one ("anonymous version tag cannot be combined
+  with other version tags").
+- On macOS it passes `-exported_symbols_list`.
+- On Windows the `#[no_mangle]` entry point is the only `dllexport`.
 
-    User->>DuckDB: SELECT * FROM semantic_view('sales', dimensions := ['region'], metrics := ['revenue'])
-    DuckDB->>VTab: bind(view_name, dimensions, metrics)
-    VTab->>Cat: catalog.read().get("sales")
-    Cat-->>VTab: JSON definition
-    VTab->>VTab: SemanticViewDefinition::from_json()
-    VTab->>Exp: expand("sales", def, QueryRequest)
-    Exp->>Exp: validate request
-    Exp->>Exp: resolve dimensions + metrics
-    Exp->>Exp: toposort_facts + inline_facts
-    Exp->>Exp: toposort_derived + inline_derived_metrics
-    Exp->>Exp: check_fan_traps
-    Exp->>Exp: find_using_context (role-playing)
-    Exp->>Graph: RelationshipGraph::from_definition
-    Exp->>Exp: resolve_joins_pkfk
-    Exp->>Exp: SQL assembly (SELECT/FROM/JOIN/WHERE/GROUP BY)
-    Exp-->>VTab: expanded SQL string
-    VTab->>VTab: build_execution_sql (type cast wrapper)
-    VTab->>VTab: Declare output columns + types
-    VTab-->>DuckDB: SemanticViewBindData
+**The host's database is reached by layout.** The shim gets the `DatabaseInstance`
+from the C API handle by casting `duckdb_database::internal_ptr` to
+`DatabaseWrapper`. That cast, and every other C++ call, depends on the host having
+exactly the layout of the engine the shim was compiled against. This is why the
+extension pins one exact DuckDB release.
 
-    DuckDB->>VTab: func(output_chunk)
-    VTab->>QConn: duckdb_query(query_conn, execution_sql)
-    QConn-->>VTab: duckdb_result
-    VTab->>Stream: duckdb_result_get_chunk()
-    Stream->>Stream: duckdb_vector_reference_vector (zero-copy)
-    VTab-->>DuckDB: DataChunkHandle with output
-```
+**The ABI is `C_STRUCT` pinned to the v1.5.6 C API, not `C_STRUCT_UNSTABLE`.** DuckDB
+2.0 loads an unstable-ABI extension only through a new `_init_c_api_v2` entry point.
+A `C_STRUCT` extension pinned to an older C API loads through the entry point we
+already have, but DuckDB then checks only that the host's C API is at least that old.
+That is why the load guard in step 2 of [Loading](#3-loading) exists. It compares
+version strings only, because an engine built from the PyPI sdist carries no real
+source id.
 
-The `build_execution_sql` step wraps the expanded SQL in a subquery with explicit `CAST` expressions when bind-time types differ from the inferred types (e.g., DuckDB's optimizer may promote `BIGINT` to `HUGEINT`).
+The cost of this arrangement is a larger binary and a slow first engine build, which
+`.engine/` caches.
 
-## 5. Connection Management
+## 5. The grammar
 
-```mermaid
-flowchart LR
-    subgraph DB["DuckDB Database"]
-        main["Main Connection<br/>(host)"]
-        persist["persist_conn<br/>(file-backed only)"]
-        query["query_conn"]
-        ddl["ddl_conn"]
-    end
+DuckDB 2.0 parses with a PEG grammar that an extension can extend. `src/grammar/` owns
+our part of it: the rule text (`grammar::changes`) and the transforms
+(`grammar::transform`). The shim registers the rules it receives from
+`sv_grammar_changes_rust` and does not know what any rule means.
 
-    subgraph Users["Used By"]
-        init["init_extension()<br/>registers all table functions"]
-        cat_write["catalog persist<br/>(INSERT into _definitions)"]
-        sem_query["semantic_view() func()<br/>executes expanded SQL"]
-        ddl_exec["sv_ddl_bind()<br/>executes rewritten DDL"]
-    end
+**Three shapes, three attachment points.** Each statement rule is prepended as the
+first alternative of an existing DuckDB rule, and the attachment decides where the
+syntax may appear:
 
-    main --> init
-    persist --> cat_write
-    query --> sem_query
-    ddl --> ddl_exec
-
-    style persist fill:#fff9c4,stroke:#f9a825
-    style query fill:#e8f5e9,stroke:#4caf50
-    style ddl fill:#fce4ec,stroke:#e91e63
-```
-
-| Connection | Created | Purpose | Why separate? |
+| Shape | Prepended to | Rules | Where it may appear |
 |---|---|---|---|
-| **main** (host) | By DuckDB | Registers table functions, reads catalog at init | -- |
-| **persist_conn** | At init (file-backed only) | Writes to `semantic_layer._definitions` | ClientContext lock is non-reentrant; `bind()` already holds it |
-| **query_conn** | At init (always) | Executes expanded SQL in `semantic_view()` `func()` | Same lock reason; query runs inside `func()` callback |
-| **ddl_conn** | At init (always) | Executes rewritten DDL SQL in `sv_ddl_bind()` | Plan/bind holds ClientContext; DDL rewrite needs a second execution context |
+| query | `DescribeStatement` | `SvShowStatement`, `SvShowColumns`, `SvDescribe` | top level, subquery, CTE, view body |
+| statement | `Statement` | `SvCreate`, `SvDrop`, `SvAlter` | top level only |
+| table reference | `InnerTableRef` | `SvSemanticView` | wherever a table can, joins and `LATERAL` included |
 
-## 6. Data Model
+Making `SHOW` and `DESCRIBE` queries is what lets `SELECT ... FROM (SHOW SEMANTIC
+VIEWS)` work (TECH-DEBT #77). DuckDB also splits multi-statement strings and reports a
+statement that matches no rule as its own syntax error, so the extension has no
+statement splitter or front-door scanner of its own.
 
-```mermaid
-classDiagram
-    class SemanticViewDefinition {
-        +String base_table
-        +Vec~TableRef~ tables
-        +Vec~Dimension~ dimensions
-        +Vec~Metric~ metrics
-        +Vec~String~ filters
-        +Vec~Join~ joins
-        +Vec~Fact~ facts
-        +Vec~Hierarchy~ hierarchies
-        +Vec~String~ column_type_names
-        +Vec~u32~ column_types_inferred
-        +from_json(name, json) Result
-    }
+**CREATE's body is not in the grammar.** `SvCreate` matches the prefix and the view
+name, then takes every remaining token with `SvCreateToken`, which the `ANY_TOKEN`
+change overrides with DuckDB's passthrough matcher. The transform rebuilds the
+statement's text from those tokens and hands it to `parse::plan_create`, the existing
+body parser. The body language (`TABLES`, `RELATIONSHIPS`, `FACTS`, `DIMENSIONS`,
+`METRICS`, annotations, window and semi-additive clauses, `FROM YAML`) is large and
+reuses unreserved words, and DuckDB's PEG reader has no negative lookahead (it
+ignores `!`). Parsing it in one Rust module keeps every CREATE form in one place. The
+price is that DuckDB gives a transform tokens, not text, so whitespace inside a
+stored expression is normalised and comments are dropped (TECH-DEBT #100, accepted).
 
-    class TableRef {
-        +String alias
-        +String table
-        +Vec~String~ pk_columns
-        +Vec~Vec~String~~ unique_constraints
-    }
+The same lack of lookahead shapes the other rules. `SEMANTIC_VIEW(...)` is a flat run
+of parts that the transform groups into clauses. `SHOW` tries some alternatives first
+so that an optional scope name cannot swallow the next clause. The comments on
+`show::RULES` and `query::RULES` explain each case.
 
-    class Dimension {
-        +String name
-        +String expr
-        +Option~String~ source_table
-        +Option~String~ output_type
-    }
+**The grammar is active per connection.** DuckDB keeps active grammar extensions per
+connection, and changing another connection's setting from the loading thread is a
+data race (TECH-DEBT #103). `sv_register_grammar` therefore registers the grammar once
+per database, and then:
 
-    class Metric {
-        +String name
-        +String expr
-        +Option~String~ source_table
-        +Option~String~ output_type
-        +Vec~String~ using_relationships
-    }
+- connections opened later activate it through an `ExtensionCallback`'s
+  `OnConnectionOpened`, on their own thread;
+- every connection open at load time, the loading one included, gets a
+  `SemanticViewsGrammarPending` state whose `QueryBegin` / `QueryEnd` activates the
+  grammar on that connection's own thread and then removes itself.
 
-    class Fact {
-        +String name
-        +String expr
-        +Option~String~ source_table
-    }
+The loading connection activates when its `LOAD` ends. Another connection that was
+already open parses its next query without the grammar, because DuckDB parses before
+`QueryBegin`. That limitation is accepted and documented. See
+[Grammar activation](../MAINTAINER.md#grammar-activation).
 
-    class Hierarchy {
-        +String name
-        +Vec~String~ levels
-    }
+## 6. How a statement is lowered
 
-    class Join {
-        +String table
-        +String on
-        +Vec~String~ from_cols
-        +Vec~JoinColumn~ join_columns
-        +String from_alias
-        +Vec~String~ fk_columns
-        +Vec~String~ ref_columns
-        +Option~String~ name
-        +Cardinality cardinality
-    }
+When a statement rule matches, DuckDB calls one of three finalize callbacks in the
+shim, one for each shape. Each calls `sv_grammar_lower`:
 
-    class JoinColumn {
-        +String from
-        +String to
-    }
+1. `sv_grammar_span` finds the statement's own byte span and its tokens, so that a
+   statement in a long multi-statement string does not cost the length of the whole
+   string.
+2. The match subtree and those tokens are serialised (`src/grammar/tree.rs` has the
+   format) and passed to `sv_grammar_transform_rust`.
+3. Rust decodes the tree, `grammar::transform` produces a `RewriteAction`, and
+   `parse::lower_action` turns that into SQL text.
+4. The shim parses the SQL with `sv_compat::builtin_parser()`, a parser with no
+   grammar extensions, so the lowered SQL cannot re-enter our rules.
 
-    class Cardinality {
-        <<enumeration>>
-        ManyToOne
-        OneToOne
-    }
+What each statement lowers to:
 
-    SemanticViewDefinition *-- TableRef
-    SemanticViewDefinition *-- Dimension
-    SemanticViewDefinition *-- Metric
-    SemanticViewDefinition *-- Fact
-    SemanticViewDefinition *-- Hierarchy
-    SemanticViewDefinition *-- Join
-    Join *-- JoinColumn
-    Join --> Cardinality
-```
+- **CREATE** (`RewriteAction::Create`). `plan_create` parses the body, and
+  `ddl::define::enrich_definition_for_create` runs cardinality inference and the graph
+  validations (`graph/`): name uniqueness, the relationship tree, facts, derived
+  metrics, `USING` relationships and member-reference scoping. The result is an
+  `INSERT` into `_definitions`, guarded by a `CASE ... error()` for plain CREATE or
+  written as `INSERT OR IGNORE` / `INSERT OR REPLACE` for the other modes. The JSON is
+  wrapped in `json_merge_patch(...)` with `now()`, `current_database()`, the target
+  schema, `current_schema()`, the temporary-table list and `schema_version`. DuckDB
+  evaluates those at execution, on the caller's connection.
+- **CREATE ... FROM YAML FILE** (`CreateFromYamlFile`). The `INSERT` selects from the
+  `__sv_compute_create_from_yaml` helper table function. Its bind reads the file
+  through DuckDB's `FileSystem` with the caller's context, then parses and enriches
+  the definition the same way.
+- **DROP and ALTER**. The grammar transform builds the action itself, and
+  `lower_action` emits the DML (`DELETE`, or an `UPDATE` of the name or of the comment
+  through `json_merge_patch`) behind guards from `catalog/writes.rs`: the
+  current-database check, the existence check and the rename-collision check.
+- **SHOW and DESCRIBE** (`Passthrough`). These become `SELECT * FROM
+  <read_side_fn>(...)` with any `LIKE`, `STARTS WITH` or `LIMIT` turned into a
+  `WHERE` / `LIMIT` suffix (`parse::lower_show`, `parse::lower_name_only_read`).
+- **SEMANTIC_VIEW(...)**. This becomes `SELECT * FROM semantic_view('v', dimensions
+  := [...], metrics := [...], ...)`, and the shim keeps only the table reference. See
+  the next section.
 
-All types derive `Serialize`/`Deserialize` (serde) and `Arbitrary` (proptest). The `Join` struct carries legacy fields (`on`, `from_cols`, `join_columns`) alongside the current PK/FK model (`from_alias`, `fk_columns`, `ref_columns`, `name`, `cardinality`) for backward-compatible deserialization of stored JSON.
+A write that lowers to several statements goes back to DuckDB as one
+`MultiStatement`. DuckDB 2.0 serves such a statement's result from its last
+row-returning statement, so the shim rewrites each guard `SELECT` that comes before
+the DML into a `SET VARIABLE`, which raises the same error and returns nothing, and
+then a `RESET`. The DML's `RETURNING` row is the result. Under autocommit the guards
+and the DML commit separately (TECH-DEBT #27). Inside an explicit transaction they
+share one snapshot.
 
-## 7. Expansion Pipeline Internals
+Why lower to SQL at all, rather than to custom statement nodes? A grammar transform
+must return DuckDB's own AST, and the simplest correct AST is the one DuckDB's parser
+builds from SQL. Lowering writes to DML also makes them transactional for free: a
+`ROLLBACK` undoes a CREATE, and the extension needs no connection and no cache that
+could diverge from the table. (The in-memory catalog mirror, the separate DDL
+connection and the parser-override hook are all gone for this reason.)
 
-The `expand()` function (line 1240 of `expand.rs`) implements a 9-step pipeline:
+One consequence is easy to miss. The transform runs while DuckDB parses, before there
+is any `ClientContext`. So CREATE is fully validated at parse time, a validation
+failure is a parser error, and nothing in CREATE can look at the catalog or the
+tables. Anything that needs the session (`now()`, the current schema, temporary
+tables) is written into the SQL for DuckDB to evaluate. Member types are not stored at
+all. The read side infers them when it needs them (`query/member_types.rs`).
 
-```mermaid
-flowchart TD
-    A["1. Validate request<br/>(at least one dim or metric)"] --> B
-    B["2. Resolve dimensions<br/>(find_dimension, duplicate check)"] --> C
-    C["3. Resolve metrics<br/>(find_metric, duplicate check)"] --> D
-    D["4a. Toposort facts<br/>(toposort_facts)"] --> E
-    E["4b. Inline facts + derived metrics<br/>(inline_derived_metrics)"] --> F
-    F["5. Fan trap detection<br/>(check_fan_traps)"] --> G
-    G["6. Role-playing resolution<br/>(find_using_context → dim_scoped_aliases)"] --> H
-    H["7. Build SELECT clause<br/>(dims → DISTINCT, mets → GROUP BY)"] --> I
-    I["8. Resolve joins<br/>(resolve_joins_pkfk → ordered LEFT JOINs)"] --> J
-    J["9. SQL assembly<br/>(FROM + JOINs + WHERE + GROUP BY)"]
+## 7. How a query runs
 
-    style A fill:#e3f2fd,stroke:#1565c0
-    style F fill:#ffebee,stroke:#c62828
-    style G fill:#fff3e0,stroke:#e65100
-    style I fill:#e8f5e9,stroke:#2e7d32
-```
+`semantic_view(name, dimensions := [...], metrics := [...], facts := [...],
+where_clause := '...', column_order := [...], params := row(...))` is the one query
+implementation. The `SEMANTIC_VIEW(v DIMENSIONS ... METRICS ... WHERE ...)` construct
+lowers to a call to it (decision D3 in `src/grammar/query.rs`). A DuckDB view over the
+construct therefore stores the `semantic_view()` call and re-expands it against the
+current definition each time it is queried.
 
-Supporting functions called by the pipeline:
+`semantic_view()` is a `bind_replace` table function, like DuckDB's own `query()`. It
+has no bind data, state or scan of its own. Its bind (`sv_semantic_view_bind_replace`)
+does the following:
 
-| Step | Function | Lines | Purpose |
-|---|---|---|---|
-| 4a | `toposort_facts()` | 673-750 | Topological sort of fact dependency DAG |
-| 4b | `inline_facts()` | 752-802 | Word-boundary-safe substitution of fact refs in expressions |
-| 4b | `toposort_derived()` | 804-883 | Topological sort of derived metric DAG |
-| 4b | `inline_derived_metrics()` | 885-1008 | Resolves all metric expressions (base facts + derived refs) |
-| 5 | `check_fan_traps()` | 1010-1237 | Detects one-to-many aggregation across relationship boundaries |
-| 6 | `find_using_context()` | (inline) | Resolves role-playing table aliases via USING RELATIONSHIPS |
-| 8 | `resolve_joins_pkfk()` | 487-671 | BFS from base table to collect required join aliases |
-| 8 | `synthesize_on_clause()` | 278-290 | Generates ON clause from FK/PK column pairs |
+1. Reads the arguments and the caller's search path, and opens an `SvCallerScope`
+   naming the caller's `ClientContext` on this thread.
+2. Calls `sv_semantic_view_bind_rust`. Rust builds a `CatalogReader::for_caller()`,
+   which calls back into the shim's `sv_caller_definitions`. That function scans
+   `_definitions` through the storage layer with the caller's transaction, so
+   uncommitted CREATE, DROP and RENAME in the same transaction are visible. It runs no
+   statement, because `ClientContext::Query` from inside the caller's own bind would
+   deadlock on the context lock (TECH-DEBT #19). Rust then looks up the view on the
+   search path, expands wildcards, builds a `QueryRequest`, and calls
+   `expand::expand`. It returns the SQL, framed with the database and schema stamped
+   at CREATE.
+3. Parses the SQL with the builtin parser, then moves every parse position to the
+   call's own location (`sv_relocate`), so an error in generated SQL points at the
+   call and not at an unrelated offset in the caller's text.
+4. Pins names with `SvTablePinner`. `TABLES` entries arrive fully qualified. Other
+   names in the expansion (a member subquery's tables, functions, macros, table
+   functions, cast types) are resolved the way DuckDB resolves a view body stored in
+   the stamped schema, so a CTE or a current schema in the caller's query cannot stand
+   in for them.
+5. Binds the prepared statement's parameters into `params` (TECH-DEBT #105).
+6. When the call sits inside an enclosing scope, binds a copy on an isolated binder
+   first, so a bare column name in a member expression fails instead of binding to a
+   column of the outer query. Only `where_clause` may refer outward (TECH-DEBT #107).
+7. Returns a `SubqueryRef`.
 
-## 8. Architectural Critique
+DuckDB then binds and plans that subquery as part of the caller's query. This is why
+the design uses `bind_replace` (TECH-DEBT #42): the expansion runs in the caller's
+transaction and session, it is optimised together with the surrounding query
+(pushdown, parallel scans), results stream with no buffering, cancellation works as
+for any query, and the column types are DuckDB's own.
 
-### C1: expand.rs is a monolith (4,490 lines)
+`explain_semantic_view()` and the read-side functions behind `SHOW` and `DESCRIBE`
+follow the same caller-context pattern. A C++ bind opens an `SvCallerScope`, a Rust
+dispatcher reads through `CatalogReader`, and a typed row payload comes back for the
+shim to emit. The dispatcher calls `sv_caller_describe` to type members and
+`sv_caller_explain` to plan. A cancelled caller is checked between member-type probes
+and after the dispatcher returns, and is raised as a bare `InterruptException`.
 
-**Severity: High | Effort: Large**
+## 8. Catalog persistence
 
-`expand.rs` contains 6 distinct responsibilities in a single file: request validation, dimension/metric resolution, fact topological sort and inlining, derived metric resolution, fan trap detection, role-playing resolution, join graph resolution, and SQL generation. At 4,490 lines (99 tests), it is the largest file by a factor of 1.8x over the next (`graph.rs` at 2,502).
+Definitions are JSON rows in `semantic_layer._definitions`, a regular DuckDB table
+keyed by `(schema_name, name)`, because semantic views are scoped to a schema. Using a
+real table is what makes DDL transactional and lets definitions persist with the
+database file. Writes are the lowered DML from section 6, and reads are the
+storage-layer scan from section 7. `init_catalog` creates the table on load and runs
+the migrations, such as rebuilding a pre-scoping catalog in place and importing a
+v0.1.0 companion file. A read-only database skips them, and a missing table reads as
+an empty catalog. The details are in
+[Catalog Persistence](../MAINTAINER.md#catalog-persistence).
 
-**Proposed refactoring:** Split into an `expand/` module directory:
+## 9. Data model
 
-```
-src/expand/
-  mod.rs          - pub fn expand(), QueryRequest, ExpandError (public API)
-  validate.rs     - request validation, duplicate checks
-  resolve.rs      - find_dimension, find_metric, dimension/metric resolution
-  facts.rs        - toposort_facts, inline_facts, toposort_derived, inline_derived_metrics
-  fan_trap.rs     - check_fan_traps
-  role_playing.rs - find_using_context, dim_scoped_aliases
-  join_resolver.rs - resolve_joins_pkfk, synthesize_on_clause
-  sql_gen.rs      - SELECT/FROM/JOIN/WHERE/GROUP BY assembly, quote_ident, quote_table_ref
-  util.rs         - suggest_closest, replace_word_boundary
-```
+`src/model.rs` defines `SemanticViewDefinition` and its parts. These structs are the
+on-disk format: serde writes them as the stored JSON, and YAML export emits the same
+shape. The serde surface is a compatibility contract, and the module doc lists the
+frozen conventions (explicit `null`s for `source_table` and `output_type`, enum
+variants in their Rust casing). New fields default on deserialisation and are skipped
+when empty, so old rows keep loading. Unknown fields are ignored, so rows that still
+carry removed keys load too.
 
-### C2: graph.rs validates 6 different concerns (2,502 lines)
+The parts, in brief:
 
-**Severity: Medium | Effort: Medium**
+- **Tables** (`TableRef`): an alias, a physical table, declared `PRIMARY KEY` and
+  `UNIQUE` columns, a comment and synonyms. Keys are logical assertions, as in
+  Snowflake. The physical catalog is never consulted for them.
+- **Relationships** (`Join`): a named foreign key from one alias's columns to
+  another table's key columns, with a `Cardinality` that CREATE infers. Together they
+  must form a tree rooted at the first table, which is the base of every expansion.
+- **Facts, dimensions and metrics**: each has a name, a SQL expression, an optional
+  source table, a comment, synonyms and (for facts and metrics) an access modifier.
+  Metrics also carry `USING` relationships for role-playing tables,
+  `NON ADDITIVE BY` dimensions for semi-additive metrics, and an optional window
+  specification. A derived metric is a metric whose expression names other metrics.
+- **Materializations**: a pre-aggregated table and the dimensions and metrics it
+  covers.
+- **Stamps**: `database_name`, `schema_name`, `resolution_schema_name`,
+  `temp_tables` and `created_on`, written by the `INSERT` at CREATE. They let a query
+  resolve the body's tables the way DuckDB resolves a view body, in the creating
+  session's schema, and are stripped from YAML export. A `schema_version` key is
+  injected into the JSON the same way but is not a field of the struct.
 
-`graph.rs` spans relationship graph construction, FK validation, fact validation, hierarchy validation, derived metric validation, and USING relationship validation. Each `validate_*` function is self-contained and could be a separate module.
+## 10. The expansion pipeline
 
-**Proposed refactoring:** Split into a `graph/` module directory:
+`expand::expand` (in `src/expand/sql_gen.rs`) turns a definition and a `QueryRequest`
+into one SQL string. It is pure Rust and DuckDB does all the data processing. At a
+high level it:
 
-```
-src/graph/
-  mod.rs               - RelationshipGraph struct + from_definition
-  relationship.rs      - validate_graph, toposort, check_no_diamonds, check_no_orphans
-  facts.rs             - validate_facts, find_fact_references
-  hierarchies.rs       - validate_hierarchies
-  derived_metrics.rs   - validate_derived_metrics, contains_aggregate_function
-  using.rs             - validate_using_relationships
-```
+1. Hoists any subqueries in `where_clause` into CTEs, so they are uncorrelated.
+2. Validates the request, then resolves the requested dimensions, metrics or facts by
+   name, enforcing `PRIVATE` access. Facts and metrics cannot be mixed in one request.
+3. Resolves the `where_clause` members and the tables they reach.
+4. Routes to a materialization when one covers the request exactly, there is no
+   predicate, and no metric is semi-additive or a window metric.
+5. Inlines facts into metric expressions, and metrics into derived metrics, in
+   dependency order.
+6. Decides the topology. A query whose metrics live at different grains gets one CTE
+   per grain (`per_grain.rs`), and window and semi-additive metrics may anchor their
+   CTE at a non-root table.
+7. Runs the fences: fan-trap checks (`fan_trap.rs`), the role-playing path checks
+   (`role_playing.rs`), and the guard against a `COUNT(*)` that would count rows that
+   a `LEFT JOIN` padded with NULLs.
+8. Dispatches to the per-grain, semi-additive or window emitter, or builds the plain
+   `SELECT ... FROM base LEFT JOIN ... WHERE ... GROUP BY` from the PK/FK join tree
+   (`join_resolver.rs`, `sql_gen.rs`).
 
-### C3: Circular dependency expand <-> graph
+The order matters. Topology is decided before the fences, because a per-grain or
+re-anchored plan supersedes the fan-trap and role-playing errors that would reject the
+base-anchored shape. A change that lets the expansion reach a new table has to teach
+every fence about it. CLAUDE.md's rule on listing "the fences it walks past" exists
+because that pairing was missed more than once.
 
-**Severity: Medium | Effort: Small**
+## 11. Error reporting
 
-`expand.rs` exports `suggest_closest` (a generic Levenshtein distance utility) which `graph.rs` imports. Meanwhile, `expand.rs` imports `graph::RelationshipGraph`. This creates a circular dependency at the module level.
+Errors take the form DuckDB uses for the same kind of failure.
 
-`suggest_closest` has zero semantic connection to query expansion -- it's a string similarity helper used for "did you mean?" suggestions in error messages.
+- **A statement no rule matches** gets DuckDB's own `syntax error at or near "..."`,
+  with DuckDB's caret. The extension produces nothing for it. The rules accept only
+  well-formed `DROP`, `ALTER` and `SHOW`, so a malformed one ends up here.
+- **A matched but invalid statement** is a Rust `ParseError { message, position }`
+  (`src/errors.rs`). The position is a byte offset into the whole query. CREATE adds
+  its statement's offset, because the body parser sees only the statement. The bridge
+  throws `ParserException(QueryLocation(position, 0), message)`, and DuckDB renders it
+  as `LINE n: ... ^` in every client, the Python client included. The full message
+  comes back on the heap, because the fixed error buffer would cut a long one short.
+- **CREATE-time semantic errors** (graph validation, a missing key) carry no position.
+  The validators work on a built definition with no spans into the text, and many of
+  these failures have no single token to point at (TECH-DEBT #31). They are still
+  `ParserException`s, because they are raised during parsing.
+- **Write guards** raise their errors through `error()` at execution time, for
+  example "already exists" and "does not exist".
+- **Query-time errors** from `semantic_view()` are `BinderException`s prefixed
+  `semantic_view: `. Generated SQL that fails to parse (usually a malformed
+  `where_clause`) is a `ParserException` at the call's location, and binder errors in
+  the expansion point at the call as well (`sv_relocate`). Cancellation is a bare
+  `InterruptException`, because ADBC maps a failure to "cancelled" only on DuckDB's
+  exact interrupt message.
+- **Load failures** come back through each registration wrapper's error buffer as
+  `Failed to register <name>: <reason>`, and a version mismatch names both versions.
 
-**Proposed fix:** Extract `suggest_closest` and `replace_word_boundary` to a new `src/util.rs` module. Both `expand.rs` and `graph.rs` import from `util` instead of each other. This breaks the cycle and makes the dependency graph a clean DAG.
+## 12. Known rough edges
 
-### C4: Double parse in FFI boundary
+None of these are bugs. They are places where the shape is less clean than the rest.
 
-**Severity: Low | Effort: N/A (intentional)**
-
-Both `sv_validate_ddl_rust` (parse phase) and `sv_rewrite_ddl_rust` (plan/bind phase) call `body_parser::parse_keyword_body`. The DuckDB parser extension API provides no mechanism to carry state between parse and plan callbacks -- the C++ `ParserExtensionParseData` only carries the raw query string.
-
-Since DDL statements are infrequent (once at view creation), the cost of re-parsing is negligible. Not worth optimizing.
-
-### C5: parse.rs <-> body_parser.rs bidirectional import
-
-**Severity: Low | Effort: Small**
-
-`parse.rs` imports `body_parser::parse_keyword_body`. `body_parser.rs` imports `parse::ParseError`. This bidirectional coupling exists because `ParseError` is defined in `parse.rs` but is the error type returned by `body_parser`.
-
-**Proposed fix:** Extract `ParseError` to a shared `error.rs` or to `model.rs`. Both `parse.rs` and `body_parser.rs` import from the shared location.
-
-### C6: Proposed refactored dependency graph
-
-After applying C1 (split expand), C2 (split graph), C3 (extract util), and C5 (shared error):
-
-```mermaid
-flowchart TD
-    subgraph core["Core"]
-        model["model.rs"]
-        util["util.rs<br/>(NEW)"]
-        error["errors.rs<br/>(NEW)"]
-    end
-
-    subgraph parser["Parser"]
-        parse["parse.rs"]
-        body["body_parser.rs"]
-    end
-
-    subgraph graph_mod["graph/"]
-        graph_rel["relationship.rs"]
-        graph_facts["facts.rs"]
-        graph_hier["hierarchies.rs"]
-        graph_derived["derived_metrics.rs"]
-        graph_using["using.rs"]
-    end
-
-    subgraph expand_mod["expand/"]
-        exp_mod["mod.rs"]
-        exp_validate["validate.rs"]
-        exp_resolve["resolve.rs"]
-        exp_facts["facts.rs"]
-        exp_fan["fan_trap.rs"]
-        exp_role["role_playing.rs"]
-        exp_join["join_resolver.rs"]
-        exp_sql["sql_gen.rs"]
-    end
-
-    subgraph storage["Storage"]
-        catalog["catalog.rs"]
-    end
-
-    subgraph ddl["ddl/"]
-        define["define.rs"]
-        drop["drop.rs"]
-        list["list.rs"]
-        describe["describe.rs"]
-    end
-
-    subgraph query["query/"]
-        table_fn["table_function.rs"]
-        explain["explain.rs"]
-        qerr["error.rs"]
-    end
-
-    parse --> body
-    parse --> model
-    body --> model
-    body --> error
-    parse --> error
-
-    graph_rel --> model
-    graph_rel --> util
-    graph_facts --> model
-    graph_facts --> util
-    graph_hier --> model
-    graph_derived --> model
-    graph_using --> model
-
-    exp_mod --> model
-    exp_validate --> model
-    exp_resolve --> model
-    exp_resolve --> util
-    exp_facts --> model
-    exp_fan --> model
-    exp_fan --> graph_rel
-    exp_role --> model
-    exp_join --> model
-    exp_join --> graph_rel
-    exp_sql --> model
-
-    catalog --> model
-    define --> catalog
-    drop --> catalog
-    list --> catalog
-    describe --> catalog
-    table_fn --> catalog
-    table_fn --> exp_mod
-    table_fn --> model
-    explain --> exp_mod
-    explain --> model
-    qerr --> exp_mod
-
-    style core fill:#e8f5e9,stroke:#4caf50
-    style expand_mod fill:#fce4ec,stroke:#e91e63
-    style graph_mod fill:#e3f2fd,stroke:#1565c0
-```
-
-Key improvements:
-- **No circular dependencies** -- all arrows flow downward
-- **Single-responsibility modules** -- each file has one concern
-- **util.rs breaks the expand<->graph cycle** -- string utilities are shared infrastructure
-- **errors.rs centralizes ParseError** -- eliminates parse<->body_parser bidirectional import
-- **expand/ and graph/ are module directories** -- internal structure is navigable without reading 4,000+ line files
+- **`parse` depends on `ddl`.** `parse::native_sql` calls
+  `ddl::define::enrich_definition_for_create`, and `ddl` is compiled only in the
+  extension build. So CREATE lowering exists only there, and the `parse` tests that
+  reach enrichment are gated on the `extension` feature. Moving enrichment next to
+  `graph/`, which is always compiled, would remove the layering inversion.
+- **The C++ names still say "parser".** The compat header is
+  `parser_extension_compat.hpp`, and some comments in `build.rs` and the Makefile
+  still speak of the parser hook. The v1.5 branches behind `SV_DUCKDB_2` are no longer
+  compiled (TECH-DEBT #91).
+- **CREATE text is rebuilt from tokens** (TECH-DEBT #100), and **graph errors have no
+  caret** (TECH-DEBT #31). Both are accepted.
+- **A connection open before `LOAD` misses the grammar for one query** (TECH-DEBT
+  #103). DuckDB offers no hook that runs before parsing.

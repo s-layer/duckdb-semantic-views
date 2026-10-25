@@ -73,7 +73,7 @@ Files:
   - Document the coexistence rule with other grammar extensions.
 - **Thread safety.** Setting `active_grammar_extensions` on other connections at load time, from the loading thread, needs a look for races with connections that are running queries.
 - **Positioned semantic errors** from inside a transform (`ParserException` with a `QueryLocation`) were not exercised.
-- **Python client:** not available in this environment. The visibility trap from Phase 15 (`_notes/entry-point-decision.md`) was a Python-only failure, so check it as soon as a 2.0 Python wheel exists.
+- **Python client:** not available in this environment. The visibility trap from Phase 15 (`_notes/architecture.md`, "Entry point and C++ linkage") was a Python-only failure, so check it as soon as a 2.0 Python wheel exists.
 - **The real Rust crate** has not been built against a 2.0 host. The spike is C++ only. The FFI and C-API surface is unchanged in kind, but finding 1 has to be verified with duckdb-rs.
 
 ## Reproduce

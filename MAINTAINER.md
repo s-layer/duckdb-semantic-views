@@ -113,7 +113,7 @@ src/
 │   ├── mod.rs                 #   CatalogReader (the catalog rows as the caller's transaction sees them)
 │   └── writes.rs              #   write-side race guards
 ├── ddl/                       # DDL execution + read-side table functions (only compiled under --features extension)
-│   ├── define.rs              #   CREATE-time enrichment (PK lookup, type inference)
+│   ├── define.rs              #   CREATE-time enrichment (cardinality inference, graph validation)
 │   ├── describe.rs get_ddl.rs list.rs
 │   ├── show_columns.rs show_entities.rs show_dims_for_metric.rs show_materializations.rs
 │   ├── read_ffi.rs read_yaml.rs alter_helpers_ffi.rs   #   FFI seam (dispatcher scaffold, caller-context reads)
@@ -163,7 +163,7 @@ test/
 Every semantic-view statement is a production of DuckDB's own PEG grammar: `src/grammar/` adds them to DuckDB 2.0's grammar at load, so DuckDB splits a multi-statement string, finds our statements wherever its own DDL may appear (at the top level, or `SHOW` / `DESCRIBE` as a subquery), and reports a malformed one as its own syntax error. Each matched statement is lowered to native SQL that DuckDB then plans and executes on the caller's connection. There is no parser override, parse stub or `sv_ddl_internal` table-function fallback any more (the last was deleted in the v0.8.0 architectural unification (Phase 59) — see CHANGELOG; the override and stub in the Phase 3 deletion PR).
 
 ```
-DDL (CREATE / DROP / ALTER / DESCRIBE / SHOW / GET_DDL / READ_YAML / FROM YAML FILE)
+DDL (CREATE, including FROM YAML [FILE] / DROP / ALTER / DESCRIBE / SHOW)
    └── DuckDB's PEG grammar matches an Sv* production (rules from src/grammar/, registered at load
        and activated per connection: see "Grammar activation" below)
    └── C++ grammar bridge (cpp/src/shim.cpp::sv_grammar_lower): serialises the match tree and the
@@ -208,13 +208,12 @@ Every table and scalar function is registered through the C++ Catalog API helper
 
 #### Grammar activation
 
-DuckDB keeps the active grammar extensions per connection (`active_grammar_extensions`, settable only locally), so loading the extension does not by itself change how other connections parse. `sv_register_grammar` (`cpp/src/shim.cpp`) registers the productions once per database, then activates them three ways:
+DuckDB keeps the active grammar extensions per connection (`active_grammar_extensions`, settable only locally), so loading the extension does not by itself change how other connections parse. `sv_register_grammar` (`cpp/src/shim.cpp`) registers the productions once per database, then activates them two ways:
 
-1. **The loading connection**, directly.
-2. **Connections opened later**, from the extension callback's `OnConnectionOpened`, on their own thread.
-3. **Connections already open**, through a `SemanticViewsGrammarPending` `ClientContextState` registered on each (that registry is mutex-synchronised). Its `QueryBegin` / `QueryEnd` runs on the connection's own thread, activates the grammar there and removes itself. Nothing writes another connection's `ClientConfig` from the loading thread (TECH-DEBT #103).
+1. **Connections opened later**, from the extension callback's `OnConnectionOpened`, on their own thread.
+2. **Connections already open**, the loading one included, through a `SemanticViewsGrammarPending` `ClientContextState` registered on each (that registry is mutex-synchronised). Its `QueryBegin` / `QueryEnd` runs on the connection's own thread, activates the grammar there and removes itself. The loading connection activates at the `QueryEnd` of its `LOAD`, so its next query has the grammar. Nothing writes another connection's `ClientConfig` from the loading thread (TECH-DEBT #103).
 
-DuckDB parses a query before `QueryBegin`, so a connection of the third kind parses its **next** query without the grammar: a semantic-view statement there fails as a DuckDB syntax error, and every query after it parses with the grammar. Running `LOAD semantic_views` on that connection activates it at once. `test_connection_open_before_load` in `test/integration/test_load_extension_twice_idempotent.py` pins this; DuckDB offers no pre-parse hook that would avoid it.
+DuckDB parses a query before `QueryBegin`, so any **other** connection that was open at the `LOAD` parses its next query without the grammar: a semantic-view statement there fails as a DuckDB syntax error, and every query after it parses with the grammar. Running `LOAD semantic_views` on that connection activates it at once. `test_connection_open_before_load` in `test/integration/test_load_extension_twice_idempotent.py` pins this; DuckDB offers no pre-parse hook that would avoid it.
 
 ### Feature Flag Split
 
