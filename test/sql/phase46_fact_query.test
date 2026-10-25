@@ -57,7 +57,7 @@ METRICS (
 # ============================================================
 
 query II
-FROM semantic_view('p46f_sales', facts := ['net_price', 'line_total'])
+FROM SEMANTIC_VIEW(p46f_sales FACTS net_price, line_total)
 ORDER BY 1, 2;
 ----
 42.50	297.50
@@ -71,7 +71,7 @@ ORDER BY 1, 2;
 
 # Facts + dimensions: row-level, no GROUP BY
 query III
-FROM semantic_view('p46f_sales', facts := ['net_price'], dimensions := ['o.region', 'li.product'])
+FROM SEMANTIC_VIEW(p46f_sales DIMENSIONS o.region, li.product FACTS net_price)
 ORDER BY 1, 2, 3;
 ----
 EU	Widget	95.00
@@ -81,7 +81,7 @@ US	Widget	90.00
 
 # Verify row count matches line_items table (4 rows, unaggregated)
 query I
-SELECT count(*) FROM semantic_view('p46f_sales', facts := ['net_price'], dimensions := ['o.region']);
+SELECT count(*) FROM SEMANTIC_VIEW(p46f_sales DIMENSIONS o.region FACTS net_price);
 ----
 4
 
@@ -90,7 +90,7 @@ SELECT count(*) FROM semantic_view('p46f_sales', facts := ['net_price'], dimensi
 # ============================================================
 
 statement error
-FROM semantic_view('p46f_sales', facts := ['net_price'], metrics := ['total_revenue']);
+FROM SEMANTIC_VIEW(p46f_sales METRICS total_revenue FACTS net_price);
 ----
 cannot combine facts and metrics
 
@@ -128,13 +128,13 @@ DIMENSIONS (
 
 # Fact on li + dim on p = divergent paths (fan from o)
 statement error
-FROM semantic_view('p46f_fan_test', facts := ['net_price'], dimensions := ['pay_status']);
+FROM SEMANTIC_VIEW(p46f_fan_test DIMENSIONS pay_status FACTS net_price);
 ----
 incompatible table paths
 
 # Fact on li + dim on o = valid (linear path: o -> li)
 query II
-FROM semantic_view('p46f_fan_test', facts := ['net_price'], dimensions := ['o.region'])
+FROM SEMANTIC_VIEW(p46f_fan_test DIMENSIONS o.region FACTS net_price)
 ORDER BY 1, 2;
 ----
 EU	95.00
@@ -147,7 +147,7 @@ US	90.00
 # ============================================================
 
 statement error
-FROM semantic_view('p46f_sales', facts := ['raw_price']);
+FROM SEMANTIC_VIEW(p46f_sales FACTS raw_price);
 ----
 private
 
@@ -156,7 +156,7 @@ private
 # ============================================================
 
 statement error
-FROM semantic_view('p46f_sales', facts := ['nonexistent']);
+FROM SEMANTIC_VIEW(p46f_sales FACTS nonexistent);
 ----
 unknown fact
 
@@ -166,7 +166,7 @@ unknown fact
 
 # line_total depends on net_price -- both should resolve correctly
 query I
-FROM semantic_view('p46f_sales', facts := ['line_total'])
+FROM SEMANTIC_VIEW(p46f_sales FACTS line_total)
 ORDER BY 1;
 ----
 250.00
@@ -204,7 +204,7 @@ true
 
 # li.* in facts should expand to net_price and line_total (raw_price is PRIVATE)
 query II
-FROM semantic_view('p46f_sales', facts := ['li.*'])
+FROM SEMANTIC_VIEW(p46f_sales FACTS li.*)
 ORDER BY 1, 2;
 ----
 42.50	297.50

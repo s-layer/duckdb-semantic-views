@@ -25,7 +25,7 @@ AS
 
 # semantic_view accepts the dimensions := / metrics := named parameters.
 query TI
-SELECT * FROM semantic_view('c7_sv', dimensions := ['region'], metrics := ['total']) ORDER BY 1
+SELECT * FROM SEMANTIC_VIEW(c7_sv DIMENSIONS region METRICS total) ORDER BY 1
 ----
 EU	200
 US	150
@@ -33,7 +33,7 @@ US	150
 # semantic_view accepts the facts := named parameter (mutually exclusive with
 # metrics), exercising the third member of the shared triple.
 query I
-SELECT * FROM semantic_view('c7_sv', facts := ['amount']) ORDER BY 1
+SELECT * FROM SEMANTIC_VIEW(c7_sv FACTS amount) ORDER BY 1
 ----
 50
 100

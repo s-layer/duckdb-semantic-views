@@ -88,7 +88,7 @@ METRICS (
 
 # Query with single dimension + single metric (DECIMAL stays VARCHAR)
 query TT rowsort
-SELECT * FROM semantic_view('simple_orders', dimensions := ['region'], metrics := ['total_revenue']);
+SELECT * FROM SEMANTIC_VIEW(simple_orders DIMENSIONS region METRICS total_revenue);
 ----
 APAC	350.00
 EMEA	225.00
@@ -96,7 +96,7 @@ EMEA	225.00
 # Query with all dimensions + all metrics
 # total_revenue (DECIMAL) stays T; order_count (BIGINT count) is typed I
 query TTTI rowsort
-SELECT * FROM semantic_view('simple_orders', dimensions := ['region', 'category'], metrics := ['total_revenue', 'order_count']);
+SELECT * FROM SEMANTIC_VIEW(simple_orders DIMENSIONS region, category METRICS total_revenue, order_count);
 ----
 APAC	clothing	150.00	1
 APAC	electronics	200.00	1
@@ -121,14 +121,14 @@ METRICS (
 )
 
 query TT rowsort
-SELECT * FROM semantic_view('filtered_orders', dimensions := ['region'], metrics := ['total_revenue']);
+SELECT * FROM SEMANTIC_VIEW(filtered_orders DIMENSIONS region METRICS total_revenue);
 ----
 APAC	350.00
 EMEA	225.00
 
 # User WHERE composes with view result -- only EMEA orders
 query TT rowsort
-SELECT * FROM semantic_view('filtered_orders', dimensions := ['region'], metrics := ['total_revenue']) WHERE region = 'EMEA';
+SELECT * FROM SEMANTIC_VIEW(filtered_orders DIMENSIONS region METRICS total_revenue) WHERE region = 'EMEA';
 ----
 EMEA	225.00
 
@@ -163,7 +163,7 @@ CREATE SEMANTIC VIEW joined_orders AS
 # Query by customer_tier -- needs test_customers join only
 # gold: Alice(100+50) + Charlie(150) = 300, silver: Bob(200+75) = 275
 query TT rowsort
-SELECT * FROM semantic_view('joined_orders', dimensions := ['customer_tier'], metrics := ['total_revenue']);
+SELECT * FROM SEMANTIC_VIEW(joined_orders DIMENSIONS customer_tier METRICS total_revenue);
 ----
 gold	300.00
 silver	275.00
@@ -172,7 +172,7 @@ silver	275.00
 # TechCorp(electronics): 3 orders, FashionInc(clothing): 2 orders
 # order_count is BIGINT (typed I)
 query TI rowsort
-SELECT * FROM semantic_view('joined_orders', dimensions := ['supplier'], metrics := ['order_count']);
+SELECT * FROM SEMANTIC_VIEW(joined_orders DIMENSIONS supplier METRICS order_count);
 ----
 FashionInc	2
 TechCorp	3
@@ -211,20 +211,20 @@ true
 
 # Dimensions-only: should return DISTINCT values
 query T rowsort
-SELECT * FROM semantic_view('simple_orders', dimensions := ['region']);
+SELECT * FROM SEMANTIC_VIEW(simple_orders DIMENSIONS region);
 ----
 APAC
 EMEA
 
 # Metrics-only: DECIMAL stays VARCHAR
 query T
-SELECT * FROM semantic_view('simple_orders', metrics := ['total_revenue']);
+SELECT * FROM SEMANTIC_VIEW(simple_orders METRICS total_revenue);
 ----
 575.00
 
 # Metrics-only with count: BIGINT typed as I
 query I
-SELECT * FROM semantic_view('simple_orders', metrics := ['order_count']);
+SELECT * FROM SEMANTIC_VIEW(simple_orders METRICS order_count);
 ----
 5
 
@@ -234,13 +234,13 @@ SELECT * FROM semantic_view('simple_orders', metrics := ['order_count']);
 
 # Nonexistent view -- should error with "not found"
 statement error
-SELECT * FROM semantic_view('nonexistent', dimensions := ['x']);
+SELECT * FROM SEMANTIC_VIEW(nonexistent DIMENSIONS x);
 ----
 not found
 
 # Unknown dimension -- should error with "unknown dimension"
 statement error
-SELECT * FROM semantic_view('simple_orders', dimensions := ['nonexistent']);
+SELECT * FROM SEMANTIC_VIEW(simple_orders DIMENSIONS nonexistent);
 ----
 unknown dimension
 
@@ -269,7 +269,7 @@ METRICS (
 
 # query TI confirms: region is VARCHAR (T), order_count is BIGINT (I)
 query TI rowsort
-FROM semantic_view('typed_output_test', dimensions := ['region'], metrics := ['order_count'])
+FROM SEMANTIC_VIEW(typed_output_test DIMENSIONS region METRICS order_count)
 ----
 APAC	2
 EMEA	3
@@ -305,7 +305,7 @@ METRICS (
 # SQLLogicTest does not support the 'D' specifier; 'T' reads any column as text.
 # The metric total_count is sum(INTEGER) = BIGINT (typed I).
 query TI rowsort
-FROM semantic_view('typed_date_test', dimensions := ['event_date'], metrics := ['total_count'])
+FROM SEMANTIC_VIEW(typed_date_test DIMENSIONS event_date METRICS total_count)
 ----
 2024-01-01 00:00:00	5
 2024-02-01 00:00:00	3

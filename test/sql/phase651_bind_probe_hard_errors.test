@@ -34,7 +34,7 @@ CREATE SEMANTIC VIEW v_good_probe
     METRICS (o.total AS SUM(o.total));
 
 query I
-SELECT COUNT(*) FROM semantic_view('v_good_probe', metrics := ['total'])
+SELECT COUNT(*) FROM SEMANTIC_VIEW(v_good_probe METRICS total)
 ----
 1
 
@@ -55,7 +55,7 @@ CREATE SEMANTIC VIEW v_bad_probe
     METRICS (o.bogus AS SUM(o.no_such_column));
 
 statement error
-SELECT * FROM semantic_view('v_bad_probe', metrics := ['bogus'])
+SELECT * FROM SEMANTIC_VIEW(v_bad_probe METRICS bogus)
 ----
 Table "o" does not have a column named "no_such_column"
 

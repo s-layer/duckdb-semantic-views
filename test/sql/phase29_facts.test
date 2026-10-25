@@ -69,7 +69,7 @@ CREATE SEMANTIC VIEW p29_analytics AS
 # ============================================================
 
 query TR rowsort
-SELECT * FROM semantic_view('p29_analytics', dimensions := ['region'], metrics := ['total_net']);
+SELECT * FROM SEMANTIC_VIEW(p29_analytics DIMENSIONS region METRICS total_net);
 ----
 East	250.00
 West	150.00
@@ -85,7 +85,7 @@ West	150.00
 # ============================================================
 
 query TR rowsort
-SELECT * FROM semantic_view('p29_analytics', dimensions := ['region'], metrics := ['total_tax']);
+SELECT * FROM SEMANTIC_VIEW(p29_analytics DIMENSIONS region METRICS total_tax);
 ----
 East	17.30
 West	15.00
@@ -97,7 +97,7 @@ West	15.00
 # ============================================================
 
 query TT
-SELECT * FROM semantic_view('p29_analytics', metrics := ['total_net', 'total_tax']);
+SELECT * FROM SEMANTIC_VIEW(p29_analytics METRICS total_net, total_tax);
 ----
 400.00	32.30
 
@@ -243,7 +243,7 @@ CREATE SEMANTIC VIEW p29_facts_only AS
   );
 
 query TI rowsort
-SELECT * FROM semantic_view('p29_facts_only', dimensions := ['region'], metrics := ['flagged']);
+SELECT * FROM SEMANTIC_VIEW(p29_facts_only DIMENSIONS region METRICS flagged);
 ----
 East	0
 West	1

@@ -76,7 +76,7 @@ staging	sales
 # it fine. This is DuckDB's rule for a view body, and it is what makes "put the
 # semantic views in their own schema" usable at all.
 query I
-SELECT total FROM semantic_view('analytics.sales', metrics := ['total'])
+SELECT total FROM SEMANTIC_VIEW(analytics.sales METRICS total)
 ----
 350
 
@@ -96,12 +96,12 @@ memory	analytics	sales	orders	total	HUGEINT	[]	(empty)
 # ============================================================
 
 query I
-SELECT total FROM semantic_view('analytics.sales', metrics := ['total'])
+SELECT total FROM SEMANTIC_VIEW(analytics.sales METRICS total)
 ----
 350
 
 query I
-SELECT total FROM semantic_view('staging.sales', metrics := ['total'])
+SELECT total FROM SEMANTIC_VIEW(staging.sales METRICS total)
 ----
 2
 
@@ -116,7 +116,7 @@ SELECT total FROM semantic_view('staging.sales', metrics := ['total'])
 # ============================================================
 
 statement error
-SELECT total FROM semantic_view('sales', metrics := ['total'])
+SELECT total FROM SEMANTIC_VIEW(sales METRICS total)
 ----
 does not exist on the search path
 
@@ -172,7 +172,7 @@ statement ok
 SET search_path = 'analytics';
 
 query I
-SELECT total FROM semantic_view('sales', metrics := ['total'])
+SELECT total FROM SEMANTIC_VIEW(sales METRICS total)
 ----
 350
 
@@ -180,7 +180,7 @@ statement ok
 SET search_path = 'staging';
 
 query I
-SELECT total FROM semantic_view('sales', metrics := ['total'])
+SELECT total FROM SEMANTIC_VIEW(sales METRICS total)
 ----
 2
 
@@ -192,7 +192,7 @@ statement ok
 SET search_path = 'analytics,staging';
 
 query I
-SELECT total FROM semantic_view('sales', metrics := ['total'])
+SELECT total FROM SEMANTIC_VIEW(sales METRICS total)
 ----
 350
 
@@ -200,7 +200,7 @@ statement ok
 SET search_path = 'staging,analytics';
 
 query I
-SELECT total FROM semantic_view('sales', metrics := ['total'])
+SELECT total FROM SEMANTIC_VIEW(sales METRICS total)
 ----
 2
 
@@ -237,7 +237,7 @@ RESET search_path;
 # ============================================================
 
 query I
-SELECT total FROM semantic_view('sales', metrics := ['total'])
+SELECT total FROM SEMANTIC_VIEW(sales METRICS total)
 ----
 350
 
@@ -312,7 +312,7 @@ staging	income
 # ============================================================
 
 query I
-SELECT total FROM semantic_view('STAGING.income', metrics := ['total'])
+SELECT total FROM SEMANTIC_VIEW(STAGING.income METRICS total)
 ----
 350
 
@@ -358,7 +358,7 @@ SELECT count(*) FROM semantic_layer._definitions WHERE name = 'v'
 2
 
 query I
-SELECT total FROM semantic_view('analytics.v', metrics := ['total'])
+SELECT total FROM SEMANTIC_VIEW(analytics.v METRICS total)
 ----
 350
 
@@ -368,7 +368,7 @@ CREATE SEMANTIC VIEW IF NOT EXISTS analytics.v AS
   METRICS (o.total AS COUNT(*));
 
 query I
-SELECT total FROM semantic_view('analytics.v', metrics := ['total'])
+SELECT total FROM SEMANTIC_VIEW(analytics.v METRICS total)
 ----
 350
 

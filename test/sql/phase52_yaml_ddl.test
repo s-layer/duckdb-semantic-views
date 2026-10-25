@@ -40,14 +40,14 @@ $$
 
 # Verify the view is queryable
 query TR rowsort
-SELECT region, total_amount FROM semantic_view('p52_yaml_basic', dimensions := ['region'], metrics := ['total_amount'])
+SELECT region, total_amount FROM SEMANTIC_VIEW(p52_yaml_basic DIMENSIONS region METRICS total_amount)
 ----
 East	250.0
 West	200.0
 
 # Verify metrics-only query works
 query R
-SELECT total_amount FROM semantic_view('p52_yaml_basic', metrics := ['total_amount'])
+SELECT total_amount FROM SEMANTIC_VIEW(p52_yaml_basic METRICS total_amount)
 ----
 450.0
 
@@ -74,7 +74,7 @@ metrics:
 $yaml$
 
 query R
-SELECT total_amount FROM semantic_view('p52_yaml_tagged', metrics := ['total_amount'])
+SELECT total_amount FROM SEMANTIC_VIEW(p52_yaml_tagged METRICS total_amount)
 ----
 450.0
 
@@ -102,7 +102,7 @@ $$
 
 # Verify the view was replaced (new metric name)
 query TR rowsort
-SELECT region, order_count FROM semantic_view('p52_yaml_basic', dimensions := ['region'], metrics := ['order_count'])
+SELECT region, order_count FROM SEMANTIC_VIEW(p52_yaml_basic DIMENSIONS region METRICS order_count)
 ----
 East	2
 West	1
@@ -131,7 +131,7 @@ $$
 
 # Verify the original view (with order_count) is still in place
 query TR rowsort
-SELECT region, order_count FROM semantic_view('p52_yaml_basic', dimensions := ['region'], metrics := ['order_count'])
+SELECT region, order_count FROM SEMANTIC_VIEW(p52_yaml_basic DIMENSIONS region METRICS order_count)
 ----
 East	2
 West	1
@@ -159,7 +159,7 @@ metrics:
 $$
 
 query R
-SELECT total_amount FROM semantic_view('p52_yaml_commented', metrics := ['total_amount'])
+SELECT total_amount FROM SEMANTIC_VIEW(p52_yaml_commented METRICS total_amount)
 ----
 450.0
 
@@ -186,7 +186,7 @@ metrics:
 $$
 
 query R
-SELECT total_amount FROM semantic_view('p52_yaml_lowercase', metrics := ['total_amount'])
+SELECT total_amount FROM SEMANTIC_VIEW(p52_yaml_lowercase METRICS total_amount)
 ----
 450.0
 

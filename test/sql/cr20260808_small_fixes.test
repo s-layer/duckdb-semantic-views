@@ -156,17 +156,16 @@ METRICS (
 # Control first: with no predicate the role-playing table is never
 # reached, so the query is unambiguous and runs.
 query I
-SELECT flight_count FROM semantic_view('cr0808_rp', metrics := ['flight_count']);
+SELECT flight_count FROM SEMANTIC_VIEW(cr0808_rp METRICS flight_count);
 ----
 1
 
 # EXP-31 fact branch: `f_elev` is declared on `f` (unambiguous) but its
 # expression reaches `ap_elev` on the role-playing `a`.
 statement error
-SELECT flight_count FROM semantic_view(
-  'cr0808_rp',
-  metrics := ['flight_count'],
-  where_clause := 'f_elev > 0'
+SELECT flight_count FROM SEMANTIC_VIEW(cr0808_rp
+    METRICS flight_count
+    WHERE f_elev > 0
 );
 ----
 is ambiguous
@@ -174,10 +173,9 @@ is ambiguous
 # EXP-31 dimension branch: the same fact reached from a DIMENSION's
 # expression (TECH-DEBT #54 made those fact-inlined too).
 statement error
-SELECT flight_count FROM semantic_view(
-  'cr0808_rp',
-  metrics := ['flight_count'],
-  where_clause := 'high_altitude = ''hi'''
+SELECT flight_count FROM SEMANTIC_VIEW(cr0808_rp
+    METRICS flight_count
+    WHERE high_altitude = 'hi'
 );
 ----
 is ambiguous
@@ -185,10 +183,9 @@ is ambiguous
 # A predicate that stays on the base table's own dimension is still
 # unambiguous — the fix must not reject every where_clause.
 query I
-SELECT flight_count FROM semantic_view(
-  'cr0808_rp',
-  metrics := ['flight_count'],
-  where_clause := 'carrier = ''AA'''
+SELECT flight_count FROM SEMANTIC_VIEW(cr0808_rp
+    METRICS flight_count
+    WHERE carrier = 'AA'
 );
 ----
 1
@@ -220,10 +217,9 @@ METRICS (
 );
 
 query I
-SELECT flight_count FROM semantic_view(
-  'cr0808_rp_control',
-  metrics := ['flight_count'],
-  where_clause := 'f_elev > 0'
+SELECT flight_count FROM SEMANTIC_VIEW(cr0808_rp_control
+    METRICS flight_count
+    WHERE f_elev > 0
 );
 ----
 1

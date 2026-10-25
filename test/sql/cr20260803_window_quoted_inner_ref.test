@@ -55,7 +55,7 @@ CREATE SEMANTIC VIEW wq_plain AS
 
 # The inner aggregate is computed at its own grain: 100 + 40 = 140.
 query TI
-SELECT * FROM semantic_view('wq_plain', metrics := ['w'], dimensions := ['seg']);
+SELECT * FROM SEMANTIC_VIEW(wq_plain DIMENSIONS seg METRICS w);
 ----
 X	140
 
@@ -82,7 +82,7 @@ CREATE SEMANTIC VIEW wq_quoted AS
 
 # The number that matters: 140, not the 340 a base-anchored aggregate produces.
 query TI
-SELECT * FROM semantic_view('wq_quoted', metrics := ['w'], dimensions := ['seg']);
+SELECT * FROM SEMANTIC_VIEW(wq_quoted DIMENSIONS seg METRICS w);
 ----
 X	140
 
@@ -106,7 +106,7 @@ CREATE SEMANTIC VIEW wq_quoted_case AS
   );
 
 query TI
-SELECT * FROM semantic_view('wq_quoted_case', metrics := ['w'], dimensions := ['seg']);
+SELECT * FROM SEMANTIC_VIEW(wq_quoted_case DIMENSIONS seg METRICS w);
 ----
 X	140
 

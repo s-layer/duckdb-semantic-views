@@ -81,10 +81,9 @@ CREATE SEMANTIC VIEW cr0808_sales AS
 
 query TIIIII rowsort
 SELECT region, n_star, n_distinct_one, n_expr, min_one, max_one
-FROM semantic_view(
-  'cr0808_sales',
-  dimensions := ['region'],
-  metrics := ['n_star', 'n_distinct_one', 'n_expr', 'min_one', 'max_one']
+FROM SEMANTIC_VIEW(cr0808_sales
+    DIMENSIONS region
+    METRICS n_star, n_distinct_one, n_expr, min_one, max_one
 );
 ----
 East	2	1	2	1	1
@@ -93,10 +92,9 @@ East	2	1	2	1	1
 # -- COUNT included (no COALESCE to 0), matching Snowflake. Never 1.
 query TIIIIII rowsort
 SELECT region, n_orders, n_star, n_distinct_one, n_expr, min_one, max_one
-FROM semantic_view(
-  'cr0808_sales',
-  dimensions := ['region'],
-  metrics := ['n_orders', 'n_star', 'n_distinct_one', 'n_expr', 'min_one', 'max_one']
+FROM SEMANTIC_VIEW(cr0808_sales
+    DIMENSIONS region
+    METRICS n_orders, n_star, n_distinct_one, n_expr, min_one, max_one
 );
 ----
 East	1	2	1	2	1	1
@@ -113,10 +111,9 @@ North	1	NULL	NULL	NULL	NULL	NULL
 
 query TII rowsort
 SELECT region, s_coalesce, s_parent
-FROM semantic_view(
-  'cr0808_sales',
-  dimensions := ['region'],
-  metrics := ['s_coalesce', 's_parent']
+FROM SEMANTIC_VIEW(cr0808_sales
+    DIMENSIONS region
+    METRICS s_coalesce, s_parent
 );
 ----
 East	5	20
@@ -124,10 +121,9 @@ East	5	20
 # With an order-grain metric alongside: NULL, never 99 or 5.
 query TIII rowsort
 SELECT region, n_orders, s_coalesce, s_parent
-FROM semantic_view(
-  'cr0808_sales',
-  dimensions := ['region'],
-  metrics := ['n_orders', 's_coalesce', 's_parent']
+FROM SEMANTIC_VIEW(cr0808_sales
+    DIMENSIONS region
+    METRICS n_orders, s_coalesce, s_parent
 );
 ----
 East	1	5	20
@@ -136,13 +132,13 @@ North	1	NULL	NULL
 # Ungrouped, the cross-table fact reference totalled 25 (20 real + the
 # childless order's 5) where 20 is correct.
 query I
-SELECT s_parent FROM semantic_view('cr0808_sales', metrics := ['s_parent']);
+SELECT s_parent FROM SEMANTIC_VIEW(cr0808_sales METRICS s_parent);
 ----
 20
 
 # The control: an ordinary column aggregate was already correct and stays so.
 query I
-SELECT s_qty FROM semantic_view('cr0808_sales', metrics := ['s_qty']);
+SELECT s_qty FROM SEMANTIC_VIEW(cr0808_sales METRICS s_qty);
 ----
 5
 
@@ -154,7 +150,7 @@ SELECT s_qty FROM semantic_view('cr0808_sales', metrics := ['s_qty']);
 # ============================================================
 
 query I
-SELECT liqty FROM semantic_view('cr0808_sales', facts := ['liqty']) ORDER BY 1;
+SELECT liqty FROM SEMANTIC_VIEW(cr0808_sales FACTS liqty) ORDER BY 1;
 ----
 2
 3
@@ -163,7 +159,7 @@ SELECT liqty FROM semantic_view('cr0808_sales', facts := ['liqty']) ORDER BY 1;
 # the two real rows and no phantom is manufactured.
 query TI
 SELECT region, liqty
-FROM semantic_view('cr0808_sales', facts := ['liqty'], dimensions := ['region'])
+FROM SEMANTIC_VIEW(cr0808_sales DIMENSIONS region FACTS liqty)
 ORDER BY 2;
 ----
 East	2
@@ -172,7 +168,7 @@ East	3
 # A fact on the BASE table keeps every base row: the base table is never
 # NULL-extended, so nothing is filtered.
 query I
-SELECT orate FROM semantic_view('cr0808_sales', facts := ['orate']) ORDER BY 1;
+SELECT orate FROM SEMANTIC_VIEW(cr0808_sales FACTS orate) ORDER BY 1;
 ----
 5
 10
@@ -184,7 +180,7 @@ SELECT orate FROM semantic_view('cr0808_sales', facts := ['orate']) ORDER BY 1;
 # ============================================================
 
 query I
-SELECT item_qty FROM semantic_view('cr0808_sales', dimensions := ['item_qty']) ORDER BY 1;
+SELECT item_qty FROM SEMANTIC_VIEW(cr0808_sales DIMENSIONS item_qty) ORDER BY 1;
 ----
 2
 3
@@ -192,7 +188,7 @@ SELECT item_qty FROM semantic_view('cr0808_sales', dimensions := ['item_qty']) O
 # Mixing a base dimension with a child one is NOT filtered: the base row is a
 # legitimate member of the result even with no child, so all three rows stand.
 query TI rowsort
-SELECT region, item_qty FROM semantic_view('cr0808_sales', dimensions := ['region', 'item_qty']);
+SELECT region, item_qty FROM SEMANTIC_VIEW(cr0808_sales DIMENSIONS region, item_qty);
 ----
 East	2
 East	3
@@ -226,17 +222,17 @@ CREATE SEMANTIC VIEW cr0808_nopk AS
   );
 
 query I
-SELECT * FROM semantic_view('cr0808_nopk', metrics := ['min_one']);
+SELECT * FROM SEMANTIC_VIEW(cr0808_nopk METRICS min_one);
 ----
 1
 
 query TI rowsort
-SELECT * FROM semantic_view('cr0808_nopk', dimensions := ['region'], metrics := ['min_one']);
+SELECT * FROM SEMANTIC_VIEW(cr0808_nopk DIMENSIONS region METRICS min_one);
 ----
 East	1
 
 # A plain column aggregate on the same PK-less table answers too.
 query I
-SELECT s_qty FROM semantic_view('cr0808_nopk', metrics := ['s_qty']);
+SELECT s_qty FROM SEMANTIC_VIEW(cr0808_nopk METRICS s_qty);
 ----
 5

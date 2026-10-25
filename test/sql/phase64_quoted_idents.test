@@ -40,7 +40,7 @@ CREATE OR REPLACE SEMANTIC VIEW "memory"."main"."orders_sv" AS
 
 # semantic_view() with the bare name resolves the row stored under quoted FQN.
 query R
-FROM semantic_view('orders_sv', metrics := ['total']);
+FROM SEMANTIC_VIEW(orders_sv METRICS total);
 ----
 300.00
 
@@ -58,7 +58,7 @@ CREATE SEMANTIC VIEW main."orders_sv" AS
   METRICS (o.total AS SUM(o.amount));
 
 query R
-FROM semantic_view('orders_sv', metrics := ['total']);
+FROM SEMANTIC_VIEW(orders_sv METRICS total);
 ----
 300.00
 
@@ -72,7 +72,7 @@ CREATE SEMANTIC VIEW "main".orders_sv AS
   METRICS (o.total AS SUM(o.amount));
 
 query R
-FROM semantic_view('orders_sv', metrics := ['total']);
+FROM SEMANTIC_VIEW(orders_sv METRICS total);
 ----
 300.00
 
@@ -95,13 +95,13 @@ DESCRIBE SEMANTIC VIEW orders_sv;
 semantic view 'orders_sv' does not exist
 
 query R
-FROM semantic_view('orders_sv_v2', metrics := ['total']);
+FROM SEMANTIC_VIEW(orders_sv_v2 METRICS total);
 ----
 300.00
 
 # Runtime arg quoted: semantic_view('"orders_sv_v2"', ...) also resolves
 query R
-FROM semantic_view('"orders_sv_v2"', metrics := ['total']);
+FROM SEMANTIC_VIEW("orders_sv_v2" METRICS total);
 ----
 300.00
 
@@ -135,7 +135,7 @@ SELECT COUNT(*) FROM explain_semantic_view('orders_sv', metrics := ['total'])
 
 # Query actually runs against the fully-quoted FQN source-table reference
 query R
-FROM semantic_view('orders_sv', metrics := ['total']);
+FROM SEMANTIC_VIEW(orders_sv METRICS total);
 ----
 300.00
 
@@ -162,7 +162,7 @@ CREATE OR REPLACE SEMANTIC VIEW orders_sv AS
   METRICS (o.total AS SUM(o.amount));
 
 query R
-FROM semantic_view('orders_sv', metrics := ['total']);
+FROM SEMANTIC_VIEW(orders_sv METRICS total);
 ----
 300.00
 

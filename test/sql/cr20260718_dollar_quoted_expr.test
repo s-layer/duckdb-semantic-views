@@ -23,7 +23,7 @@ CREATE SEMANTIC VIEW dq_view AS
 # The dimension is a single constant literal, so every row shares one group and
 # the metric sums all rows. The label value is the literal text between the tags.
 query TI rowsort
-SELECT * FROM semantic_view('dq_view', dimensions := ['label'], metrics := ['total']);
+SELECT * FROM SEMANTIC_VIEW(dq_view DIMENSIONS label METRICS total);
 ----
 a, b (c)	60
 
@@ -36,7 +36,7 @@ CREATE SEMANTIC VIEW dq_view2 AS
   METRICS (s.total AS SUM(amount));
 
 query TI rowsort
-SELECT * FROM semantic_view('dq_view2', dimensions := ['note'], metrics := ['total']);
+SELECT * FROM SEMANTIC_VIEW(dq_view2 DIMENSIONS note METRICS total);
 ----
 x AS y, $z$ inner	60
 

@@ -130,7 +130,7 @@ does not exist
 # ============================================================
 
 query TR rowsort
-SELECT * FROM semantic_view('p45_sv', dimensions := ['region'], metrics := ['total']);
+SELECT * FROM SEMANTIC_VIEW(p45_sv DIMENSIONS region METRICS total);
 ----
 EU	200.00
 US	100.00

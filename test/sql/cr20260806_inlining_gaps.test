@@ -61,7 +61,7 @@ METRICS (o.revenue AS SUM(total));
 # base_price/total per row: 100/200, 25/25, 200/200.
 # No filter: 200 + 25 + 200 = 425.
 query I
-SELECT revenue FROM semantic_view('cr0806i_chain', metrics := ['revenue']);
+SELECT revenue FROM SEMANTIC_VIEW(cr0806i_chain METRICS revenue);
 ----
 425
 
@@ -69,10 +69,9 @@ SELECT revenue FROM semantic_view('cr0806i_chain', metrics := ['revenue']);
 # `(base_price * o.quantity) > 100`, so `base_price` reached DuckDB as a bare
 # column and the query failed to bind. Rows with total > 100: 200 and 200.
 query I
-SELECT revenue FROM semantic_view(
-  'cr0806i_chain',
-  metrics := ['revenue'],
-  where_clause := 'total > 100'
+SELECT revenue FROM SEMANTIC_VIEW(cr0806i_chain
+    METRICS revenue
+    WHERE total > 100
 );
 ----
 400
@@ -80,21 +79,19 @@ SELECT revenue FROM semantic_view(
 # The leaf fact still filters correctly -- the single-level case was already
 # right and must stay so.
 query I
-SELECT revenue FROM semantic_view(
-  'cr0806i_chain',
-  metrics := ['revenue'],
-  where_clause := 'base_price > 50'
+SELECT revenue FROM SEMANTIC_VIEW(cr0806i_chain
+    METRICS revenue
+    WHERE base_price > 50
 );
 ----
 400
 
 # Grouped, so the predicate interacts with GROUP BY as well.
 query TI rowsort
-SELECT * FROM semantic_view(
-  'cr0806i_chain',
-  dimensions := ['region'],
-  metrics := ['revenue'],
-  where_clause := 'total > 100'
+SELECT * FROM SEMANTIC_VIEW(cr0806i_chain
+    DIMENSIONS region
+    METRICS revenue
+    WHERE total > 100
 );
 ----
 east	200
@@ -138,10 +135,9 @@ METRICS (s.total AS SUM(s.amount));
 # rows 2 and 3, so total = 20 + 30 = 50. Before the fix the predicate named
 # `cust_rate` as a bare column AND `c` was never joined.
 query I
-SELECT total FROM semantic_view(
-  'cr0806i_cross',
-  metrics := ['total'],
-  where_clause := 'weighted > 25'
+SELECT total FROM SEMANTIC_VIEW(cr0806i_cross
+    METRICS total
+    WHERE weighted > 25
 );
 ----
 50
@@ -174,9 +170,8 @@ METRICS (
 # qualified spelling emitted `li.item_rev * 2` as a raw column and failed to
 # bind, while the bare spelling emitted `(SUM(li.price)) * 2` correctly.
 query II
-SELECT double_rev, bare_double FROM semantic_view(
-  'cr0806i_qual',
-  metrics := ['double_rev', 'bare_double']
+SELECT double_rev, bare_double FROM SEMANTIC_VIEW(cr0806i_qual
+    METRICS double_rev, bare_double
 );
 ----
 120	120
@@ -184,10 +179,9 @@ SELECT double_rev, bare_double FROM semantic_view(
 # Grouped: east has orders 1 and 2 (line items 10 + 20 = 30), west has order 3
 # (30). The two spellings must agree row for row.
 query TII rowsort
-SELECT * FROM semantic_view(
-  'cr0806i_qual',
-  dimensions := ['region'],
-  metrics := ['double_rev', 'bare_double']
+SELECT * FROM SEMANTIC_VIEW(cr0806i_qual
+    DIMENSIONS region
+    METRICS double_rev, bare_double
 );
 ----
 east	60	60

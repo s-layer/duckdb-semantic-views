@@ -50,8 +50,10 @@ METRICS (
 # = 2024-01-01 rows (10.00 + 20.00, tied). The pre-fix alias binding
 # partitioned on raw region and returned US = 8.00 (1+2+5).
 query TR
-SELECT region, latest_balance FROM semantic_view('cr1_view',
-    dimensions := ['region'], metrics := ['latest_balance']) ORDER BY region;
+SELECT region, latest_balance FROM SEMANTIC_VIEW(cr1_view
+    DIMENSIONS region
+    METRICS latest_balance
+) ORDER BY region;
 ----
 EU	30
 US	7
@@ -93,7 +95,7 @@ METRICS (
 # profit was queried alone (and silently "worked" only when co-queried
 # with revenue and cost — DuckDB's lateral alias resolution rescued it).
 query R
-SELECT profit FROM semantic_view('cr2_view', metrics := ['profit']);
+SELECT profit FROM SEMANTIC_VIEW(cr2_view METRICS profit);
 ----
 20
 

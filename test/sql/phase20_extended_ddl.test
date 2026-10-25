@@ -43,7 +43,7 @@ METRICS (
 
 # Query it to verify initial state
 query TT rowsort
-SELECT * FROM semantic_view('sv_replace_test', dimensions := ['region'], metrics := ['total_amount']);
+SELECT * FROM SEMANTIC_VIEW(sv_replace_test DIMENSIONS region METRICS total_amount);
 ----
 East	100.0
 West	200.0
@@ -63,7 +63,7 @@ METRICS (
 
 # Query the replaced view -- new metric should be available
 query TT rowsort
-SELECT * FROM semantic_view('sv_replace_test', dimensions := ['region'], metrics := ['avg_amount']);
+SELECT * FROM SEMANTIC_VIEW(sv_replace_test DIMENSIONS region METRICS avg_amount);
 ----
 East	100.0
 West	200.0

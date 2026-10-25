@@ -66,7 +66,7 @@ CREATE SEMANTIC VIEW sam_sv AS
 # ============================================================
 
 query TII rowsort
-SELECT * FROM semantic_view('sam_sv', metrics := ['order_count', 'total_balance'], dimensions := ['segment']);
+SELECT * FROM SEMANTIC_VIEW(sam_sv DIMENSIONS segment METRICS order_count, total_balance);
 ----
 EAST	4	100
 WEST	3	200
@@ -108,7 +108,7 @@ SELECT count(*) FROM (
 # ============================================================
 
 query II
-SELECT * FROM semantic_view('sam_sv', metrics := ['order_count', 'total_balance']);
+SELECT * FROM SEMANTIC_VIEW(sam_sv METRICS order_count, total_balance);
 ----
 7	300
 
@@ -119,7 +119,7 @@ SELECT * FROM semantic_view('sam_sv', metrics := ['order_count', 'total_balance'
 # ============================================================
 
 query TTII rowsort
-SELECT * FROM semantic_view('sam_sv', metrics := ['order_count', 'total_balance'], dimensions := ['segment', 'as_of']);
+SELECT * FROM SEMANTIC_VIEW(sam_sv DIMENSIONS segment, as_of METRICS order_count, total_balance);
 ----
 EAST	2026-01-01	1	10
 EAST	2026-02-01	3	100

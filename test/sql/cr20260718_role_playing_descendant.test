@@ -68,7 +68,7 @@ CREATE SEMANTIC VIEW cr718rp AS
 # silently used the departure instance).
 statement error
 SELECT region_name, arrival_count
-FROM semantic_view('cr718rp', dimensions := ['region_name'], metrics := ['arrival_count']);
+FROM SEMANTIC_VIEW(cr718rp DIMENSIONS region_name METRICS arrival_count);
 ----
 ambiguous
 
@@ -78,7 +78,7 @@ ambiguous
 # departure city.
 query TI rowsort
 SELECT city, departure_count
-FROM semantic_view('cr718rp', dimensions := ['city'], metrics := ['departure_count']);
+FROM SEMANTIC_VIEW(cr718rp DIMENSIONS city METRICS departure_count);
 ----
 London	1
 San Francisco	1
@@ -86,13 +86,13 @@ San Francisco	1
 # EXP-5: a fact sourced on the role-playing table `a` has no USING context to
 # pick a role -> reject (before the fix it silently read the departure airport).
 statement error
-SELECT airport_city FROM semantic_view('cr718rp', facts := ['airport_city']);
+SELECT airport_city FROM SEMANTIC_VIEW(cr718rp FACTS airport_city);
 ----
 ambiguous
 
 # EXP-5: a fact on a DESCENDANT of the role-playing table is equally ambiguous.
 statement error
-SELECT fact_region FROM semantic_view('cr718rp', facts := ['fact_region']);
+SELECT fact_region FROM SEMANTIC_VIEW(cr718rp FACTS fact_region);
 ----
 ambiguous
 

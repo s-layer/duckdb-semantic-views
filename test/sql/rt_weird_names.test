@@ -28,7 +28,7 @@ wéird name
 
 # Query through the quoted lookup argument.
 query II
-FROM semantic_view('"wéird name"', dimensions := ['city'], metrics := ['total'])
+FROM SEMANTIC_VIEW("wéird name" DIMENSIONS city METRICS total)
 ORDER BY 1;
 ----
 São Paulo	100.00
@@ -90,7 +90,7 @@ it's_ok
 # Query lookup with the quoted-identifier argument (single quote doubled in the
 # SQL string literal argument).
 query II
-FROM semantic_view('"it''s_ok"', dimensions := ['city'], metrics := ['total'])
+FROM SEMANTIC_VIEW("it's_ok" DIMENSIONS city METRICS total)
 ORDER BY 1;
 ----
 São Paulo	100.00

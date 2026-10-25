@@ -65,7 +65,7 @@ SET search_path = 'analytics';
 
 # Control: no comment, injection works. This passed before the fix too.
 query I
-SELECT total FROM semantic_view('sales', metrics := ['total'])
+SELECT total FROM SEMANTIC_VIEW(sales METRICS total)
 ----
 350
 
@@ -74,13 +74,13 @@ SELECT total FROM semantic_view('sales', metrics := ['total'])
 # head, so nothing was injected and this errored as ambiguous.
 query I
 -- don't touch this
-SELECT total FROM semantic_view('sales', metrics := ['total'])
+SELECT total FROM SEMANTIC_VIEW(sales METRICS total)
 ----
 350
 
 # PARSE-5 repro 2: the same shape as a block comment.
 query I
-/* it's fine */ SELECT total FROM semantic_view('sales', metrics := ['total'])
+/* it's fine */ SELECT total FROM SEMANTIC_VIEW(sales METRICS total)
 ----
 350
 
@@ -100,7 +100,7 @@ SELECT total FROM semantic_view /* c */ ('sales', metrics := ['total'])
 
 # The dbt-duckdb annotation itself, on the read path.
 query I
-/* {"app": "dbt", "node_id": "model.sales"} */ SELECT total FROM semantic_view('sales', metrics := ['total'])
+/* {"app": "dbt", "node_id": "model.sales"} */ SELECT total FROM SEMANTIC_VIEW(sales METRICS total)
 ----
 350
 
@@ -111,7 +111,7 @@ SET search_path = 'staging';
 
 query I
 -- don't touch this
-SELECT total FROM semantic_view('sales', metrics := ['total'])
+SELECT total FROM SEMANTIC_VIEW(sales METRICS total)
 ----
 2
 
@@ -149,13 +149,13 @@ true
 # And it computes: two rows say 'keep', one says 'drop'. With the expression
 # stored as the dangling `n.`, this failed with a query-time syntax error.
 query TI rowsort
-SELECT * FROM semantic_view('notes_view', dimensions := ['is_keep'], metrics := ['cnt'])
+SELECT * FROM SEMANTIC_VIEW(notes_view DIMENSIONS is_keep METRICS cnt)
 ----
 0	1
 1	2
 
 query TI rowsort
-SELECT * FROM semantic_view('notes_view', dimensions := ['has_label'], metrics := ['cnt'])
+SELECT * FROM SEMANTIC_VIEW(notes_view DIMENSIONS has_label METRICS cnt)
 ----
 0	1
 1	2

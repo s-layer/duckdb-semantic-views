@@ -53,7 +53,7 @@ CREATE SEMANTIC VIEW p33_basic AS
   );
 
 query TR rowsort
-SELECT * FROM semantic_view('p33_basic', dimensions := ['name'], metrics := ['revenue']);
+SELECT * FROM SEMANTIC_VIEW(p33_basic DIMENSIONS name METRICS revenue);
 ----
 Alice	150.0
 Bob	200.0
@@ -82,7 +82,7 @@ CREATE SEMANTIC VIEW p33_multi_unique AS
   );
 
 query TR rowsort
-SELECT * FROM semantic_view('p33_multi_unique', dimensions := ['name'], metrics := ['revenue']);
+SELECT * FROM SEMANTIC_VIEW(p33_multi_unique DIMENSIONS name METRICS revenue);
 ----
 Alice	150.0
 Bob	200.0
@@ -137,14 +137,14 @@ CREATE SEMANTIC VIEW p33_infer_many AS
 
 # Safe: li->o forward ManyToOne
 query TR rowsort
-SELECT * FROM semantic_view('p33_infer_many', dimensions := ['region'], metrics := ['revenue']);
+SELECT * FROM SEMANTIC_VIEW(p33_infer_many DIMENSIONS region METRICS revenue);
 ----
 East	150.0
 West	200.0
 
 # Fan trap: o->li reverse ManyToOne = fan-out
 statement error
-SELECT * FROM semantic_view('p33_infer_many', dimensions := ['status'], metrics := ['order_count']);
+SELECT * FROM SEMANTIC_VIEW(p33_infer_many DIMENSIONS status METRICS order_count);
 ----
 fan trap detected
 
@@ -175,13 +175,13 @@ CREATE SEMANTIC VIEW p33_infer_oto AS
 
 # OneToOne: both directions safe
 query TI rowsort
-SELECT * FROM semantic_view('p33_infer_oto', dimensions := ['bio'], metrics := ['customer_count']);
+SELECT * FROM SEMANTIC_VIEW(p33_infer_oto DIMENSIONS bio METRICS customer_count);
 ----
 Designer	1
 Engineer	1
 
 query TI rowsort
-SELECT * FROM semantic_view('p33_infer_oto', dimensions := ['name'], metrics := ['profile_count']);
+SELECT * FROM SEMANTIC_VIEW(p33_infer_oto DIMENSIONS name METRICS profile_count);
 ----
 Alice	1
 Bob	1
@@ -219,7 +219,7 @@ CREATE SEMANTIC VIEW p33_infer_oto_unique AS
 
 # user_id is UNIQUE on t -> OneToOne, both directions safe
 query TI rowsort
-SELECT * FROM semantic_view('p33_infer_oto_unique', dimensions := ['token'], metrics := ['customer_count']);
+SELECT * FROM SEMANTIC_VIEW(p33_infer_oto_unique DIMENSIONS token METRICS customer_count);
 ----
 tok_a	1
 tok_b	1
@@ -273,7 +273,7 @@ CREATE SEMANTIC VIEW p33_ref_pk AS
   );
 
 query TR rowsort
-SELECT * FROM semantic_view('p33_ref_pk', dimensions := ['name'], metrics := ['revenue']);
+SELECT * FROM SEMANTIC_VIEW(p33_ref_pk DIMENSIONS name METRICS revenue);
 ----
 Alice	150.0
 Bob	200.0
@@ -302,7 +302,7 @@ CREATE SEMANTIC VIEW p33_ref_explicit AS
   );
 
 query TR rowsort
-SELECT * FROM semantic_view('p33_ref_explicit', dimensions := ['name'], metrics := ['revenue']);
+SELECT * FROM SEMANTIC_VIEW(p33_ref_explicit DIMENSIONS name METRICS revenue);
 ----
 Alice	150.0
 Bob	200.0
@@ -359,14 +359,14 @@ CREATE SEMANTIC VIEW p33_chain AS
 
 # Safe: li->o->c is ManyToOne chain
 query TR rowsort
-SELECT * FROM semantic_view('p33_chain', dimensions := ['name'], metrics := ['revenue']);
+SELECT * FROM SEMANTIC_VIEW(p33_chain DIMENSIONS name METRICS revenue);
 ----
 Alice	150.0
 Bob	200.0
 
 # Fan trap: c->o->li requires reverse traversal of ManyToOne edges
 statement error
-SELECT * FROM semantic_view('p33_chain', dimensions := ['status'], metrics := ['cust_count']);
+SELECT * FROM SEMANTIC_VIEW(p33_chain DIMENSIONS status METRICS cust_count);
 ----
 fan trap detected
 
@@ -445,7 +445,7 @@ CREATE SEMANTIC VIEW p33_fact AS
   );
 
 query TR rowsort
-SELECT * FROM semantic_view('p33_fact', dimensions := ['region'], metrics := ['revenue']);
+SELECT * FROM SEMANTIC_VIEW(p33_fact DIMENSIONS region METRICS revenue);
 ----
 East	150.0
 West	200.0
@@ -512,7 +512,7 @@ CREATE SEMANTIC VIEW p33_pkopt_basic AS
   );
 
 query TR rowsort
-SELECT * FROM semantic_view('p33_pkopt_basic', dimensions := ['name'], metrics := ['revenue']);
+SELECT * FROM SEMANTIC_VIEW(p33_pkopt_basic DIMENSIONS name METRICS revenue);
 ----
 Alice	150.0
 Bob	200.0
@@ -553,7 +553,7 @@ CREATE SEMANTIC VIEW p33_pkopt_composite AS
   );
 
 query TI rowsort
-SELECT * FROM semantic_view('p33_pkopt_composite', dimensions := ['status'], metrics := ['carrier_count']);
+SELECT * FROM SEMANTIC_VIEW(p33_pkopt_composite DIMENSIONS status METRICS carrier_count);
 ----
 pending	1
 shipped	2
@@ -589,7 +589,7 @@ CREATE SEMANTIC VIEW p33_pkopt_explicit AS
   );
 
 query TR rowsort
-SELECT * FROM semantic_view('p33_pkopt_explicit', dimensions := ['name'], metrics := ['revenue']);
+SELECT * FROM SEMANTIC_VIEW(p33_pkopt_explicit DIMENSIONS name METRICS revenue);
 ----
 Alice	150.0
 Bob	200.0
@@ -652,7 +652,7 @@ CREATE SEMANTIC VIEW p33_pkopt_mixed AS
   );
 
 query TR rowsort
-SELECT * FROM semantic_view('p33_pkopt_mixed', dimensions := ['name'], metrics := ['revenue']);
+SELECT * FROM SEMANTIC_VIEW(p33_pkopt_mixed DIMENSIONS name METRICS revenue);
 ----
 Alice	150.0
 Bob	200.0

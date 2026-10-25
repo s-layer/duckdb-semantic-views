@@ -39,7 +39,7 @@ ATTACH ':memory:' AS adb;
 # ------------------------------------------------------------------
 
 statement error
-SELECT * FROM semantic_view('adb.main.v', dimensions := ['region'], metrics := ['total']);
+SELECT * FROM SEMANTIC_VIEW(adb.main.v DIMENSIONS region METRICS total);
 ----
 single-catalog
 
@@ -66,7 +66,7 @@ single-catalog
 # The error names the database that was written, so the caller can see which of
 # the two spellings is the wrong one.
 statement error
-SELECT * FROM semantic_view('adb.main.v', dimensions := ['region']);
+SELECT * FROM SEMANTIC_VIEW(adb.main.v DIMENSIONS region);
 ----
 names database 'adb'
 
@@ -74,7 +74,7 @@ names database 'adb'
 # view being missing: a name that exists in no schema at all reports the
 # single-catalog error too, so the guard cannot be confused with "not found".
 statement error
-SELECT * FROM semantic_view('adb.main.nonexistent', dimensions := ['region']);
+SELECT * FROM SEMANTIC_VIEW(adb.main.nonexistent DIMENSIONS region);
 ----
 single-catalog
 
@@ -85,20 +85,20 @@ single-catalog
 # ------------------------------------------------------------------
 
 query TR
-SELECT region, total FROM semantic_view('memory.main.v', dimensions := ['region'], metrics := ['total']) ORDER BY region;
+SELECT region, total FROM SEMANTIC_VIEW(memory.main.v DIMENSIONS region METRICS total) ORDER BY region;
 ----
 EU	20.00
 US	10.00
 
 query TR
-SELECT region, total FROM semantic_view('v', dimensions := ['region'], metrics := ['total']) ORDER BY region;
+SELECT region, total FROM SEMANTIC_VIEW(v DIMENSIONS region METRICS total) ORDER BY region;
 ----
 EU	20.00
 US	10.00
 
 # Case-insensitively, per DuckDB's identifier rule — `MEMORY` is `memory`.
 query I
-SELECT count(*) FROM semantic_view('MEMORY.main.v', dimensions := ['region']);
+SELECT count(*) FROM SEMANTIC_VIEW(MEMORY.main.v DIMENSIONS region);
 ----
 2
 
@@ -112,12 +112,12 @@ statement ok
 USE adb;
 
 statement error
-SELECT * FROM semantic_view('adb.main.v', dimensions := ['region']);
+SELECT * FROM SEMANTIC_VIEW(adb.main.v DIMENSIONS region);
 ----
 single-catalog
 
 query I
-SELECT count(*) FROM semantic_view('v', dimensions := ['region']);
+SELECT count(*) FROM SEMANTIC_VIEW(v DIMENSIONS region);
 ----
 2
 

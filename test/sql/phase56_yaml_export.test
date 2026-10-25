@@ -241,7 +241,7 @@ METRICS (
 # Store query results from original view
 statement ok
 CREATE TABLE p56_rt_results AS
-SELECT * FROM semantic_view('p56_rt_source', dimensions := ['region'], metrics := ['total'])
+SELECT * FROM SEMANTIC_VIEW(p56_rt_source DIMENSIONS region METRICS total)
 
 # Store YAML export
 statement ok
@@ -287,7 +287,7 @@ $$
 
 # Query the re-created view and compare
 query TR rowsort
-SELECT * FROM semantic_view('p56_rt_target', dimensions := ['region'], metrics := ['total'])
+SELECT * FROM SEMANTIC_VIEW(p56_rt_target DIMENSIONS region METRICS total)
 ----
 EU	200.00
 US	250.00
@@ -295,7 +295,7 @@ US	250.00
 # Verify results match original
 query I
 SELECT COUNT(*) FROM (
-    SELECT * FROM semantic_view('p56_rt_target', dimensions := ['region'], metrics := ['total'])
+    SELECT * FROM SEMANTIC_VIEW(p56_rt_target DIMENSIONS region METRICS total)
     EXCEPT
     SELECT * FROM p56_rt_results
 )

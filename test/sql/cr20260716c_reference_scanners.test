@@ -53,7 +53,7 @@ CREATE SEMANTIC VIEW rs_flights_view AS
 
 # The literal ` seen at a ` survives verbatim (not ` seen at a__dep_airport `).
 query TI rowsort
-SELECT * FROM semantic_view('rs_flights_view', dimensions := ['city_tag'], metrics := ['departure_count']);
+SELECT * FROM SEMANTIC_VIEW(rs_flights_view DIMENSIONS city_tag METRICS departure_count);
 ----
 New York seen at a 	1
 San Francisco seen at a 	1
@@ -92,7 +92,7 @@ CREATE SEMANTIC VIEW rs_sales AS
   );
 
 query RR
-SELECT * FROM semantic_view('rs_sales', metrics := ['Total Revenue', 'doubled']);
+SELECT * FROM SEMANTIC_VIEW(rs_sales METRICS "Total Revenue", doubled);
 ----
 350.00	700.00
 

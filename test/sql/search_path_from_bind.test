@@ -81,7 +81,7 @@ true
 # statements it saw); the path comes from the caller's context at bind.
 
 query TI
-SELECT * FROM semantic_view('v', dimensions := ['region'], metrics := ['n']);
+SELECT * FROM SEMANTIC_VIEW(v DIMENSIONS region METRICS n);
 ----
 one	1
 
@@ -94,7 +94,7 @@ statement ok
 SET search_path = 'sp2';
 
 query TI
-SELECT * FROM semantic_view('v', dimensions := ['region'], metrics := ['n']);
+SELECT * FROM SEMANTIC_VIEW(v DIMENSIONS region METRICS n);
 ----
 two	1
 
@@ -134,7 +134,7 @@ statement ok
 PREPARE sp_prep_ddl_param AS SELECT get_ddl('SEMANTIC_VIEW', $1) LIKE '%from sp2%';
 
 statement ok
-PREPARE sp_prep_tf AS SELECT region FROM semantic_view('v', dimensions := ['region'], metrics := ['n']);
+PREPARE sp_prep_tf AS SELECT region FROM SEMANTIC_VIEW(v DIMENSIONS region METRICS n);
 
 statement ok
 SET search_path = 'sp2';

@@ -52,7 +52,7 @@ CREATE SEMANTIC VIEW p30_sales AS
 # ============================================================
 
 query TR rowsort
-SELECT * FROM semantic_view('p30_sales', dimensions := ['region'], metrics := ['profit']);
+SELECT * FROM SEMANTIC_VIEW(p30_sales DIMENSIONS region METRICS profit);
 ----
 East	170.00
 West	90.00
@@ -64,7 +64,7 @@ West	90.00
 # ============================================================
 
 query TRRR rowsort
-SELECT * FROM semantic_view('p30_sales', dimensions := ['region'], metrics := ['revenue', 'cost', 'profit']);
+SELECT * FROM SEMANTIC_VIEW(p30_sales DIMENSIONS region METRICS revenue, cost, profit);
 ----
 East	300.00	130.00	170.00
 West	150.00	60.00	90.00
@@ -76,7 +76,7 @@ West	150.00	60.00	90.00
 # ============================================================
 
 query TR rowsort
-SELECT * FROM semantic_view('p30_sales', dimensions := ['region'], metrics := ['profit']);
+SELECT * FROM SEMANTIC_VIEW(p30_sales DIMENSIONS region METRICS profit);
 ----
 East	170.00
 West	90.00
@@ -89,7 +89,7 @@ West	90.00
 # ============================================================
 
 query R
-SELECT * FROM semantic_view('p30_sales', metrics := ['profit']);
+SELECT * FROM SEMANTIC_VIEW(p30_sales METRICS profit);
 ----
 260.00
 
@@ -124,14 +124,14 @@ CREATE SEMANTIC VIEW p30_sales_v2 AS
 # Use approximate comparison via ROUND
 
 query TR rowsort
-SELECT * FROM semantic_view('p30_sales_v2', dimensions := ['region'], metrics := ['profit']);
+SELECT * FROM SEMANTIC_VIEW(p30_sales_v2 DIMENSIONS region METRICS profit);
 ----
 East	170.00
 West	90.00
 
 query TR rowsort
 SELECT region, ROUND(margin, 2) FROM (
-  SELECT * FROM semantic_view('p30_sales_v2', dimensions := ['region'], metrics := ['margin'])
+  SELECT * FROM SEMANTIC_VIEW(p30_sales_v2 DIMENSIONS region METRICS margin)
 );
 ----
 East	56.67
@@ -140,7 +140,7 @@ West	60.00
 # Both profit and margin together
 query TRR rowsort
 SELECT region, profit, ROUND(margin, 2) FROM (
-  SELECT * FROM semantic_view('p30_sales_v2', dimensions := ['region'], metrics := ['profit', 'margin'])
+  SELECT * FROM SEMANTIC_VIEW(p30_sales_v2 DIMENSIONS region METRICS profit, margin)
 );
 ----
 East	170.00	56.67
@@ -179,14 +179,14 @@ CREATE SEMANTIC VIEW p30_sales_facts AS
 # West revenue: 150, cost: 60, profit: 150-60=90
 
 query TR rowsort
-SELECT * FROM semantic_view('p30_sales_facts', dimensions := ['region'], metrics := ['profit']);
+SELECT * FROM SEMANTIC_VIEW(p30_sales_facts DIMENSIONS region METRICS profit);
 ----
 East	120.00
 West	90.00
 
 # Verify base metric with fact inlining still works alongside derived
 query TRR rowsort
-SELECT * FROM semantic_view('p30_sales_facts', dimensions := ['region'], metrics := ['revenue', 'profit']);
+SELECT * FROM SEMANTIC_VIEW(p30_sales_facts DIMENSIONS region METRICS revenue, profit);
 ----
 East	250.00	120.00
 West	150.00	90.00

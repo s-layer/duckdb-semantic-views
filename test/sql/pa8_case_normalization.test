@@ -34,7 +34,7 @@ salesview
 
 # Query lookup folds the same way — every casing reaches the same view.
 query II
-FROM semantic_view('SALESVIEW', dimensions := ['region'], metrics := ['total'])
+FROM SEMANTIC_VIEW(SALESVIEW DIMENSIONS region METRICS total)
 ORDER BY 1;
 ----
 EU	50.00
@@ -75,14 +75,14 @@ salesview
 
 # Every casing reaches the same view, quoted or not.
 query II
-FROM semantic_view('"SalesView"', dimensions := ['region'], metrics := ['total'])
+FROM SEMANTIC_VIEW("SalesView" DIMENSIONS region METRICS total)
 ORDER BY 1;
 ----
 EU	50.00
 US	100.00
 
 query II
-FROM semantic_view('salesview', dimensions := ['region'], metrics := ['total'])
+FROM SEMANTIC_VIEW(salesview DIMENSIONS region METRICS total)
 ORDER BY 1;
 ----
 EU	50.00

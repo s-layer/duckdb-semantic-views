@@ -83,14 +83,14 @@ MATERIALIZATIONS (
 # Query that exactly matches the materialization (region + total_revenue + order_count)
 # Should route to p55_region_agg
 query TRI rowsort
-SELECT * FROM semantic_view('p55_routed', dimensions := ['region'], metrics := ['total_revenue', 'order_count'])
+SELECT * FROM SEMANTIC_VIEW(p55_routed DIMENSIONS region METRICS total_revenue, order_count)
 ----
 East	250.00	2
 West	250.00	2
 
 # Verify row count
 query I
-SELECT count(*) FROM semantic_view('p55_routed', dimensions := ['region'], metrics := ['total_revenue', 'order_count'])
+SELECT count(*) FROM SEMANTIC_VIEW(p55_routed DIMENSIONS region METRICS total_revenue, order_count)
 ----
 2
 
@@ -101,14 +101,14 @@ SELECT count(*) FROM semantic_view('p55_routed', dimensions := ['region'], metri
 # region + status + total_revenue is NOT covered by any materialization
 # Should fall back to raw expansion (GROUP BY)
 query TTR rowsort
-SELECT * FROM semantic_view('p55_routed', dimensions := ['region', 'status'], metrics := ['total_revenue'])
+SELECT * FROM SEMANTIC_VIEW(p55_routed DIMENSIONS region, status METRICS total_revenue)
 ----
 East	shipped	250.00
 West	pending	200.00
 West	shipped	50.00
 
 query I
-SELECT count(*) FROM semantic_view('p55_routed', dimensions := ['region', 'status'], metrics := ['total_revenue'])
+SELECT count(*) FROM SEMANTIC_VIEW(p55_routed DIMENSIONS region, status METRICS total_revenue)
 ----
 3
 
@@ -119,7 +119,7 @@ SELECT count(*) FROM semantic_view('p55_routed', dimensions := ['region', 'statu
 # dimensions-only query for 'region' -- materialization has metrics too,
 # so exact match fails (empty mets != {total_revenue, order_count})
 query T rowsort
-SELECT * FROM semantic_view('p55_routed', dimensions := ['region'])
+SELECT * FROM SEMANTIC_VIEW(p55_routed DIMENSIONS region)
 ----
 East
 West
@@ -142,7 +142,7 @@ METRICS (
 
 # Standard query with no materializations -- should work as before
 query TR rowsort
-SELECT * FROM semantic_view('p55_no_mat', dimensions := ['region'], metrics := ['total_revenue'])
+SELECT * FROM SEMANTIC_VIEW(p55_no_mat DIMENSIONS region METRICS total_revenue)
 ----
 East	250.00
 West	250.00
@@ -186,14 +186,14 @@ MATERIALIZATIONS (
 # Falls back to raw expansion with RANK CTE snapshot selection
 # Latest amount per region: East -> 150.00 (2024-01-03), West -> 50.00 (2024-01-04)
 query TR rowsort
-SELECT * FROM semantic_view('p55_semi_add', dimensions := ['region'], metrics := ['latest_amount'])
+SELECT * FROM SEMANTIC_VIEW(p55_semi_add DIMENSIONS region METRICS latest_amount)
 ----
 East	150.00
 West	50.00
 
 # If routing had happened, we would see 999.99 -- confirm we don't
 query I
-SELECT count(*) FROM semantic_view('p55_semi_add', dimensions := ['region'], metrics := ['latest_amount']) WHERE latest_amount = 999.99
+SELECT count(*) FROM SEMANTIC_VIEW(p55_semi_add DIMENSIONS region METRICS latest_amount) WHERE latest_amount = 999.99
 ----
 0
 
@@ -236,7 +236,7 @@ MATERIALIZATIONS (
 # Window metric should NOT route to materialization (MAT-04)
 # Falls back to CTE-based window expansion
 query TRI rowsort
-SELECT * FROM semantic_view('p55_window', dimensions := ['region', 'order_date'], metrics := ['running_total'])
+SELECT * FROM SEMANTIC_VIEW(p55_window DIMENSIONS region, order_date METRICS running_total)
 ----
 East	2024-01-01	100.00
 East	2024-01-03	250.00
@@ -245,7 +245,7 @@ West	2024-01-04	250.00
 
 # If routing had happened, we would see 999.99 -- confirm we don't
 query I
-SELECT count(*) FROM semantic_view('p55_window', dimensions := ['region', 'order_date'], metrics := ['running_total']) WHERE running_total = 999.99
+SELECT count(*) FROM SEMANTIC_VIEW(p55_window DIMENSIONS region, order_date METRICS running_total) WHERE running_total = 999.99
 ----
 0
 
@@ -301,7 +301,7 @@ MATERIALIZATIONS (
 
 # Should read from the FIRST matching materialization (p55_first_agg)
 query TR rowsort
-SELECT * FROM semantic_view('p55_multi_mat', dimensions := ['region'], metrics := ['total_revenue'])
+SELECT * FROM SEMANTIC_VIEW(p55_multi_mat DIMENSIONS region METRICS total_revenue)
 ----
 East	111.11
 West	222.22
@@ -342,7 +342,7 @@ MATERIALIZATIONS (
 
 # Query with lowercase dim/met names should match despite capitalized mat declarations
 query TR rowsort
-SELECT * FROM semantic_view('p55_case_mat', dimensions := ['region'], metrics := ['total_revenue'])
+SELECT * FROM SEMANTIC_VIEW(p55_case_mat DIMENSIONS region METRICS total_revenue)
 ----
 East	777.77
 West	888.88
@@ -382,14 +382,14 @@ MATERIALIZATIONS (
 )
 
 query T rowsort
-SELECT * FROM semantic_view('p55_dims_routed', dimensions := ['region'])
+SELECT * FROM SEMANTIC_VIEW(p55_dims_routed DIMENSIONS region)
 ----
 East
 North
 West
 
 query I
-SELECT count(*) FROM semantic_view('p55_dims_routed', dimensions := ['region'])
+SELECT count(*) FROM SEMANTIC_VIEW(p55_dims_routed DIMENSIONS region)
 ----
 3
 

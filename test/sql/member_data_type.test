@@ -185,28 +185,28 @@ tier	SMALLINT
 
 query TTTTTT
 SELECT typeof(total_qty), typeof(order_count), typeof(avg_qty), typeof(total_amount), typeof(last_placed), typeof(avg_order)
-FROM semantic_view('dt_sv', metrics := ['total_qty', 'order_count', 'avg_qty', 'total_amount', 'last_placed', 'avg_order']) LIMIT 1
+FROM SEMANTIC_VIEW(dt_sv METRICS total_qty, order_count, avg_qty, total_amount, last_placed, avg_order) LIMIT 1
 ----
 HUGEINT	BIGINT	DOUBLE	DECIMAL(38,2)	DATE	DOUBLE
 
 query TTTT
 SELECT typeof("Customer Name"), typeof(tier), typeof(tags), typeof(placed)
-FROM semantic_view('dt_sv', dimensions := ['Customer Name', 'tier', 'tags', 'placed']) LIMIT 1
+FROM SEMANTIC_VIEW(dt_sv DIMENSIONS "Customer Name", tier, tags, placed) LIMIT 1
 ----
 VARCHAR	SMALLINT	VARCHAR[]	DATE
 
 query T
-SELECT typeof(qty_lag) FROM semantic_view('dt_sv', dimensions := ['placed'], metrics := ['qty_lag']) LIMIT 1
+SELECT typeof(qty_lag) FROM SEMANTIC_VIEW(dt_sv DIMENSIONS placed METRICS qty_lag) LIMIT 1
 ----
 HUGEINT
 
 query T
-SELECT typeof(closing_amount) FROM semantic_view('dt_sv', metrics := ['closing_amount']) LIMIT 1
+SELECT typeof(closing_amount) FROM SEMANTIC_VIEW(dt_sv METRICS closing_amount) LIMIT 1
 ----
 DECIMAL(38,2)
 
 query T
-SELECT typeof(line_total) FROM semantic_view('dt_sv', facts := ['line_total']) LIMIT 1
+SELECT typeof(line_total) FROM SEMANTIC_VIEW(dt_sv FACTS line_total) LIMIT 1
 ----
 DECIMAL(18,2)
 
@@ -312,7 +312,7 @@ METRICS (o.parent_over_child AS SUM(l.line_price), l.child_total AS SUM(l.line_p
 
 # CASE a fanned-out parent metric is refused by semantic_view() ...
 statement error
-SELECT * FROM semantic_view('dt_fanned', metrics := ['parent_over_child']);
+SELECT * FROM SEMANTIC_VIEW(dt_fanned METRICS parent_over_child);
 ----
 fan trap detected -- 'parent_over_child' (table 'o')
 
@@ -379,7 +379,7 @@ info	STRUCT(a INTEGER)
 mood	ENUM('ok', 'sad')
 
 query TTT
-SELECT typeof(big), typeof(info), typeof(mood) FROM semantic_view('dt_odd_sv', dimensions := ['big', 'info', 'mood'])
+SELECT typeof(big), typeof(info), typeof(mood) FROM SEMANTIC_VIEW(dt_odd_sv DIMENSIONS big, info, mood)
 ----
 HUGEINT	STRUCT(a INTEGER)	ENUM('ok', 'sad')
 
@@ -427,6 +427,6 @@ departures	BIGINT	M
 max_elevation	INTEGER	M
 
 query T
-SELECT typeof(city) FROM semantic_view('dt_rp', dimensions := ['city'], metrics := ['departures'])
+SELECT typeof(city) FROM SEMANTIC_VIEW(dt_rp DIMENSIONS city METRICS departures)
 ----
 VARCHAR
