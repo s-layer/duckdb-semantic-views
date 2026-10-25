@@ -261,24 +261,36 @@ pub fn plan_create(query: &str) -> Result<Option<RewriteAction>, ParseError> {
     let Some((kind, plen)) = detect_create_prefix(trimmed_no_semi) else {
         return Ok(None);
     };
-    let planned = validate_create_body(trimmed_no_semi, lead, plen, kind)?;
     // Past an unterminated quote the pass blanked nothing, so a comment there
-    // would have been planned as code. The body parser refuses a stray quote
-    // in the body with its own message; one where it does not look (a bare
-    // view name such as `v'`) is refused here, as `DuckDB`'s tokenizer refuses
-    // it before the grammar sees it.
+    // would be planned as code; `DuckDB`'s tokenizer refuses such text before
+    // the grammar sees it. A quote the body parser reads (in the body, or a
+    // `"` in the name, which `parse_view_ref` owns) gets its own message from
+    // it. A `'` or `$tag$` in a bare name is read by nothing, so it is refused
+    // first, before the body parser trips on comment text left in place.
+    let after_prefix = &trimmed_no_semi[plen..];
+    let name_start = lead + plen + (after_prefix.len() - after_prefix.trim_start().len());
+    let name_end = name_start + crate::ident::find_identifier_end(&query[name_start..], true);
+    if let Some(pos) = unterminated.filter(|&p| p < name_end && query.as_bytes()[p] != b'"') {
+        return Err(unterminated_quote(query, pos));
+    }
+    let planned = validate_create_body(trimmed_no_semi, lead, plen, kind)?;
     if let Some(pos) = unterminated {
-        let message = if query.as_bytes()[pos] == b'"' {
-            "Unterminated quoted identifier."
-        } else {
-            "Unterminated string literal."
-        };
-        return Err(ParseError {
-            message: message.to_string(),
-            position: Some(pos),
-        });
+        return Err(unterminated_quote(query, pos));
     }
     Ok(planned)
+}
+
+/// The error for a quoted region opened at `pos` and never closed.
+fn unterminated_quote(query: &str, pos: usize) -> ParseError {
+    let message = match query.as_bytes()[pos] {
+        b'"' => "Unterminated quoted identifier.",
+        b'$' => "Unterminated dollar-quoted string.",
+        _ => "Unterminated string literal.",
+    };
+    ParseError {
+        message: message.to_string(),
+        position: Some(pos),
+    }
 }
 
 // Cardinality inference (Phase 33) now lives in `crate::graph::cardinality`
@@ -345,6 +357,18 @@ mod tests {
         let err = plan_create(text).expect_err("a stray quote in the name is refused");
         assert_eq!(err.message, "Unterminated string literal.");
         assert_eq!(err.position, Some(text.find('\'').unwrap()));
+        // The stray quote is reported even when the body after it would trip
+        // the body parser on comment text the pass left in place.
+        let text = "CREATE SEMANTIC VIEW v' AS TABLES (o AS t PRIMARY KEY (id)) -- note";
+        let err = plan_create(text).expect_err("refused");
+        assert_eq!(err.message, "Unterminated string literal.");
+        assert_eq!(err.position, Some(text.find('\'').unwrap()));
+        // The same for a dollar quote opening at the name.
+        let text = "CREATE SEMANTIC VIEW $a$ AS TABLES (o AS t PRIMARY KEY (x -- a\n y)) \
+                    METRICS (o.n AS COUNT(*))";
+        let err = plan_create(text).expect_err("refused");
+        assert_eq!(err.message, "Unterminated dollar-quoted string.");
+        assert_eq!(err.position, Some(text.find('$').unwrap()));
         // Text that is not a CREATE is still not ours, quote or no quote.
         assert!(matches!(plan_create("SELECT 'open"), Ok(None)));
     }

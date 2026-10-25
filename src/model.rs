@@ -830,10 +830,16 @@ fn member_expr(kind: &str, name: &str, expr: &str) -> Result<(), String> {
     // that no longer plans (fuzz_create_text, CI run 40184213171). Window
     // arguments are not checked: they sit inside `OVER (…)`, below depth 0.
     if let Some(at) = crate::body_parser::find_annotation_start(expr) {
-        let keyword = expr[at..]
+        let word = expr[at..]
             .split(|c: char| !c.is_ascii_alphabetic())
             .next()
             .unwrap_or_default();
+        // `WITH` starts annotations only as `WITH SYNONYMS`; name both words.
+        let keyword = if word.eq_ignore_ascii_case("WITH") {
+            format!("{word} SYNONYMS")
+        } else {
+            word.to_string()
+        };
         return Err(format!(
             "{kind} '{name}' has an expression the DDL grammar cannot carry ('{expr}'); \
              '{keyword}' at depth 0 starts the entry's annotations. Quote it as an \
@@ -1665,7 +1671,7 @@ mod tests {
         for (expr, keyword) in [
             ("o.a COMMENT 'x'", "COMMENT"),
             ("o.a labels", "labels"),
-            ("o.a WITH SYNONYMS", "WITH"),
+            ("o.a WITH SYNONYMS", "WITH SYNONYMS"),
         ] {
             let yaml = format!(
                 "{VALID_TABLES}dimensions:\n  - name: d\n    expr: \"{expr}\"\n    source_table: o\n\
@@ -1673,10 +1679,30 @@ mod tests {
             );
             let e = yaml_err(&yaml);
             assert!(
-                e.contains("'d'") && e.contains(&format!("'{keyword}' at depth 0")),
+                e.contains("dimension 'd'") && e.contains(&format!("'{keyword}' at depth 0")),
                 "the error must name the member and the keyword: {e}"
             );
         }
+        // Facts and metrics go through the same rule.
+        let fact = format!(
+            "{VALID_TABLES}facts:\n  - name: f\n    expr: \"o.a COMMENT 'x'\"\n    source_table: o\n\
+             dimensions:\n  - name: d\n    expr: o.d\n    source_table: o\n\
+             metrics:\n  - name: total\n    expr: sum(o.amount)\n    source_table: o\n"
+        );
+        let e = yaml_err(&fact);
+        assert!(
+            e.contains("fact 'f'") && e.contains("'COMMENT' at depth 0"),
+            "{e}"
+        );
+        let metric = format!(
+            "{VALID_TABLES}dimensions:\n  - name: d\n    expr: o.d\n    source_table: o\n\
+             metrics:\n  - name: total\n    expr: \"sum(o.amount) COMMENT 'x'\"\n    source_table: o\n"
+        );
+        let e = yaml_err(&metric);
+        assert!(
+            e.contains("metric 'total'") && e.contains("'COMMENT' at depth 0"),
+            "{e}"
+        );
     }
 
     #[test]

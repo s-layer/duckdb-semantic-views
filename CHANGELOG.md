@@ -136,6 +136,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `CREATE` refused. Quote the word if it names a column (`o."comment"`); `o.comment` and
   the word inside brackets or a string are unaffected.
 
+- **A `$` inside a name is part of the name.** A column such as `price$usd$` used in a
+  semantic view's expression was read as the start of a `$usd$ … $usd$` string, so
+  `CREATE` failed with an unrelated syntax error. As in DuckDB, a `$` right after a
+  letter, digit or `_` now continues the name, and a dollar-quoted string opens only at
+  the start of a token.
+
 - **A subquery in `where_clause` keeps its own names.** A name inside a subquery, such as
   `amt` in `amt IN (SELECT amt FROM targets)`, was replaced with the member of that name, so
   the subquery compared each row with itself and filtered nothing, or failed to parse. Names

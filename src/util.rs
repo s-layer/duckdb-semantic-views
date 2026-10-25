@@ -148,7 +148,9 @@ pub fn starts_with_keyword_ci(s: &str, kw: &str) -> bool {
 /// is the opener (e.g. `$$`, `$yaml$`). The tag body is ASCII alphanumerics and
 /// `_` and may **not** start with a digit — `$1` is a positional parameter, not
 /// a dollar-quote tag — matching `PostgreSQL`/`DuckDB`. The empty tag `$$` is
-/// valid; the returned length includes both `$` delimiters.
+/// valid; the returned length includes both `$` delimiters. A `$` that
+/// follows an identifier byte (with only `$`s between) is part of that
+/// identifier and opens nothing.
 ///
 /// **Single source of truth for dollar-quote tags** (P-6, code-review
 /// 2026-07-11), shared by [`blank_sql_comments`] and the CREATE-body
@@ -160,6 +162,16 @@ pub fn starts_with_keyword_ci(s: &str, kw: &str) -> bool {
 #[must_use]
 pub fn read_dollar_tag_len(bytes: &[u8], start: usize) -> Option<usize> {
     if start >= bytes.len() || bytes[start] != b'$' {
+        return None;
+    }
+    // A `$` inside an identifier continues it (`v$a$`, `v$$x$$`), as in
+    // DuckDB's scanner, so no dollar quote opens after an identifier byte,
+    // with any `$`s between.
+    let mut k = start;
+    while k > 0 && bytes[k - 1] == b'$' {
+        k -= 1;
+    }
+    if k > 0 && is_ident_byte(bytes[k - 1]) {
         return None;
     }
     let mut j = start + 1;
@@ -319,14 +331,12 @@ pub fn blank_sql_comments(input: &str) -> std::borrow::Cow<'_, str> {
     blank_sql_comments_tracking(input).0
 }
 
-/// [`blank_sql_comments`], also returning the byte offset of the `'` or `"`
-/// that opens a quoted region still open at the end of `input`.
+/// [`blank_sql_comments`], also returning the byte offset of the `'`, `"` or
+/// `$tag$` that opens a quoted region still open at the end of `input`.
 ///
 /// The pass cannot tell a comment from string content after an unterminated
 /// quote, so it blanks nothing past one. A caller that plans the text (as
 /// `plan_create` does) must refuse it rather than plan comment text as code.
-/// An unterminated `$tag$` is not reported: `$` is also an identifier byte,
-/// so `$a$` inside a name is not reliably an opener.
 #[must_use]
 #[allow(clippy::too_many_lines)]
 pub fn blank_sql_comments_tracking(input: &str) -> (std::borrow::Cow<'_, str>, Option<usize>) {
@@ -397,6 +407,7 @@ pub fn blank_sql_comments_tracking(input: &str) -> (std::borrow::Cow<'_, str>, O
                 b'$' => {
                     if let Some(len) = read_dollar_tag_len(bytes, i) {
                         dollar_tag = Some(&bytes[i..i + len]);
+                        open_at = i;
                         i += len;
                     } else {
                         i += 1;
@@ -445,7 +456,7 @@ pub fn blank_sql_comments_tracking(input: &str) -> (std::borrow::Cow<'_, str>, O
         }
     }
 
-    let unterminated = (st != St::Code).then_some(open_at);
+    let unterminated = (st != St::Code || dollar_tag.is_some()).then_some(open_at);
     let text = match out {
         // Only whole comment regions (bounded by ASCII delimiters) were
         // overwritten with ASCII spaces, so the buffer remains valid UTF-8.
@@ -804,8 +815,24 @@ mod tests {
         assert_eq!(open("a -- don't\nb"), None);
         assert_eq!(open("a /* ' */ b"), None);
         assert_eq!(open("$$ it's $$"), None);
-        // An unterminated dollar quote is not reported (see the docs).
-        assert_eq!(open("$a$ x"), None);
+        assert_eq!(open("x $a$ y -- c"), Some(2));
+        // A `$` inside an identifier opens nothing, so nothing is unterminated.
+        assert_eq!(open("v$a$ x -- c"), None);
+    }
+
+    #[test]
+    fn dollar_tag_does_not_open_inside_an_identifier() {
+        // DuckDB reads `v$a$` and `v$$x$$` as identifiers: a `$` right after an
+        // identifier byte continues it, so no dollar quote opens there.
+        assert_eq!(read_dollar_tag_len(b"v$a$", 1), None);
+        assert_eq!(read_dollar_tag_len(b"v$$x$$", 1), None);
+        assert_eq!(read_dollar_tag_len(b"v$$x$$", 2), None);
+        assert_eq!(read_dollar_tag_len(b"price_9$usd$", 7), None);
+        // At a token start it still opens.
+        assert_eq!(read_dollar_tag_len(b"x $a$", 2), Some(3));
+        assert_eq!(read_dollar_tag_len(b"($a$", 1), Some(3));
+        // So a comment after such an identifier is still blanked.
+        assert_eq!(blank_sql_comments("v$a$ x -- c"), "v$a$ x     ");
     }
 
     #[test]
