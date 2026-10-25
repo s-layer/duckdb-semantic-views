@@ -121,3 +121,19 @@ fn balanced_paren_in_dimension_name() {
         err.message
     );
 }
+
+/// Run 40195607830: `AS$$$reg…` with no space after `AS`. The lexer ended the
+/// name at the `$`, so `AS` was read as the keyword and `$$$reg…` as the
+/// expression; the render puts a space after `AS`, and there `$$` opens a
+/// dollar-quoted string that runs to the end. A `$` continues a name, as in
+/// DuckDB, so `AS$$$reg` is one name and the entry has no `AS`.
+#[test]
+fn dollar_quote_glued_to_as() {
+    let text = "CREATE SEMANTIC VIEW v COMMENT = 'orders analytics' AS TABLES (o AS orders \
+                PRIMARY KEY (id), c AS customers PRIMARY KEY (id)) RELATIONSHIPS \
+                (order_customer AS o(customer_id) REFERENCES c) DIMENSIONS (o.region \
+                AS$$$reg\0\x7fn \0\0\0\0\0\0\0\0\0COMMENT = 'sales region', c.tier AS c.tier) \
+                METRICS (o.revenue AS SUM(o.amount) AS COUNT(*));\n";
+    let err = plan_create(text).expect_err("an entry with no `AS` is refused");
+    assert!(err.message.contains("Expected 'AS'"), "{}", err.message);
+}
