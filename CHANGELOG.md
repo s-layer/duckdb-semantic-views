@@ -9,7 +9,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-_No unreleased changes yet._
+### Fixed
+
+- **The extension can be installed from the community registry on DuckDB 1.5.6 again.** The
+  registry's Windows build of v0.14.0 and v0.14.1 failed, and the registry publishes a
+  release only when every platform builds, so `INSTALL semantic_views` on DuckDB 1.5.6 still
+  fetched v0.13.0 on every platform. The registry generates DuckDB's single-file source on
+  Windows with Windows line endings, which the build's Windows-only source patch did not
+  expect. The build now accepts either line ending.
 
 ## [0.14.1] - 2026-10-16
 
