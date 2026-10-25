@@ -66,7 +66,7 @@ CREATE SEMANTIC VIEW p28_analytics AS
 # ============================================================
 
 query TR rowsort
-SELECT * FROM semantic_view('p28_analytics', dimensions := ['customer_name'], metrics := ['total_revenue']);
+SELECT * FROM SEMANTIC_VIEW(p28_analytics DIMENSIONS customer_name METRICS total_revenue);
 ----
 Alice	300.00
 Bob	50.00
@@ -78,7 +78,7 @@ Charlie	225.00
 # ============================================================
 
 query TI rowsort
-SELECT * FROM semantic_view('p28_analytics', dimensions := ['product_name'], metrics := ['order_count']);
+SELECT * FROM SEMANTIC_VIEW(p28_analytics DIMENSIONS product_name METRICS order_count);
 ----
 Gadget	2
 Widget	3
@@ -91,7 +91,7 @@ Widget	3
 # ============================================================
 
 query TTR rowsort
-SELECT * FROM semantic_view('p28_analytics', dimensions := ['customer_name', 'product_name'], metrics := ['total_revenue']);
+SELECT * FROM SEMANTIC_VIEW(p28_analytics DIMENSIONS customer_name, product_name METRICS total_revenue);
 ----
 Alice	Gadget	200.00
 Alice	Widget	100.00
@@ -105,7 +105,7 @@ Charlie	Widget	150.00
 # ============================================================
 
 query TR rowsort
-SELECT * FROM semantic_view('p28_analytics', dimensions := ['region'], metrics := ['total_revenue']);
+SELECT * FROM SEMANTIC_VIEW(p28_analytics DIMENSIONS region METRICS total_revenue);
 ----
 East	450.00
 West	125.00
@@ -116,7 +116,7 @@ West	125.00
 # ============================================================
 
 query T
-SELECT * FROM semantic_view('p28_analytics', metrics := ['total_revenue']);
+SELECT * FROM SEMANTIC_VIEW(p28_analytics METRICS total_revenue);
 ----
 575.00
 
@@ -125,7 +125,7 @@ SELECT * FROM semantic_view('p28_analytics', metrics := ['total_revenue']);
 # ============================================================
 
 query T rowsort
-SELECT * FROM semantic_view('p28_analytics', dimensions := ['region']);
+SELECT * FROM SEMANTIC_VIEW(p28_analytics DIMENSIONS region);
 ----
 East
 West
@@ -163,7 +163,7 @@ true
 # ============================================================
 
 query TR rowsort
-SELECT * FROM semantic_view('p28_analytics', dimensions := ['customer_name'], metrics := ['total_revenue']) WHERE customer_name != 'Bob';
+SELECT * FROM SEMANTIC_VIEW(p28_analytics DIMENSIONS customer_name METRICS total_revenue) WHERE customer_name != 'Bob';
 ----
 Alice	300.00
 Charlie	225.00
@@ -222,7 +222,7 @@ METRIC	order_count	p28_orders	ACCESS_MODIFIER	PUBLIC
 # ============================================================
 
 statement error
-SELECT * FROM semantic_view('p28_analytics', dimensions := ['nonexistent']);
+SELECT * FROM SEMANTIC_VIEW(p28_analytics DIMENSIONS nonexistent);
 ----
 unknown dimension
 

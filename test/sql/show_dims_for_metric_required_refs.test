@@ -32,7 +32,7 @@ METRICS (
 
 # The query side requires the dotted reference's dimension.
 statement error
-SELECT * FROM semantic_view('rr_sv', metrics := ['lag_dotted'])
+SELECT * FROM SEMANTIC_VIEW(rr_sv METRICS lag_dotted)
 ----
 requires dimension
 

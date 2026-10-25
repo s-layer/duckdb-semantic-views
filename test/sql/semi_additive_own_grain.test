@@ -62,7 +62,7 @@ CREATE SEMANTIC VIEW sa_sv AS
 # ============================================================
 
 query TI rowsort
-SELECT * FROM semantic_view('sa_sv', metrics := ['total_balance'], dimensions := ['account_type']);
+SELECT * FROM SEMANTIC_VIEW(sa_sv DIMENSIONS account_type METRICS total_balance);
 ----
 CHECKING	100
 SAVINGS	200
@@ -92,7 +92,7 @@ SELECT count(*) FROM (
 # ============================================================
 
 query TTI rowsort
-SELECT * FROM semantic_view('sa_sv', metrics := ['total_balance'], dimensions := ['account_type', 'report_date']);
+SELECT * FROM SEMANTIC_VIEW(sa_sv DIMENSIONS account_type, report_date METRICS total_balance);
 ----
 CHECKING	2026-01-01	10
 CHECKING	2026-02-01	100
@@ -149,7 +149,7 @@ CREATE SEMANTIC VIEW sa_off AS
   );
 
 query TI rowsort
-SELECT * FROM semantic_view('sa_off', metrics := ['total_balance'], dimensions := ['account_type']);
+SELECT * FROM SEMANTIC_VIEW(sa_off DIMENSIONS account_type METRICS total_balance);
 ----
 CHECKING	100
 SAVINGS	200

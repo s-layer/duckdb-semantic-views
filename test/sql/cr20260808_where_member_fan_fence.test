@@ -63,18 +63,17 @@ METRICS (
 # Control first: with no predicate the base-grain metric is the un-multiplied
 # 100, so the 200 below really is the join's doing.
 query I
-SELECT rev FROM semantic_view('cr0808_fan', metrics := ['rev']);
+SELECT rev FROM SEMANTIC_VIEW(cr0808_fan METRICS rev);
 ----
 100
 
 # The fact branch. `o_fact` is declared on `o` but its expression lives entirely on
 # `li`, so resolving it joins the child and doubles SUM(o.amount) to 200.
 statement error
-SELECT rev FROM semantic_view(
-  'cr0808_fan',
-  dimensions := ['region'],
-  metrics := ['rev'],
-  where_clause := 'o_fact > 0'
+SELECT rev FROM SEMANTIC_VIEW(cr0808_fan
+    DIMENSIONS region
+    METRICS rev
+    WHERE o_fact > 0
 );
 ----
 fan trap detected
@@ -83,11 +82,10 @@ fan trap detected
 # expression instead of a fact's (TECH-DEBT #54 made dimension expressions
 # fact-inlined, so this hits the identical join).
 statement error
-SELECT rev FROM semantic_view(
-  'cr0808_fan',
-  dimensions := ['region'],
-  metrics := ['rev'],
-  where_clause := 'band = 1'
+SELECT rev FROM SEMANTIC_VIEW(cr0808_fan
+    DIMENSIONS region
+    METRICS rev
+    WHERE band = 1
 );
 ----
 fan trap detected
@@ -96,10 +94,9 @@ fan trap detected
 # the child grain is not multiplied by joining the child, so the same predicate
 # is sound for it. Both line items have qty > 0, so li_qty = 5 + 6 = 11.
 query I
-SELECT li_qty FROM semantic_view(
-  'cr0808_fan',
-  metrics := ['li_qty'],
-  where_clause := 'o_fact > 0'
+SELECT li_qty FROM SEMANTIC_VIEW(cr0808_fan
+    METRICS li_qty
+    WHERE o_fact > 0
 );
 ----
 11
@@ -143,10 +140,9 @@ METRICS (s.total AS SUM(s.amount));
 # rows 2 and 3, so total = 20 + 30 = 50 -- unchanged from
 # cr20260806_inlining_gaps.test, which is the point.
 query I
-SELECT total FROM semantic_view(
-  'cr0808_safe',
-  metrics := ['total'],
-  where_clause := 'weighted > 25'
+SELECT total FROM SEMANTIC_VIEW(cr0808_safe
+    METRICS total
+    WHERE weighted > 25
 );
 ----
 50

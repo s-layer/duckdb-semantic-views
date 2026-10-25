@@ -55,7 +55,7 @@ p65rn_v2
 
 # B7: View queryable under the new name.
 query R
-SELECT total FROM semantic_view('p65rn_v2', metrics := ['total'])
+SELECT total FROM SEMANTIC_VIEW(p65rn_v2 METRICS total)
 ----
 125.0
 

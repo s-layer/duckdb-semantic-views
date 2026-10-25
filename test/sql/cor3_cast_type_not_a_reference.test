@@ -78,7 +78,7 @@ b	20
 
 # Fact inlining in a dimension expression: `s.ts::DATE` with a fact named `date`.
 query TI
-SELECT * FROM semantic_view('cor3_v', dimensions := ['day'], metrics := ['total'])
+SELECT * FROM SEMANTIC_VIEW(cor3_v DIMENSIONS day METRICS total)
 ORDER BY day
 ----
 2020-01-01	10

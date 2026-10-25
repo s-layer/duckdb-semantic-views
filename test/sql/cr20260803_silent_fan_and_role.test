@@ -72,7 +72,7 @@ CREATE SEMANTIC VIEW cr803_na AS
 # answer, because one snapshot CTE has no way to rank over an un-fanned row set
 # here.
 statement error
-SELECT * FROM semantic_view('cr803_na', metrics := ['balance_at'], dimensions := ['region']);
+SELECT * FROM SEMANTIC_VIEW(cr803_na DIMENSIONS region METRICS balance_at);
 ----
 fan trap detected
 
@@ -81,7 +81,7 @@ fan trap detected
 # always rejected the identical join. The un-queried case must not be the
 # permissive one.
 statement error
-SELECT * FROM semantic_view('cr803_na', metrics := ['balance_at'], dimensions := ['ship_ts']);
+SELECT * FROM SEMANTIC_VIEW(cr803_na DIMENSIONS ship_ts METRICS balance_at);
 ----
 fan trap detected
 
@@ -119,7 +119,7 @@ CREATE SEMANTIC VIEW cr803_na_safe AS
   );
 
 query TT
-SELECT * FROM semantic_view('cr803_na_safe', metrics := ['balance_at'], dimensions := ['region']);
+SELECT * FROM SEMANTIC_VIEW(cr803_na_safe DIMENSIONS region METRICS balance_at);
 ----
 EU	140.00
 
@@ -166,14 +166,14 @@ CREATE SEMANTIC VIEW cr803_rp AS
 # the numbers coincide here, which is exactly why a value assertion alone
 # cannot be trusted for this bug and the error is the right outcome.
 statement error
-SELECT * FROM semantic_view('cr803_rp', metrics := ['arr_count'], where_clause := 'city = ''NYC''');
+SELECT * FROM SEMANTIC_VIEW(cr803_rp METRICS arr_count WHERE city = 'NYC');
 ----
 where_clause member 'city' is ambiguous
 
 # EXP-10 case 2: no USING in the query at all -- still ambiguous, because the
 # predicate's join instance is picked by declaration order either way.
 statement error
-SELECT * FROM semantic_view('cr803_rp', metrics := ['dep_count'], where_clause := 'city = ''NYC''');
+SELECT * FROM SEMANTIC_VIEW(cr803_rp METRICS dep_count WHERE city = 'NYC');
 ----
 where_clause member 'city' is ambiguous
 
@@ -211,7 +211,7 @@ CREATE SEMANTIC VIEW cr803_plain AS
 # Pre-aggregation filtering still works, and still recomputes rather than
 # filtering the result: AA's 500 is the sum of its two legs only.
 query I
-SELECT * FROM semantic_view('cr803_plain', metrics := ['total_miles'], where_clause := 'name = ''AA''');
+SELECT * FROM SEMANTIC_VIEW(cr803_plain METRICS total_miles WHERE name = 'AA');
 ----
 500
 
@@ -219,7 +219,7 @@ SELECT * FROM semantic_view('cr803_plain', metrics := ['total_miles'], where_cla
 # resolves through a co-queried metric's USING, as it always has. The fix must
 # not disturb the path that already had an answer.
 query TI
-SELECT * FROM semantic_view('cr803_rp', metrics := ['arr_count'], dimensions := ['city']) ORDER BY 1;
+SELECT * FROM SEMANTIC_VIEW(cr803_rp DIMENSIONS city METRICS arr_count) ORDER BY 1;
 ----
 LA	1
 NYC	1

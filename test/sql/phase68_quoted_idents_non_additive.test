@@ -29,7 +29,7 @@ CREATE SEMANTIC VIEW p68_b1_v1 AS
 # without grouping returns a single snapshot row; DESC selects the earliest
 # per F-1, but this test only pins that rows come back, not which snapshot).
 query I
-SELECT count(*) > 0 FROM semantic_view('p68_b1_v1', metrics := ['qty_sum']);
+SELECT count(*) > 0 FROM SEMANTIC_VIEW(p68_b1_v1 METRICS qty_sum);
 ----
 true
 
@@ -74,7 +74,7 @@ o."order date" DESC NULLS FIRST
 # snapshot and returns the correct value. Metrics-only ⇒ global snapshot; DESC
 # selects the EARLIEST "order date" (2026-01-01, qty 10) per F-1.
 query I
-SELECT qty_sum FROM semantic_view('p68_b1_v2', metrics := ['qty_sum']);
+SELECT qty_sum FROM SEMANTIC_VIEW(p68_b1_v2 METRICS qty_sum);
 ----
 10
 

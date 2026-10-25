@@ -31,7 +31,7 @@ METRICS (
 
 # DDL-01: Query the created view to confirm it works end-to-end
 query TT rowsort
-SELECT region, total_revenue FROM semantic_view('p25_orders_view', dimensions := ['region'], metrics := ['total_revenue'])
+SELECT region, total_revenue FROM SEMANTIC_VIEW(p25_orders_view DIMENSIONS region METRICS total_revenue)
 ----
 East	100.0
 West	200.0

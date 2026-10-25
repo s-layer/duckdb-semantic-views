@@ -44,7 +44,7 @@ FROM semantic_layer._definitions WHERE name = 'ar4_sv'
 
 # A3: the normal view still queries correctly.
 query TI rowsort
-SELECT region, total FROM semantic_view('ar4_sv', dimensions := ['region'], metrics := ['total'])
+SELECT region, total FROM SEMANTIC_VIEW(ar4_sv DIMENSIONS region METRICS total)
 ----
 EU	200.00
 US	100.00
@@ -60,6 +60,6 @@ INSERT INTO semantic_layer._definitions (schema_name, name, definition) VALUES (
 )
 
 statement error
-SELECT * FROM semantic_view('ar4_legacy', dimensions := ['region'], metrics := ['total'])
+SELECT * FROM SEMANTIC_VIEW(ar4_legacy DIMENSIONS region METRICS total)
 ----
 foreign-key column metadata

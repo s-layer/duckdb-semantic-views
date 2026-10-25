@@ -59,7 +59,7 @@ CREATE SEMANTIC VIEW p0c_elev AS
 
 # 1. Window over the departure role: each flight's departure elevation.
 query II rowsort
-SELECT * FROM semantic_view('p0c_elev', dimensions := ['flight_id'], metrics := ['dep_elev_by_flight']);
+SELECT * FROM SEMANTIC_VIEW(p0c_elev DIMENSIONS flight_id METRICS dep_elev_by_flight);
 ----
 1	13
 2	13
@@ -67,7 +67,7 @@ SELECT * FROM semantic_view('p0c_elev', dimensions := ['flight_id'], metrics := 
 
 # 1. Window over the arrival role reads the other instance.
 query II rowsort
-SELECT * FROM semantic_view('p0c_elev', dimensions := ['flight_id'], metrics := ['arr_elev_by_flight']);
+SELECT * FROM SEMANTIC_VIEW(p0c_elev DIMENSIONS flight_id METRICS arr_elev_by_flight);
 ----
 1	5434
 2	5434
@@ -75,20 +75,20 @@ SELECT * FROM semantic_view('p0c_elev', dimensions := ['flight_id'], metrics := 
 
 # 1. A window over an inner metric with no USING has no role to name.
 statement error
-SELECT * FROM semantic_view('p0c_elev', dimensions := ['flight_id'], metrics := ['any_elev_by_flight']);
+SELECT * FROM SEMANTIC_VIEW(p0c_elev DIMENSIONS flight_id METRICS any_elev_by_flight);
 ----
 'any_elev' is ambiguous -- it references fact
 
 # 2. Both spellings name dep_airport: 13 + 13 + 5434.
 query I
-SELECT * FROM semantic_view('p0c_elev', metrics := ['dep_elev_twice_named']);
+SELECT * FROM SEMANTIC_VIEW(p0c_elev METRICS dep_elev_twice_named);
 ----
 5460
 
 # Semi-additive USING metric over the role-played fact: the latest flight (3)
 # arrives at SFO.
 query I
-SELECT * FROM semantic_view('p0c_elev', metrics := ['latest_arr_elev']);
+SELECT * FROM SEMANTIC_VIEW(p0c_elev METRICS latest_arr_elev);
 ----
 13
 
@@ -131,18 +131,18 @@ CREATE SEMANTIC VIEW p0c_legs_view AS
   );
 
 statement error
-SELECT * FROM semantic_view('p0c_legs_view', metrics := ['any_leg_elev']);
+SELECT * FROM SEMANTIC_VIEW(p0c_legs_view METRICS any_leg_elev);
 ----
 metric 'any_leg_elev' is ambiguous -- it aggregates table 'p'
 
 statement error
-SELECT * FROM semantic_view('p0c_legs_view', metrics := ['raw_leg_elev']);
+SELECT * FROM SEMANTIC_VIEW(p0c_legs_view METRICS raw_leg_elev);
 ----
 metric 'raw_leg_elev' is ambiguous -- it aggregates table 'p'
 
 # Control: naming the role from the legs table still works, for each role.
 query II
-SELECT * FROM semantic_view('p0c_legs_view', metrics := ['dep_leg_elev', 'arr_leg_elev']);
+SELECT * FROM SEMANTIC_VIEW(p0c_legs_view METRICS dep_leg_elev, arr_leg_elev);
 ----
 113	5447
 
@@ -186,17 +186,17 @@ CREATE SEMANTIC VIEW p0c_orders_view AS
   );
 
 statement error
-SELECT * FROM semantic_view('p0c_orders_view', dimensions := ['region'], metrics := ['li_qty']);
+SELECT * FROM SEMANTIC_VIEW(p0c_orders_view DIMENSIONS region METRICS li_qty);
 ----
 fan trap detected -- 'li_qty' (table 'o')
 
 statement error
-SELECT * FROM semantic_view('p0c_orders_view', dimensions := ['region'], metrics := ['li_qty_w']);
+SELECT * FROM SEMANTIC_VIEW(p0c_orders_view DIMENSIONS region METRICS li_qty_w);
 ----
 fan trap detected -- 'li_qty' (table 'o')
 
 statement error
-SELECT * FROM semantic_view('p0c_orders_view', dimensions := ['region'], metrics := ['li_qty_twice']);
+SELECT * FROM SEMANTIC_VIEW(p0c_orders_view DIMENSIONS region METRICS li_qty_twice);
 ----
 fan trap detected -- 'li_qty' (table 'o')
 
@@ -225,17 +225,17 @@ CREATE SEMANTIC VIEW p0c_rp_base AS
   );
 
 query I
-SELECT * FROM semantic_view('p0c_rp_base', metrics := ['n_airports']);
+SELECT * FROM SEMANTIC_VIEW(p0c_rp_base METRICS n_airports);
 ----
 2
 
 query I
-SELECT * FROM semantic_view('p0c_rp_base', metrics := ['any_elev']);
+SELECT * FROM SEMANTIC_VIEW(p0c_rp_base METRICS any_elev);
 ----
 5447
 
 # Control: the referencing table's USING metric keeps its role (13 + 13 + 5434).
 query I
-SELECT * FROM semantic_view('p0c_rp_base', metrics := ['dep_elev']);
+SELECT * FROM SEMANTIC_VIEW(p0c_rp_base METRICS dep_elev);
 ----
 5460

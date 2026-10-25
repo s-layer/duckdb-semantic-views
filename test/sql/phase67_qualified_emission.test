@@ -74,7 +74,7 @@ SELECT count(*) > 0 FROM explain_semantic_view('p67_main.p67_main_sch', dimensio
 true
 
 query I
-SELECT count(*) > 0 FROM semantic_view('p67_main.p67_main_sch', dimensions := ['region'], metrics := ['total']);
+SELECT count(*) > 0 FROM SEMANTIC_VIEW(p67_main.p67_main_sch DIMENSIONS region METRICS total);
 ----
 true
 
@@ -105,7 +105,7 @@ SELECT count(*) > 0 FROM explain_semantic_view('p67_main_db2', dimensions := ['r
 true
 
 query I
-SELECT count(*) > 0 FROM semantic_view('p67_main_db2', dimensions := ['region'], metrics := ['total']);
+SELECT count(*) > 0 FROM SEMANTIC_VIEW(p67_main_db2 DIMENSIONS region METRICS total);
 ----
 true
 
@@ -145,7 +145,7 @@ SELECT count(*) > 0 FROM explain_semantic_view('p67_facts.p67_facts_sch', facts 
 true
 
 query I
-SELECT count(*) > 0 FROM semantic_view('p67_facts.p67_facts_sch', facts := ['net_price'], dimensions := ['product']);
+SELECT count(*) > 0 FROM SEMANTIC_VIEW(p67_facts.p67_facts_sch DIMENSIONS product FACTS net_price);
 ----
 true
 
@@ -174,7 +174,7 @@ SELECT count(*) > 0 FROM explain_semantic_view('p67_facts_db2', facts := ['subto
 true
 
 query I
-SELECT count(*) > 0 FROM semantic_view('p67_facts_db2', facts := ['subtotal'], dimensions := ['product']);
+SELECT count(*) > 0 FROM SEMANTIC_VIEW(p67_facts_db2 DIMENSIONS product FACTS subtotal);
 ----
 true
 
@@ -232,7 +232,7 @@ SELECT count(*) > 0 FROM explain_semantic_view('p67_semi.p67_semi_sch', dimensio
 true
 
 query I
-SELECT count(*) > 0 FROM semantic_view('p67_semi.p67_semi_sch', dimensions := ['customer_name'], metrics := ['latest_balance']);
+SELECT count(*) > 0 FROM SEMANTIC_VIEW(p67_semi.p67_semi_sch DIMENSIONS customer_name METRICS latest_balance);
 ----
 true
 
@@ -278,7 +278,7 @@ SELECT count(*) > 0 FROM explain_semantic_view('p67_semi_db2', dimensions := ['c
 true
 
 query I
-SELECT count(*) > 0 FROM semantic_view('p67_semi_db2', dimensions := ['customer_name'], metrics := ['latest_balance']);
+SELECT count(*) > 0 FROM SEMANTIC_VIEW(p67_semi_db2 DIMENSIONS customer_name METRICS latest_balance);
 ----
 true
 
@@ -336,7 +336,7 @@ SELECT count(*) > 0 FROM explain_semantic_view('p67_win.p67_win_sch', dimensions
 true
 
 query I
-SELECT count(*) > 0 FROM semantic_view('p67_win.p67_win_sch', dimensions := ['store', 'sale_date'], metrics := ['avg_qty']);
+SELECT count(*) > 0 FROM SEMANTIC_VIEW(p67_win.p67_win_sch DIMENSIONS store, sale_date METRICS avg_qty);
 ----
 true
 
@@ -383,7 +383,7 @@ SELECT count(*) > 0 FROM explain_semantic_view('p67_win_db2', dimensions := ['st
 true
 
 query I
-SELECT count(*) > 0 FROM semantic_view('p67_win_db2', dimensions := ['store', 'sale_date'], metrics := ['avg_qty']);
+SELECT count(*) > 0 FROM SEMANTIC_VIEW(p67_win_db2 DIMENSIONS store, sale_date METRICS avg_qty);
 ----
 true
 
@@ -449,7 +449,7 @@ SELECT count(*) > 0 FROM explain_semantic_view('p67_mat.p67_mat_sch', dimensions
 true
 
 query I
-SELECT count(*) > 0 FROM semantic_view('p67_mat.p67_mat_sch', dimensions := ['region'], metrics := ['total_revenue']);
+SELECT count(*) > 0 FROM SEMANTIC_VIEW(p67_mat.p67_mat_sch DIMENSIONS region METRICS total_revenue);
 ----
 true
 
@@ -460,7 +460,7 @@ SELECT count(*) > 0 FROM explain_semantic_view('p67_mat.p67_mat_sch', dimensions
 true
 
 query I
-SELECT count(*) > 0 FROM semantic_view('p67_mat.p67_mat_sch', dimensions := ['region', 'status'], metrics := ['total_revenue']);
+SELECT count(*) > 0 FROM SEMANTIC_VIEW(p67_mat.p67_mat_sch DIMENSIONS region, status METRICS total_revenue);
 ----
 true
 
@@ -510,7 +510,7 @@ SELECT count(*) > 0 FROM explain_semantic_view('p67_mat_db2', dimensions := ['re
 true
 
 query I
-SELECT count(*) > 0 FROM semantic_view('p67_mat_db2', dimensions := ['region'], metrics := ['total_revenue']);
+SELECT count(*) > 0 FROM SEMANTIC_VIEW(p67_mat_db2 DIMENSIONS region METRICS total_revenue);
 ----
 true
 
@@ -521,7 +521,7 @@ SELECT count(*) > 0 FROM explain_semantic_view('p67_mat_db2', dimensions := ['re
 true
 
 query I
-SELECT count(*) > 0 FROM semantic_view('p67_mat_db2', dimensions := ['region', 'status'], metrics := ['total_revenue']);
+SELECT count(*) > 0 FROM SEMANTIC_VIEW(p67_mat_db2 DIMENSIONS region, status METRICS total_revenue);
 ----
 true
 

@@ -80,7 +80,7 @@ true
 # regions. Values CAST to BIGINT for deterministic formatting.
 query TI rowsort
 SELECT region, CAST(running_total AS BIGINT)
-FROM semantic_view('p68_b2_v2', dimensions := ['region', '"order date"'], metrics := ['running_total']);
+FROM SEMANTIC_VIEW(p68_b2_v2 DIMENSIONS region, "order date" METRICS running_total);
 ----
 EU	300
 US	150

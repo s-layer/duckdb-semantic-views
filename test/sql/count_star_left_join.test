@@ -46,7 +46,7 @@ CREATE SEMANTIC VIEW sg8_sales AS
 # ============================================================
 
 query I
-SELECT * FROM semantic_view('sg8_sales', metrics := ['item_count']);
+SELECT * FROM SEMANTIC_VIEW(sg8_sales METRICS item_count);
 ----
 3
 
@@ -56,7 +56,7 @@ SELECT * FROM semantic_view('sg8_sales', metrics := ['item_count']);
 # ============================================================
 
 query TI rowsort
-SELECT * FROM semantic_view('sg8_sales', dimensions := ['region'], metrics := ['item_count']);
+SELECT * FROM SEMANTIC_VIEW(sg8_sales DIMENSIONS region METRICS item_count);
 ----
 East	2
 West	1
@@ -88,12 +88,12 @@ CREATE SEMANTIC VIEW sg8_nopk AS
   );
 
 query I
-SELECT * FROM semantic_view('sg8_nopk', metrics := ['item_count']);
+SELECT * FROM SEMANTIC_VIEW(sg8_nopk METRICS item_count);
 ----
 3
 
 query TI rowsort
-SELECT * FROM semantic_view('sg8_nopk', dimensions := ['region'], metrics := ['item_count']);
+SELECT * FROM SEMANTIC_VIEW(sg8_nopk DIMENSIONS region METRICS item_count);
 ----
 East	2
 West	1
@@ -124,7 +124,7 @@ CREATE SEMANTIC VIEW sg8_base AS
   );
 
 query I
-SELECT * FROM semantic_view('sg8_base', metrics := ['order_count']);
+SELECT * FROM SEMANTIC_VIEW(sg8_base METRICS order_count);
 ----
 3
 

@@ -93,10 +93,9 @@ METRICS (
 );
 
 query TI
-SELECT store, w FROM semantic_view(
-  'cr0808_ok',
-  dimensions := ['store'],
-  metrics := ['w']
+SELECT store, w FROM SEMANTIC_VIEW(cr0808_ok
+    DIMENSIONS store
+    METRICS w
 ) ORDER BY store;
 ----
 a	30
@@ -135,9 +134,8 @@ CREATE SEMANTIC VIEW cr0808_e AS
   );
 
 query II
-SELECT n_quote, total FROM semantic_view(
-  'cr0808_e',
-  metrics := ['n_quote', 'total']
+SELECT n_quote, total FROM SEMANTIC_VIEW(cr0808_e
+    METRICS n_quote, total
 );
 ----
 1	30
@@ -154,9 +152,8 @@ CREATE SEMANTIC VIEW cr0808_date AS
   );
 
 query II
-SELECT recent, total FROM semantic_view(
-  'cr0808_date',
-  metrics := ['recent', 'total']
+SELECT recent, total FROM SEMANTIC_VIEW(cr0808_date
+    METRICS recent, total
 );
 ----
 1	30

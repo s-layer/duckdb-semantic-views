@@ -63,7 +63,7 @@ true
 # stripped before quoting (EXP-7) — and `SELECT *` reads the two columns
 # positionally regardless.
 query TI rowsort
-SELECT * FROM semantic_view('cr718_v', dimensions := ['region'], metrics := ['"Item Count"']);
+SELECT * FROM SEMANTIC_VIEW(cr718_v DIMENSIONS region METRICS "Item Count");
 ----
 US	3
 
@@ -89,7 +89,7 @@ SELECT count(*) FROM explain_semantic_view('cr718_v', dimensions := ['region', '
 # miss the window would sum the raw COUNT(*) and read 4 for US, not 3.
 query TTI rowsort
 SELECT region, channel, CAST(rolling AS BIGINT)
-FROM semantic_view('cr718_v', dimensions := ['region', 'channel'], metrics := ['rolling']);
+FROM SEMANTIC_VIEW(cr718_v DIMENSIONS region, channel METRICS rolling);
 ----
 US	store	3
 US	web	3

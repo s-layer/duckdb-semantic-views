@@ -80,7 +80,7 @@ CREATE SEMANTIC VIEW par6_margin AS
 #   US: (30.00 - 7.00)                   =  23.00
 query TT
 SELECT region, net_total
-FROM semantic_view('par6_margin', metrics := ['net_total'], dimensions := ['region'])
+FROM SEMANTIC_VIEW(par6_margin DIMENSIONS region METRICS net_total)
 ORDER BY region;
 ----
 EU	142.00
@@ -89,7 +89,7 @@ US	23.00
 # Case 2: the same metric with no dimension at all -- one row, the whole total.
 # 142.00 + 23.00 = 165.00.
 query T
-SELECT net_total FROM semantic_view('par6_margin', metrics := ['net_total']);
+SELECT net_total FROM SEMANTIC_VIEW(par6_margin METRICS net_total);
 ----
 165.00
 
@@ -102,7 +102,7 @@ SELECT net_total FROM semantic_view('par6_margin', metrics := ['net_total']);
 #   US: net  23.00, discount 2.00
 query TTT
 SELECT region, net_total, total_discount
-FROM semantic_view('par6_margin', metrics := ['net_total', 'total_discount'], dimensions := ['region'])
+FROM SEMANTIC_VIEW(par6_margin DIMENSIONS region METRICS net_total, total_discount)
 ORDER BY region;
 ----
 EU	142.00	5.00
@@ -119,7 +119,7 @@ US	23.00	2.00
 # rule from the one under test here.
 query TT
 SELECT order_id, prod_markup
-FROM semantic_view('par6_margin', facts := ['prod_markup'], dimensions := ['order_id'])
+FROM SEMANTIC_VIEW(par6_margin DIMENSIONS order_id FACTS prod_markup)
 ORDER BY order_id;
 ----
 10	7.00
@@ -163,7 +163,7 @@ CREATE SEMANTIC VIEW par6_fanning AS
 # without the fence would have turned a bind error into a silent wrong number,
 # which is the failure this project fences hardest against.
 statement error
-SELECT * FROM semantic_view('par6_fanning', metrics := ['bad_margin'], dimensions := ['order_id']);
+SELECT * FROM SEMANTIC_VIEW(par6_fanning DIMENSIONS order_id METRICS bad_margin);
 ----
 fan trap detected
 
@@ -171,6 +171,6 @@ fan trap detected
 # relationship, not just report "a" fan trap -- the user's next move is to move
 # the fact or pick another one.
 statement error
-SELECT * FROM semantic_view('par6_fanning', metrics := ['bad_margin']);
+SELECT * FROM SEMANTIC_VIEW(par6_fanning METRICS bad_margin);
 ----
 item_cost

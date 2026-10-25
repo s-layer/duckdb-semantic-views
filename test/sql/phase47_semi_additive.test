@@ -61,7 +61,7 @@ METRICS (
 # ========================================
 
 query TR
-SELECT * FROM semantic_view('p47_account_view', dimensions := ['customer_name'], metrics := ['total_balance']) ORDER BY 1;
+SELECT * FROM SEMANTIC_VIEW(p47_account_view DIMENSIONS customer_name METRICS total_balance) ORDER BY 1;
 ----
 Alice	200.00
 Bob	250.00
@@ -97,7 +97,7 @@ true
 # ========================================
 
 query TTR
-SELECT * FROM semantic_view('p47_account_view', dimensions := ['customer_name', 'report_date'], metrics := ['total_balance']) ORDER BY 1, 2;
+SELECT * FROM SEMANTIC_VIEW(p47_account_view DIMENSIONS customer_name, report_date METRICS total_balance) ORDER BY 1, 2;
 ----
 Alice	2024-01-01	100.00
 Alice	2024-01-02	150.00
@@ -146,14 +146,14 @@ METRICS (
 )
 
 statement error
-SELECT * FROM semantic_view('p47_mixed_view', dimensions := ['customer_name'], metrics := ['row_count', 'total_balance']);
+SELECT * FROM SEMANTIC_VIEW(p47_mixed_view DIMENSIONS customer_name METRICS row_count, total_balance);
 ----
 cannot be co-queried with semi-additive metric 'total_balance'
 
 # COUNT(*) alone (no active semi-additive metric in the query) still takes
 # the standard aggregation path: Alice has 3 account rows, Bob has 2.
 query TI
-SELECT * FROM semantic_view('p47_mixed_view', dimensions := ['customer_name'], metrics := ['row_count']) ORDER BY 1;
+SELECT * FROM SEMANTIC_VIEW(p47_mixed_view DIMENSIONS customer_name METRICS row_count) ORDER BY 1;
 ----
 Alice	3
 Bob	2
@@ -181,7 +181,7 @@ METRICS (
 )
 
 query TIR
-SELECT * FROM semantic_view('p47_mixed_view2', dimensions := ['customer_name'], metrics := ['row_count', 'total_balance']) ORDER BY 1;
+SELECT * FROM SEMANTIC_VIEW(p47_mixed_view2 DIMENSIONS customer_name METRICS row_count, total_balance) ORDER BY 1;
 ----
 Alice	3	200.00
 Bob	2	250.00
@@ -233,7 +233,7 @@ METRICS (
 )
 
 query R
-SELECT * FROM semantic_view('p47_global_view', metrics := ['latest_balance']);
+SELECT * FROM SEMANTIC_VIEW(p47_global_view METRICS latest_balance);
 ----
 200.00
 
@@ -275,7 +275,7 @@ METRICS (
 )
 
 query TR
-SELECT * FROM semantic_view('p47_tie_view', dimensions := ['customer_name'], metrics := ['total_balance']) ORDER BY 1;
+SELECT * FROM SEMANTIC_VIEW(p47_tie_view DIMENSIONS customer_name METRICS total_balance) ORDER BY 1;
 ----
 Alice	200.00
 Bob	300.00
@@ -283,7 +283,7 @@ Bob	300.00
 # Global aggregate (no dims): the latest date overall is 2024-01-03, held by
 # Alice's two tied rows -> 120.00 + 80.00 = 200.00.
 query R
-SELECT * FROM semantic_view('p47_tie_view', metrics := ['total_balance']);
+SELECT * FROM SEMANTIC_VIEW(p47_tie_view METRICS total_balance);
 ----
 200.00
 
@@ -326,7 +326,7 @@ METRICS (
 )
 
 query TR
-SELECT * FROM semantic_view('p47_nulls_first_view', dimensions := ['customer_name'], metrics := ['latest_balance']) ORDER BY 1;
+SELECT * FROM SEMANTIC_VIEW(p47_nulls_first_view DIMENSIONS customer_name METRICS latest_balance) ORDER BY 1;
 ----
 Alice	40.00
 Bob	300.00
@@ -343,7 +343,7 @@ METRICS (
 )
 
 query TR
-SELECT * FROM semantic_view('p47_nulls_last_view', dimensions := ['customer_name'], metrics := ['latest_balance']) ORDER BY 1;
+SELECT * FROM SEMANTIC_VIEW(p47_nulls_last_view DIMENSIONS customer_name METRICS latest_balance) ORDER BY 1;
 ----
 Alice	150.00
 Bob	300.00
@@ -364,7 +364,7 @@ METRICS (
 )
 
 query R
-SELECT * FROM semantic_view('p47_earliest_view', metrics := ['earliest_balance']);
+SELECT * FROM SEMANTIC_VIEW(p47_earliest_view METRICS earliest_balance);
 ----
 400.00
 

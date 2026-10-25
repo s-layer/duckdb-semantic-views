@@ -18,7 +18,7 @@ statement ok
 CREATE SEMANTIC VIEW gc_a AS TABLES (t AS gc_t PRIMARY KEY (id)) DIMENSIONS (t.region AS region) METRICS (t.total AS SUM(amount));
 
 query TI rowsort
-SELECT * FROM semantic_view('gc_a', dimensions := ['region'], metrics := ['total']);
+SELECT * FROM SEMANTIC_VIEW(gc_a DIMENSIONS region METRICS total);
 ----
 n	15
 s	20
@@ -66,7 +66,7 @@ metrics: []
 $$;
 
 query T rowsort
-SELECT region FROM semantic_view('gc_y', dimensions := ['region']);
+SELECT region FROM SEMANTIC_VIEW(gc_y DIMENSIONS region);
 ----
 n
 s
@@ -178,7 +178,7 @@ statement ok
 SELECT 1; CREATE SEMANTIC VIEW gc_m AS TABLES (t AS gc_t PRIMARY KEY (id)) DIMENSIONS (t.region AS region); SELECT 2;
 
 query T rowsort
-SELECT region FROM semantic_view('gc_m', dimensions := ['region']);
+SELECT region FROM SEMANTIC_VIEW(gc_m DIMENSIONS region);
 ----
 n
 s
@@ -234,7 +234,7 @@ statement ok
 CREATE SEMANTIC VIEW gc_dv AS TABLES (d AS gc_d PRIMARY KEY (id)) DIMENSIONS (d.p AS d.price$usd$) METRICS (d.total AS sum(d.price$usd$));
 
 query I
-SELECT total FROM semantic_view('gc_dv', metrics := ['total']);
+SELECT total FROM SEMANTIC_VIEW(gc_dv METRICS total);
 ----
 42
 
@@ -248,7 +248,7 @@ statement ok
 CREATE SEMANTIC VIEW gc_dp AS TABLES (d AS gc_d PRIMARY KEY (id)) FACTS (d.price AS d.id * 100) METRICS (d.total AS sum(d.price$usd$));
 
 query I
-SELECT total FROM semantic_view('gc_dp', metrics := ['total']);
+SELECT total FROM SEMANTIC_VIEW(gc_dp METRICS total);
 ----
 42
 
@@ -256,7 +256,7 @@ statement ok
 CREATE SEMANTIC VIEW gc_du AS TABLES (d AS gc_d PRIMARY KEY (id)) FACTS (d.usd AS d.id * 100) METRICS (d.total AS sum(d.price$usd$));
 
 query I
-SELECT total FROM semantic_view('gc_du', metrics := ['total']);
+SELECT total FROM SEMANTIC_VIEW(gc_du METRICS total);
 ----
 42
 

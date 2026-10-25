@@ -57,7 +57,7 @@ CREATE SEMANTIC VIEW wog_sv AS
 # ============================================================
 
 query TT rowsort
-SELECT * FROM semantic_view('wog_sv', metrics := ['total_balance'], dimensions := ['segment']);
+SELECT * FROM SEMANTIC_VIEW(wog_sv DIMENSIONS segment METRICS total_balance);
 ----
 ENT	300
 SMB	50
@@ -73,7 +73,7 @@ SMB	50
 # ============================================================
 
 query TT rowsort
-SELECT * FROM semantic_view('wog_sv', metrics := ['seg_balance'], dimensions := ['segment']);
+SELECT * FROM SEMANTIC_VIEW(wog_sv DIMENSIONS segment METRICS seg_balance);
 ----
 ENT	300
 SMB	50
@@ -118,7 +118,7 @@ true
 # ============================================================
 
 query TT rowsort
-SELECT * FROM semantic_view('wog_sv', metrics := ['running_orders'], dimensions := ['segment']);
+SELECT * FROM SEMANTIC_VIEW(wog_sv DIMENSIONS segment METRICS running_orders);
 ----
 ENT	4
 SMB	2
@@ -136,14 +136,14 @@ true
 # ============================================================
 
 query TT rowsort
-SELECT * FROM semantic_view('wog_sv', metrics := ['seg_balance'], dimensions := ['segment'], where_clause := 'segment = ''ENT''');
+SELECT * FROM SEMANTIC_VIEW(wog_sv DIMENSIONS segment METRICS seg_balance WHERE segment = 'ENT');
 ----
 ENT	300
 
 # Dropping one ENT customer recomputes that segment's total (300 -> 200), which
 # an outer WHERE on the result could not do.
 query TT rowsort
-SELECT * FROM semantic_view('wog_sv', metrics := ['seg_balance'], dimensions := ['segment'], where_clause := 'balance > 150');
+SELECT * FROM SEMANTIC_VIEW(wog_sv DIMENSIONS segment METRICS seg_balance WHERE balance > 150);
 ----
 ENT	200
 
@@ -151,12 +151,12 @@ ENT	200
 # evaluates the predicate inside a CTE of its own: `balance` is a name the
 # subquery has no table for, so it does not reach the customers' column.
 query TT rowsort
-SELECT * FROM semantic_view('wog_sv', metrics := ['seg_balance'], dimensions := ['segment'], where_clause := 'segment IN (SELECT ''ENT'')');
+SELECT * FROM SEMANTIC_VIEW(wog_sv DIMENSIONS segment METRICS seg_balance WHERE segment IN (SELECT 'ENT'));
 ----
 ENT	300
 
 statement error
-SELECT * FROM semantic_view('wog_sv', metrics := ['seg_balance'], dimensions := ['segment'], where_clause := 'EXISTS (SELECT 1 WHERE balance > 150)');
+SELECT * FROM SEMANTIC_VIEW(wog_sv DIMENSIONS segment METRICS seg_balance WHERE EXISTS (SELECT 1 WHERE balance > 150));
 ----
 Referenced column "balance" was not found
 
@@ -168,7 +168,7 @@ Referenced column "balance" was not found
 # ============================================================
 
 statement error
-SELECT * FROM semantic_view('wog_sv', metrics := ['seg_balance', 'running_orders'], dimensions := ['segment']);
+SELECT * FROM SEMANTIC_VIEW(wog_sv DIMENSIONS segment METRICS seg_balance, running_orders);
 ----
 fan trap detected
 
@@ -179,7 +179,7 @@ fan trap detected
 # ============================================================
 
 statement error
-SELECT * FROM semantic_view('wog_sv', metrics := ['seg_balance'], dimensions := ['order_id']);
+SELECT * FROM SEMANTIC_VIEW(wog_sv DIMENSIONS order_id METRICS seg_balance);
 ----
 fan trap detected
 
@@ -217,7 +217,7 @@ CREATE SEMANTIC VIEW wog_uniq AS
   );
 
 query TI rowsort
-SELECT * FROM semantic_view('wog_uniq', metrics := ['seg_custs'], dimensions := ['segment']);
+SELECT * FROM SEMANTIC_VIEW(wog_uniq DIMENSIONS segment METRICS seg_custs);
 ----
 ENT	2
 SMB	1

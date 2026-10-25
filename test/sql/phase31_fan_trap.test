@@ -64,7 +64,7 @@ CREATE SEMANTIC VIEW p31_sales AS
 # ============================================================
 
 query TR rowsort
-SELECT * FROM semantic_view('p31_sales', dimensions := ['region'], metrics := ['revenue']);
+SELECT * FROM SEMANTIC_VIEW(p31_sales DIMENSIONS region METRICS revenue);
 ----
 East	300.0
 West	150.0
@@ -76,7 +76,7 @@ West	150.0
 # ============================================================
 
 statement error
-SELECT * FROM semantic_view('p31_sales', dimensions := ['status'], metrics := ['order_count']);
+SELECT * FROM SEMANTIC_VIEW(p31_sales DIMENSIONS status METRICS order_count);
 ----
 fan trap detected
 
@@ -89,7 +89,7 @@ fan trap detected
 # ============================================================
 
 query IR
-SELECT * FROM semantic_view('p31_sales', metrics := ['order_count', 'revenue']);
+SELECT * FROM SEMANTIC_VIEW(p31_sales METRICS order_count, revenue);
 ----
 2	450.0
 
@@ -100,7 +100,7 @@ SELECT * FROM semantic_view('p31_sales', metrics := ['order_count', 'revenue']);
 # ============================================================
 
 query TR rowsort
-SELECT * FROM semantic_view('p31_sales', dimensions := ['segment'], metrics := ['revenue']);
+SELECT * FROM SEMANTIC_VIEW(p31_sales DIMENSIONS segment METRICS revenue);
 ----
 Enterprise	300.0
 SMB	150.0
@@ -140,13 +140,13 @@ CREATE SEMANTIC VIEW p31_oto AS
 # Both directions safe with OneToOne
 
 query TR rowsort
-SELECT * FROM semantic_view('p31_oto', dimensions := ['note'], metrics := ['order_count']);
+SELECT * FROM SEMANTIC_VIEW(p31_oto DIMENSIONS note METRICS order_count);
 ----
 rush	1
 standard	1
 
 query TR rowsort
-SELECT * FROM semantic_view('p31_oto', dimensions := ['region'], metrics := ['detail_count']);
+SELECT * FROM SEMANTIC_VIEW(p31_oto DIMENSIONS region METRICS detail_count);
 ----
 East	1
 West	1
@@ -179,13 +179,13 @@ CREATE SEMANTIC VIEW p31_default AS
 # Inferred ManyToOne: li->o is safe, o->li is fan-out
 
 query TR rowsort
-SELECT * FROM semantic_view('p31_default', dimensions := ['region'], metrics := ['revenue']);
+SELECT * FROM SEMANTIC_VIEW(p31_default DIMENSIONS region METRICS revenue);
 ----
 East	300.0
 West	150.0
 
 statement error
-SELECT * FROM semantic_view('p31_default', dimensions := ['status'], metrics := ['order_count']);
+SELECT * FROM SEMANTIC_VIEW(p31_default DIMENSIONS status METRICS order_count);
 ----
 fan trap detected
 
@@ -219,7 +219,7 @@ CREATE SEMANTIC VIEW p31_derived AS
 # Querying with li.status means traversal o->li which is fan-out.
 
 statement error
-SELECT * FROM semantic_view('p31_derived', dimensions := ['status'], metrics := ['avg_revenue']);
+SELECT * FROM SEMANTIC_VIEW(p31_derived DIMENSIONS status METRICS avg_revenue);
 ----
 fan trap detected
 
@@ -233,7 +233,7 @@ fan trap detected
 # East: revenue 100 + 200 = 300 over 1 order. West: 150 over 1 order.
 # The inflated denominator would have made East 300 / 2 = 150.
 query TR rowsort
-SELECT * FROM semantic_view('p31_derived', dimensions := ['region'], metrics := ['avg_revenue']);
+SELECT * FROM SEMANTIC_VIEW(p31_derived DIMENSIONS region METRICS avg_revenue);
 ----
 East	300.0
 West	150.0

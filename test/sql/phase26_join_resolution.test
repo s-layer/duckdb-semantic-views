@@ -42,7 +42,7 @@ CREATE SEMANTIC VIEW p26_sales AS
 
 # Query crossing join boundary (customer_name from c, total_amount from o)
 query TR rowsort
-SELECT * FROM semantic_view('p26_sales', dimensions := ['customer_name'], metrics := ['total_amount']);
+SELECT * FROM SEMANTIC_VIEW(p26_sales DIMENSIONS customer_name METRICS total_amount);
 ----
 Alice	300.00
 Bob	50.00
@@ -69,14 +69,14 @@ CREATE SEMANTIC VIEW p26_detailed AS
 
 # Query from li to c: should auto-join through o
 query TI rowsort
-SELECT * FROM semantic_view('p26_detailed', dimensions := ['customer_name'], metrics := ['total_qty']);
+SELECT * FROM SEMANTIC_VIEW(p26_detailed DIMENSIONS customer_name METRICS total_qty);
 ----
 Alice	3
 Bob	3
 
 # --- Test 3: Pruning -- query only base table metrics needs minimal joins ---
 query TI rowsort
-SELECT * FROM semantic_view('p26_detailed', dimensions := ['product'], metrics := ['total_qty']);
+SELECT * FROM SEMANTIC_VIEW(p26_detailed DIMENSIONS product METRICS total_qty);
 ----
 Gadget	1
 Widget	5
@@ -87,7 +87,7 @@ statement ok
 INSERT INTO p26_orders VALUES (4, 999, 75.00);
 
 query TR rowsort
-SELECT * FROM semantic_view('p26_sales', dimensions := ['customer_name'], metrics := ['total_amount']);
+SELECT * FROM SEMANTIC_VIEW(p26_sales DIMENSIONS customer_name METRICS total_amount);
 ----
 Alice	300.00
 Bob	50.00

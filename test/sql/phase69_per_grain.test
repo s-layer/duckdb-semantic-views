@@ -75,7 +75,7 @@ CREATE SEMANTIC VIEW p69_sales AS
 # ============================================================
 
 query I
-SELECT * FROM semantic_view('p69_sales', metrics := ['total_balance']);
+SELECT * FROM SEMANTIC_VIEW(p69_sales METRICS total_balance);
 ----
 600
 
@@ -85,7 +85,7 @@ SELECT * FROM semantic_view('p69_sales', metrics := ['total_balance']);
 # ============================================================
 
 query TI rowsort
-SELECT * FROM semantic_view('p69_sales', dimensions := ['region'], metrics := ['total_balance']);
+SELECT * FROM SEMANTIC_VIEW(p69_sales DIMENSIONS region METRICS total_balance);
 ----
 East	300
 West	300
@@ -99,7 +99,7 @@ West	300
 # ============================================================
 
 query TII rowsort
-SELECT * FROM semantic_view('p69_sales', dimensions := ['region'], metrics := ['total_balance', 'order_count']);
+SELECT * FROM SEMANTIC_VIEW(p69_sales DIMENSIONS region METRICS total_balance, order_count);
 ----
 East	300	3
 West	300	NULL
@@ -114,7 +114,7 @@ West	300	NULL
 # ============================================================
 
 query II
-SELECT * FROM semantic_view('p69_sales', metrics := ['order_count', 'item_qty']);
+SELECT * FROM SEMANTIC_VIEW(p69_sales METRICS order_count, item_qty);
 ----
 3	6
 
@@ -124,7 +124,7 @@ SELECT * FROM semantic_view('p69_sales', metrics := ['order_count', 'item_qty'])
 # ============================================================
 
 query TII rowsort
-SELECT * FROM semantic_view('p69_sales', dimensions := ['status'], metrics := ['order_count', 'item_qty']);
+SELECT * FROM SEMANTIC_VIEW(p69_sales DIMENSIONS status METRICS order_count, item_qty);
 ----
 closed	1	1
 open	2	5
@@ -137,13 +137,13 @@ open	2	5
 # ============================================================
 
 query R
-SELECT * FROM semantic_view('p69_sales', metrics := ['qty_per_order']);
+SELECT * FROM SEMANTIC_VIEW(p69_sales METRICS qty_per_order);
 ----
 2.0
 
 # GRAIN-04 grouped: open = 5 / 2, closed = 1 / 1.
 query TR rowsort
-SELECT * FROM semantic_view('p69_sales', dimensions := ['status'], metrics := ['qty_per_order']);
+SELECT * FROM SEMANTIC_VIEW(p69_sales DIMENSIONS status METRICS qty_per_order);
 ----
 closed	1.0
 open	2.5
@@ -174,7 +174,7 @@ CREATE SEMANTIC VIEW p69_pkless AS
   );
 
 query II
-SELECT * FROM semantic_view('p69_pkless', metrics := ['order_count', 'item_count']);
+SELECT * FROM SEMANTIC_VIEW(p69_pkless METRICS order_count, item_count);
 ----
 3	3
 
@@ -184,7 +184,7 @@ SELECT * FROM semantic_view('p69_pkless', metrics := ['order_count', 'item_count
 # items, so it adds nothing to `open`; there is no `status` with zero items, so
 # no row is missing here.
 query TI rowsort
-SELECT * FROM semantic_view('p69_pkless', dimensions := ['status'], metrics := ['item_count']);
+SELECT * FROM SEMANTIC_VIEW(p69_pkless DIMENSIONS status METRICS item_count);
 ----
 closed	1
 open	2
@@ -229,7 +229,7 @@ CREATE SEMANTIC VIEW p69_siblings AS
   );
 
 query II
-SELECT * FROM semantic_view('p69_siblings', metrics := ['item_qty', 'ship_weight']);
+SELECT * FROM SEMANTIC_VIEW(p69_siblings METRICS item_qty, ship_weight);
 ----
 6	65
 
@@ -237,7 +237,7 @@ SELECT * FROM semantic_view('p69_siblings', metrics := ['item_qty', 'ship_weight
 # through their own FK without fanning.
 # open (order 10): 5 units, 50 kg. closed (order 11): 1 unit, 15 kg.
 query TII rowsort
-SELECT * FROM semantic_view('p69_siblings', dimensions := ['status'], metrics := ['item_qty', 'ship_weight']);
+SELECT * FROM SEMANTIC_VIEW(p69_siblings DIMENSIONS status METRICS item_qty, ship_weight);
 ----
 closed	1	15
 open	5	50
@@ -247,7 +247,7 @@ open	5	50
 # Neither sibling is an ancestor of the other, so the fence's parent-chain walk
 # used to find no path between them and let this through silently.
 statement error
-SELECT * FROM semantic_view('p69_siblings', dimensions := ['carrier'], metrics := ['item_qty']);
+SELECT * FROM SEMANTIC_VIEW(p69_siblings DIMENSIONS carrier METRICS item_qty);
 ----
 fan trap detected
 
@@ -266,12 +266,12 @@ DROP TABLE p69_shipments;
 # ============================================================
 
 statement error
-SELECT * FROM semantic_view('p69_sales', dimensions := ['sku'], metrics := ['order_count']);
+SELECT * FROM SEMANTIC_VIEW(p69_sales DIMENSIONS sku METRICS order_count);
 ----
 fan trap detected
 
 statement error
-SELECT * FROM semantic_view('p69_sales', dimensions := ['status'], metrics := ['total_balance']);
+SELECT * FROM SEMANTIC_VIEW(p69_sales DIMENSIONS status METRICS total_balance);
 ----
 fan trap detected
 
@@ -281,7 +281,7 @@ fan trap detected
 # ============================================================
 
 query TI rowsort
-SELECT * FROM semantic_view('p69_sales', dimensions := ['region'], metrics := ['order_count']);
+SELECT * FROM SEMANTIC_VIEW(p69_sales DIMENSIONS region METRICS order_count);
 ----
 East	3
 

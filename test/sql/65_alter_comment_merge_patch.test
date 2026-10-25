@@ -69,7 +69,7 @@ replaced
 # The rest of the persisted JSON survives (sibling keys preserved per
 # RFC-7396 merge semantics). Verify the metrics still work end-to-end.
 query R
-SELECT total FROM semantic_view('p65_sv', metrics := ['total'])
+SELECT total FROM SEMANTIC_VIEW(p65_sv METRICS total)
 ----
 350.0
 
@@ -87,7 +87,7 @@ SELECT comment FROM list_semantic_views() WHERE name = 'p65_sv'
 
 # Sibling JSON keys must still be intact -- the view is still queryable.
 query R
-SELECT total FROM semantic_view('p65_sv', metrics := ['total'])
+SELECT total FROM SEMANTIC_VIEW(p65_sv METRICS total)
 ----
 350.0
 

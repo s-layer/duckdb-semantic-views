@@ -46,7 +46,7 @@ DIMENSIONS ()
 METRICS (o.total AS SUM(o.amount))
 
 query R
-SELECT total FROM semantic_view('cvb_empty_dims', metrics := ['total']);
+SELECT total FROM SEMANTIC_VIEW(cvb_empty_dims METRICS total);
 ----
 65
 
@@ -65,8 +65,10 @@ DIMENSIONS (o.region AS o.region /* inside parens: has ) and , */)
 METRICS (o.total AS SUM(o.amount))
 
 query TR
-SELECT region, total FROM semantic_view('cvb_comments',
-    dimensions := ['region'], metrics := ['total']) ORDER BY region;
+SELECT region, total FROM SEMANTIC_VIEW(cvb_comments
+    DIMENSIONS region
+    METRICS total
+) ORDER BY region;
 ----
 east	35
 west	30
@@ -105,8 +107,10 @@ METRICS (
 # latest date is 2024-01-02 (20.00 + 5.00 tied = 25.00); west's is
 # 2024-01-01 (30.00). total is the plain sum.
 query TRR
-SELECT region, total, latest FROM semantic_view('cvb_semi',
-    dimensions := ['region'], metrics := ['o.*']) ORDER BY region;
+SELECT region, total, latest FROM SEMANTIC_VIEW(cvb_semi
+    DIMENSIONS region
+    METRICS o.*
+) ORDER BY region;
 ----
 east	35	25
 west	30	30
@@ -128,15 +132,19 @@ METRICS (
 # metric, which the engine forbids in one query. The wildcard expansion must
 # surface the same mix error as the explicit list (routing via wildcards).
 statement error
-SELECT * FROM semantic_view('cvb_win',
-    dimensions := ['region', 'snap_date'], metrics := ['o.*']);
+SELECT * FROM SEMANTIC_VIEW(cvb_win
+    DIMENSIONS region, snap_date
+    METRICS o.*
+);
 ----
 cannot mix window function metrics
 
 # Explicit window metric alongside a dims wildcard is mix-free and works.
 query TTR
-SELECT region, snap_date, running FROM semantic_view('cvb_win',
-    dimensions := ['o.*'], metrics := ['running']) ORDER BY region, snap_date;
+SELECT region, snap_date, running FROM SEMANTIC_VIEW(cvb_win
+    DIMENSIONS o.*
+    METRICS running
+) ORDER BY region, snap_date;
 ----
 east	2024-01-01	10
 east	2024-01-02	35

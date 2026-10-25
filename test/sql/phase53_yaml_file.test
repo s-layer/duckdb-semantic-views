@@ -37,14 +37,14 @@ CREATE SEMANTIC VIEW p53_from_file FROM YAML FILE '__TEST_DIR__/p53_test.yaml'
 
 # Verify the view is queryable
 query TR rowsort
-SELECT region, total_amount FROM semantic_view('p53_from_file', dimensions := ['region'], metrics := ['total_amount'])
+SELECT region, total_amount FROM SEMANTIC_VIEW(p53_from_file DIMENSIONS region METRICS total_amount)
 ----
 East	100.0
 West	200.0
 
 # Verify metrics-only query works
 query R
-SELECT total_amount FROM semantic_view('p53_from_file', metrics := ['total_amount'])
+SELECT total_amount FROM SEMANTIC_VIEW(p53_from_file METRICS total_amount)
 ----
 300.0
 
@@ -75,7 +75,7 @@ CREATE OR REPLACE SEMANTIC VIEW p53_from_file FROM YAML FILE '__TEST_DIR__/p53_t
 
 # Verify the view was replaced (new metric name)
 query TR rowsort
-SELECT region, order_count FROM semantic_view('p53_from_file', dimensions := ['region'], metrics := ['order_count'])
+SELECT region, order_count FROM SEMANTIC_VIEW(p53_from_file DIMENSIONS region METRICS order_count)
 ----
 East	1
 West	1
@@ -89,7 +89,7 @@ CREATE SEMANTIC VIEW IF NOT EXISTS p53_from_file FROM YAML FILE '__TEST_DIR__/p5
 
 # Verify original view (with order_count) is still in place
 query TR rowsort
-SELECT region, order_count FROM semantic_view('p53_from_file', dimensions := ['region'], metrics := ['order_count'])
+SELECT region, order_count FROM SEMANTIC_VIEW(p53_from_file DIMENSIONS region METRICS order_count)
 ----
 East	1
 West	1
@@ -102,7 +102,7 @@ statement ok
 CREATE SEMANTIC VIEW p53_commented COMMENT = 'Loaded from file' FROM YAML FILE '__TEST_DIR__/p53_test.yaml'
 
 query R
-SELECT total_amount FROM semantic_view('p53_commented', metrics := ['total_amount'])
+SELECT total_amount FROM SEMANTIC_VIEW(p53_commented METRICS total_amount)
 ----
 300.0
 
@@ -114,7 +114,7 @@ statement ok
 CREATE SEMANTIC VIEW p53_lowercase from yaml file '__TEST_DIR__/p53_test.yaml'
 
 query R
-SELECT total_amount FROM semantic_view('p53_lowercase', metrics := ['total_amount'])
+SELECT total_amount FROM SEMANTIC_VIEW(p53_lowercase METRICS total_amount)
 ----
 300.0
 
@@ -159,7 +159,7 @@ metrics:
 $$
 
 query R
-SELECT total_amount FROM semantic_view('p53_inline_regression', metrics := ['total_amount'])
+SELECT total_amount FROM SEMANTIC_VIEW(p53_inline_regression METRICS total_amount)
 ----
 300.0
 
