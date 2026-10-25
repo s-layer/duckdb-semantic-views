@@ -85,8 +85,9 @@ const DIMS: [&str; 5] = ["td", "ucat", "uwd", "etd", "eucat"];
 /// `esv`, `esw` and `edsv` (TECH-DEBT #76) are EXPRESSION items: `esv` is two
 /// aggregates of a child fact and a child dimension under one derived metric,
 /// `esw` an aggregate of a parent fact (so a parent-grain metric, like `sw`),
-/// and `edsv` an expression over the declared metrics `sv` and `ct`.
-const METS: [&str; 8] = ["sv", "ct", "sw", "svf", "dsv", "esv", "esw", "edsv"];
+/// `edsv` an expression over the declared metrics `sv` and `ct`, and `esvf`
+/// an aggregate with a `FILTER` clause, which belongs to its aggregate.
+const METS: [&str; 9] = ["sv", "ct", "sw", "svf", "dsv", "esv", "esw", "edsv", "esvf"];
 
 /// The item each pool name is queried with: a declared member's name, or for
 /// the TECH-DEBT #76 entries an expression item named with `AS`.
@@ -97,6 +98,7 @@ fn item_text(name: &str) -> String {
         "esv" => "sum(tv1) - count(td) AS esv",
         "esw" => "max(uw1) AS esw",
         "edsv" => "sv + ct AS edsv",
+        "esvf" => "sum(tv1) FILTER (WHERE td > 0) AS esvf",
         other => other,
     }
     .to_string()
@@ -575,6 +577,7 @@ fn child_grain_sql(case: &Case) -> String {
             // TECH-DEBT #76: the expression items' aggregates and arithmetic.
             "esv" => "sum(t.v + 1) - count(t.d) AS esv".to_string(),
             "edsv" => "sum(t.v) + count(*) AS edsv".to_string(),
+            "esvf" => "sum(t.v + 1) FILTER (WHERE t.d > 0) AS esvf".to_string(),
             other => unreachable!("unexpected child-grain metric {other}"),
         })
         .collect();
@@ -937,8 +940,8 @@ fn generator_reaches_both_where_clause_branches() {
     let mut dsv_selected = 0usize;
     let mut dsv_oracled = 0usize;
     let mut svf_and_dsv_oracled = 0usize;
-    const EXPRESSION_ITEMS: [&str; 5] = ["etd", "eucat", "esv", "esw", "edsv"];
-    let mut expression_oracled = [0usize; 5];
+    const EXPRESSION_ITEMS: [&str; 6] = ["etd", "eucat", "esv", "esw", "edsv", "esvf"];
+    let mut expression_oracled = [0usize; 6];
     let mut expression_fenced = 0usize;
     let mut distinct: HashSet<String> = HashSet::new();
 

@@ -99,6 +99,8 @@ use semantic_views::model::{
     AccessModifier, Cardinality, Dimension, Fact, Join, Metric, NonAdditiveDim, NullsOrder,
     SemanticViewDefinition, SortOrder, TableRef, WindowSpec,
 };
+use semantic_views::query::expr_items::lower_expression_items;
+use semantic_views::query::items::RequestItems;
 
 /// Base rows `o` have ids `0..n_o`; child rows `li` carry a foreign key into
 /// them, and grandchild rows `lid` a foreign key into `li`. `None` is a SQL
@@ -250,9 +252,22 @@ fn arb_grains() -> impl Strategy<Value = Grains> {
         1 => g(true, false, true),
     ]
 }
-/// The only requestable fact: a row-level child value. A fact query is at the
+/// The requestable facts: a row-level child value. A fact query is at the
 /// grain of its facts, so a childless parent has no row in it (EXP-28).
-const FACTS: [&str; 1] = ["f_amt"];
+/// `ef_amt` (TECH-DEBT #76) is an EXPRESSION item over it ([`fact_item_text`]),
+/// which becomes a fact of the query's own copy of the definition, so it has to
+/// take the same row-level path as the declared one.
+const FACTS: [&str; 2] = ["f_amt", "ef_amt"];
+
+/// The item each fact is queried with: the declared fact's name, or for
+/// `ef_amt` an expression item named with `AS`.
+fn fact_item_text(name: &str) -> String {
+    match name {
+        "ef_amt" => "f_amt * 2 + 1 AS ef_amt",
+        other => other,
+    }
+    .to_string()
+}
 
 /// Members a generated `where_clause` may name, and which side of the join each
 /// lives on. `fregion` / `camt` / `famt` are `LABELS = (FILTER)` members whose
@@ -948,6 +963,7 @@ fn facts_oracle_sql(case: &Case) -> String {
         })
         .collect();
     items.push("li.amount AS f_amt".to_string());
+    items.push("li.amount * 2 + 1 AS ef_amt".to_string());
     let and_pred = case.where_pred.as_ref().map_or_else(String::new, |p| {
         format!(" AND {}", p.to_raw_sql(WMember::raw_from_child))
     });
@@ -983,10 +999,8 @@ fn build_request(case: &Case) -> QueryRequest {
             sel.iter().map(|&i| MetricName::new(METS[i])).collect(),
             vec![],
         ),
-        Ask::ChildFacts => (
-            vec![],
-            FACTS.iter().map(|f| FactName::new(*f)).collect::<Vec<_>>(),
-        ),
+        // The facts are the lowered items, which `check_case` fills in.
+        Ask::ChildFacts => (vec![], vec![]),
     };
     QueryRequest {
         where_clause: case.where_pred.as_ref().map(Pred::to_member_sql),
@@ -1013,11 +1027,37 @@ proptest! {
 /// proptest and the pinned cases below so a pinned case runs exactly the
 /// property's checks.
 fn check_case(case: &Case) -> Result<(), TestCaseError> {
-    let def = build_def();
-    let req = build_request(case);
+    let stored = build_def();
+    let mut req = build_request(case);
+    // TECH-DEBT #76: a FACTS request's items go through the lowering
+    // `semantic_view()` gives them, so the expression item is planned as the
+    // fact it becomes, and its column is renamed to its alias, as
+    // `semantic_view()` renames it.
+    let mut renamed = Vec::new();
+    let def = if matches!(case.ask, Ask::ChildFacts) {
+        let texts: Vec<String> = FACTS.iter().map(|f| fact_item_text(f)).collect();
+        let items = RequestItems::parse(&[], &[], &texts, &[]).expect("the facts parse");
+        let lowered = lower_expression_items("child", &stored, items)
+            .unwrap_or_else(|e| panic!("the facts lower: {e:?}"));
+        req.facts = lowered
+            .items
+            .facts
+            .iter()
+            .map(|it| FactName::new(it.member.clone()))
+            .collect();
+        for it in &lowered.items.facts {
+            if let Some(alias) = &it.alias {
+                renamed.push(format!("{} AS {alias}", it.member));
+            }
+        }
+        lowered.def.unwrap_or(stored)
+    } else {
+        stored
+    };
 
     let expanded = match expand("child", &def, &req) {
-        Ok(sql) => sql,
+        Ok(sql) if renamed.is_empty() => sql,
+        Ok(sql) => format!("SELECT *, {} FROM ({sql}) ex", renamed.join(", ")),
         Err(e) => {
             prop_assert!(false, "child-grain query unexpectedly rejected: {e}");
             unreachable!()
