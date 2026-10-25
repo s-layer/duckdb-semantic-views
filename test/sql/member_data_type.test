@@ -191,7 +191,7 @@ HUGEINT	BIGINT	DOUBLE	DECIMAL(38,2)	DATE	DOUBLE
 
 query TTTT
 SELECT typeof("Customer Name"), typeof(tier), typeof(tags), typeof(placed)
-FROM SEMANTIC_VIEW(dt_sv DIMENSIONS "Customer Name", tier, tags, placed) LIMIT 1
+FROM semantic_view('dt_sv', dimensions := ['Customer Name', 'tier', 'tags', 'placed']) LIMIT 1
 ----
 VARCHAR	SMALLINT	VARCHAR[]	DATE
 

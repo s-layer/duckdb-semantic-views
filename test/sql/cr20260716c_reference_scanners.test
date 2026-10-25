@@ -92,7 +92,7 @@ CREATE SEMANTIC VIEW rs_sales AS
   );
 
 query RR
-SELECT * FROM SEMANTIC_VIEW(rs_sales METRICS "Total Revenue", doubled);
+SELECT * FROM semantic_view('rs_sales', metrics := ['Total Revenue', 'doubled']);
 ----
 350.00	700.00
 

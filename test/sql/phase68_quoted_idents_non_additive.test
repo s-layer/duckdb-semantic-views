@@ -100,7 +100,7 @@ SELECT count(*) FROM explain_semantic_view('p68_b1_v2', metrics := ['qty_sum']) 
 # One row per "order date" (standard GROUP BY), each with its own qty — proves
 # the metric aggregated additively rather than collapsing to a single snapshot.
 query I rowsort
-SELECT qty_sum FROM SEMANTIC_VIEW(p68_b1_v2 DIMENSIONS "order date" METRICS qty_sum);
+SELECT qty_sum FROM semantic_view('p68_b1_v2', dimensions := ['order date'], metrics := ['qty_sum']);
 ----
 10
 20

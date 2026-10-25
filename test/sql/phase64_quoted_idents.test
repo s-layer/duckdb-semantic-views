@@ -99,7 +99,7 @@ FROM SEMANTIC_VIEW(orders_sv_v2 METRICS total);
 ----
 300.00
 
-# Runtime arg quoted: semantic_view('"orders_sv_v2"', ...) also resolves
+# Quoted view name: SEMANTIC_VIEW("orders_sv_v2" ...) also resolves
 query R
 FROM SEMANTIC_VIEW("orders_sv_v2" METRICS total);
 ----
