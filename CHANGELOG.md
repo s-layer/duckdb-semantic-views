@@ -11,6 +11,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 _No unreleased changes yet._
 
+## [0.14.2] - 2026-10-25
+
+### Fixed
+
+- **The extension can be installed from the community registry on DuckDB 1.5.6 again.** The
+  registry's Windows build of v0.14.1 failed, and the registry publishes a release only when
+  every platform builds, so `INSTALL semantic_views` on DuckDB 1.5.6 still fetched v0.13.0 on
+  every platform. The registry generates DuckDB's single-file source on
+  Windows with Windows line endings, which the build's Windows-only source patch did not
+  expect. The build now accepts either line ending.
+
 ## [0.14.1] - 2026-10-16
 
 ### Changed
@@ -789,7 +800,8 @@ Connection-lifecycle and ADBC fixes. Two downstream regressions reported against
 - `list_semantic_views()` and `describe_semantic_view()` introspection functions
 - Fuzz targets for FFI boundary testing
 
-[Unreleased]: https://github.com/s-layer/duckdb-semantic-views/compare/v0.14.1...HEAD
+[Unreleased]: https://github.com/s-layer/duckdb-semantic-views/compare/v0.14.2...HEAD
+[0.14.2]: https://github.com/s-layer/duckdb-semantic-views/compare/v0.14.1...v0.14.2
 [0.14.1]: https://github.com/s-layer/duckdb-semantic-views/compare/v0.14.0...v0.14.1
 [0.14.0]: https://github.com/s-layer/duckdb-semantic-views/compare/v0.13.0...v0.14.0
 [0.13.0]: https://github.com/s-layer/duckdb-semantic-views/compare/v0.12.1...v0.13.0

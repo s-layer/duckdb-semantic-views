@@ -1,7 +1,7 @@
 extension:
   name: semantic_views
   description: "Semantic views -- a declarative layer for dimensions, metrics, and relationships"
-  version: 0.14.1
+  version: 0.14.2
   language: Rust
   build: cargo
   license: MIT

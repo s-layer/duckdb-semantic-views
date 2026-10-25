@@ -360,10 +360,18 @@ fn patch_duckdb_cpp_for_windows() -> String {
     let out_dir = std::env::var("OUT_DIR").expect("OUT_DIR not set");
     let patched = format!("{out_dir}/duckdb_patched.cpp");
 
-    let content = std::fs::read_to_string(orig).expect(
-        "failed to read cpp/include/duckdb.cpp — \
+    // The markers below are written with `\n`. The release zip's duckdb.cpp has LF
+    // line endings, but one generated on Windows from an engine tree (the
+    // `generate_from_source` path in scripts/ensure_amalgamation.py, which the
+    // community-extensions build takes) has CRLF, because the engine's
+    // scripts/amalgamation.py writes in text mode. Normalise so the markers match
+    // either way; MSVC compiles LF sources as is.
+    let content = std::fs::read_to_string(orig)
+        .expect(
+            "failed to read cpp/include/duckdb.cpp — \
              run 'make ensure_amalgamation' or 'just update-headers' to download it",
-    );
+        )
+        .replace("\r\n", "\n");
 
     // Idempotent: if already patched (e.g. local dev copy with manual edits), use as-is.
     // We check for one of our undef markers to detect prior patching.
