@@ -276,7 +276,11 @@ pub fn plan_create(query: &str) -> Result<Option<RewriteAction>, ParseError> {
     let name_end = name_start + crate::ident::find_identifier_end(&query[name_start..], true);
     let (_, open_in_name) = crate::util::blank_sql_comments_tracking(&query[..name_end]);
     if let Some(pos) = open_in_name.filter(|&p| query.as_bytes()[p] != b'"') {
-        return Err(unterminated_quote(query, pos));
+        return Err(if unterminated == Some(pos) {
+            unterminated_quote(query, pos)
+        } else {
+            quote_in_view_name(query, pos)
+        });
     }
     let planned = validate_create_body(trimmed_no_semi, lead, plen, kind)?;
     if let Some(pos) = unterminated {
@@ -294,6 +298,22 @@ fn unterminated_quote(query: &str, pos: usize) -> ParseError {
     };
     ParseError {
         message: message.to_string(),
+        position: Some(pos),
+    }
+}
+
+/// A `'` or `$tag$` opened in a bare view name that closes later: the name is
+/// not a string, so it is refused as such rather than as unterminated.
+fn quote_in_view_name(query: &str, pos: usize) -> ParseError {
+    let what = if query.as_bytes()[pos] == b'$' {
+        "a dollar-quoted string"
+    } else {
+        "a string literal"
+    };
+    ParseError {
+        message: format!(
+            "A view name cannot be {what}; quote the name with double quotes, as in \"my view\"."
+        ),
         position: Some(pos),
     }
 }

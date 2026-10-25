@@ -296,6 +296,13 @@ pub(crate) fn column_roundtrips_verbatim(s: &str) -> bool {
 /// quoted `""`). A multi-token run (`a b`, `a.b`, `a(b`) or an empty string
 /// therefore returns `false` and is quoted. Idempotent: a well-formed
 /// `"..."` token lexes as one quoted identifier and passes the slot check.
+///
+/// So is a bare word the entry grammar reads as a keyword where the value
+/// stands (`fuzz_create_text`, run 40234410533): an entry is split at its
+/// first depth-0 `AS`, so a member named `AS` rendered as `o.AS AS o.region`
+/// lost its name, and a `USING` after a metric's name opens its relationship
+/// list. A table alias is the qualifier of every member on it, so it needs the
+/// same.
 pub(crate) fn identifier_slot_roundtrips_verbatim(s: &str) -> bool {
     use super::lexer::{lex, TokenKind};
     let toks = lex(s);
@@ -305,6 +312,8 @@ pub(crate) fn identifier_slot_roundtrips_verbatim(s: &str) -> bool {
     matches!(tok.kind, TokenKind::Ident { .. })
         && tok.start == 0
         && tok.end == s.len()
+        && !s.eq_ignore_ascii_case("AS")
+        && !s.eq_ignore_ascii_case("USING")
         && identifier_slot_error(s).is_none()
 }
 

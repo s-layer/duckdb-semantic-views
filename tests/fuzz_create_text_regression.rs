@@ -142,14 +142,87 @@ fn dollar_quote_glued_to_as() {
 /// `/*$$'`. The quote hid the `/*` from the comment pass, so it was planned
 /// into a relationship column; the rendered DDL has no quote before it, so
 /// re-planning read a comment. A quote the name opens is refused wherever it
-/// closes, as run 40187299120's unterminated one is.
+/// closes, as run 40187299120's unterminated one is, and named for what it
+/// is: a string in the name, not an unterminated one.
 #[test]
 fn quote_in_name_closed_in_the_body() {
     let text = "CREATE SEMANTIC VIEW' AS TABLES(o AS s PRIMARY KEY(),E AS s PRIMARY KEY())\
                 RELATIONSHIPS(r AS o(/*$$'a$$)REFERENCES c)DIMENSIONS(o.n AS r)";
     let err = plan_create(text).expect_err("a quote opened in the name is refused");
-    assert_eq!(err.message, "Unterminated string literal.");
+    assert!(
+        err.message
+            .starts_with("A view name cannot be a string literal"),
+        "{}",
+        err.message
+    );
     assert_eq!(err.position, Some(text.find('\'').unwrap()));
+    // The same for a dollar quote that closes in a comment in the body.
+    let text = "CREATE SEMANTIC VIEW $a$ AS TABLES (o AS t PRIMARY KEY (x /*$a$ y))) \
+                METRICS (o.n AS COUNT(*))";
+    let err = plan_create(text).expect_err("a dollar quote opened in the name is refused");
+    assert!(
+        err.message
+            .starts_with("A view name cannot be a dollar-quoted string"),
+        "{}",
+        err.message
+    );
+    assert_eq!(err.position, Some(text.find('$').unwrap()));
+    // And for a string that is the whole name.
+    let text = "CREATE SEMANTIC VIEW 'my view' AS TABLES (o AS t PRIMARY KEY (id)) \
+                METRICS (o.n AS COUNT(*))";
+    let err = plan_create(text).expect_err("a string as the name is refused");
+    assert!(
+        err.message
+            .starts_with("A view name cannot be a string literal"),
+        "{}",
+        err.message
+    );
+}
+
+/// Run 40234410533: a YAML dimension named `AS` rendered as `o.AS AS o.region`,
+/// and the entry parser split it at the first `AS`. A name the entry grammar
+/// reads as a keyword (`AS`, and `USING` before a metric's expression) is now
+/// rendered quoted, in a member's name and in a table alias, which qualifies
+/// every member.
+#[test]
+fn keyword_names_render_quoted() {
+    // `twice` refers to the metric quoted, so that a metric named `USING` can
+    // be used at all.
+    let yaml = |alias: &str, dim: &str, metric: &str, twice: &str| {
+        format!(
+            "CREATE SEMANTIC VIEW yv FROM YAML $$\n\
+             base_table: orders\n\
+             tables:\n  - alias: {alias}\n    table: orders\n    pk_columns:\n      - id\n\
+             dimensions:\n  - name: {dim}\n    expr: {alias}.region\n    source_table: {alias}\n\
+             metrics:\n  - name: {metric}\n    expr: SUM({alias}.amount)\n    source_table: {alias}\n\
+             \x20 - name: twice\n    expr: {twice}\n\
+             $$\n"
+        )
+    };
+    // Each case on its own, so that every one is seen to fail without the fix.
+    let failing: Vec<_> = [
+        ("o", "AS", "total"),
+        ("o", "as", "total"),
+        ("o", "region", "AS"),
+        ("o", "region", "USING"),
+        ("AS", "region", "total"),
+        ("USING", "region", "total"),
+    ]
+    .into_iter()
+    .filter(|&(alias, dim, metric)| {
+        let text = yaml(alias, dim, metric, &format!("'\"{metric}\" * 2'"));
+        std::panic::catch_unwind(|| assert_fixpoint(&text)).is_err()
+    })
+    .collect();
+    assert!(failing.is_empty(), "no fixpoint for {failing:?}");
+    // Named bare in an expression, `USING` is refused at import: after `AS`
+    // the metric grammar reads a depth-0 `USING` as a misplaced clause.
+    let err = plan_create(&yaml("o", "region", "USING", "USING * 2")).expect_err("refused");
+    assert!(
+        err.message.contains("'USING (...)' must come BEFORE 'AS'"),
+        "{}",
+        err.message
+    );
 }
 
 /// `fuzz_ddl_parse`, run 40198249801: leading non-breaking spaces, which
