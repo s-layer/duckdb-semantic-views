@@ -138,6 +138,20 @@ fn dollar_quote_glued_to_as() {
     assert!(err.message.contains("Expected 'AS'"), "{}", err.message);
 }
 
+/// Run 40231464274: a `'` opened in the view name and closed in the body, in
+/// `/*$$'`. The quote hid the `/*` from the comment pass, so it was planned
+/// into a relationship column; the rendered DDL has no quote before it, so
+/// re-planning read a comment. A quote the name opens is refused wherever it
+/// closes, as run 40187299120's unterminated one is.
+#[test]
+fn quote_in_name_closed_in_the_body() {
+    let text = "CREATE SEMANTIC VIEW' AS TABLES(o AS s PRIMARY KEY(),E AS s PRIMARY KEY())\
+                RELATIONSHIPS(r AS o(/*$$'a$$)REFERENCES c)DIMENSIONS(o.n AS r)";
+    let err = plan_create(text).expect_err("a quote opened in the name is refused");
+    assert_eq!(err.message, "Unterminated string literal.");
+    assert_eq!(err.position, Some(text.find('\'').unwrap()));
+}
+
 /// `fuzz_ddl_parse`, run 40198249801: leading non-breaking spaces, which
 /// `str::trim` strips but the ASCII lead count does not, put the view-name
 /// offset inside a character and the slice panicked. The target's own check
