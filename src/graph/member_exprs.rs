@@ -304,8 +304,10 @@ mod tests {
     }
 
     /// Every aggregate the bundled `DuckDB` registers is on the list, so a
-    /// dimension or fact cannot slip one past CREATE by name.
+    /// dimension or fact cannot slip one past CREATE by name. (It needs the
+    /// bundled engine, which the `extension` build does not link.)
     #[test]
+    #[cfg(not(feature = "extension"))]
     fn every_duckdb_aggregate_is_known() {
         let conn = duckdb::Connection::open_in_memory().unwrap();
         let mut stmt = conn
