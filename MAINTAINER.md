@@ -96,6 +96,8 @@ src/
 ├── graph/                     # Relationship graph: cardinality, join tree, toposort, derived-metric DAG
 │   ├── relationship.rs cardinality.rs join_tree.rs toposort.rs
 │   ├── derived_metrics.rs facts.rs using.rs names.rs
+│   ├── member_exprs.rs        #   CREATE-time content checks: no aggregate in a dimension or fact, no
+│   │                          #   prepared-statement parameter in any member (TECH-DEBT #95)
 │   ├── member_refs.rs         #   CREATE-time scoping: a member expression may name a column of
 │   │                          #   its own table or a declared fact/metric, never a raw column of
 │   │                          #   another table (TECH-DEBT #52 / PAR-3)

@@ -1547,31 +1547,13 @@ DIMENSION	café東京	EXPRESSION	café.region
 DIMENSION	café東京	TABLE	"dcc 東京 table"
 TABLE	"dcc 東京 table"	BASE_TABLE_NAME	"dcc 東京 table"
 
-# C-185: body_parser/lexer.rs::lone_dollar_and_positional_param_are_symbols, body_parser/lexer.rs::well_formed_over_hostile_inputs — `$1` lexes as a positional parameter (not a dollar-quote tag) and is stored as the expression
-# PRE-EXISTING (TECH-DEBT #95): a positional parameter is accepted in a stored dimension
-# expression (DATA_TYPE is empty) and every query selecting it is refused at
-# bind ('a member of this semantic view holds the prepared statement parameter
-# $1'; see semantic_view_parameters.test).
-statement ok
+# C-185: body_parser/lexer.rs::lone_dollar_and_positional_param_are_symbols, body_parser/lexer.rs::well_formed_over_hostile_inputs — `$1` lexes as a positional parameter (not a dollar-quote tag)
+# CREATE refuses a parameter in a member (TECH-DEBT #95); the message quoting
+# `$1` as a parameter shows it was not read as a dollar-quote tag.
+statement error
 CREATE SEMANTIC VIEW dcc_c185 AS TABLES (o AS dcc_orders PRIMARY KEY (id)) DIMENSIONS (o.p AS $1, o.region AS o.region);
-
-query T nosort
-SELECT * FROM dcc_ddl('dcc_c185');
 ----
-CREATE OR REPLACE SEMANTIC VIEW dcc_c185 AS
-TABLES (
-    o AS dcc_orders PRIMARY KEY (id)
-)
-DIMENSIONS (
-    o.p AS $1,
-    o.region AS o.region
-)
-
-query TTTT rowsort
-SELECT object_kind, object_name, property, property_value FROM describe_semantic_view('dcc_c185') WHERE object_name = 'p' AND property IN ('EXPRESSION', 'DATA_TYPE');
-----
-DIMENSION	p	DATA_TYPE	(empty)
-DIMENSION	p	EXPRESSION	$1
+dimension 'p' holds the prepared statement parameter $1, which has no value
 
 # --- window metric shape: FUNC(args) OVER (...) only (window.rs) ---
 

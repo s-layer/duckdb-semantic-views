@@ -137,6 +137,8 @@ pub fn enrich_definition_for_create(
     // expression may legitimately reference those across tables, and only a
     // RAW column of another table is out of scope.
     crate::graph::validate_member_references(&def)?;
+    // TECH-DEBT #95: no aggregate in a dimension, no parameter in any member.
+    crate::graph::validate_member_expressions(&def)?;
 
     // 4. Serialize. Metadata (created_on, database_name, schema_name) is
     //    populated by SQL inside the rewritten INSERT — not here. Column

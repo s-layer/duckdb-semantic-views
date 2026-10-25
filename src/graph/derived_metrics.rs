@@ -52,6 +52,48 @@ const AGGREGATE_FUNCTIONS: &[&str] = &[
     "bit_xor",
     "bool_and",
     "bool_or",
+    // DuckDB's own aggregates (`duckdb_functions()` lists them; the
+    // `every_duckdb_aggregate_is_known` test in `member_exprs` keeps this
+    // list complete, and `expand::facts`' phantom-row guard uses it too).
+    "approx_quantile",
+    "approx_top_k",
+    "arbitrary",
+    "arg_max",
+    "arg_max_null",
+    "arg_max_nulls_last",
+    "arg_min",
+    "arg_min_null",
+    "arg_min_nulls_last",
+    "argmax",
+    "argmin",
+    "bitstring_agg",
+    "count_if",
+    "count_star",
+    "countif",
+    "entropy",
+    "favg",
+    "first",
+    "fsum",
+    "histogram",
+    "histogram_exact",
+    "kahan_sum",
+    "kurtosis",
+    "kurtosis_pop",
+    "last",
+    "list",
+    "mad",
+    "max_by",
+    "mean",
+    "min_by",
+    "product",
+    "quantile",
+    "quantile_cont",
+    "quantile_disc",
+    "reservoir_quantile",
+    "sem",
+    "skewness",
+    "sum_no_overflow",
+    "sumkahan",
 ];
 
 /// Check if an expression contains an aggregate function call.
@@ -72,13 +114,14 @@ const AGGREGATE_FUNCTIONS: &[&str] = &[
 /// `None`.
 #[must_use]
 pub fn contains_aggregate_function(expr: &str) -> Option<&'static str> {
-    for head in crate::expr_tokens::scan_function_heads(expr) {
-        let name = head.last_part_key();
-        if let Some(&func) = AGGREGATE_FUNCTIONS.iter().find(|&&f| f == name.as_str()) {
-            return Some(func);
-        }
-    }
-    None
+    crate::expr_tokens::scan_function_heads(expr)
+        .into_iter()
+        .find_map(|head| aggregate_name(&head.last_part_key()))
+}
+
+/// `name` (a lowercase function-name key) if it is a known aggregate.
+pub(crate) fn aggregate_name(name: &str) -> Option<&'static str> {
+    AGGREGATE_FUNCTIONS.iter().copied().find(|&f| f == name)
 }
 
 /// Validate derived metrics in a semantic view definition.

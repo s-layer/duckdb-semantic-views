@@ -391,104 +391,33 @@ pub(super) fn rewrite_count_star(expr: &str, replacement_arg: &str) -> Option<St
     Some(out)
 }
 
-/// `DuckDB`'s aggregate function names (`duckdb_functions()` where
-/// `function_type = 'aggregate'`), minus the pure *window* functions that share
-/// that catalog classification (`rank`, `row_number`, `lag`, `lead`,
-/// `first_value`, …) and minus `count_star`, which takes no argument.
-///
-/// Every entry is guarded by [`guard_aggregate_args`]: on a NULL-extended
-/// (LEFT-JOINed) source table the phantom row must not reach ANY aggregate,
-/// whatever its argument. EXP-21 fenced only a five-name whitelist over
-/// recognized constant literals; EXP-25/EXP-26 (code-review 2026-08-08) showed
-/// that whitelist leaking four ways — `COUNT(DISTINCT 1)`, `COUNT(1+0)`,
-/// `MIN(1)`, and any NULL-insensitive expression such as
-/// `SUM(COALESCE(li.qty, 99))` or a fact reference reaching another table.
-///
-/// Lower-case here; matching is case-insensitive over the whole identifier
-/// word, so `sum_no_overflow(` matches as itself rather than as `sum` (a
-/// prefix-scan would have missed it entirely).
-const AGGREGATE_FUNCTIONS: &[&str] = &[
-    "any_value",
-    "approx_count_distinct",
-    "approx_quantile",
-    "approx_top_k",
-    "arbitrary",
-    "arg_max",
-    "arg_max_null",
-    "arg_max_nulls_last",
-    "arg_min",
-    "arg_min_null",
-    "arg_min_nulls_last",
-    "argmax",
-    "argmin",
-    "array_agg",
-    "avg",
-    "bit_and",
-    "bit_or",
-    "bit_xor",
-    "bitstring_agg",
-    "bool_and",
-    "bool_or",
-    "corr",
-    "count",
-    "count_if",
-    "countif",
-    "covar_pop",
-    "covar_samp",
-    "entropy",
-    "favg",
-    "first",
-    "fsum",
-    "group_concat",
-    "histogram",
-    "histogram_exact",
-    "kahan_sum",
-    "kurtosis",
-    "kurtosis_pop",
-    "last",
-    "list",
-    "listagg",
-    "mad",
-    "max",
-    "max_by",
-    "mean",
-    "median",
-    "min",
-    "min_by",
-    "mode",
-    "product",
-    "quantile",
-    "quantile_cont",
-    "quantile_disc",
-    "regr_avgx",
-    "regr_avgy",
-    "regr_count",
-    "regr_intercept",
-    "regr_r2",
-    "regr_slope",
-    "regr_sxx",
-    "regr_sxy",
-    "regr_syy",
-    "reservoir_quantile",
-    "sem",
-    "skewness",
-    "stddev",
-    "stddev_pop",
-    "stddev_samp",
-    "string_agg",
-    "sum",
-    "sum_no_overflow",
-    "sumkahan",
-    "var_pop",
-    "var_samp",
-    "variance",
-];
+/// Aggregates on the shared list ([`crate::graph::aggregate_name`]) that
+/// [`guard_aggregate_args`] leaves alone, because their first argument is not
+/// the value being aggregated: `count_star` takes no argument, and
+/// `percentile_cont` / `percentile_disc` take the fraction, with the value in
+/// `WITHIN GROUP (ORDER BY ...)`.
+const UNGUARDED_AGGREGATES: &[&str] = &["count_star", "percentile_cont", "percentile_disc"];
 
-/// Whether `word` names one of [`AGGREGATE_FUNCTIONS`], case-insensitively.
+/// Whether `word` names an aggregate whose first argument
+/// [`guard_aggregate_args`] guards, case-insensitively.
+///
+/// The names come from the list CREATE refuses in a dimension or fact, which
+/// `every_duckdb_aggregate_is_known` keeps complete against `DuckDB`'s
+/// `duckdb_functions()`, so the guard cannot fall behind it.
+///
+/// Every such aggregate is guarded: on a NULL-extended (LEFT-JOINed) source
+/// table the phantom row must not reach ANY aggregate, whatever its argument.
+/// EXP-21 fenced only a five-name whitelist over recognized constant literals;
+/// EXP-25/EXP-26 (code-review 2026-08-08) showed that whitelist leaking four
+/// ways — `COUNT(DISTINCT 1)`, `COUNT(1+0)`, `MIN(1)`, and any NULL-insensitive
+/// expression such as `SUM(COALESCE(li.qty, 99))` or a fact reference reaching
+/// another table.
+///
+/// Matching is over the whole identifier word, so `sum_no_overflow(` matches as
+/// itself rather than as `sum` (a prefix-scan would have missed it entirely).
 fn is_aggregate_name(word: &str) -> bool {
-    AGGREGATE_FUNCTIONS
-        .iter()
-        .any(|agg| word.eq_ignore_ascii_case(agg))
+    let key = word.to_ascii_lowercase();
+    crate::graph::aggregate_name(&key).is_some() && !UNGUARDED_AGGREGATES.contains(&key.as_str())
 }
 
 /// Whether `arg` is a SQL constant: a numeric literal, a single-quoted string
@@ -668,7 +597,7 @@ fn has_constant_arg_aggregate(expr: &str) -> bool {
 /// `SUM(COALESCE(li.qty, 99))` becomes
 /// `SUM(CASE WHEN <pk> IS NOT NULL THEN COALESCE(li.qty, 99) END)`: the
 /// argument evaluates to NULL exactly on the phantom row, and a NULL first
-/// argument drops the row from every aggregate in [`AGGREGATE_FUNCTIONS`]. On a
+/// argument drops the row from every aggregate [`is_aggregate_name`] names. On a
 /// real row the PK is non-NULL by definition, so the `CASE` returns the
 /// original value — the rewrite is semantically neutral on real data whatever
 /// the argument is, which is why it no longer needs to RECOGNIZE the argument
@@ -1269,6 +1198,29 @@ pub(crate) fn collect_derived_metric_grain(
 mod tests {
     use super::*;
     use crate::model::{AccessModifier, Metric};
+
+    #[test]
+    fn the_guard_names_the_shared_aggregates_but_not_the_unguarded_ones() {
+        for name in [
+            "sum",
+            "SUM",
+            "count",
+            "sum_no_overflow",
+            "arg_max",
+            "quantile_disc",
+        ] {
+            assert!(is_aggregate_name(name), "{name}");
+        }
+        for name in [
+            "count_star",
+            "percentile_cont",
+            "PERCENTILE_DISC",
+            "coalesce",
+            "lag",
+        ] {
+            assert!(!is_aggregate_name(name), "{name}");
+        }
+    }
 
     fn make_metric(name: &str, expr: &str, source_table: Option<&str>) -> Metric {
         Metric {

@@ -301,7 +301,8 @@ Facts can reference other facts by name. The extension resolves dependencies in 
 
 **Validation rules:**
 
-- Aggregate functions (``SUM``, ``COUNT``, ``AVG``, ``MIN``, ``MAX``, etc.) in fact expressions are rejected.
+- Aggregate functions (``SUM``, ``COUNT``, ``AVG``, ``MIN``, ``MAX``, etc.) in fact expressions are rejected. An aggregate inside a subquery or with ``OVER`` (a windowed aggregate) is one value per row and is allowed. See :ref:`ref-error-messages`.
+- A prepared statement parameter (``?``, ``$1``, ``$name``) in a fact expression is rejected; use one in the query's ``WHERE`` clause instead.
 - Circular references between distinct facts are rejected (a fact referencing its own name resolves to the physical column).
 
 **Reported data type:**
@@ -328,7 +329,7 @@ Declares named grouping expressions available for queries.
 
 - ``PUBLIC``, optional. Accepted as an explicit no-op (dimensions are always public). ``PRIVATE`` is **not** allowed on a dimension and is rejected rather than silently downgraded. This matches Snowflake, whose grammar lists ``{ PRIVATE | PUBLIC }`` on a dimension but whose rule is that `"You cannot mark a dimension as private. Dimensions are always public." <https://docs.snowflake.com/en/sql-reference/sql/create-semantic-view>`_
 - ``<alias>.<dim_name>``, the table alias and dimension name. The alias indicates which table the dimension comes from (used for join dependency resolution).
-- ``<expression>``, any SQL expression. Can be a simple column reference (``o.region``) or a computed expression (``date_trunc('month', o.ordered_at)``).
+- ``<expression>``, any row-level SQL expression: no aggregate (outside a subquery or ``OVER``) and no prepared statement parameter. Can be a simple column reference (``o.region``) or a computed expression (``date_trunc('month', o.ordered_at)``).
 - ``COMMENT = '<text>'``, optional. A human-readable description.
 - ``WITH SYNONYMS = ('<synonym>', ...)``, optional. Alternative names for discoverability.
 - ``LABELS = (FILTER)``, optional. Declares the dimension a :ref:`named filter <howto-annotations-filters>` -- a boolean-valued member meant for reuse in a query's :ref:`where_clause <ref-sv-pre-agg-filtering>`. Metadata only: it does not hide the dimension from output, and the ``BOOLEAN`` requirement is enforced by DuckDB's binder at query time. ``FILTER`` is the only accepted label.
@@ -341,6 +342,7 @@ Declares named grouping expressions available for queries.
 
 - Dimension names must be unique within the view (case-insensitive, quoted or not -- DuckDB treats double-quoted identifiers as case-insensitive too). For example, ``region`` and ``Region`` cannot both appear in the same ``DIMENSIONS`` clause. See :ref:`ref-err-name-uniqueness`.
 - A dimension name cannot collide with any metric name (case-insensitive, quoted or not -- DuckDB treats double-quoted identifiers as case-insensitive too). See :ref:`ref-err-name-uniqueness`.
+- An aggregate function in the expression is rejected, unless it is inside a subquery or windowed with ``OVER``: a query groups by a dimension. So is a prepared statement parameter. See :ref:`ref-error-messages`.
 - The table alias that qualifies the dimension name must be declared in ``TABLES``, in any case (``o`` or ``O`` for alias ``o``). This applies to a single-table view too: ``x.foo`` in a view whose only table is ``o`` is rejected with ``unknown source table 'x'; did you mean 'o'?`` (since v0.14.0; earlier versions accepted it). Metrics follow the same rule.
 
   .. note::
@@ -475,6 +477,7 @@ See :ref:`howto-window-metrics` for details on both modes.
 - Metric names must be unique within the view (case-insensitive, quoted or not -- DuckDB treats double-quoted identifiers as case-insensitive too), across both base and derived metrics. See :ref:`ref-err-name-uniqueness`.
 - A metric name cannot collide with any dimension name (case-insensitive, quoted or not -- DuckDB treats double-quoted identifiers as case-insensitive too). See :ref:`ref-err-name-uniqueness`.
 - Derived metrics must not contain aggregate functions.
+- A prepared statement parameter (``?``, ``$1``, ``$name``) in a metric expression, or in a window metric's arguments, ``ORDER BY`` or frame, is rejected. See :ref:`ref-error-messages`.
 - Circular derived metric references are rejected.
 - ``USING`` relationship names must match declared relationships. Names match the way DuckDB matches identifiers: case-insensitively, whether or not they are quoted, so ``USING (dep_airport)`` names a relationship declared as ``"Dep_Airport"``. Two relationships whose names differ only in case or quoting (``dep`` and ``"dep"``) are the same name. A name keeps its parts, though: the quoted ``"x.y"`` is one identifier containing a dot, so it is a different name from the two-part ``x.y`` (which ``"x"."y"`` also spells).
 - ``NON ADDITIVE BY`` dimension names must match declared dimensions.
