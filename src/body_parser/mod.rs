@@ -27,7 +27,7 @@ use clause_bounds::find_clause_bounds;
 pub(crate) use annotations::find_annotation_start;
 pub(crate) use entries::parse_qualified_entries;
 pub(crate) use materializations::parse_materializations_clause;
-pub(crate) use metrics::parse_metrics_clause;
+pub(crate) use metrics::{misplaced_metric_clause, parse_metrics_clause};
 pub(crate) use relationships::parse_relationships_clause;
 pub(crate) use scan::{
     column_roundtrips_verbatim, identifier_slot_error, identifier_slot_roundtrips_verbatim,
