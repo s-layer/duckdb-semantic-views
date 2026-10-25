@@ -263,6 +263,8 @@ just build-release  # builds build/release/semantic_views.duckdb_extension (opti
 
 The Makefile also handles building the DuckDB engine the C++ shim links against, running the SQLLogicTest runner, and packaging the extension with metadata.
 
+Before each `cargo build`, `make ensure_rust_toolchain` (`scripts/ensure_rust_toolchain.py`, guarded by `tests/ensure_rust_toolchain_script.rs`) installs the toolchain `rust-toolchain.toml` pins, with its components, retrying a failed install five times with a growing delay. Without it a fresh runner (every community-extensions registry build) has rustup fetch the toolchain lazily inside `cargo build`, once, so one network failure fails that platform and the whole registry release (v0.15.0's osx_arm64 build died that way on a DNS error). It does nothing when the toolchain is already installed or when there is no rustup on `PATH`. Our own CI installs the toolchain first anyway (`.github/actions/setup-pinned-rust`), so there it is a no-op.
+
 #### Which DuckDB the C++ shim compiles against
 
 `build.rs` links a static build of the DuckDB engine *into* the extension binary

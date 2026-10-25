@@ -148,12 +148,20 @@ clean_all: clean_configure clean
 # so that it links against the DuckDB that loads it at runtime.
 # --no-default-features removes duckdb/bundled; --features extension adds
 # duckdb/loadable-extension + duckdb/vscalar.
-build_extension_library_debug: check_configure ensure_engine
+# Install the toolchain rust-toolchain.toml pins, with retries, before cargo runs:
+# a fresh runner (every registry build) would otherwise have rustup fetch it
+# lazily inside `cargo build`, once, so one network failure fails the platform.
+# See scripts/ensure_rust_toolchain.py.
+.PHONY: ensure_rust_toolchain
+ensure_rust_toolchain:
+	@$(PYTHON_BIN) scripts/ensure_rust_toolchain.py
+
+build_extension_library_debug: check_configure ensure_engine ensure_rust_toolchain
 	DUCKDB_EXTENSION_NAME=$(EXTENSION_NAME) DUCKDB_EXTENSION_MIN_DUCKDB_VERSION=$(TARGET_DUCKDB_VERSION) cargo build $(CARGO_OVERRIDE_DUCKDB_RS_FLAG) $(TARGET_INFO) --no-default-features --features extension
 	$(PYTHON_VENV_BIN) -c "from pathlib import Path;Path('$(EXTENSION_BUILD_PATH)/debug/extension/$(EXTENSION_NAME)').mkdir(parents=True, exist_ok=True)"
 	$(PYTHON_VENV_BIN) -c "import shutil;shutil.copyfile('$(TARGET_PATH)/debug$(IS_EXAMPLE)/$(RUST_LIBNAME)', '$(EXTENSION_BUILD_PATH)/debug/$(EXTENSION_LIB_FILENAME)')"
 
-build_extension_library_release: check_configure ensure_engine
+build_extension_library_release: check_configure ensure_engine ensure_rust_toolchain
 	DUCKDB_EXTENSION_NAME=$(EXTENSION_NAME) DUCKDB_EXTENSION_MIN_DUCKDB_VERSION=$(TARGET_DUCKDB_VERSION) cargo build $(CARGO_OVERRIDE_DUCKDB_RS_FLAG) --release $(TARGET_INFO) --no-default-features --features extension
 	$(PYTHON_VENV_BIN) -c "from pathlib import Path;Path('$(EXTENSION_BUILD_PATH)/release/extension/$(EXTENSION_NAME)').mkdir(parents=True, exist_ok=True)"
 	$(PYTHON_VENV_BIN) -c "import shutil;shutil.copyfile('$(TARGET_PATH)/release$(IS_EXAMPLE)/$(RUST_LIBNAME)', '$(EXTENSION_BUILD_PATH)/release/$(EXTENSION_LIB_FILENAME)')"

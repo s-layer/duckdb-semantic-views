@@ -130,6 +130,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **A long error message reaches you whole.** An error from a semantic-view statement
   used to be cut off after 1023 bytes, so a message quoting a long name lost its end.
 
+- **A registry build no longer fails on one network error while it installs Rust.** The
+  build installs the pinned Rust toolchain itself before compiling, retrying a failed
+  download, instead of leaving it to a single attempt inside `cargo build`. v0.15.0's
+  macOS (Apple silicon) build in the community registry failed that way, so `INSTALL
+  semantic_views` found no v0.15.0 binary for DuckDB 2.0 on any platform.
+
 - **A YAML member expression holding a bare `COMMENT`, `LABELS` or `WITH SYNONYMS` is
   refused.** In DDL those words, outside brackets and quotes, end a member's expression and
   start its annotations, so such a YAML view imported and then gave a `GET_DDL` that
