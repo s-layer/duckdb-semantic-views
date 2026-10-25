@@ -82,7 +82,12 @@ def components_installed(rustup: str, channel: str, components: list[str]) -> bo
 
 
 def overridden(rustup: str, root: Path) -> str | None:
-    """The toolchain a `rustup override` sets for `root` or a parent, if any."""
+    """The toolchain a `rustup override` sets for `root` itself, if any.
+
+    rustup walks up from the working directory and, in each directory, takes
+    an override before a toolchain file. `root` holds rust-toolchain.toml, so
+    only an override on `root` beats it; one on a parent is never reached.
+    """
     listed = run(rustup, "override", "list")
     if listed.returncode != 0:
         return None
@@ -91,7 +96,7 @@ def overridden(rustup: str, root: Path) -> str | None:
         if len(parts) < 2:
             continue
         path = Path(parts[0])
-        if path == root or path in root.parents:
+        if path == root:
             return parts[-1]
     return None
 

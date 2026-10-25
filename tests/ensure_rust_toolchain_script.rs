@@ -254,17 +254,22 @@ fn rustup_toolchain_naming_the_pin_still_installs_it() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
-#[test]
-fn a_rustup_override_for_the_repo_is_left_alone() {
-    let dir = scratch("override");
-    let root = repo_root();
-    let rustup = fake_rustup(
-        &dir,
+/// A fake rustup whose `override list` puts `toolchain` on `path`, and whose
+/// installs succeed.
+fn rustup_with_override(dir: &Path, path: &Path, toolchain: &str) -> PathBuf {
+    fake_rustup(
+        dir,
         &format!(
-            "case \"$1 $2\" in 'override list') printf '%s\\t%s\\n' '{}' 'nightly-x86_64-unknown-linux-gnu' ;; 'toolchain install') exit 1 ;; esac",
-            root.parent().unwrap().display()
+            "case \"$1 $2\" in 'override list') printf '%s\\t%s\\n' '{}' '{toolchain}' ;; esac",
+            path.display()
         ),
-    );
+    )
+}
+
+#[test]
+fn a_rustup_override_on_the_repo_is_left_alone() {
+    let dir = scratch("override");
+    let rustup = rustup_with_override(&dir, &repo_root(), "nightly-x86_64-unknown-linux-gnu");
     let out = run_script(&rustup);
     assert!(
         out.status.success(),
@@ -272,6 +277,27 @@ fn a_rustup_override_for_the_repo_is_left_alone() {
         String::from_utf8_lossy(&out.stderr)
     );
     assert_eq!(installs(&dir), 0, "calls: {:?}", calls(&dir));
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// rustup finds the repo's rust-toolchain.toml before an override on a parent
+/// directory, so the pin still applies and is installed.
+#[test]
+fn a_rustup_override_on_a_parent_still_installs_the_pin() {
+    let dir = scratch("override-parent");
+    let root = repo_root();
+    let rustup = rustup_with_override(
+        &dir,
+        root.parent().unwrap(),
+        "nightly-x86_64-unknown-linux-gnu",
+    );
+    let out = run_script(&rustup);
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert_eq!(installs(&dir), 1, "calls: {:?}", calls(&dir));
     let _ = std::fs::remove_dir_all(&dir);
 }
 
