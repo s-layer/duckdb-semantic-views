@@ -54,7 +54,7 @@ Function Inventory
      - :ref:`DESCRIBE SEMANTIC VIEW <ref-describe-semantic-view>`
    * - ``list_semantic_views``
      - table
-     - :ref:`SHOW SEMANTIC VIEWS <ref-show-semantic-views>` (one exception: see :ref:`ref-functions-subqueries`)
+     - :ref:`SHOW SEMANTIC VIEWS <ref-show-semantic-views>`
    * - ``list_terse_semantic_views``
      - table
      - :ref:`SHOW TERSE SEMANTIC VIEWS <ref-show-semantic-views>`
@@ -280,4 +280,4 @@ Statements as Subqueries
 
 ``CREATE``, ``DROP`` and ``ALTER SEMANTIC VIEW`` are statements, not queries, so they can't appear inside one.
 
-The table function behind ``SHOW SEMANTIC VIEWS`` is ``list_semantic_views()``, which the :ref:`GET_DDL <ref-get-ddl-examples>` recipe for dumping every view reads from.
+The :ref:`GET_DDL <ref-get-ddl-examples>` recipe for dumping every view reads from ``(SHOW SEMANTIC VIEWS)`` this way.

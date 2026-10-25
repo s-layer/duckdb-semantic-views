@@ -388,9 +388,99 @@ The materialization rows come last, after the tables, dimensions, and metrics.
 
 .. _ref-describe-subquery:
 
-.. note::
+**Filtering the output:**
 
-   Since 0.16.0, ``DESCRIBE SEMANTIC VIEW`` can be used as a subquery or in a ``WITH`` clause, like DuckDB's own ``DESCRIBE``: ``SELECT * FROM (DESCRIBE SEMANTIC VIEW order_metrics) WHERE object_kind = 'METRIC'``. See :ref:`ref-functions-subqueries`.
+.. versionadded:: 0.16.0
+
+``DESCRIBE SEMANTIC VIEW`` can be used as a subquery or in a ``WITH`` clause, like DuckDB's own ``DESCRIBE`` (see :ref:`ref-functions-subqueries`). Filter by ``object_kind`` to pick out one part of the definition. With the view above, only the materialization rows:
+
+.. code-block:: sql
+
+   SELECT object_name, property, property_value
+   FROM (DESCRIBE SEMANTIC VIEW order_metrics)
+   WHERE object_kind = 'MATERIALIZATION';
+
+.. code-block:: text
+
+   ┌─────────────┬────────────┬───────────────────────────┐
+   │ object_name │ property   │ property_value            │
+   ├─────────────┼────────────┼───────────────────────────┤
+   │ region_agg  │ TABLE      │ revenue_by_region         │
+   │ region_agg  │ DIMENSIONS │ ["region"]                │
+   │ region_agg  │ METRICS    │ ["revenue","order_count"] │
+   └─────────────┴────────────┴───────────────────────────┘
+
+Only the dimensions:
+
+.. code-block:: sql
+
+   SELECT object_name, property, property_value
+   FROM (DESCRIBE SEMANTIC VIEW order_metrics)
+   WHERE object_kind = 'DIMENSION';
+
+.. code-block:: text
+
+   ┌─────────────┬────────────┬────────────────┐
+   │ object_name │ property   │ property_value │
+   ├─────────────┼────────────┼────────────────┤
+   │ region      │ TABLE      │ orders         │
+   │ region      │ EXPRESSION │ o.region       │
+   │ region      │ DATA_TYPE  │ VARCHAR        │
+   └─────────────┴────────────┴────────────────┘
+
+How many objects of each kind the view declares:
+
+.. code-block:: sql
+
+   SELECT object_kind, count(DISTINCT object_name) AS objects
+   FROM (DESCRIBE SEMANTIC VIEW order_metrics)
+   GROUP BY object_kind
+   ORDER BY object_kind;
+
+.. code-block:: text
+
+   ┌─────────────────┬─────────┐
+   │ object_kind     │ objects │
+   ├─────────────────┼─────────┤
+   │ DIMENSION       │ 1       │
+   │ MATERIALIZATION │ 1       │
+   │ METRIC          │ 2       │
+   │ TABLE           │ 1       │
+   └─────────────────┴─────────┘
+
+The relationships of a view with more than one table:
+
+.. code-block:: sql
+
+   CREATE SEMANTIC VIEW shop AS
+   TABLES (
+       o AS orders PRIMARY KEY (id),
+       c AS customers PRIMARY KEY (id)
+   )
+   RELATIONSHIPS (
+       order_customer AS o(customer_id) REFERENCES c
+   )
+   DIMENSIONS (
+       c.name AS c.name
+   )
+   METRICS (
+       o.revenue AS SUM(o.amount)
+   );
+
+   SELECT object_name, property, property_value
+   FROM (DESCRIBE SEMANTIC VIEW shop)
+   WHERE object_kind = 'RELATIONSHIP';
+
+.. code-block:: text
+
+   ┌────────────────┬─────────────┬─────────────────┐
+   │ object_name    │ property    │ property_value  │
+   ├────────────────┼─────────────┼─────────────────┤
+   │ order_customer │ TABLE       │ orders          │
+   │ order_customer │ REF_TABLE   │ customers       │
+   │ order_customer │ FOREIGN_KEY │ ["customer_id"] │
+   │ order_customer │ REF_KEY     │ ["id"]          │
+   └────────────────┴─────────────┴─────────────────┘
 
 **Error: view does not exist:**
 
