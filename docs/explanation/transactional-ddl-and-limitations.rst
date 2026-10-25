@@ -262,37 +262,37 @@ A query string can hold semantic-view statements alongside other SQL, separated 
 
 DuckDB 2.0 runs a string's statements one at a time and parses each one just before it runs. So when one statement fails, whether on a syntax error or while it runs, the statements before it have already run and their effects stay, and nothing after it runs. The exception is a string that opens its own transaction with ``BEGIN``: the error aborts that transaction, so the statements before it are rolled back with it, and the connection needs a ``ROLLBACK`` before it runs anything else.
 
-One name still needs its own call: a view named with a reserved word such as ``select``, written without quotes. DuckDB does not accept an unquoted reserved word as a name, so in a multi-statement string a ``DROP``, ``ALTER``, ``DESCRIBE`` or ``SHOW`` naming such a view fails with :ref:`one statement per call <ref-err-one-statement>`. (``CREATE`` still accepts the name there.) Quote the name (``DROP SEMANTIC VIEW "select"; ...``) and it works there too.
+A view named with a DuckDB reserved word, such as ``select``, has to be quoted in every statement, as DuckDB requires for its own names: ``CREATE SEMANTIC VIEW "select" AS ...``. Unquoted, the statement fails with a :ref:`syntax error <ref-err-syntax>`.
 
 
 .. _explanation-txn-ddl-peg:
 
-The Parser Override Setting
-===========================
+How the Extension Joins DuckDB's Parser
+=======================================
 
-.. versionchanged:: 0.15.0
+.. versionchanged:: 0.16.0
 
-   DuckDB 2.0 parses every statement with its PEG parser and no longer has
-   ``enable_peg_parser()`` or ``disable_peg_parser()``. On DuckDB 1.5, calling
-   ``disable_peg_parser()`` reset the setting described below as a side effect.
-   That can no longer happen.
+   The semantic-view statements are part of DuckDB's own grammar on every
+   connection. Earlier releases also parsed a statement sent on its own
+   through DuckDB's parser-override hook, which the
+   ``allow_parser_override_extension`` setting could switch off. That setting
+   no longer affects semantic-view statements.
 
-``CREATE SEMANTIC VIEW`` and the other semantic-view statements are not part of DuckDB's built-in grammar. The extension adds them to it, and also handles a statement sent on its own through DuckDB's parser-override hook, which DuckDB consults only while the ``allow_parser_override_extension`` setting is ``'FALLBACK'``. The extension sets it to ``'FALLBACK'`` when it loads and leaves it in place.
+``CREATE SEMANTIC VIEW`` and the other semantic-view statements are not part of DuckDB's built-in grammar. When the extension loads, it adds them to the PEG grammar DuckDB 2.0 parses every statement with, so DuckDB finds them wherever its own statements of the same kind may appear, and reports a malformed one as a :ref:`syntax error <ref-err-syntax>` with a ``LINE 1: ... ^`` pointer, as it does for its own SQL.
 
-If a session sets ``allow_parser_override_extension`` back to ``'DEFAULT'``, semantic-view statements on that connection keep working through the grammar, with two differences:
+Two things follow from DuckDB reading the statement as tokens:
 
-- An error in a semantic-view statement shows no ``LINE 1: ... ^`` pointer in the Python client. The message is the same.
-- ``CREATE SEMANTIC VIEW`` stores each expression with its tabs turned into spaces and each run of blank lines into one line break, so ``GET_DDL`` and ``DESCRIBE`` show that spelling. The view behaves the same.
+- ``CREATE SEMANTIC VIEW`` stores each expression as DuckDB's tokens spell it: a tab becomes a space, a run of blank lines one line break, and comments are dropped. ``GET_DDL`` and ``DESCRIBE`` show that spelling. The view behaves the same.
+- A view name that is a reserved word must be quoted, as above.
 
-A ``DROP``, ``ALTER``, ``DESCRIBE`` or ``SHOW`` naming a view with an unquoted reserved word, such as ``DESCRIBE SEMANTIC VIEW select``, fails there with :ref:`parser_override is not active <ref-err-one-statement>`. Quote the name.
+DuckDB keeps the grammar a connection parses with per connection. The connection that runs ``LOAD semantic_views``, and every connection opened after it, can use the statements at once. A connection that was **already open** when another connection loaded the extension picks them up only when it next starts or finishes a query. A statement that fails to parse never starts one, so until that connection runs a statement DuckDB parses on its own, such as ``SELECT 1``, every semantic-view statement on it fails as a syntax error, and retrying it fails the same way. To avoid that, run ``LOAD semantic_views`` on the connection first (it is a no-op on a database that has the extension loaded), or open the connection after the ``LOAD``.
 
-To restore the default, run:
+.. code-block:: python
 
-.. code-block:: sql
-
-   SET allow_parser_override_extension = 'FALLBACK';
-
-Sessions that never change the setting are unaffected.
+   other = con.cursor()                 # opened before the LOAD
+   con.execute("LOAD semantic_views")
+   other.execute("LOAD semantic_views") # activates the statements on this connection
+   other.execute("SHOW SEMANTIC VIEWS")
 
 
 .. _explanation-txn-ddl-summary:
@@ -309,7 +309,7 @@ The other items on this page only matter in specific situations:
 
 - Concurrent ``CREATE IF NOT EXISTS`` from two connections can produce a constraint or commit-conflict error on one of them; catch it and treat as success.
 - Semantic views are single-catalog: run their DDL from the database you loaded the extension into, not from a ``USE``-d attached database.
-- Setting ``allow_parser_override_extension`` back to ``'DEFAULT'`` drops the error pointer and the original tabs and blank lines of ``CREATE`` expressions until you set it to ``'FALLBACK'`` again.
+- A connection that was already open when another one ran ``LOAD semantic_views`` needs one statement DuckDB parses on its own, such as its own ``LOAD semantic_views``, before it parses semantic-view statements. Retrying a failed semantic-view statement does not help.
 
 See also:
 

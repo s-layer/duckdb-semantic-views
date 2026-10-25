@@ -132,13 +132,6 @@ test-sql: build test-sql-prebuilt
 test-sql-prebuilt: _ensure-test-deps
     make test_debug
 
-# Run the SQL logic tests with every statement the grammar productions cover
-# (src/grammar/) parsed by the grammar instead of the parser override. Both
-# implementations coexist during Phase 3 of the DuckDB 2.0 epic; this holds the
-# grammar to the same tests, the DDL corpus included.
-test-sql-grammar: build _ensure-test-deps
-    SV_ROUTE_TO_GRAMMAR=1 make test_debug
-
 # Download jaffle-shop data and create DuckLake/Iceberg catalog for integration tests.
 # Idempotent — safe to run multiple times. Data files are gitignored.
 # Uses uv to run the script with its declared dependencies (PEP 723).
@@ -231,9 +224,10 @@ test-concurrent: build
 test-engine-pins:
     uv run test/integration/test_engine_pins.py
 
-# `LOAD semantic_views` twice in one process must be idempotent (parser-hook
-# re-registration guard, WR-09 D-21). Behavioral half of the structural test
-# in tests/parser_hook_idempotent.rs — both must stay wired.
+# `LOAD semantic_views` twice in one process must be idempotent (the grammar is
+# registered once per database, WR-09 D-21), and LOAD must turn the grammar on
+# for the loading connection, later connections and ones already open
+# (TECH-DEBT #103).
 test-load-idempotent: build
     uv run test/integration/test_load_extension_twice_idempotent.py
 
@@ -342,12 +336,11 @@ test-sqllogictest-guards: build _ensure-test-deps
     make patch-runner
     configure/venv/bin/python test/integration/test_sqllogictest_guards.py
 
-# Semantic-view DDL inside a multi-statement query string (TECH-DEBT #85) must
-# fail with the "one statement per call" message rather than the misleading
-# "parser_override is not active" one; the real override-off case keeps its
-# message. Exercises the whole parser_override -> default parser ->
-# parse_function chain, which a unit test cannot.
-# Check the error for semantic-view DDL in a multi-statement string
+# Semantic-view DDL inside a multi-statement query string (TECH-DEBT #85) runs,
+# an error in it shows a caret on its own line, and a reserved-word view name
+# must be quoted. Exercises DuckDB's statement splitting and the grammar
+# productions end to end, which a unit test cannot.
+# Check semantic-view DDL in a multi-statement string
 test-multi-statement-error: build
     uv run test/integration/test_multi_statement_ddl_error.py
 
@@ -360,7 +353,7 @@ test-integration: test-engine-pins test-legacy-schema-spelling test-vtab-crash t
 # Run all tests: Rust unit tests + SQL logic tests + DuckLake integration + all Python integration suites
 # Note: test-iceberg requires `just setup-ducklake` first. test-ducklake-ci uses synthetic data.
 # _ensure-test-deps runs early to catch pip version mismatches before slow builds.
-test-all: _ensure-test-deps test-rust test-sql test-sql-grammar test-ducklake-ci test-integration
+test-all: _ensure-test-deps test-rust test-sql test-ducklake-ci test-integration
 
 # Check that fuzz targets compile (requires nightly)
 check-fuzz:

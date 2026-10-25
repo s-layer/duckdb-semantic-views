@@ -76,7 +76,7 @@ GrammarExtension::Register(db, make_shared_ptr<MyGrammar>(...));  // SetTransfor
 ### ABI
 
 - **VERIFIED:** `CPP` and `C_STRUCT_UNSTABLE` both require an exact version match. `C_STRUCT` needs only equal-or-higher (`src/include/duckdb/main/extension.hpp`).
-- **INFERENCE:** we already build `C_STRUCT_UNSTABLE` against the amalgamation and pin DuckDB exactly (TECH-DEBT Known Limitation #2, `_notes/entry-point-decision.md`). A C++ `GrammarExtension` in the shim therefore adds no new pinning cost.
+- **INFERENCE:** we already build `C_STRUCT_UNSTABLE` against the amalgamation and pin DuckDB exactly (TECH-DEBT Known Limitation #2, and "Entry point and C++ linkage" in `_notes/architecture.md`). A C++ `GrammarExtension` in the shim therefore adds no new pinning cost.
 - **Risk to check in the spike:** our amalgamation copy's objects, such as the `GrammarExtension` vtable and the transform functions calling `PEGTransformer` methods, would interact with the host's `DatabaseInstance`. Today's `ParserExtension` registration already does the same thing.
 
 ### Gotchas (VERIFIED unless marked)

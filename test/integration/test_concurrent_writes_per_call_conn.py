@@ -19,7 +19,7 @@ Per-call outcomes are categorised into five buckets:
 
 - ``success`` — the operation completed without error.
 - ``already_exists`` — caught error matching the canonical "already exists"
-  wording (from the race-guard SQL emitted by ``parser_override``).
+  wording (from the race-guard SQL a CREATE lowers to).
 - ``constraint_violation`` — PK violation per TECH-DEBT 23 (D-20). When two
   ``CREATE IF NOT EXISTS`` transactions both evaluate against a snapshot
   in which the row is absent and both attempt the INSERT, the loser sees

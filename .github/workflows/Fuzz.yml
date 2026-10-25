@@ -93,9 +93,9 @@ jobs:
       matrix:
         # Keep in sync with fuzz/fuzz_targets/ AND the `fuzz-all` Justfile recipe
         # (all nine targets must be listed — fuzz_yaml_parse and
-        # fuzz_parser_override_ffi were missing here until 2026-07-02, and
+        # the then parser-override target were missing here until 2026-07-02, and
         # fuzz_where_predicate was missing from `fuzz-all` until 2026-08-04).
-        target: [fuzz_json_parse, fuzz_sql_expand, fuzz_query_names, fuzz_ddl_parse, fuzz_yaml_parse, fuzz_parser_override_ffi, fuzz_keyword_body, fuzz_render_roundtrip, fuzz_where_predicate]
+        target: [fuzz_json_parse, fuzz_sql_expand, fuzz_query_names, fuzz_ddl_parse, fuzz_yaml_parse, fuzz_create_text, fuzz_keyword_body, fuzz_render_roundtrip, fuzz_where_predicate]
     steps:
       - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@nightly

@@ -6,11 +6,10 @@
 //! into one buffer; this module decodes it. The wire format, little-endian throughout:
 //!
 //! ```text
-//! buffer := node token_count:u32 token* source
+//! buffer := node token_count:u32 token*
 //! node   := kind:u8 name_len:u32 name offset:u32 length:u32
 //!           value_len:u32 value child_count:u32 node*
 //! token  := offset:u32 length:u32 newline:u8 text_len:u32 text
-//! source := source_offset:u32 source_len:u32 source
 //! ```
 //!
 //! The tokens are the statement's own: those inside the matched node's span,
@@ -21,13 +20,10 @@
 //! the node has none. `value` is the leaf's decoded value (an identifier
 //! without its quotes, a string literal's contents) and is empty for
 //! structural nodes. `newline` is 1 when a line break comes between the token
-//! and the one before it. `source` is the statement's source text, which
-//! starts at query offset `source_offset`, when the bridge knows it, and empty
-//! otherwise: `DuckDB` gives a transform only the tokens, so the bridge passes
-//! the statement's part of the query the parser override saw on this thread,
-//! and only when every token of the statement is that query's text at the
-//! token's offset. Without it the text is rebuilt from the tokens
-//! ([`Tree::tokens_in`], [`Tree::text`]).
+//! and the one before it.
+//!
+//! `DuckDB` gives a transform only the tokens, never the query text, so a
+//! node's text is rebuilt from them ([`Tree::tokens_in`], [`Tree::text`]).
 
 /// The `ParseResultType` of a node, as `DuckDB` numbers it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -94,16 +90,6 @@ pub(crate) struct Token {
 pub(crate) struct Tree {
     pub(crate) root: Node,
     pub(crate) tokens: Vec<Token>,
-    /// The statement's source text, when the bridge has it (see the module
-    /// doc).
-    pub(crate) source: Option<Source>,
-}
-
-/// Source text that starts at byte `offset` of the query.
-#[derive(Debug, Clone)]
-pub(crate) struct Source {
-    pub(crate) offset: usize,
-    pub(crate) text: String,
 }
 
 impl Node {
@@ -156,25 +142,15 @@ impl Tree {
             .filter(move |t| t.offset >= start && t.offset + t.len <= end)
     }
 
-    /// `node`'s text, which starts at query offset `node.offset()`. With the
-    /// statement's source text (`source`) it is the node's source text.
-    /// Without it the text is rebuilt from the tokens, each at its offset, and
-    /// spaces fill the gaps between them, which held whitespace and comments; a
-    /// gap that held a line break starts with one (the tokens record only that
-    /// there was one), so tabs, comments and blank lines are lost (TECH-DEBT
-    /// #100).
+    /// `node`'s text, which starts at query offset `node.offset()`, rebuilt
+    /// from the tokens: each token sits at its offset, and spaces fill the gaps
+    /// between them, which held whitespace and comments. A gap that held a line
+    /// break starts with one (the tokens record only that there was one), so
+    /// tabs, comments and blank lines are not kept.
     pub(crate) fn text(&self, node: &Node) -> String {
-        let Some((start, len)) = node.span else {
+        let Some((start, _)) = node.span else {
             return String::new();
         };
-        if let Some(source) = &self.source {
-            let text = start
-                .checked_sub(source.offset)
-                .and_then(|at| source.text.get(at..at + len));
-            if let Some(text) = text {
-                return text.to_string();
-            }
-        }
         let mut out = String::new();
         for t in self.tokens_in(node) {
             let at = start + out.len();
@@ -210,24 +186,13 @@ impl Tree {
                 newline,
             });
         }
-        let source_offset = r.u32()? as usize;
-        let source = Some(r.string()?)
-            .filter(|s| !s.is_empty())
-            .map(|text| Source {
-                offset: source_offset,
-                text,
-            });
         if r.pos != bytes.len() {
             return Err(format!(
                 "{} trailing bytes after the parse tree",
                 bytes.len() - r.pos
             ));
         }
-        Ok(Self {
-            root,
-            tokens,
-            source,
-        })
+        Ok(Self { root, tokens })
     }
 }
 
@@ -301,15 +266,10 @@ impl Reader<'_> {
 
 #[cfg(test)]
 pub(crate) mod tests {
-    use super::{Kind, Node, Source, Token, Tree};
+    use super::{Kind, Node, Token, Tree};
 
-    /// Encode a tree in the bridge's wire format, for tests. `source` is the
-    /// source text and the query offset it starts at.
-    pub(crate) fn encode(
-        root: &Node,
-        tokens: &[(usize, &str, bool)],
-        source: (usize, &str),
-    ) -> Vec<u8> {
+    /// Encode a tree in the bridge's wire format, for tests.
+    pub(crate) fn encode(root: &Node, tokens: &[(usize, &str, bool)]) -> Vec<u8> {
         fn put_str(out: &mut Vec<u8>, s: &str) {
             out.extend_from_slice(&u32::try_from(s.len()).unwrap().to_le_bytes());
             out.extend_from_slice(s.as_bytes());
@@ -350,8 +310,6 @@ pub(crate) mod tests {
             out.push(u8::from(*newline));
             put_str(&mut out, text);
         }
-        out.extend_from_slice(&u32::try_from(source.0).unwrap().to_le_bytes());
-        put_str(&mut out, source.1);
         out
     }
 
@@ -386,7 +344,7 @@ pub(crate) mod tests {
                 leaf("Name", Kind::Identifier, 5, 4, "a b"),
             ],
         );
-        let bytes = encode(&root, &[(0, "SHOW", false), (5, "\"a b\"", true)], (0, ""));
+        let bytes = encode(&root, &[(0, "SHOW", false), (5, "\"a b\"", true)]);
         let tree = Tree::decode(&bytes).unwrap();
         assert_eq!(tree.root.rule, "SvRoot");
         assert_eq!(tree.root.children.len(), 2);
@@ -394,11 +352,6 @@ pub(crate) mod tests {
         assert_eq!(tree.tokens.len(), 2);
         assert!(!tree.tokens[0].newline);
         assert!(tree.tokens[1].newline);
-        assert!(tree.source.is_none());
-        let bytes = encode(&root, &[], (3, "SHOW\n\"a b\""));
-        let source = Tree::decode(&bytes).unwrap().source.unwrap();
-        assert_eq!(source.offset, 3);
-        assert_eq!(source.text, "SHOW\n\"a b\"");
     }
 
     #[test]
@@ -419,7 +372,6 @@ pub(crate) mod tests {
                 tok(6, "ef"),
                 tok(9, "g"),
             ],
-            source: None,
         };
         let texts: Vec<_> = tree
             .tokens_in(&tree.root)
@@ -449,7 +401,6 @@ pub(crate) mod tests {
                 tok(29, "AS", true),
                 tok(33, "y", false),
             ],
-            source: None,
         };
         let text = tree.text(&tree.root);
         assert_eq!(text, format!("CREATE x\n{}AS  y", " ".repeat(10)));
@@ -458,29 +409,22 @@ pub(crate) mod tests {
         }
     }
 
-    /// With the statement's source text the node's text is its source, tabs,
-    /// comments and blank lines included, for the statement and for a node
-    /// inside it.
+    /// The rebuilt text keeps each token at its offset, but a tab becomes a
+    /// space and a run of blank lines one line break: the tokens are all the
+    /// bridge has. (A comment is not a token at all, so it becomes spaces too.)
     #[test]
-    fn text_takes_the_source_when_the_bridge_has_it() {
-        let sql = "SELECT 1; CREATE x -- note\n\n\tAS  y";
+    fn text_drops_tabs_and_blank_lines() {
+        let sql = "SELECT 1; CREATE x\n\n\tAS  y";
         let inner = list("X", 17, sql.len() - 17, vec![]);
-        let mut tree = super::tests::tree(sql, list("R", 10, sql.len() - 10, vec![inner]));
-        tree.source = Some(Source {
-            offset: 10,
-            text: sql[10..].to_string(),
-        });
-        assert_eq!(tree.text(&tree.root), "CREATE x -- note\n\n\tAS  y");
-        assert_eq!(
-            tree.text(tree.root.find("X").unwrap()),
-            "x -- note\n\n\tAS  y"
-        );
+        let tree = super::tests::tree(sql, list("R", 10, sql.len() - 10, vec![inner]));
+        assert_eq!(tree.text(&tree.root), "CREATE x\n  AS  y");
+        assert_eq!(tree.text(tree.root.find("X").unwrap()), "x\n  AS  y");
     }
 
     #[test]
     fn decode_rejects_a_truncated_buffer() {
         let root = list("R", 0, 1, vec![]);
-        let mut bytes = encode(&root, &[], (0, ""));
+        let mut bytes = encode(&root, &[]);
         bytes.pop();
         assert!(Tree::decode(&bytes).is_err());
     }
@@ -488,7 +432,7 @@ pub(crate) mod tests {
     #[test]
     fn decode_rejects_trailing_bytes() {
         let root = list("R", 0, 1, vec![]);
-        let mut bytes = encode(&root, &[], (0, ""));
+        let mut bytes = encode(&root, &[]);
         bytes.push(0);
         assert!(Tree::decode(&bytes).unwrap_err().contains("trailing"));
     }
@@ -551,11 +495,7 @@ pub(crate) mod tests {
                 start = Some(i);
             }
         }
-        Tree {
-            root,
-            tokens,
-            source: None,
-        }
+        Tree { root, tokens }
     }
 
     pub(crate) fn root(sql: &str, rule: &str, children: Vec<Node>) -> Node {

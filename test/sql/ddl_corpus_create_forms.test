@@ -2,7 +2,7 @@
 #
 # Ports the CREATE-side cases from the `#[test]`s in `src/parse/rewrite.rs`
 # (`mod tests`): CREATE / OR REPLACE / IF NOT EXISTS modes, the CREATE front
-# door (prefix near-misses, missing name or body), view-level COMMENT, view-name
+# door (misspelt prefixes, missing name or body), view-level COMMENT, view-name
 # capture, `FROM YAML` inline with dollar quoting, `FROM YAML FILE`, and the
 # relationship enrichment that runs at CREATE. The non-CREATE cases from the same
 # module live in `ddl_corpus_statements_a.test` / `ddl_corpus_statements_b.test`.
@@ -17,7 +17,7 @@
 #             (comments inside expressions, case folding, quoting).
 #
 # The `FROM YAML FILE` rows write their YAML fixtures to
-# `__TEST_DIR__/ddl_corpus_s_*.yaml` with COPY, as `peg_compat.test` does.
+# `__TEST_DIR__/ddl_corpus_s_*.yaml` with COPY.
 
 require semantic_views
 
@@ -253,24 +253,24 @@ DROP SEMANTIC VIEW ws3
 statement ok
 DROP SEMANTIC VIEW x2
 
-# --- the CREATE front door: near-miss prefixes, missing name, missing or malformed body ---
+# --- the CREATE front door: misspelt prefixes, missing name, missing or malformed body ---
 
-# S-310: rewrite.rs::sv_parse_function_rust_returns_1_for_near_miss — `CRETAE SEMANTIC VIEW` (transposed) [text]
+# S-310: rewrite.rs::sv_parse_function_rust_returns_1_for_near_miss — `CRETAE SEMANTIC VIEW` (transposed) gets DuckDB's syntax error at the misspelt keyword [text]
 statement error
 CRETAE SEMANTIC VIEW v AS TABLES (t AS dcs_orders PRIMARY KEY (id)) DIMENSIONS (t.r AS t.region) METRICS (t.m AS SUM(1))
 ----
-Did you mean 'CREATE SEMANTIC VIEW'?
+syntax error at or near "CRETAE"
 
-# S-311: rewrite.rs::test_near_miss_creat, test_near_miss_position_zero — `CREAT SEMANTIC VIEW` (dropped letter) [text]
+# S-311: rewrite.rs::test_near_miss_creat, test_near_miss_position_zero — `CREAT SEMANTIC VIEW` (dropped letter) gets DuckDB's syntax error at the misspelt keyword [text]
 statement error
 CREAT SEMANTIC VIEW x (tables := [])
 ----
-Did you mean 'CREATE SEMANTIC VIEW'?
+syntax error at or near "CREAT"
 
 statement error
 CREAT SEMANTIC VIEW x ()
 ----
-Did you mean 'CREATE SEMANTIC VIEW'?
+syntax error at or near "CREAT"
 
 # S-312: rewrite.rs::test_too_short — `create semantic vie` [syntax]
 statement error
@@ -1308,7 +1308,7 @@ CREATE SEMANTIC VIEW dup_short AS TABLES (o AS dcs_orders PRIMARY KEY (id)) DIME
 ----
 duplicate name 'r': dimension 'r' collides with dimension 'r' -- dimension, metric, and fact names share one namespace and are case-insensitive (quoting does not make a name distinct)
 
-# S-391: rewrite.rs::write_error_to_buffer_truncates_at_char_boundary — an error message longer than the 1024-byte hook buffer is cut at a UTF-8 character boundary, so it still decodes (the dimension name is 600 two-byte `é`; today the message stops after 1022 bytes, mid-name, before "collides ...": the regex pins exactly that, 503 `é` and nothing after them) PRE-EXISTING (TECH-DEBT #98) [text]
+# S-391: rewrite.rs::write_error_to_buffer_truncates_at_char_boundary — an error message longer than 1024 bytes reaches the user whole (the dimension name is 600 two-byte `é`; the message used to stop after 1022 bytes, mid-name, before "collides ...", TECH-DEBT #98) [text]
 statement ok
 CREATE SEMANTIC VIEW long_ok AS TABLES (o AS dcs_orders PRIMARY KEY (id)) DIMENSIONS (o.éééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééé AS o.region)
 
@@ -1320,7 +1320,7 @@ SELECT strlen(line) FROM dcs_ddl('long_ok') WHERE line LIKE '%AS o.region';
 statement error
 CREATE SEMANTIC VIEW long_dup AS TABLES (o AS dcs_orders PRIMARY KEY (id)) DIMENSIONS (o.éééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééé AS o.region, o.éééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééé AS o.id)
 ----
-<REGEX>:^Parser Error: duplicate name 'é{503}$
+<REGEX>:^Parser Error: duplicate name 'é{600}': dimension 'é{600}' collides with dimension 'é{600}'
 
 query TTT nosort
 SELECT * FROM dcs_views() WHERE name IN ('dup_short', 'long_dup');

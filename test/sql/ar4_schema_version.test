@@ -2,7 +2,7 @@
 #
 # Covers the end-to-end integration paths the Rust unit tests cannot:
 #   A. CREATE / CREATE OR REPLACE inject schema_version into the stored JSON
-#      via the parser_override json_merge_patch emission.
+#      via the CREATE production's json_merge_patch emission.
 #   B. A legacy definition whose relationship lacks fk_columns is rejected at
 #      query time (SG-7) instead of silently mis-aggregating.
 

@@ -115,8 +115,7 @@ def test_multi_db_isolation():
                 f"db2 should see only view_db2, got: {db2_views}"
             )
 
-            # DESCRIBE is rewritten on the parser_override success path
-            # (v0.8.0 Phase 59 unification) into a SELECT against the
+            # DESCRIBE lowers (through its grammar production) into a SELECT against the
             # read-side table function. The original cross-DB-routing bug
             # this test pins lived in the per-call function_info lookup;
             # the fix is verified by both DBs returning their own view.
@@ -148,8 +147,8 @@ def test_multi_db_isolation():
                 pass
 
             # Issuing SHOW SEMANTIC VIEWS alternately on both connections
-            # exercises per-call routing on the parser_override success path
-            # (rewritten to SELECT against the read-side table function),
+            # exercises per-call routing on the grammar's SHOW production
+            # (lowered to a SELECT against the read-side table function),
             # making sure each connection's SHOW resolves against its own DB.
             # Column 1 of the SHOW result is `name` (column 0 is `created_on`).
             for _ in range(3):

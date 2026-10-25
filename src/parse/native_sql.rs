@@ -1,23 +1,23 @@
-//! Native-SQL emission for the `parser_override` DDL path (AR-1).
+//! Native-SQL emission for semantic-view DDL (AR-1).
 //!
-//! Every recognised CREATE / DROP / ALTER semantic-view statement is rewritten
+//! Every planned CREATE / DROP / ALTER semantic-view statement is lowered
 //! here into native `INSERT` / `DELETE` / `UPDATE` against
 //! `semantic_layer._definitions` (plus pure-SQL existence/collision guards), so
 //! the writes run on the caller's connection inside the caller's transaction.
-//! Read-side DDL (DESCRIBE / SHOW) is passed through unchanged by
-//! [`rewrite_to_native_sql`], the dispatch entry point.
+//! Read-side DDL (DESCRIBE / SHOW) arrives already lowered and passes through
+//! [`lower_action`], the dispatch entry point, unchanged.
 //!
 //! SQL-string escaping is handled by the [`crate::sql_lit::SqlLit`] newtype
 //! (R-1): names are escaped exactly once at this dispatch boundary via
 //! `SqlLit::escape`, and the emission helpers take `&SqlLit` so a raw `&str`
-//! cannot be embedded by mistake. The emission/rewrite functions are
-//! `extension`-gated; `rewrite_to_native_sql` is re-exported from the parent
-//! module for the FFI entry points. The guard-SELECT builders in
-//! `crate::catalog::writes` are compiled unconditionally so their wording
-//! unit tests run under `cargo test`.
+//! cannot be embedded by mistake. The emission functions are
+//! `extension`-gated; `lower_action` is re-exported from the parent module for
+//! the grammar bridge. The guard-SELECT builders in `crate::catalog::writes`
+//! are compiled unconditionally so their wording unit tests run under
+//! `cargo test`.
 
 #[cfg(feature = "extension")]
-use super::{plan_rewrite, RewriteAction};
+use super::RewriteAction;
 #[cfg(feature = "extension")]
 use crate::catalog::writes::{
     create_target_schema_expr, current_database_guard_select, definitions_table_guard_select,
@@ -89,71 +89,12 @@ fn current_database_guard(view: &ViewRef) -> String {
 }
 
 // ---------------------------------------------------------------------------
-// v0.8.x: native-SQL rewrite for parser_override (transactional DDL)
+// v0.8.x: native-SQL lowering of semantic-view DDL (transactional DDL)
 // ---------------------------------------------------------------------------
-//
-// `parser_override` is the sole semantic-view DDL entry point. Every recognised
-// statement is rewritten here and re-executed on the caller's connection by
-// DuckDB — the legacy parse_function / sv_ddl_internal fallback was retired
-// in v0.8.0.
-//
-// Rewriting is dispatched by shape:
-//
-//   * CREATE / CREATE OR REPLACE / CREATE IF NOT EXISTS
-//     CREATE ... FROM YAML FILE '/path/...'
-//     DROP / DROP IF EXISTS
-//     ALTER ... RENAME TO / SET COMMENT / UNSET COMMENT
-//       → emitted as native INSERT / DELETE / UPDATE against
-//         `semantic_layer._definitions`, so writes participate in the
-//         caller's transaction (the v0.8.0 ADBC autocommit=false fix).
-//
-//   * DESCRIBE / SHOW SEMANTIC * / GET_DDL / READ_YAML_FROM_SEMANTIC_VIEW
-//       → passed through as `SELECT * FROM <existing_read_side_table_function>(...)`
-//         (or the same SQL with WHERE/LIMIT clauses appended). DuckDB re-parses
-//         and executes on the caller's connection. The read-side table functions
-//         themselves read the catalog in the caller's transaction too, through
-//         the storage layer rather than a statement (TECH-DEBT #19).
-//
-//   * Anything else (`validate_and_rewrite` returns None)
-//       → `Ok(None)`; the C++ shim returns DISPLAY_ORIGINAL_ERROR and DuckDB's
-//         default parser handles it.
-//
-// AR-7: this used to take `&OverrideContext`, but that struct was empty after
-// Phase 65 Plan 06 moved CREATE/DROP/ALTER existence checks into the emitted
-// SQL (pure-SQL race guards on the caller's connection) — so the parameter was
-// dead and has been removed. Under `cargo test` (no extension feature) this
-// path is excluded entirely (this entry point is feature-gated; its sole
-// caller — `sv_parser_override_rust` — is `extension`-only).
-//
-// INVARIANT (AR-5) — purity / idempotence. This function MUST be a pure
-// function of `query` (and committed catalog state): for a given input it
-// must produce the same `Ok(Some)` / `Ok(None)` / `Err(message, position)`
-// result on every call, with no dependence on call order, wall-clock time,
-// `HashMap` iteration order, or any mutable process state. The error-reporting
-// layer depends on this: after the override path runs, DuckDB's failed default
-// parser drives `sv_parse_function_rust`, which calls this function a SECOND
-// time (via `run_validation_for_parse_function`) purely to recover the same
-// `Err` message and caret position the override produced. If the two runs can
-// diverge, the caret error shown to the user no longer matches the rewrite
-// that actually ran. Any future change that reads mutable state or introduces
-// nondeterminism here breaks that contract and must instead cache the first
-// run's `(query -> result)` rather than re-deriving it.
-#[cfg(feature = "extension")]
-pub(crate) fn rewrite_to_native_sql(query: &str) -> Result<Option<String>, ParseError> {
-    // Not semantic-view DDL: DuckDB's own parser handles it. (Statements that
-    // only *query* a semantic view used to be rewritten here to carry the
-    // caller's search path; the read functions now take it from the caller's
-    // context themselves.)
-    let Some(action) = plan_rewrite(query)? else {
-        return Ok(None);
-    };
-    lower_action(action).map(Some)
-}
 
 /// Lower one planned statement to the SQL `DuckDB` runs in its place: the read
-/// SQL for DESCRIBE / SHOW, or the guarded native DML for a write. Shared by
-/// the parser override ([`rewrite_to_native_sql`]) and the grammar productions
-/// (`crate::grammar`), so both paths run the same statements.
+/// SQL for DESCRIBE / SHOW, or the guarded native DML for a write. The grammar
+/// productions (`crate::grammar`) call it for every statement they own.
 #[cfg(feature = "extension")]
 pub(crate) fn lower_action(action: RewriteAction) -> Result<String, ParseError> {
     // Every `<database>.` prefix the statement writes must name the current
@@ -291,7 +232,7 @@ fn emit_native_create_sql(
     // `current_schema()` capture is embedded as SQL inside the emitted
     // INSERT via `json_merge_patch` so it resolves on the CALLER's
     // connection at INSERT-time, preserving D-21 transactional contract
-    // without parser_override holding a long-lived handle. CREATE-time
+    // without the extension holding a long-lived handle. CREATE-time
     // column type inference (`column_type_names`, fact `output_type`)
     // is deferred to read-side bind under Plan 05's C++ Catalog API
     // migration (D-17).
@@ -503,13 +444,13 @@ fn emit_native_create_from_yaml_file(
 // which makes the escaped-vs-raw distinction a compile-time contract instead
 // of a naming convention (R-1). The old free `escape_sql_arg` /
 // `unescape_sql_arg` pair was removed: names are escaped exactly once at the
-// `rewrite_to_native_sql` boundary via `SqlLit::escape`, and the comment now
+// `lower_action` boundary via `SqlLit::escape`, and the comment now
 // flows RAW to `rewrite_alter_comment` (no escape→unescape round-trip).
 
 #[cfg(feature = "extension")]
 // Infallible today, but kept `Result`-returning for symmetry with the fallible
 // `rewrite_*` siblings (e.g. `rewrite_alter_comment`) dispatched through the
-// same `?`-chained match in `rewrite_to_native_sql`; diverging one signature
+// same `?`-chained match in `lower_action`; diverging one signature
 // would fragment that dispatch.
 #[allow(clippy::unnecessary_wraps)]
 fn rewrite_drop(view: &ViewRef, if_exists: bool) -> Result<String, ParseError> {

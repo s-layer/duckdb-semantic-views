@@ -2,7 +2,7 @@
 //! (AR-1).
 //!
 //! These functions build the pure-SQL existence/collision guards that the
-//! `parser_override` DROP/ALTER emitters (`crate::parse::native_sql`) prepend
+//! DROP/ALTER emitters (`crate::parse::native_sql`) prepend
 //! to their DML. They live here, next to the table identity
 //! ([`super::DEFINITIONS_TABLE`]) and the canonical "does not exist" wording
 //! ([`super::view_not_found_msg`]) they mirror, rather than in the parse layer
@@ -121,7 +121,7 @@ pub(crate) const SEARCH_PATH_SQL: &str = "list_concat(current_schemas(false), [c
 /// worse, for a dotted name — parses as a different qualified reference. It is
 /// a separate argument rather than derived here because `name` has already been
 /// SQL-escaped, and identifier quoting has to happen before that (R-1: names
-/// are escaped exactly once, at the `rewrite_to_native_sql` boundary).
+/// are escaped exactly once, at the `lower_action` boundary).
 #[cfg_attr(not(any(feature = "extension", test)), allow(dead_code))]
 pub(crate) fn resolved_schema_expr(
     target: &SchemaTarget,
@@ -179,7 +179,7 @@ pub(crate) fn row_predicate(name: &SqlLit, schema_expr: &str) -> String {
 /// Build the existence-guard SELECT for non-IF-EXISTS DROP/ALTER.
 ///
 /// `name` is the view name already `''`-escaped as a [`SqlLit`] (produced
-/// via `SqlLit::escape` at the `rewrite_to_native_sql` boundary).
+/// via `SqlLit::escape` at the `lower_action` boundary).
 ///
 /// The emitted statement errors with `semantic view '<name>' does not
 /// exist` when the row is missing from the catalog table (`DEFINITIONS_TABLE`).
@@ -610,7 +610,7 @@ mod tests {
     #[test]
     fn resolved_schema_of_an_unqualified_reference_follows_the_search_path() {
         let e = unqualified("v");
-        // The same expression the parser override hands the read side, so
+        // The same path the read side reads off the caller's context, so
         // `DROP SEMANTIC VIEW v` and `semantic_view('v')` cannot disagree
         // about which `v` they mean.
         assert!(

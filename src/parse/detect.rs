@@ -1,16 +1,13 @@
-//! Prefix detection for semantic-view DDL statements.
+//! Prefix detection for `CREATE … SEMANTIC VIEW` (AR-1).
 //!
-//! Extracted from `parse` (AR-1). Everything here answers "is this one of our
-//! statements, and if so which kind?" without rewriting anything: keyword
-//! prefix matching ([`match_keyword_prefix`]), comment/whitespace skipping
-//! ([`skip_leading_whitespace`]), the longest-first prefix table
-//! ([`detect_ddl_prefix`]), the public detection entry points
-//! ([`detect_ddl_kind`], [`detect_semantic_view_ddl`]), and fuzzy near-miss
-//! suggestion ([`detect_near_miss`]).
+//! The grammar productions (`crate::grammar`) recognise every semantic-view
+//! statement. CREATE's body still goes to the Rust body parser as text, and
+//! the helpers here find where that text's prefix ends: keyword prefix
+//! matching ([`match_keyword_prefix`]), whitespace skipping
+//! ([`skip_leading_whitespace`]) and the longest-first CREATE prefix table
+//! ([`detect_create_prefix`]).
 
 use super::DdlKind;
-use super::{PARSE_DETECTED, PARSE_NOT_OURS};
-use crate::errors::ParseError;
 use crate::util::is_ident_byte;
 
 /// Match a fixed sequence of keyword tokens at the start of `input`, tolerating
@@ -29,7 +26,8 @@ use crate::util::is_ident_byte;
 /// If keyword[0] doesn't match at the start (after whitespace), returns None.
 ///
 /// Note: only handles ASCII whitespace (0x09, 0x0A, 0x0B, 0x0C, 0x0D, 0x20).
-/// Unicode whitespace is handled by `DuckDB`'s `StripUnicodeSpaces` before the hook fires.
+/// In the extension the text is rebuilt from `DuckDB`'s tokens, which carry no
+/// Unicode whitespace.
 pub(crate) fn match_keyword_prefix(input: &[u8], keywords: &[&[u8]]) -> Option<usize> {
     let mut pos = 0;
     for (i, &kw) in keywords.iter().enumerate() {
@@ -80,25 +78,23 @@ pub(crate) fn match_keyword_prefix(input: &[u8], keywords: &[&[u8]]) -> Option<u
 /// actually apply (P-5, code-review 2026-07-11).
 ///
 /// The returned offset is into the *original* (blanked, length-preserving)
-/// slice, so v0.5.1 error-caret positions continue to reference the original
-/// query string after leading whitespace/comments are consumed. This is what
-/// keeps parser-hook compatibility with dbt-duckdb (and any other tool that
-/// prepends a query annotation comment): the comment is blanked upstream, then
-/// skipped here as whitespace.
+/// slice, so error-caret positions still point into the statement's text after
+/// leading whitespace and comments are skipped.
 pub(crate) fn skip_leading_whitespace(input: &str) -> usize {
     input.bytes().take_while(u8::is_ascii_whitespace).count()
 }
 
-/// Detect the DDL kind and consumed prefix byte count from a query string.
+/// Detect which CREATE form a statement is, and how many bytes its prefix
+/// takes.
 ///
 /// The input must already be trimmed of leading/trailing whitespace and
 /// trailing semicolons. Returns `Some((DdlKind, consumed_bytes))` where
 /// `consumed_bytes` is the number of bytes consumed by the matched prefix
 /// (including any inter-keyword whitespace in the input). Returns `None`
-/// if no prefix matches.
+/// if the statement is not a CREATE.
 ///
 /// Longest-first ordering prevents prefix overlap.
-pub(crate) fn detect_ddl_prefix(trimmed: &str) -> Option<(DdlKind, usize)> {
+pub(crate) fn detect_create_prefix(trimmed: &str) -> Option<(DdlKind, usize)> {
     let b = trimmed.as_bytes();
 
     // CREATE OR REPLACE SEMANTIC VIEW (5 keywords) -- before CREATE SEMANTIC VIEW
@@ -117,203 +113,50 @@ pub(crate) fn detect_ddl_prefix(trimmed: &str) -> Option<(DdlKind, usize)> {
     if let Some(n) = match_keyword_prefix(b, &[b"create", b"semantic", b"view"]) {
         return Some((DdlKind::Create, n));
     }
-    // DROP SEMANTIC VIEW IF EXISTS (5 keywords) -- before DROP SEMANTIC VIEW
-    if let Some(n) = match_keyword_prefix(b, &[b"drop", b"semantic", b"view", b"if", b"exists"]) {
-        return Some((DdlKind::DropIfExists, n));
-    }
-    // DROP SEMANTIC VIEW (3 keywords)
-    if let Some(n) = match_keyword_prefix(b, &[b"drop", b"semantic", b"view"]) {
-        return Some((DdlKind::Drop, n));
-    }
-    // ALTER SEMANTIC VIEW IF EXISTS (5 keywords) -- before ALTER SEMANTIC VIEW
-    if let Some(n) = match_keyword_prefix(b, &[b"alter", b"semantic", b"view", b"if", b"exists"]) {
-        return Some((DdlKind::AlterIfExists, n));
-    }
-    // ALTER SEMANTIC VIEW (3 keywords)
-    if let Some(n) = match_keyword_prefix(b, &[b"alter", b"semantic", b"view"]) {
-        return Some((DdlKind::Alter, n));
-    }
-    // DESCRIBE SEMANTIC VIEW (3 keywords)
-    if let Some(n) = match_keyword_prefix(b, &[b"describe", b"semantic", b"view"]) {
-        return Some((DdlKind::Describe, n));
-    }
-    // DESC SEMANTIC VIEW (3 keywords) — Snowflake documents `{DESCRIBE | DESC}`
-    // and DuckDB itself accepts the `DESC` abbreviation, so both conventions
-    // support it (F-10, code-review 2026-07-16). The mandatory whitespace
-    // between prefix keywords keeps this from shadowing `DESCRIBE`: matching
-    // `desc` against `DESCRIBE...` leaves `RIBE...` where whitespace is
-    // required before `semantic`, so that path falls through to the match above.
-    if let Some(n) = match_keyword_prefix(b, &[b"desc", b"semantic", b"view"]) {
-        return Some((DdlKind::Describe, n));
-    }
-    // SHOW COLUMNS IN SEMANTIC VIEW (5 keywords) -- before all SHOW SEMANTIC matches
-    if let Some(n) = match_keyword_prefix(b, &[b"show", b"columns", b"in", b"semantic", b"view"]) {
-        return Some((DdlKind::ShowColumns, n));
-    }
-    // SHOW TERSE SEMANTIC VIEWS (4 keywords) -- before SHOW SEMANTIC VIEWS
-    if let Some(n) = match_keyword_prefix(b, &[b"show", b"terse", b"semantic", b"views"]) {
-        return Some((DdlKind::ShowTerse, n));
-    }
-    // SHOW SEMANTIC DIMENSIONS (3 keywords) -- before SHOW SEMANTIC VIEWS
-    if let Some(n) = match_keyword_prefix(b, &[b"show", b"semantic", b"dimensions"]) {
-        return Some((DdlKind::ShowDimensions, n));
-    }
-    // SHOW SEMANTIC METRICS (3 keywords)
-    if let Some(n) = match_keyword_prefix(b, &[b"show", b"semantic", b"metrics"]) {
-        return Some((DdlKind::ShowMetrics, n));
-    }
-    // SHOW SEMANTIC FACTS (3 keywords)
-    if let Some(n) = match_keyword_prefix(b, &[b"show", b"semantic", b"facts"]) {
-        return Some((DdlKind::ShowFacts, n));
-    }
-    // SHOW SEMANTIC MATERIALIZATIONS (3 keywords) -- before SHOW SEMANTIC VIEWS
-    if let Some(n) = match_keyword_prefix(b, &[b"show", b"semantic", b"materializations"]) {
-        return Some((DdlKind::ShowMaterializations, n));
-    }
-    // SHOW SEMANTIC VIEWS (3 keywords)
-    if let Some(n) = match_keyword_prefix(b, &[b"show", b"semantic", b"views"]) {
-        return Some((DdlKind::Show, n));
-    }
 
     None
 }
 
-/// Detect the DDL kind from a query string.
-///
-/// Returns `Some(DdlKind)` if the query matches one of the semantic view
-/// DDL prefixes, `None` otherwise. Uses longest-first ordering to avoid
-/// prefix overlap (e.g. "create or replace semantic view" before
-/// "create semantic view").
-///
-/// Tolerates arbitrary ASCII whitespace (spaces, tabs, newlines, carriage
-/// returns, vertical tabs, form feeds) between prefix keywords.
-#[must_use]
-pub fn detect_ddl_kind(query: &str) -> Option<DdlKind> {
-    // PA-7: comment-blind detection — also lets a comment sit between
-    // prefix keywords (`CREATE /* x */ SEMANTIC VIEW`).
-    let blanked = crate::util::blank_sql_comments(query);
-    let query = blanked.as_ref();
-    let lead = skip_leading_whitespace(query);
-    let trimmed = query[lead..].trim_end().trim_end_matches(';').trim();
-    detect_ddl_prefix(trimmed).map(|(kind, _)| kind)
-}
-
-/// Detect whether a query is any semantic view DDL statement.
-///
-/// Returns `PARSE_DETECTED` for any semantic view DDL form, `PARSE_NOT_OURS`
-/// otherwise. Handles case variations, leading/trailing whitespace, and
-/// trailing semicolons.
-#[must_use]
-pub fn detect_semantic_view_ddl(query: &str) -> u8 {
-    if detect_ddl_kind(query).is_some() {
-        PARSE_DETECTED
-    } else {
-        PARSE_NOT_OURS
-    }
-}
-
-/// Known DDL prefixes for fuzzy near-miss matching.
-const DDL_PREFIXES: &[&str] = &[
-    "create semantic view",
-    "create or replace semantic view",
-    "create semantic view if not exists",
-    "drop semantic view",
-    "drop semantic view if exists",
-    "describe semantic view",
-    "show semantic views",
-    "show terse semantic views",
-    "show columns in semantic view",
-    "alter semantic view",
-    "alter semantic view if exists",
-    "show semantic dimensions",
-    "show semantic dimensions for metric",
-    "show semantic metrics",
-    "show semantic facts",
-    "show semantic materializations",
-];
-
-/// Detect near-miss DDL prefixes using fuzzy matching.
-///
-/// If the beginning of the query is close (Levenshtein distance <= 3) to one
-/// of the known DDL prefixes (see `DDL_PREFIXES`), returns a `ParseError`
-/// suggesting the correct prefix. Returns `None` if no near-miss is found.
-#[must_use]
-pub fn detect_near_miss(query: &str) -> Option<ParseError> {
-    // PA-7: comment-blind near-miss detection.
-    let blanked = crate::util::blank_sql_comments(query);
-    let query = blanked.as_ref();
-    let lead = skip_leading_whitespace(query);
-    let trimmed = query[lead..].trim_end();
-    let trimmed_no_semi = trimmed.trim_end_matches(';').trim();
-    let lower = trimmed_no_semi.to_ascii_lowercase();
-
-    let mut best: Option<(usize, &str)> = None;
-
-    for &prefix in DDL_PREFIXES {
-        // Extract the first N words from the query where N is the number of
-        // words in this DDL prefix. This ensures we compare apples-to-apples
-        // regardless of what follows the prefix in the query.
-        let prefix_word_count = prefix.split_whitespace().count();
-        let query_words: Vec<&str> = lower.split_whitespace().collect();
-        let query_slice_words = &query_words[..query_words.len().min(prefix_word_count)];
-        let query_slice = query_slice_words.join(" ");
-
-        let dist = strsim::levenshtein(&query_slice, prefix);
-        if dist <= 3 {
-            if let Some((best_dist, _)) = best {
-                if dist < best_dist {
-                    best = Some((dist, prefix));
-                }
-            } else {
-                best = Some((dist, prefix));
-            }
-        }
-    }
-
-    best.map(|(_, prefix)| {
-        let trim_offset = lead;
-        ParseError {
-            message: format!(
-                "Unknown statement. Did you mean '{}'?",
-                prefix.to_uppercase()
-            ),
-            position: Some(trim_offset),
-        }
-    })
-}
-
 #[cfg(test)]
 mod tests {
-    use super::*;
+    use super::detect_create_prefix;
+    use crate::parse::DdlKind;
 
-    // F-10 (code-review 2026-07-16): `DESC` is a Snowflake- and DuckDB-accepted
-    // abbreviation of `DESCRIBE`, so `DESC SEMANTIC VIEW` maps to the same kind.
+    fn kind(s: &str) -> Option<DdlKind> {
+        detect_create_prefix(s).map(|(k, _)| k)
+    }
+
     #[test]
-    fn desc_abbreviation_maps_to_describe() {
+    fn each_create_form_is_detected_longest_first() {
+        assert_eq!(kind("CREATE SEMANTIC VIEW v AS"), Some(DdlKind::Create));
         assert_eq!(
-            detect_ddl_kind("DESC SEMANTIC VIEW my_view"),
-            Some(DdlKind::Describe)
+            kind("CREATE OR REPLACE SEMANTIC VIEW v AS"),
+            Some(DdlKind::CreateOrReplace)
         );
-        // Case-insensitive and whitespace-tolerant, like every other prefix.
         assert_eq!(
-            detect_ddl_kind("desc   semantic   view v"),
-            Some(DdlKind::Describe)
+            kind("CREATE SEMANTIC VIEW IF NOT EXISTS v AS"),
+            Some(DdlKind::CreateIfNotExists)
         );
     }
 
     #[test]
-    fn describe_full_spelling_still_maps_to_describe() {
-        // The `DESC` arm must not shadow the full `DESCRIBE` spelling: matching
-        // `desc` against `DESCRIBE` leaves `RIBE` where whitespace is required.
-        assert_eq!(
-            detect_ddl_kind("DESCRIBE SEMANTIC VIEW my_view"),
-            Some(DdlKind::Describe)
-        );
+    fn keywords_match_in_any_case_and_across_any_whitespace() {
+        let (k, n) = detect_create_prefix("create\t Semantic\n\r VIEW v").unwrap();
+        assert_eq!(k, DdlKind::Create);
+        assert_eq!(n, "create\t Semantic\n\r VIEW".len());
     }
 
     #[test]
-    fn desc_requires_word_boundary() {
-        // `DESCXYZ SEMANTIC VIEW` is neither DESC nor DESCRIBE.
-        assert_eq!(detect_ddl_kind("DESCXYZ SEMANTIC VIEW v"), None);
+    fn a_keyword_must_end_at_a_word_boundary() {
+        assert_eq!(kind("CREATE SEMANTIC VIEWS v"), None);
+        assert_eq!(kind("CREATE SEMANTICS VIEW v"), None);
+    }
+
+    #[test]
+    fn other_statements_are_not_creates() {
+        assert_eq!(kind("DROP SEMANTIC VIEW v"), None);
+        assert_eq!(kind("SELECT 1"), None);
+        assert_eq!(kind("CREATE VIEW v AS SELECT 1"), None);
+        assert_eq!(kind(""), None);
     }
 }

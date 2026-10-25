@@ -4,7 +4,7 @@
 //! Prior to v0.8.0 this module also maintained an in-memory `HashMap` mirror
 //! that DDL writes updated alongside the catalog table. v0.8.0 removed the
 //! mirror so catalog reads always see the same state `DuckDB` does — which is
-//! a prerequisite for transactional DDL: the parser-override path emits
+//! a prerequisite for transactional DDL: the grammar productions emit
 //! `INSERT/DELETE/UPDATE` against `_definitions` directly on the caller's
 //! connection, and any cached mirror would diverge across rollback.
 
@@ -1168,8 +1168,8 @@ mod tests {
 
         #[test]
         fn without_a_search_path_ambiguity_is_still_an_error() {
-            // No path means the call bypassed the parser override — a directly
-            // invoked table function, or SQL emitted before injection existed.
+            // No path means no caller context gave one — SQL emitted before the
+            // read side took the path from the caller's context.
             // Guessing would be wrong; the pre-injection rule still applies.
             let all = rows(&[("a", "DEF_A"), ("b", "DEF_B")]);
             let err = resolve_in_search_path(&parse_view_ref("v").unwrap(), &all, &[]).unwrap_err();

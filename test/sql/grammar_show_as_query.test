@@ -1,10 +1,10 @@
 # SHOW and DESCRIBE SEMANTIC statements are queries wherever DuckDB accepts one
 # (TECH-DEBT #77).
 #
-# The parser override rewrites a statement only when the statement *starts*
-# with our syntax, so SHOW nested in a subquery, a CTE or a view body failed
-# with a generic syntax error. The grammar extension adds SHOW as a production
-# of DuckDB's own grammar, so the nesting comes from DuckDB.
+# The grammar extension adds SHOW as a production of DuckDB's own grammar, so
+# SHOW can nest in a subquery, a CTE or a view body as any query can. (The
+# parser override this replaced only saw statements that *started* with our
+# syntax.)
 
 require semantic_views
 
@@ -148,7 +148,7 @@ gq_m
 
 # --- IN <schema>.<view> where the schema is named like a scope keyword ---------
 # ACCOUNT, SCHEMA and DATABASE are not reserved, so each can name a schema.
-# `IN account.v` is that schema's view, as it is for the parser override; the
+# `IN account.v` is that schema's view; the
 # grammar used to take the keyword as the scope and fail on `.v`.
 
 statement ok
@@ -232,7 +232,7 @@ SELECT * FROM (SHOW SEMANTIC VIEWS LIMIT -1);
 ----
 LIMIT must be a non-negative integer, got: '-1'
 
-# A leading '+' is accepted, as the parser override's integer parse accepts it.
+# A leading '+' is accepted: the count is read with Rust's integer parse, which takes it.
 query I
 SELECT count(*) FROM (SHOW SEMANTIC VIEWS LIMIT +1);
 ----
@@ -251,8 +251,7 @@ SELECT * FROM (DESCRIBE SEMANTIC VIEW gq_nope);
 ----
 semantic view 'gq_nope' does not exist
 
-# A pattern is a plain '...' literal, as for the parser override: DuckDB's
-# string literal also takes $$...$$ and E'...', which the grammar refuses.
+# A pattern is a plain '...' literal: DuckDB's string literal also takes $$...$$ and E'...', which the grammar refuses.
 statement error
 SELECT * FROM (SHOW SEMANTIC VIEWS LIKE $$gq%$$);
 ----
@@ -288,8 +287,7 @@ SHOW SEMANTIC VIEWS IN SCHEMA main STARTS WITH E'gq';
 ----
 Expected single-quoted string
 
-# A name is one run of text, as for the parser override: whitespace or a
-# comment inside a dotted name ends it, and the rest is reported. The rest
+# A name is one run of text: whitespace or a comment inside a dotted name ends it, and the rest is reported. The rest
 # stops at the end of the SHOW, not of the query around it.
 statement error
 SELECT * FROM (DESCRIBE SEMANTIC VIEW main . gq_m);

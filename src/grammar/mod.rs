@@ -11,12 +11,9 @@
 //! The `SEMANTIC_VIEW(...)` query construct ([`query`]) is a table reference
 //! rather than a statement, and only the grammar has it.
 //!
-//! The parser override still runs first and still owns every statement that
-//! starts with our syntax. The grammar takes what the override cannot reach,
-//! such as SHOW inside a subquery, and everything when overrides are off
-//! (`SET allow_parser_override_extension = 'DEFAULT'`), which is how the DDL
-//! corpus is run against both while they coexist (`.planning/PEG-PARSER-EPIC.md`,
-//! Phase 3).
+//! These productions are the extension's only parser: a statement none of
+//! them matches gets `DuckDB`'s own syntax error, with its caret
+//! (`.planning/PEG-PARSER-EPIC.md`, Phase 3).
 
 mod create;
 mod query;
@@ -113,9 +110,8 @@ pub(crate) fn changes() -> String {
     out
 }
 
-/// Plan one matched statement rule: the same [`RewriteAction`] the parser
-/// override plans for the statement, which `crate::parse::lower_action` turns
-/// into SQL.
+/// Plan one matched statement rule as a [`RewriteAction`], which
+/// `crate::parse::lower_action` turns into SQL.
 #[cfg_attr(not(feature = "extension"), allow(dead_code))]
 pub(crate) fn transform(tree: &Tree) -> Result<RewriteAction, ParseError> {
     let rule = tree.root.rule.as_str();
@@ -141,8 +137,7 @@ pub(crate) fn transform(tree: &Tree) -> Result<RewriteAction, ParseError> {
 // --- helpers the statement modules share ---
 
 /// The decoded contents of the string literal under `node`, which must be
-/// written `'...'`, as the parser override requires: `DuckDB`'s
-/// `StringLiteral` also matches `$$...$$`, `$tag$...$tag$` and `E'...'`, which
+/// written `'...'`: `DuckDB`'s `StringLiteral` also matches `$$...$$`, `$tag$...$tag$` and `E'...'`, which
 /// get `message`, at the literal.
 fn plain_string(tree: &Tree, node: &Node, message: &str) -> Result<String, ParseError> {
     let leaf = node
@@ -165,8 +160,8 @@ fn plain_string(tree: &Tree, node: &Node, message: &str) -> Result<String, Parse
 /// functions fold and resolve it themselves (FF-4).
 ///
 /// The grammar's tokens skip whitespace and comments, so `s . v` matches a
-/// dotted name. The parser override ends a name at the first whitespace, as
-/// `DuckDB` does, and reports what follows. So a name is one run of text: the
+/// dotted name. A name is one run of text, ended by the first whitespace, and
+/// what follows is reported: the
 /// error is the offset of the first token that whitespace or a comment
 /// separates from the one before it, for the caller to report with
 /// [`rest_from`].
@@ -184,8 +179,8 @@ fn name_text(tree: &Tree, node: &Node) -> Result<String, usize> {
 }
 
 /// The statement's text from query offset `offset` to its end, comments
-/// blanked and trimmed: what the parser override reports as the unexpected
-/// rest of a statement.
+/// blanked and trimmed: what an error reports as the unexpected rest of a
+/// statement.
 fn rest_from(tree: &Tree, offset: usize) -> String {
     let start = tree.root.offset().unwrap_or(0);
     let text = tree.text(&tree.root);
@@ -218,8 +213,7 @@ fn internal(node: &Node, what: &str) -> ParseError {
 /// return-code contract of `sv_grammar_transform_rust` (`ffi.rs`).
 ///
 /// Split out so the panic arm is reachable from a unit test with a real
-/// unwinding panic (the production body has no injectable fault), as
-/// `crate::parse::ffi`'s `parse_function_panic_guard` is.
+/// unwinding panic (the production body has no injectable fault).
 ///
 /// # Safety
 ///
@@ -247,8 +241,7 @@ where
             "semantic_views: internal error: panic inside sv_grammar_transform_rust \
              (please report this bug)",
         );
-        // rc=1, an ordinary parser error, as the parse stub reports its own
-        // panics. rc=2 is thrown as an InternalException, which can leave the
+        // rc=1, an ordinary parser error. rc=2 is thrown as an InternalException, which can leave the
         // database invalidated for every later query.
         1
     }

@@ -5,10 +5,9 @@
 //! as one `MultiStatement` in place of the matched `Statement`.
 //!
 //! The rules accept only well-formed statements. A malformed one (`ALTER
-//! SEMANTIC VIEW v TRUNCATE`, a missing name) does not match, so `DuckDB`'s
-//! parser fails and the parse stub reports the extension's own message for it,
-//! as it does for a statement the parser override declines. The deletion PR,
-//! which removes the stub, has to move those messages into the grammar.
+//! SEMANTIC VIEW v TRUNCATE`, a missing name) does not match, so it gets
+//! `DuckDB`'s own syntax error, with a caret at the token where the match
+//! failed.
 
 use super::tree::{Node, Tree};
 use super::{internal, name_or, plain_string};
@@ -39,8 +38,8 @@ pub(super) fn transform(rule: &str, tree: &Tree) -> Result<RewriteAction, ParseE
     let root = &tree.root;
     let if_exists = root.find("SvIfExists").is_some();
     let is_drop = rule.eq_ignore_ascii_case("SvDrop");
-    // The override reads ALTER's operation from where the source name ends,
-    // so a name with a gap reads as an unknown operation.
+    // ALTER's operation is read from where the source name ends, so a name
+    // with a gap reads as an unknown operation.
     let name = view_ref(tree, root, "SvViewName", INVALID_VIEW_NAME, |rest| {
         if is_drop {
             unexpected_after_view_name(rest)
@@ -81,8 +80,8 @@ pub(super) fn transform(rule: &str, tree: &Tree) -> Result<RewriteAction, ParseE
     Err(internal(action, "unknown ALTER operation"))
 }
 
-/// The view named by the `rule` node under `parent`, folded as the parser
-/// override folds it (`parse_view_ref`). `gap` words the error for a name
+/// The view named by the `rule` node under `parent`, folded by
+/// `parse_view_ref`. `gap` words the error for a name
 /// with whitespace inside it, given the rest of the statement.
 fn view_ref(
     tree: &Tree,
@@ -249,8 +248,8 @@ mod tests {
         );
     }
 
-    /// The parser override ends a name at whitespace and reports the rest;
-    /// the grammar's tokens skip it, so the transform checks for the gap.
+    /// A name ends at whitespace and the rest is reported; the grammar's
+    /// tokens skip whitespace, so the transform checks for the gap.
     #[test]
     fn a_name_with_whitespace_inside_is_reported_with_the_rest() {
         let sql = "DROP SEMANTIC VIEW s . v";

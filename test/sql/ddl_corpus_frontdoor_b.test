@@ -9,8 +9,8 @@ require semantic_views
 #     without cardinality, USING;
 #   - tests/create_front_door_proptest.rs: hostile bodies through the full
 #     CREATE OR REPLACE front door, one row per generator axis;
-#   - src/parse/ffi.rs: statement framing (multi-statement strings, the
-#     parser_override-inactive diagnosis, and the per-thread record behind it).
+#   - the former src/parse/ffi.rs: statement framing (multi-statement strings,
+#     and DDL on a second connection).
 # Part C (ddl_corpus_frontdoor_c.test) ports src/parse/search_path.rs and
 # src/parse/show_clauses.rs. Case map: _notes/phase3-corpus/map-F.md.
 #
@@ -261,7 +261,7 @@ SELECT * FROM semantic_view('dcf_u2', metrics := ['flight_cnt']);
 # --- Hostile bodies through the CREATE OR REPLACE front door (create_front_door_proptest) ---
 # One row per generator axis of tests/common/mod.rs::arb_canonical_def. The
 # Rust property compares tables / dimensions / facts / metrics after
-# plan_rewrite; here GET_DDL pins all of them (and the joins and
+# plan_create; here GET_DDL pins all of them (and the joins and
 # materializations the property skips). Base tables exist so the real front
 # door's catalog checks pass.
 
@@ -424,7 +424,7 @@ DIMENSIONS (
 
 # --- Statement framing: one DDL statement per call (ffi.rs, TECH-DEBT #85) ---
 
-# F-061: ffi.rs::ddl_after_another_statement_says_one_statement_per_call — a DDL after another statement in one query string runs, with the statement before it (the parser override declines the string, and DuckDB's grammar splits it and runs the CREATE production). The override refused this shape as a whole until CREATE moved onto the grammar.
+# F-061: ffi.rs::ddl_after_another_statement_says_one_statement_per_call — a DDL after another statement in one query string runs, with the statement before it (DuckDB's grammar splits the string and runs the CREATE production).
 statement ok
 CREATE TABLE dcf_ms (id INTEGER); CREATE SEMANTIC VIEW dcf_ms_v AS TABLES (t AS dcf_orders PRIMARY KEY (id)) DIMENSIONS (t.region AS region);
 
@@ -460,23 +460,12 @@ DROP SEMANTIC VIEW dcf_ms_v;
 statement ok
 CREATE SEMANTIC VIEW dcf_ms_v AS TABLES (t AS dcf_orders PRIMARY KEY (id)) DIMENSIONS (t.region AS region);
 
-# --- Statement framing: parser_override inactive (ffi.rs) ---
-# `con2` turns the override off for its own session only.
-#
-# Not portable: the "one statement per call" diagnosis rests on a per-thread
-# record of the last multi-statement string the override saw, and the ffi.rs
-# tests pin how long that record lives (consumed when read, consumed by a
-# not-ours statement, replaced by a later string, matched only as a whole
-# statement). The sqllogictest runner itself runs a settings query on the
-# default connection before EVERY statement, on the same thread, which
-# overwrites the record -- so no .test row can observe its lifetime, and rows
-# that tried would pass vacuously. Only the single-query halves are ported
-# below; the rest is listed N/A in the case map.
+# --- Statement framing: a second connection (ffi.rs) ---
+# The record the parser override kept of declined multi-statement strings, and
+# the "not active" diagnosis built on it, went with the override; the case map
+# lists those cases N/A. What remains is that DDL runs on any connection.
 
-statement ok con2
-SET SESSION allow_parser_override_extension = 'DEFAULT';
-
-# F-063: ffi.rs::valid_ddl_without_a_declined_query_reports_override_inactive — with the override off, a valid DDL runs through the CREATE grammar production (it was refused with the "not active" hint until CREATE moved onto the grammar); the same DDL on the default connection (override on) is accepted too
+# F-063: ffi.rs::valid_ddl_without_a_declined_query_reports_override_inactive — a valid DDL on a second connection runs through the CREATE grammar production; the same DDL on the default connection is accepted too
 statement ok con2
 CREATE SEMANTIC VIEW dcf_off AS TABLES (t AS dcf_orders PRIMARY KEY (id)) DIMENSIONS (t.region AS region);
 

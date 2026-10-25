@@ -11,12 +11,11 @@ via sqllogictest, but sqllogictest `statement error` only matches message
 substrings. This test closes the gap by inspecting the Python exception text
 to verify the right validation message reaches the caller for malformed DDL.
 
-Phase 62 (v0.8.0 — 2026-05-06): caret rendering restored. Validation
-errors now arrive as `Parser Error: ... LINE 1: ... ^` via parse_function
-(parser_override defers all errors with rc=2; the default parser fails on
-the unrecognised DDL prefix; DuckDB calls our parse_function which
-returns DISPLAY_EXTENSION_ERROR with byte-offset error_location;
-ParserException::SyntaxError formats the caret).
+Validation errors arrive as `Parser Error: ... LINE 1: ... ^`: a grammar
+production reports its error as a ParserException at a byte offset in the
+query, and DuckDB renders the caret. A statement no production matches (a
+misspelt prefix, a missing name, an unknown ALTER operation) gets DuckDB's own
+syntax error, whose caret underlines the token where the match failed.
 
 Tests assert both message text AND that `extract_caret_position(...)`
 returns a non-None integer at the expected column. Resolves TECH-DEBT
@@ -25,7 +24,7 @@ item 22.
 Three representative error types are covered:
   1. Structural error -- missing '(' after clause keyword (ERR-02)
   2. Clause-level error -- typo in AS-body keyword (ERR-01)
-  3. Near-miss prefix error (ERR-03)
+  3. Misspelt prefix -- DuckDB's syntax error
 
 Usage:
     python3 test/integration/test_caret_position.py
@@ -81,15 +80,16 @@ def extract_caret_position(error_text: str):
         LINE 1: {query_text}
                 ^
 
-    Returns the 0-based column position of ^ relative to the query text
+    A syntax error underlines its token (`^^^^`). Returns the 0-based column
+    of the first ^ relative to the query text
     (subtracting the "LINE 1: " prefix of 8 characters), or None if no
     caret line found.
     """
     lines = error_text.split("\n")
     for line in lines:
         stripped = line.strip()
-        # The caret line contains only whitespace and a single ^
-        if stripped == "^":
+        # The caret line contains only whitespace and a run of ^
+        if stripped and set(stripped) == {"^"}:
             caret_col = line.index("^")
             # Subtract the "LINE 1: " prefix (8 characters)
             return caret_col - 8
@@ -195,7 +195,7 @@ def test_caret_clause_typo():
 # ---------------------------------------------------------------------------
 
 def test_caret_near_miss():
-    """B3: Near-miss prefix 'CRETAE' surfaces 'Did you mean' with caret on column 0."""
+    """B3: Misspelt prefix 'CRETAE' gets DuckDB's syntax error with caret on column 0."""
     conn = make_connection()
     try:
         query = "CRETAE SEMANTIC VIEW x (tables := [])"
@@ -204,17 +204,15 @@ def test_caret_near_miss():
             assert False, "Expected exception"
         except Exception as e:
             error_text = str(e)
-            assert "CREATE SEMANTIC VIEW" in error_text, (
-                f"Expected suggestion for 'CREATE SEMANTIC VIEW' "
-                f"but got: {error_text}"
+            assert 'syntax error at or near "CRETAE"' in error_text, (
+                f"Expected a syntax error at CRETAE but got: {error_text}"
             )
             print(f"  Error: {error_text.splitlines()[0]} -- correct")
             caret_col = extract_caret_position(error_text)
             assert caret_col is not None, (
                 f"Phase 62 contract: caret column must be reported. error={error_text!r}"
             )
-            # detect_near_miss returns position=Some(trim_offset) where trim_offset
-            # is leading whitespace/comment skip. With no leading whitespace this is 0.
+            # The caret underlines CRETAE, the first token.
             assert caret_col == 0, (
                 f"caret_col should be 0 (start of CRETAE), got {caret_col}; "
                 f"error={error_text!r}"
@@ -336,9 +334,9 @@ def test_caret_alter_typo():
     """B6: caret column for ALTER with bad sub-operation keyword (RENAM)."""
     conn = make_connection()
     try:
-        # Set up a view to ALTER. validate_alter inspects the sub-operation
-        # text BEFORE name resolution, so the RENAM typo surfaces regardless
-        # of whether the view exists. We still create one for completeness.
+        # Set up a view to ALTER. The RENAM typo is a syntax error, so it
+        # surfaces whether or not the view exists. We still create one for
+        # completeness.
         conn.execute(
             "CREATE TABLE orders (id INTEGER PRIMARY KEY, amount DECIMAL(10,2))"
         )
@@ -356,33 +354,21 @@ def test_caret_alter_typo():
         except Exception as e:
             error_text = str(e)
             print(f"  Error captured: {error_text.splitlines()[0]}")
-            assert "ALTER operation" in error_text or "RENAME" in error_text, (
-                f"validator should mention supported ALTER operations; "
-                f"error={error_text!r}"
+            assert 'syntax error at or near "RENAM"' in error_text, (
+                f"expected a syntax error at RENAM; error={error_text!r}"
             )
             caret_col = extract_caret_position(error_text)
             assert caret_col is not None, (
                 f"Phase 62 contract: caret column must be reported. "
                 f"error={error_text!r}"
             )
-            # validate_alter returns position somewhere between the end of
-            # the prefix "ALTER SEMANTIC VIEW" and the start of "RENAM".
-            # Empirically the caret lands on the space-or-letter boundary
-            # before RENAM (column 20: the 'v' itself, since that's where
-            # name_end measurement places the offset for this query). Allow
-            # a generous window covering the view-name region through to
-            # the start of RENAM.
-            view_kw_end = query.index("VIEW") + len("VIEW")  # 19
-            renam_start = query.index("RENAM")               # 22
-            assert view_kw_end <= caret_col <= renam_start, (
-                f"caret_col {caret_col} should be between {view_kw_end} "
-                f"(end of 'VIEW') and {renam_start} (start of 'RENAM'); "
+            # The caret underlines RENAM, where the ALTER stops matching.
+            renam_start = query.index("RENAM")  # 22
+            assert caret_col == renam_start, (
+                f"caret_col {caret_col} should be {renam_start} (start of 'RENAM'); "
                 f"error={error_text!r}"
             )
-            print(
-                f"  caret_col = {caret_col} "
-                f"(within view-name region: {view_kw_end}..{renam_start})"
-            )
+            print(f"  caret_col = {caret_col} (start of 'RENAM')")
     finally:
         conn.close()
 
@@ -398,26 +384,21 @@ def test_caret_drop_missing_name():
         except Exception as e:
             error_text = str(e)
             print(f"  Error captured: {error_text.splitlines()[0]}")
-            assert "Missing view name" in error_text, (
-                f"validator should report 'Missing view name'; error={error_text!r}"
+            assert 'syntax error at or near ";"' in error_text, (
+                f"expected a syntax error where the name belongs; error={error_text!r}"
             )
             caret_col = extract_caret_position(error_text)
             assert caret_col is not None, (
                 f"Phase 62 contract: caret column must be reported. "
                 f"error={error_text!r}"
             )
-            # validate_and_rewrite returns position trim_offset+plen for the
-            # DROP-missing-name case. plen covers "DROP SEMANTIC VIEW" (18)
-            # plus the trailing space (the prefix matcher consumes whitespace
-            # to the next token boundary). The caret should land at-or-after
-            # the end of "DROP SEMANTIC VIEW".
+            # The caret is on the `;` where the name belongs.
             prefix_end = len("DROP SEMANTIC VIEW")
-            assert caret_col >= prefix_end, (
-                f"caret_col {caret_col} should be at-or-after position "
-                f"{prefix_end} (end of 'DROP SEMANTIC VIEW'); "
+            assert caret_col == prefix_end, (
+                f"caret_col {caret_col} should be {prefix_end} (the ';'); "
                 f"error={error_text!r}"
             )
-            print(f"  caret_col = {caret_col} (>= end of 'DROP SEMANTIC VIEW' = {prefix_end})")
+            print(f"  caret_col = {caret_col} (the ';')")
     finally:
         conn.close()
 

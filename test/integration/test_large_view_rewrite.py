@@ -4,11 +4,12 @@
 # requires-python = ">=3.10"
 # ///
 """
-Regression test for the v0.8.0 silent-truncation bug in the parser_override
-buffer path.
+Regression test for the v0.8.0 silent-truncation bug in the buffer that
+carries a DDL's rewritten SQL from Rust to C++.
 
 Pre-fix the C++ shim allocated a fixed 64 KB std::string for the rewritten
-SQL emitted by sv_parser_override_rust, and the Rust-side `write_to_buffer`
+SQL emitted by the extension's parser hook (today, the grammar bridge's
+`sv_grammar_transform_rust`), and the Rust-side `write_to_buffer`
 helper silently truncated anything over the cap. For semantic views with
 many metrics / dimensions, the rewritten
 ``INSERT INTO semantic_layer._definitions VALUES ('<name>', '<json>')``
@@ -21,7 +22,7 @@ released via ``sv_free_buffer`` through an RAII guard.
 
 This test creates a view with enough metrics to push the rewritten INSERT
 well past 64 KB, runs it inside a transaction (exercising the
-parser_override path that the fix targets), and verifies it commits
+heap-buffer path that the fix targets), and verifies it commits
 cleanly and produces the expected metric count.
 
 Usage:
@@ -102,7 +103,7 @@ def run_test() -> int:
         "64 KB cap; bump num_metrics or comment length."
     )
 
-    # Exercise the transactional parser_override path (the fix's primary site).
+    # Exercise the transactional DDL path (the fix's primary site).
     print("Running BEGIN; CREATE SEMANTIC VIEW (large) ; COMMIT …")
     try:
         conn.execute("BEGIN")

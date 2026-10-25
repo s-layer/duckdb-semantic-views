@@ -116,7 +116,7 @@ already exists
 statement error
 ALTER SEMANTIC VIEW sales_view
 ----
-Missing ALTER operation
+syntax error at or near "sales_view"
 
 # ============================================================
 # Test 7: Missing new name (error)
@@ -125,7 +125,7 @@ Missing ALTER operation
 statement error
 ALTER SEMANTIC VIEW sales_view RENAME TO
 ----
-Missing new name
+syntax error at or near "TO"
 
 # ============================================================
 # Test 8: Case insensitive DDL

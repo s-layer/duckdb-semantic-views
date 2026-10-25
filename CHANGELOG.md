@@ -22,18 +22,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   call can now hold, say, `CREATE TABLE …; INSERT …; CREATE SEMANTIC VIEW …`: DuckDB
   splits the string and runs each statement in order. Before, any `CREATE`, `DROP` or
   `ALTER SEMANTIC VIEW` in such a string was refused with "semantic-view DDL must be sent
-  as its own statement, one statement per call". The one exception is a `DROP`, `ALTER`,
-  `DESCRIBE` or `SHOW` that names a view with an unquoted reserved word (`select`), which
-  still has to be sent on its own; quote the name to lift that.
-
-- **Semantic-view DDL runs with `allow_parser_override_extension` set to `DEFAULT`.**
-  Before, every `CREATE`, `DROP`, `ALTER`, `SHOW` and `DESCRIBE` failed there with
-  "parser_override is not active". Two differences remain with that setting: in the
-  Python client a syntax error in the DDL shows no `LINE 1: … ^` caret, and `GET_DDL`
-  shows a tab inside an expression as a space and a run of blank lines as one line
-  break. The query a view expands to is the same. A `DROP`, `ALTER`, `DESCRIBE` or `SHOW`
-  that names a view with an unquoted reserved word (`select`) still fails there with
-  "parser_override is not active"; quote the name to run it.
+  as its own statement, one statement per call".
 
 - **The `SEMANTIC_VIEW(...)` query construct.** You can query a semantic view the way
   Snowflake does, in `FROM`:
@@ -59,6 +48,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   be quoted into the predicate.
 
 ### Changed
+
+- **Semantic-view statements are part of DuckDB's own grammar.** The extension no longer
+  uses DuckDB's parser-override hook, so `allow_parser_override_extension` no longer
+  affects semantic-view statements, and they parse the same way at the top of a query
+  string, after other statements and as a subquery. What you can see of this:
+  - A statement the grammar cannot match, such as one with a misspelt keyword
+    (`CREAT SEMANTIC VIEW`), a missing view name or an `ALTER` with no operation, gets
+    DuckDB's own `syntax error at or near "…"` with its `LINE 1: … ^` pointer, in place
+    of the extension's messages ("Did you mean 'CREATE SEMANTIC VIEW'?", "Missing view
+    name", "Missing ALTER operation" and the like). Errors the extension raises from a
+    statement it does match, such as an unknown table alias, keep their messages.
+  - A view name that is a DuckDB reserved word, such as `select`, `order` or `left`, has
+    to be quoted in every statement, `CREATE` included, as DuckDB requires for its own
+    names: `CREATE SEMANTIC VIEW "select" AS …`. `CREATE` used to accept it unquoted.
+    `GET_DDL` now quotes such a name, so its output runs as written.
+  - `CREATE SEMANTIC VIEW` stores each expression as DuckDB's tokens spell it: a tab
+    becomes a space, a run of blank lines one line break, and comments are dropped. So
+    `GET_DDL` and `DESCRIBE` show that spelling. The query a view expands to is the same.
+  - Loading the extension no longer switches other open connections over from the
+    loading connection's thread, which could race with a query they were parsing.
+    Each one now switches itself when it next starts or finishes a query (see Known
+    limitations).
 
 - **The unclosed-bracket error names its clause like the others.** It now reads
   `Unclosed '(' in clause 'METRICS'.`, as the other bracket and quote errors for a clause
@@ -116,6 +127,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **A long error message reaches you whole.** An error from a semantic-view statement
+  used to be cut off after 1023 bytes, so a message quoting a long name lost its end.
+
 - **A subquery in `where_clause` keeps its own names.** A name inside a subquery, such as
   `amt` in `amt IN (SELECT amt FROM targets)`, was replaced with the member of that name, so
   the subquery compared each row with itself and filtered nothing, or failed to parse. Names
@@ -147,6 +161,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **A prepared `semantic_view()` query follows a later `SET search_path`.** `EXECUTE`
   now looks the view up on the search path in effect when it runs, as DuckDB does for
   its own tables. Before, it kept the view found when the statement was prepared.
+
+### Known limitations
+
+- **A connection open before another one runs `LOAD semantic_views` needs one ordinary
+  statement first.** Until it starts or finishes a query, it parses without the
+  semantic-view statements, so `CREATE` / `SHOW SEMANTIC …` and the rest fail there with
+  a syntax error, and a statement that fails to parse never starts a query, so retrying
+  it fails the same way. Running any statement DuckDB parses on its own, such as
+  `LOAD semantic_views` or `SELECT 1`, switches that connection over. Connections opened
+  after the `LOAD`, and the connection that ran it, are not affected.
 
 ## [0.15.0] - 2026-10-21
 

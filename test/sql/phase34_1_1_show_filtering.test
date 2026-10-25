@@ -212,7 +212,7 @@ p3411_orders	order_date	DATE	false
 statement error
 SHOW SEMANTIC DIMENSIONS IN filter_sv LIKE '%x%'
 ----
-Unexpected tokens
+syntax error at or near "LIKE"
 
 # ============================================================
 # Test 17: Case insensitivity of keywords

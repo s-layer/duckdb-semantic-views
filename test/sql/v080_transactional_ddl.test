@@ -1,7 +1,7 @@
 # v0.8.0: transactional CREATE / DROP / ALTER SEMANTIC VIEW
 #
 # Verifies that all three write forms participate in the caller's transaction.
-# The parser_override hook rewrites recognised DDL into native
+# The grammar productions lower recognised DDL into native
 # INSERT / DELETE / UPDATE against semantic_layer._definitions, which DuckDB
 # then executes on the caller's connection — so BEGIN / COMMIT / ROLLBACK
 # behave as expected.
@@ -269,7 +269,7 @@ SELECT count(*) FROM list_semantic_views() WHERE name = 'v080_create_commit'
 1
 
 # Metadata enrichment ran (database_name / schema_name / created_on populated)
-# even though the INSERT was emitted via parser_override.
+# even though the INSERT was emitted by the CREATE production.
 query III
 SELECT
   database_name IS NOT NULL,
@@ -374,9 +374,8 @@ SELECT count(*) FROM list_semantic_views() WHERE name = 'v080_create_ine'
 
 # ------------------------------------------------------------------
 # CREATE FROM YAML FILE participates in the caller's transaction.
-# Same enrichment helper as inline CREATE; the YAML file read happens on
-# the catalog connection inside the parser_override callback so the user's
-# transaction state is untouched, then the INSERT runs on the caller's
+# Same enrichment helper as inline CREATE; reading the YAML file leaves the
+# user's transaction state untouched, then the INSERT runs on the caller's
 # connection.
 # ------------------------------------------------------------------
 
@@ -501,7 +500,7 @@ statement ok
 ROLLBACK
 
 # ------------------------------------------------------------------
-# v0.8.1 D2/D3/D4/D8: regression coverage for parser_override DDL.
+# v0.8.1 D2/D3/D4/D8: regression coverage for semantic-view DDL.
 # ------------------------------------------------------------------
 
 # D2: CREATE OR REPLACE of an existing view leaves exactly ONE row

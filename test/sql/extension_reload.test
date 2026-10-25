@@ -7,12 +7,14 @@
 # It does NOT pin the registration mechanics, and cannot — a `.test` file has
 # no view of DBConfig. Those live where they can be observed:
 #
-#   * tests/parser_hook_idempotent.rs — counts entries in
-#     DBConfig::GetCallbackManager().ParserExtensions() whose parser_override
-#     is ours, across repeated sv_register_parser_hooks calls (via the
-#     sv_count_parser_extensions helper in cpp/src/shim.cpp).
-#   * test/integration/test_load_extension_twice_idempotent.py — the same
-#     property through a real Python session.
+#   * test/integration/test_load_extension_twice_idempotent.py — a repeat
+#     LOAD in a real Python session, and the grammar's activation on
+#     connections opened before and after the LOAD.
+#
+# (tests/parser_hook_idempotent.rs counted the parser-override entries a
+# repeat LOAD registered; it went with the override in the Phase 3 deletion
+# PR. The grammar is registered once per database, guarded in
+# sv_register_grammar in cpp/src/shim.cpp.)
 #
 # The header here used to describe a pre-WR-09 architecture in which a re-LOAD
 # left two SemanticViewsParserInfo objects registered, "each with its own

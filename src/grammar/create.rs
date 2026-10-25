@@ -1,28 +1,32 @@
 //! CREATE [OR REPLACE] SEMANTIC VIEW as a grammar production.
 //!
-//! The rule matches the statement's prefix and then takes every token up to
-//! the end of the statement without interpreting it (`SvCreateToken`, `DuckDB`'s
-//! passthrough matcher). The transform takes the statement's text
-//! ([`Tree::text`]) and plans it with the parser override's own
-//! [`plan_rewrite`]. So every CREATE form (`AS` body, `FROM YAML`, `FROM YAML
-//! FILE`, `IF NOT EXISTS`, `COMMENT =`) is accepted and refused exactly as the
-//! override does, with the same messages. An error position in the text is
-//! moved by the statement's offset, so it is one in the query.
+//! The rule matches the statement's prefix and the view name, then takes every
+//! token up to the end of the statement without interpreting it
+//! (`SvCreateToken`, `DuckDB`'s passthrough matcher). The name is a
+//! `SvViewName`, a `ColId` as in DROP, ALTER, DESCRIBE and SHOW, so a reserved
+//! word must be quoted, as in `DuckDB`'s own DDL. The transform rebuilds the statement's text from its
+//! tokens ([`Tree::text`]) and plans it with [`plan_create`], the Rust body
+//! parser's entry point. So every CREATE form (`AS` body, `FROM YAML`, `FROM
+//! YAML FILE`, `IF NOT EXISTS`, `COMMENT =`) is parsed in one place. An error
+//! position in the text is moved by the statement's offset, so it is one in
+//! the query.
 //!
-//! With the parser override off, the bridge has no source text and the text is
-//! rebuilt from the tokens, so a tab inside an expression becomes a space and a
-//! run of blank lines one line break (TECH-DEBT #100).
+//! `DuckDB` gives a transform only the tokens, so the stored text of an
+//! expression has a space where it had a tab, one line break where it had
+//! several, and no comments.
 
 use super::internal;
 use super::tree::Tree;
 use crate::errors::ParseError;
-use crate::parse::{plan_rewrite, RewriteAction};
+use crate::parse::{plan_create, RewriteAction};
 
-/// The rules, one per line. `SvCreateToken`'s body is a placeholder: the
-/// terminal override in [`ANY_TOKEN`] is what matches.
+/// The rules, one per line. `SvViewName` comes from `show::RULES`.
+/// `SvCreateToken`'s body is a placeholder: the terminal override in
+/// [`ANY_TOKEN`] is what matches.
 pub(super) const RULES: &str = r"
-SvCreate <- 'CREATE' SvOrReplace? 'SEMANTIC' 'VIEW' SvCreateToken*
+SvCreate <- 'CREATE' SvOrReplace? 'SEMANTIC' 'VIEW' SvIfNotExists? SvViewName SvCreateToken*
 SvOrReplace <- 'OR' 'REPLACE'
+SvIfNotExists <- 'IF' 'NOT' 'EXISTS'
 SvCreateToken <- Identifier
 ";
 
@@ -35,7 +39,7 @@ pub(super) const ANY_TOKEN: &[&str] = &["SvCreateToken"];
 pub(super) fn transform(tree: &Tree) -> Result<RewriteAction, ParseError> {
     let base = tree.root.offset().unwrap_or(0);
     let text = tree.text(&tree.root);
-    plan_rewrite(&text)
+    plan_create(&text)
         .map_err(|e| ParseError {
             position: e.position.map(|p| p + base),
             ..e
@@ -51,28 +55,27 @@ mod tests {
     use crate::parse::RewriteAction;
 
     #[test]
-    fn a_create_plans_as_the_parser_override_plans_it() {
+    fn a_create_plans_as_its_text_plans() {
         let sql = "CREATE OR REPLACE SEMANTIC VIEW s.v AS TABLES (o AS orders PRIMARY KEY (id)) DIMENSIONS (o.r AS o.region)";
         let got = transform(&tree(sql, root(sql, "SvCreate", vec![]))).unwrap();
-        let want = crate::parse::plan_rewrite(sql).unwrap().unwrap();
+        let want = crate::parse::plan_create(sql).unwrap().unwrap();
         assert_eq!(got, want);
         assert!(matches!(got, RewriteAction::Create { .. }));
     }
 
-    /// With the query's text, an expression keeps its tabs and blank lines,
-    /// as it does through the parser override.
+    /// The body is planned from the rebuilt text: a tab inside an expression
+    /// becomes a space and blank lines one line break.
     #[test]
-    fn with_the_source_the_body_is_planned_as_written() {
+    fn the_body_is_planned_from_the_rebuilt_text() {
         let sql = "SELECT 1; CREATE SEMANTIC VIEW v AS TABLES (o AS orders PRIMARY KEY (id)) DIMENSIONS (o.r AS upper(\to.region ||\n\n  'x'))";
         let stmt = &sql[10..];
-        let mut t = tree(sql, n(sql, "SvCreate", stmt, Kind::List, "", vec![]));
-        t.source = Some(crate::grammar::tree::Source {
-            offset: 10,
-            text: stmt.to_string(),
-        });
+        let t = tree(sql, n(sql, "SvCreate", stmt, Kind::List, "", vec![]));
         let got = transform(&t).unwrap();
-        let want = crate::parse::plan_rewrite(stmt).unwrap().unwrap();
+        let rebuilt = t.text(&t.root);
+        assert!(!rebuilt.contains('\t'));
+        let want = crate::parse::plan_create(&rebuilt).unwrap().unwrap();
         assert_eq!(got, want);
+        assert_ne!(got, crate::parse::plan_create(stmt).unwrap().unwrap());
     }
 
     /// The statement after another one in the same string: an error position
@@ -83,7 +86,7 @@ mod tests {
         let stmt = &sql[10..];
         let r = n(sql, "SvCreate", stmt, Kind::List, "", vec![]);
         let err = transform(&tree(sql, r)).unwrap_err();
-        let alone = crate::parse::plan_rewrite(stmt).unwrap_err();
+        let alone = crate::parse::plan_create(stmt).unwrap_err();
         assert_eq!(err.message, alone.message);
         assert_eq!(err.position, alone.position.map(|p| p + 10));
         assert!(err.position.is_some());

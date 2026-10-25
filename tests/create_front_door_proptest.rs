@@ -1,4 +1,4 @@
-//! T-5 (code-review 2026-07-11): drive the FULL `plan_rewrite` CREATE front
+//! T-5 (code-review 2026-07-11): drive the FULL `plan_create` CREATE front
 //! door with the same hostile-shape definitions the round-trip property uses.
 //!
 //! `parse_proptest.rs`'s CREATE properties only ever feed the one fixed
@@ -11,7 +11,7 @@
 //!
 //! This closes that asymmetry: a hostile definition is rendered to a complete
 //! `CREATE OR REPLACE SEMANTIC VIEW` statement and pushed through the public
-//! `plan_rewrite` entry the parser hook itself calls. The front door must
+//! `plan_create` entry the parser hook itself calls. The front door must
 //! (a) not reject it, and (b) carry the definition through intact.
 //!
 //! Cardinality inference (run inside the CREATE route) only rewrites `joins`
@@ -20,7 +20,7 @@
 //! the input definition. Join fidelity is covered by `roundtrip_proptest.rs`.
 
 use proptest::prelude::*;
-use semantic_views::parse::{plan_rewrite, CreateMode, RewriteAction};
+use semantic_views::parse::{plan_create, CreateMode, RewriteAction};
 use semantic_views::render_ddl::render_create_ddl;
 
 mod common;
@@ -40,7 +40,7 @@ proptest! {
         let ddl = render_create_ddl("rt_view", &def)
             .expect("canonical definitions must render");
 
-        let action = plan_rewrite(&ddl)
+        let action = plan_create(&ddl)
             .unwrap_or_else(|e| {
                 panic!(
                     "CREATE front door rejected a body that parse_keyword_body accepts: {}\n--- rendered ---\n{ddl}",

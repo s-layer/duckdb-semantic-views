@@ -6,8 +6,8 @@
 //! earlier `read_text(?)` SQL path), then calls into Rust here to parse the
 //! YAML, run validation +
 //! cardinality inference, and serialize the resulting JSON. The bind returns
-//! the JSON in a single VARCHAR row; the outer `parser_override` INSERT (in
-//! `src/parse.rs::rewrite_yaml_file_create`) wraps that row with
+//! the JSON in a single VARCHAR row; the outer INSERT the CREATE lowers to (in
+//! `src/parse/native_sql.rs::emit_native_create_from_yaml_file`) wraps that row with
 //! `json_merge_patch` + `json_object` to add the metadata fields
 //! (`created_on`, `database_name`, `schema_name`) on the caller's connection.
 //!
@@ -17,7 +17,7 @@
 //! see AR-7). The bind reads the file through `DuckDB`'s `FileSystem` API and
 //! opens no connection, so nothing outlives the user's `close()`.
 //!
-//! FFI safety conventions (match `src/parse.rs::sv_parser_override_rust`):
+//! FFI safety conventions (as for the grammar bridge, `src/grammar/ffi.rs`):
 //!   * Every entry point wraps its body in `std::panic::catch_unwind(
 //!     AssertUnwindSafe(...))` so panics never cross the C++ boundary (UB).
 //!   * Heap-owned UTF-8 buffers are allocated as `Box<[u8]>::into_raw` and
@@ -44,8 +44,8 @@ use std::panic::AssertUnwindSafe;
 /// so this function only sees the already-loaded bytes — no file I/O on the
 /// Rust side.
 ///
-/// Returns the metadata-less JSON definition. The outer `parser_override`
-/// INSERT wraps the JSON with `json_merge_patch(new_def, json_object(...))`
+/// Returns the metadata-less JSON definition. The outer INSERT the CREATE
+/// lowers to wraps the JSON with `json_merge_patch(new_def, json_object(...))`
 /// to populate `created_on` / `database_name` / `schema_name` on the
 /// caller's connection (preserving D-21 transactional contract).
 ///
@@ -216,7 +216,7 @@ mod tests {
         let new_def = if rc == 0 && !out_ptr.is_null() {
             let bytes = std::slice::from_raw_parts(out_ptr, out_len).to_vec();
             // Release through the same FFI path real callers use.
-            crate::parse::sv_free_buffer(out_ptr, out_len);
+            crate::ffi_util::sv_free_buffer(out_ptr, out_len);
             Some(String::from_utf8(bytes).expect("FFI output is UTF-8"))
         } else {
             None

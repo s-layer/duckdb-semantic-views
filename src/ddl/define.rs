@@ -1,11 +1,11 @@
-//! CREATE-time enrichment shared by the `parser_override` CREATE path.
+//! CREATE-time enrichment shared by the CREATE forms.
 //!
 //! Pre-v0.8.0 this module also hosted `DefineFromJsonVTab` — a table function
 //! that the legacy `parse_function` fallback rewrote DDL into. v0.8.0's full
-//! unification deleted that path; `parser_override` now emits native INSERT
-//! against `semantic_layer._definitions` directly. Only the enrichment helper
-//! remains — called by `crate::parse::rewrite_create` and
-//! `crate::parse::rewrite_yaml_file_create`.
+//! unification deleted that path; CREATE now lowers to a native INSERT against
+//! `semantic_layer._definitions` directly. Only the enrichment helper remains —
+//! called by `crate::parse::native_sql` (the inline body) and
+//! `crate::ddl::alter_helpers_ffi` (`FROM YAML FILE`).
 //!
 //! # Phase 65 (v0.10.0) — read-elimination architecture
 //!
@@ -45,7 +45,7 @@
 /// current_database(), 'schema_name', current_schema()))` so `DuckDB`
 /// resolves the values on the caller's connection at INSERT-time. This
 /// makes CREATE SEMANTIC VIEW participate in the caller's transaction
-/// without `parser_override` needing a long-lived catalog connection
+/// without the extension needing a long-lived catalog connection
 /// (D-21 + read-elimination architecture).
 ///
 /// Column type inference (`column_type_names`, `column_types_inferred`,
@@ -53,8 +53,8 @@
 /// read-side bind callbacks per D-16 / D-17 — they stay empty / None
 /// in the persisted JSON.
 ///
-/// Called by both `parse::rewrite_create` (inline AS-body) and
-/// `parse::rewrite_yaml_file_create` (FROM YAML FILE) under `parser_override`.
+/// Called for the inline body (`parse::native_sql`) and for `FROM YAML FILE`
+/// (`ddl::alter_helpers_ffi`, from the helper table function's bind).
 pub fn enrich_definition_for_create(
     _name: &str,
     mut def: crate::model::SemanticViewDefinition,

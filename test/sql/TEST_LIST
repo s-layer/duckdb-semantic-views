@@ -32,7 +32,6 @@ test/sql/identity_fact_passthrough.test
 test/sql/lru_removed_isolation.test
 test/sql/named_filters.test
 test/sql/pa8_case_normalization.test
-test/sql/peg_compat.test
 test/sql/phase20_extended_ddl.test
 test/sql/phase21_error_reporting.test
 test/sql/phase25_keyword_body.test

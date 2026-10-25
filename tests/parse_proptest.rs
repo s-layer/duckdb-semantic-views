@@ -43,19 +43,6 @@ fn arb_semicolons() -> impl Strategy<Value = String> {
 // DDL forms: prefix string to DdlKind mapping
 // ---------------------------------------------------------------------------
 
-const DDL_FORMS: &[(&str, DdlKind)] = &[
-    ("create semantic view", DdlKind::Create),
-    ("create or replace semantic view", DdlKind::CreateOrReplace),
-    (
-        "create semantic view if not exists",
-        DdlKind::CreateIfNotExists,
-    ),
-    ("drop semantic view", DdlKind::Drop),
-    ("drop semantic view if exists", DdlKind::DropIfExists),
-    ("describe semantic view", DdlKind::Describe),
-    ("show semantic views", DdlKind::Show),
-];
-
 /// The 3 CREATE-with-body forms: (prefix, DdlKind, function_name).
 const CREATE_FORMS: &[(&str, DdlKind, &str)] = &[
     (
@@ -75,21 +62,6 @@ const CREATE_FORMS: &[(&str, DdlKind, &str)] = &[
     ),
 ];
 
-/// The 3 name-only forms: (prefix, DdlKind, function_name).
-const NAME_ONLY_FORMS: &[(&str, DdlKind, &str)] = &[
-    ("drop semantic view", DdlKind::Drop, "drop_semantic_view"),
-    (
-        "drop semantic view if exists",
-        DdlKind::DropIfExists,
-        "drop_semantic_view_if_exists",
-    ),
-    (
-        "describe semantic view",
-        DdlKind::Describe,
-        "describe_semantic_view",
-    ),
-];
-
 /// Build a minimal valid AS-body suffix: AS TABLES (...) DIMENSIONS (...) METRICS (...)
 fn build_as_body_suffix(name: &str) -> String {
     format!(
@@ -97,182 +69,12 @@ fn build_as_body_suffix(name: &str) -> String {
     )
 }
 
-/// Build a valid suffix for a given DdlKind (AS-body for CREATE, name for DROP/DESCRIBE, empty for SHOW).
-fn build_suffix(kind: DdlKind, name: &str) -> String {
-    match kind {
-        DdlKind::Create | DdlKind::CreateOrReplace | DdlKind::CreateIfNotExists => {
-            format!(
-                " {name} AS TABLES (t AS orders PRIMARY KEY (id)) DIMENSIONS (t.region AS region) METRICS (t.revenue AS SUM(amount))"
-            )
-        }
-        DdlKind::Drop | DdlKind::DropIfExists | DdlKind::Describe => {
-            format!(" {name}")
-        }
-        DdlKind::Show
-        | DdlKind::ShowTerse
-        | DdlKind::ShowDimensions
-        | DdlKind::ShowMetrics
-        | DdlKind::ShowFacts
-        | DdlKind::ShowMaterializations => {
-            format!(" {name}")
-        }
-        DdlKind::ShowColumns => {
-            format!(" {name}")
-        }
-        DdlKind::Alter | DdlKind::AlterIfExists => {
-            format!(" {name} RENAME TO new_{name}")
-        }
-    }
-}
-
-// ---------------------------------------------------------------------------
-// Detection properties (TEST-01)
-// ---------------------------------------------------------------------------
-
-proptest! {
-    /// Case-insensitive detection: CREATE SEMANTIC VIEW
-    #[test]
-    fn detect_create_case_insensitive(
-        prefix in arb_case_variant("create semantic view"),
-        name in arb_view_name(),
-    ) {
-        let query = format!("{prefix} {name} (tables := [], dimensions := [])");
-        prop_assert_eq!(detect_ddl_kind(&query), Some(DdlKind::Create));
-    }
-
-    /// Case-insensitive detection: CREATE OR REPLACE SEMANTIC VIEW
-    #[test]
-    fn detect_create_or_replace_case_insensitive(
-        prefix in arb_case_variant("create or replace semantic view"),
-        name in arb_view_name(),
-    ) {
-        let query = format!("{prefix} {name} (tables := [], dimensions := [])");
-        prop_assert_eq!(detect_ddl_kind(&query), Some(DdlKind::CreateOrReplace));
-    }
-
-    /// Case-insensitive detection: CREATE SEMANTIC VIEW IF NOT EXISTS
-    #[test]
-    fn detect_create_if_not_exists_case_insensitive(
-        prefix in arb_case_variant("create semantic view if not exists"),
-        name in arb_view_name(),
-    ) {
-        let query = format!("{prefix} {name} (tables := [], dimensions := [])");
-        prop_assert_eq!(detect_ddl_kind(&query), Some(DdlKind::CreateIfNotExists));
-    }
-
-    /// Case-insensitive detection: DROP SEMANTIC VIEW
-    #[test]
-    fn detect_drop_case_insensitive(
-        prefix in arb_case_variant("drop semantic view"),
-        name in arb_view_name(),
-    ) {
-        let query = format!("{prefix} {name}");
-        prop_assert_eq!(detect_ddl_kind(&query), Some(DdlKind::Drop));
-    }
-
-    /// Case-insensitive detection: DROP SEMANTIC VIEW IF EXISTS
-    #[test]
-    fn detect_drop_if_exists_case_insensitive(
-        prefix in arb_case_variant("drop semantic view if exists"),
-        name in arb_view_name(),
-    ) {
-        let query = format!("{prefix} {name}");
-        prop_assert_eq!(detect_ddl_kind(&query), Some(DdlKind::DropIfExists));
-    }
-
-    /// Case-insensitive detection: DESCRIBE SEMANTIC VIEW
-    #[test]
-    fn detect_describe_case_insensitive(
-        prefix in arb_case_variant("describe semantic view"),
-        name in arb_view_name(),
-    ) {
-        let query = format!("{prefix} {name}");
-        prop_assert_eq!(detect_ddl_kind(&query), Some(DdlKind::Describe));
-    }
-
-    /// Case-insensitive detection: SHOW SEMANTIC VIEWS
-    #[test]
-    fn detect_show_case_insensitive(
-        prefix in arb_case_variant("show semantic views"),
-    ) {
-        prop_assert_eq!(detect_ddl_kind(&prefix), Some(DdlKind::Show));
-    }
-
-    /// Leading whitespace does not affect detection for any of the 7 forms.
-    #[test]
-    fn detect_with_leading_whitespace(
-        ws in arb_whitespace(),
-        form_idx in 0..7usize,
-        name in arb_view_name(),
-    ) {
-        let (prefix, expected_kind) = DDL_FORMS[form_idx];
-        let suffix = build_suffix(expected_kind, &name);
-        let query = format!("{ws}{prefix}{suffix}");
-        prop_assert_eq!(detect_ddl_kind(&query), Some(expected_kind));
-    }
-
-    /// Trailing semicolons (0-3) do not affect detection for any of the 7 forms.
-    #[test]
-    fn detect_with_trailing_semicolons(
-        form_idx in 0..7usize,
-        name in arb_view_name(),
-        semis in arb_semicolons(),
-    ) {
-        let (prefix, expected_kind) = DDL_FORMS[form_idx];
-        let suffix = build_suffix(expected_kind, &name);
-        let query = format!("{prefix}{suffix}{semis}");
-        prop_assert_eq!(detect_ddl_kind(&query), Some(expected_kind));
-    }
-
-    /// Non-DDL SQL statements always return None from detect_ddl_kind.
-    #[test]
-    fn detect_non_ddl_returns_none(
-        stmt in prop_oneof![
-            Just("SELECT * FROM orders".to_string()),
-            Just("INSERT INTO orders VALUES (1)".to_string()),
-            Just("UPDATE orders SET x = 1".to_string()),
-            Just("DELETE FROM orders".to_string()),
-            Just("ALTER TABLE orders ADD COLUMN x INT".to_string()),
-            Just("CREATE TABLE orders (id INT)".to_string()),
-            Just("CREATE VIEW orders AS SELECT 1".to_string()),
-        ],
-    ) {
-        prop_assert_eq!(detect_ddl_kind(&stmt), None);
-    }
-
-    /// detect_semantic_view_ddl returns PARSE_DETECTED for all 7 forms.
-    #[test]
-    fn detect_semantic_view_ddl_returns_detected(
-        form_idx in 0..7usize,
-        name in arb_view_name(),
-    ) {
-        let (prefix, kind) = DDL_FORMS[form_idx];
-        let suffix = build_suffix(kind, &name);
-        let query = format!("{prefix}{suffix}");
-        prop_assert_eq!(detect_semantic_view_ddl(&query), PARSE_DETECTED);
-    }
-
-    /// detect_semantic_view_ddl returns PARSE_NOT_OURS for non-DDL statements.
-    #[test]
-    fn detect_semantic_view_ddl_returns_not_ours(
-        stmt in prop_oneof![
-            Just("SELECT * FROM orders".to_string()),
-            Just("INSERT INTO orders VALUES (1)".to_string()),
-            Just("UPDATE orders SET x = 1".to_string()),
-            Just("DELETE FROM orders".to_string()),
-            Just("ALTER TABLE orders ADD COLUMN x INT".to_string()),
-        ],
-    ) {
-        prop_assert_eq!(detect_semantic_view_ddl(&stmt), PARSE_NOT_OURS);
-    }
-}
-
 // ---------------------------------------------------------------------------
 // Rewrite properties (TEST-02)
 // ---------------------------------------------------------------------------
 
 proptest! {
-    /// Rewrite of CREATE forms via plan_rewrite produces a Create action carrying the view name.
+    /// Rewrite of CREATE forms via plan_create produces a Create action carrying the view name.
     #[test]
     fn rewrite_create_forms(
         form_idx in 0..3usize,
@@ -280,7 +82,7 @@ proptest! {
     ) {
         let (prefix, _kind, _fn_name) = CREATE_FORMS[form_idx];
         let ddl = format!("{prefix}{}", build_as_body_suffix(&name));
-        let result = plan_rewrite(&ddl);
+        let result = plan_create(&ddl);
         prop_assert!(
             result.is_ok(),
             "Expected Ok for valid AS-body DDL, got: {:?}",
@@ -301,41 +103,6 @@ proptest! {
         }
     }
 
-    /// plan_rewrite lowers name-only forms (DROP / DROP IF EXISTS / DESCRIBE)
-    /// to a structured action or passthrough carrying the view name. (CREATE
-    /// forms are covered by `rewrite_create_forms` above.)
-    #[test]
-    fn rewrite_name_only_forms_carry_name(
-        form_idx in 0..3usize,
-        name in arb_view_name(),
-    ) {
-        let (prefix, _kind, fn_name) = NAME_ONLY_FORMS[form_idx];
-        let ddl = format!("{prefix} {name}");
-        // arb_view_name() is already lowercase, so the DROP fold and the raw
-        // DESCRIBE passthrough both carry `name` verbatim.
-        match rewrite_result(&ddl).unwrap() {
-            RewriteAction::Drop { name: n, .. } => {
-                prop_assert_eq!(n.schema, None);
-                prop_assert_eq!(n.name, name);
-            }
-            RewriteAction::Passthrough(sql) =>
-                prop_assert_eq!(sql, format!("SELECT * FROM {fn_name}('{name}')")),
-            other => prop_assert!(false, "unexpected rewrite action: {:?}", other),
-        }
-    }
-
-    /// A bare SHOW SEMANTIC VIEWS has no target name: plan_rewrite lowers it to
-    /// the all-views list function with no name argument.
-    #[test]
-    fn rewrite_show_views_has_no_target_name(
-        prefix in arb_case_variant("show semantic views"),
-    ) {
-        match rewrite_result(&prefix).unwrap() {
-            RewriteAction::Passthrough(sql) =>
-                prop_assert_eq!(sql, "SELECT * FROM list_semantic_views()"),
-            other => prop_assert!(false, "unexpected rewrite action: {:?}", other),
-        }
-    }
 }
 
 // ---------------------------------------------------------------------------
@@ -368,71 +135,45 @@ fn arb_hostile_name_content() -> impl Strategy<Value = String> {
 }
 
 proptest! {
-    /// Quoted hostile names round-trip through the rewrite with their content
-    /// intact except for ASCII case, which folds to lowercase — DuckDB treats
-    /// quoted identifiers as case-insensitive too (revised 2026-07-12). No
-    /// mojibake, no truncation at inner whitespace/dots, for every name-only
-    /// form.
+    /// A quoted hostile name in CREATE's name slot is captured whole and
+    /// folded to lowercase (PA-8), whatever it holds.
     #[test]
-    fn rewrite_quoted_hostile_names(
+    fn create_captures_quoted_hostile_names(
         form_idx in 0..3usize,
         content in arb_hostile_name_content(),
     ) {
-        let (prefix, _kind, fn_name) = NAME_ONLY_FORMS[form_idx];
-        let folded = content.to_ascii_lowercase();
+        let (prefix, _kind, _fn_name) = CREATE_FORMS[form_idx];
         let quoted = format!("\"{}\"", content.replace('"', "\"\""));
-        let ddl = format!("{prefix} {quoted}");
-
-        // DROP carries the normalized view name structurally (quoted content
-        // folds to lowercase via normalize_view_name). FF-4: DESCRIBE / SHOW
-        // COLUMNS embed the RAW quoted name verbatim (single-quote-escaped) and
-        // defer folding to the TF dispatcher, matching every other read TF — so
-        // the passthrough SQL carries the quoted form, not the bare content.
-        let action = rewrite_result(&ddl).unwrap();
-        match action {
-            RewriteAction::Drop { name, .. } => {
+        let ddl = format!("{prefix}{}", build_as_body_suffix(&quoted));
+        match plan_create(&ddl) {
+            Ok(Some(RewriteAction::Create { name, .. })) => {
                 prop_assert_eq!(name.schema, None);
-                prop_assert_eq!(name.name, folded.clone());
+                prop_assert_eq!(name.name, content.to_ascii_lowercase());
             }
-            RewriteAction::Passthrough(sql) => {
-                let expected =
-                    format!("SELECT * FROM {fn_name}('{}')", quoted.replace('\'', "''"));
-                prop_assert_eq!(sql, expected);
-            }
-            other => prop_assert!(false, "unexpected rewrite action: {:?}", other),
+            other => prop_assert!(false, "unexpected plan for {:?}: {:?}", ddl, other),
         }
     }
 
-    /// Unquoted mixed-case names: DROP folds to lowercase structurally (PA-8);
-    /// DESCRIBE embeds the RAW name in its passthrough (FF-4 — folding is
-    /// deferred to the TF dispatcher), so the rewrite carries the original case.
+    /// The CREATE prefix matches in any case, after leading whitespace, and
+    /// with trailing semicolons.
     #[test]
-    fn rewrite_unquoted_name_case(
-        form_idx in 0..3usize,
-        name in "[A-Za-z_][A-Za-z0-9_]{0,20}",
+    fn create_prefix_tolerates_case_whitespace_and_semicolons(
+        (form_idx, cased) in (0..3usize)
+            .prop_flat_map(|i| (Just(i), arb_case_variant(CREATE_FORMS[i].0))),
+        ws in arb_whitespace(),
+        semis in arb_semicolons(),
+        name in arb_view_name(),
     ) {
-        let (prefix, _kind, fn_name) = NAME_ONLY_FORMS[form_idx];
-        let ddl = format!("{prefix} {name}");
-        match rewrite_result(&ddl).unwrap() {
-            RewriteAction::Drop { name: n, .. } => {
-                prop_assert_eq!(n.schema, None);
-                prop_assert_eq!(n.name, name.to_ascii_lowercase());
-            }
-            RewriteAction::Passthrough(sql) =>
-                prop_assert_eq!(sql, format!("SELECT * FROM {fn_name}('{name}')")),
-            other => prop_assert!(false, "unexpected rewrite action: {:?}", other),
+        let want = match CREATE_FORMS[form_idx].1 {
+            DdlKind::Create => CreateMode::Create,
+            DdlKind::CreateOrReplace => CreateMode::OrReplace,
+            _ => CreateMode::IfNotExists,
+        };
+        let ddl = format!("{ws}{cased}{}{semis}", build_as_body_suffix(&name));
+        match plan_create(&ddl) {
+            Ok(Some(RewriteAction::Create { mode, .. })) => prop_assert_eq!(mode, want),
+            other => prop_assert!(false, "unexpected plan for {:?}: {:?}", ddl, other),
         }
-    }
-}
-
-/// `plan_rewrite` adapter: name-only forms route through the same public entry
-/// the parser hook uses, surfacing the structured `RewriteAction` (or the error
-/// message on failure / "not ours" on a non-match).
-fn rewrite_result(ddl: &str) -> Result<RewriteAction, String> {
-    match plan_rewrite(ddl) {
-        Ok(Some(action)) => Ok(action),
-        Ok(None) => Err("not ours".to_string()),
-        Err(e) => Err(e.message),
     }
 }
 
@@ -447,37 +188,13 @@ proptest! {
         spaces in "[ ]{0,20}",
     ) {
         let query = format!("{spaces}CREATE SEMANTIC VIEW x (tbles := [])");
-        let err = plan_rewrite(&query).unwrap_err();
+        let err = plan_create(&query).unwrap_err();
         prop_assert!(
             err.message.contains("Expected 'AS' or 'FROM YAML'"),
             "Expected 'Expected AS or FROM YAML' error, got: {}",
             err.message
         );
         prop_assert!(err.position.is_some());
-    }
-
-    /// Error position for missing view name after DROP prefix accounts for whitespace.
-    #[test]
-    fn position_invariant_missing_name_drop(
-        spaces in "[ ]{0,20}",
-    ) {
-        let query = format!("{spaces}DROP SEMANTIC VIEW");
-        let err = plan_rewrite(&query).unwrap_err();
-        let pos = err.position.unwrap();
-        // Position should be at or after the end of "DROP SEMANTIC VIEW" in the trimmed query.
-        let prefix_len = "drop semantic view".len();
-        let trim_offset = spaces.len();
-        prop_assert_eq!(
-            pos,
-            trim_offset + prefix_len,
-            "Position {} should equal trim_offset({}) + prefix_len({}) in query: {:?}",
-            pos, trim_offset, prefix_len, query
-        );
-        prop_assert!(
-            err.message.contains("Missing view name"),
-            "Expected 'Missing view name' error, got: {}",
-            err.message
-        );
     }
 
     /// Error position for missing 'AS' after view name accounts for whitespace.
@@ -487,7 +204,7 @@ proptest! {
         name in arb_view_name(),
     ) {
         let query = format!("{spaces}CREATE SEMANTIC VIEW {name}");
-        let err = plan_rewrite(&query).unwrap_err();
+        let err = plan_create(&query).unwrap_err();
         let pos = err.position.unwrap();
         // Position should point after the view name.
         prop_assert!(
@@ -502,7 +219,7 @@ proptest! {
         );
     }
 
-    /// plan_rewrite returns Ok(Some(_)) for valid AS-body DDL with varying whitespace.
+    /// plan_create returns Ok(Some(_)) for valid AS-body DDL with varying whitespace.
     #[test]
     fn valid_ddl_with_whitespace_succeeds(
         spaces in "[ ]{0,20}",
@@ -511,7 +228,7 @@ proptest! {
         let query = format!(
             "{spaces}CREATE SEMANTIC VIEW{}", build_as_body_suffix(&name)
         );
-        let result = plan_rewrite(&query);
+        let result = plan_create(&query);
         prop_assert!(
             result.is_ok(),
             "Expected Ok for valid DDL, got: {:?}",
@@ -528,92 +245,15 @@ proptest! {
 // Near-miss safety properties (TEST-04)
 // ---------------------------------------------------------------------------
 
-proptest! {
-    /// Common SQL statements that are NOT close to any DDL prefix return None.
-    #[test]
-    fn near_miss_no_false_positives(
-        stmt in prop_oneof![
-            Just("SELECT * FROM t".to_string()),
-            Just("INSERT INTO t VALUES (1)".to_string()),
-            Just("UPDATE t SET x = 1".to_string()),
-            Just("DELETE FROM t".to_string()),
-            Just("ALTER TABLE t ADD COLUMN x INT".to_string()),
-            Just("BEGIN TRANSACTION".to_string()),
-            Just("COMMIT".to_string()),
-            Just("ROLLBACK".to_string()),
-        ],
-    ) {
-        prop_assert!(
-            detect_near_miss(&stmt).is_none(),
-            "Expected no near-miss for normal SQL '{}', got: {:?}",
-            stmt, detect_near_miss(&stmt)
-        );
-    }
-
-    /// Transposition near-misses (e.g. "cretae" for "create") are detected.
-    #[test]
-    fn near_miss_detects_transposition(
-        near_miss in prop_oneof![
-            Just("cretae semantic view x".to_string()),
-            Just("craete semantic view x".to_string()),
-            Just("dreop semantic view x".to_string()),
-            Just("descrbe semantic view x".to_string()),
-            Just("shwo semantic views".to_string()),
-        ],
-    ) {
-        let result = detect_near_miss(&near_miss);
-        prop_assert!(
-            result.is_some(),
-            "Expected near-miss detection for '{}', got None",
-            near_miss
-        );
-        let err = result.unwrap();
-        prop_assert!(
-            err.message.contains("Did you mean"),
-            "Expected 'Did you mean' suggestion in near-miss error, got: {}",
-            err.message
-        );
-    }
-
-    /// Near-miss position points at the start of the input (after trimming whitespace).
-    #[test]
-    fn near_miss_position_at_start(
-        spaces in "[ ]{0,10}",
-    ) {
-        let query = format!("{spaces}cretae semantic view x");
-        let result = detect_near_miss(&query);
-        prop_assert!(result.is_some(), "Expected near-miss for: {:?}", query);
-        let err = result.unwrap();
-        prop_assert_eq!(
-            err.position,
-            Some(spaces.len()),
-            "Near-miss position should be at trim_offset ({}), got {:?}",
-            spaces.len(), err.position
-        );
-    }
-}
+proptest! {}
 
 // ---------------------------------------------------------------------------
 // AS-body keyword syntax properties (TEST-06)
 // ---------------------------------------------------------------------------
 
 proptest! {
-    /// AS-body CREATE forms are detected by detect_ddl_kind.
-    #[test]
-    fn as_body_detected_for_create_forms(
-        form_idx in 0..3usize,
-        name in arb_view_name(),
-    ) {
-        let (prefix, expected_kind, _) = CREATE_FORMS[form_idx];
-        let query = format!("{prefix}{}", build_as_body_suffix(&name));
-        prop_assert_eq!(
-            detect_ddl_kind(&query),
-            Some(expected_kind),
-            "AS-body DDL should be detected for form: {}", prefix
-        );
-    }
 
-    /// AS-body plan_rewrite returns Ok(Some(_)) for valid keyword body,
+    /// AS-body plan_create returns Ok(Some(_)) for valid keyword body,
     /// producing the CREATE route (RewriteAction::Create, mode Create) with the
     /// view name carried structurally.
     #[test]
@@ -621,7 +261,7 @@ proptest! {
         name in arb_view_name(),
     ) {
         let query = format!("CREATE SEMANTIC VIEW{}", build_as_body_suffix(&name));
-        let result = plan_rewrite(&query);
+        let result = plan_create(&query);
         prop_assert!(
             result.is_ok(),
             "Expected Ok for valid AS-body DDL, got: {:?}",
@@ -658,7 +298,7 @@ proptest! {
         leading in "[ \t\n]{0,20}",
     ) {
         let query = format!("{leading}CREATE SEMANTIC VIEW x AS TABLSE (t AS orders PRIMARY KEY (id)) DIMENSIONS (t.r AS r) METRICS (t.m AS SUM(1))");
-        let err = plan_rewrite(&query).unwrap_err();
+        let err = plan_create(&query).unwrap_err();
         let pos = err.position.unwrap();
         // Position must point at "TABLSE" in the original query.
         prop_assert_eq!(
@@ -672,37 +312,6 @@ proptest! {
             "Expected 'did you mean TABLES' error, got: {}",
             err.message
         );
-    }
-
-    /// Valid AS-body DDL is accepted regardless of inter-token whitespace style
-    /// within the body (spaces, tabs, newlines, or mixed).
-    ///
-    /// Note: the `CREATE SEMANTIC VIEW` prefix uses literal space matching in
-    /// `detect_ddl_kind`, so only body-internal whitespace is varied here.
-    /// Prefix whitespace normalization is tracked in TECH-DEBT.md.
-    #[test]
-    fn as_body_accepts_any_inter_token_whitespace(
-        sep in "[ \t\n]{1,4}",
-    ) {
-        // Vary whitespace between tokens WITHIN the body only (after "AS").
-        // The DDL prefix "CREATE SEMANTIC VIEW v AS" uses single spaces because
-        // detect_ddl_kind does literal prefix matching.
-        let query = format!(
-            "CREATE SEMANTIC VIEW v AS TABLES{sep}(\
-             t{sep}AS{sep}orders{sep}PRIMARY{sep}KEY{sep}(id)\
-             ){sep}DIMENSIONS{sep}(\
-             t.region{sep}AS{sep}region\
-             ){sep}METRICS{sep}(\
-             t.rev{sep}AS{sep}SUM(amount)\
-             )"
-        );
-        let result = plan_rewrite(&query);
-        prop_assert!(
-            result.is_ok(),
-            "Expected Ok for valid AS-body with sep={sep:?}, got: {:?}",
-            result
-        );
-        prop_assert!(result.unwrap().is_some());
     }
 
     /// Clause keywords are case-insensitive (tables/TABLES/Tables all accepted).
@@ -720,7 +329,7 @@ proptest! {
             "CREATE SEMANTIC VIEW {name} AS {tables_kw} (t AS orders PRIMARY KEY (id)) \
              {dims_kw} (t.region AS region) {metrics_kw} (t.rev AS SUM(amount))"
         );
-        let result = plan_rewrite(&query);
+        let result = plan_create(&query);
         prop_assert!(
             result.is_ok(),
             "Expected Ok for case variant tables={tables_kw} dims={dims_kw} metrics={metrics_kw}, got: {:?}",
@@ -742,31 +351,9 @@ fn arb_inter_keyword_ws() -> impl Strategy<Value = String> {
 }
 
 proptest! {
-    /// Replacing single spaces between DDL keywords with tabs, newlines, or mixed
-    /// whitespace must still produce the correct DdlKind. Currently FAILS because
-    /// detect_ddl_kind uses literal starts_with_ci byte matching.
-    #[test]
-    fn prefix_whitespace_detection(
-        form_idx in 0..7usize,
-        sep in arb_inter_keyword_ws(),
-        name in arb_view_name(),
-    ) {
-        let (prefix, expected_kind) = DDL_FORMS[form_idx];
-        // Split on ASCII space and rejoin with the generated separator.
-        // e.g. "create semantic view" -> "create\tsemantic\tview"
-        let rejoined = prefix.split(' ').collect::<Vec<_>>().join(&sep);
-        let suffix = build_suffix(expected_kind, &name);
-        let query = format!("{rejoined}{suffix}");
-        prop_assert_eq!(
-            detect_ddl_kind(&query),
-            Some(expected_kind),
-            "Expected {:?} for query with sep={:?}: {:?}",
-            expected_kind, sep, query
-        );
-    }
 
     /// For the 3 CREATE forms, replacing prefix spaces with non-space whitespace
-    /// and calling plan_rewrite must return Ok(Some(RewriteAction::Create { .. })).
+    /// and calling plan_create must return Ok(Some(RewriteAction::Create { .. })).
     #[test]
     fn prefix_whitespace_rewrite_roundtrip(
         form_idx in 0..3usize,
@@ -776,7 +363,7 @@ proptest! {
         let (prefix, _kind, _fn_name) = CREATE_FORMS[form_idx];
         let rejoined = prefix.split(' ').collect::<Vec<_>>().join(&sep);
         let query = format!("{rejoined}{}", build_as_body_suffix(&name));
-        let result = plan_rewrite(&query);
+        let result = plan_create(&query);
         prop_assert!(
             result.is_ok(),
             "Expected Ok for whitespace-variant CREATE prefix, got: {:?}",
@@ -802,18 +389,34 @@ proptest! {
 
 #[test]
 fn test_large_input_no_panic() {
+    // 1 MB of non-DDL text must be refused as "not a CREATE" in one linear
+    // pass (comment blanking scans all of it), without panicking. The bound
+    // leaves room for a debug build on a loaded runner (about 30ms locally)
+    // while still catching a quadratic scan, which would take seconds.
     let s: String = std::iter::repeat('A').take(1_000_000).collect();
     let start = std::time::Instant::now();
-    let result = detect_semantic_view_ddl(&s);
+    let result = plan_create(&s);
     let elapsed = start.elapsed();
-    assert_eq!(
-        result, PARSE_NOT_OURS,
-        "1MB non-DDL should return PARSE_NOT_OURS"
+    assert!(
+        matches!(result, Ok(None)),
+        "1MB non-DDL should not plan as a CREATE, got {result:?}"
     );
     assert!(
-        elapsed.as_millis() < 50,
-        "1MB scan took {}ms, expected <50ms",
+        elapsed.as_millis() < 500,
+        "1MB scan took {}ms, expected <500ms",
         elapsed.as_millis()
+    );
+}
+
+#[test]
+fn test_unicode_homoglyph() {
+    // Cyrillic 'С' (U+0421) looks like Latin 'C' but is a different byte
+    // sequence. The ASCII-only prefix matcher must not read it as CREATE.
+    let query =
+        "СREATE SEMANTIC VIEW x AS TABLES (t AS t PRIMARY KEY (id)) DIMENSIONS (t.a AS t.a)";
+    assert!(
+        matches!(plan_create(query), Ok(None)),
+        "Cyrillic С prefix must not plan as a CREATE"
     );
 }
 
@@ -823,8 +426,8 @@ fn test_null_byte_in_name() {
     // The parser must not panic. It may return Ok (if null byte in name is tolerated)
     // or Err (if the name validator rejects it). Either is acceptable.
     let query = "CREATE SEMANTIC VIEW x\x00bad (tables := [], dimensions := [])";
-    let result = std::panic::catch_unwind(|| plan_rewrite(query));
-    assert!(result.is_ok(), "plan_rewrite panicked on null byte in name");
+    let result = std::panic::catch_unwind(|| plan_create(query));
+    assert!(result.is_ok(), "plan_create panicked on null byte in name");
 }
 
 /// A `;` in the view-name position is rejected — the name scanner stops at it,
@@ -832,7 +435,7 @@ fn test_null_byte_in_name() {
 ///
 /// TC-12: the invariant this test's comment used to claim ("the rewritten SQL
 /// must start with `SELECT * FROM`") stopped being expressible here when
-/// `plan_rewrite` began returning a structured `RewriteAction` instead of a SQL
+/// `plan_create` began returning a structured `RewriteAction` instead of a SQL
 /// string — the only variant that carries SQL at all is `Passthrough`, and a
 /// CREATE never produces one. All three match arms were consequently left
 /// assertion-free, so the test could only have failed by panicking.
@@ -844,25 +447,13 @@ fn test_null_byte_in_name() {
 #[test]
 fn test_semicolon_in_name() {
     // (with `;injection` in the name position, same statement without it)
-    let pairs = [
-        (
-            "CREATE SEMANTIC VIEW x;injection AS TABLES (t) DIMENSIONS (t.a AS t.a)",
-            "CREATE SEMANTIC VIEW x AS TABLES (t) DIMENSIONS (t.a AS t.a)",
-        ),
-        ("DROP SEMANTIC VIEW x;injection", "DROP SEMANTIC VIEW x"),
-        (
-            "ALTER SEMANTIC VIEW x;injection RENAME TO y",
-            "ALTER SEMANTIC VIEW x RENAME TO y",
-        ),
-        (
-            "DESCRIBE SEMANTIC VIEW x;injection",
-            "DESCRIBE SEMANTIC VIEW x",
-        ),
-        ("SHOW SEMANTIC VIEWS;injection", "SHOW SEMANTIC VIEWS"),
-    ];
+    let pairs = [(
+        "CREATE SEMANTIC VIEW x;injection AS TABLES (t) DIMENSIONS (t.a AS t.a)",
+        "CREATE SEMANTIC VIEW x AS TABLES (t) DIMENSIONS (t.a AS t.a)",
+    )];
 
     for (injected, control) in pairs {
-        let Err(err) = plan_rewrite(injected) else {
+        let Err(err) = plan_create(injected) else {
             panic!(
                 "a ';' in the name position must be rejected, not absorbed \
                  into the name: {injected:?} was accepted"
@@ -876,7 +467,7 @@ fn test_semicolon_in_name() {
         // Anti-vacuity: the same statement without the `;injection` parses, so
         // the rejection above is attributable to the `;` and not to the rest of
         // the query being malformed.
-        let ok = plan_rewrite(control)
+        let ok = plan_create(control)
             .unwrap_or_else(|e| panic!("control statement must parse: {control:?} -> {e:?}"));
         assert!(
             ok.is_some(),
@@ -887,27 +478,8 @@ fn test_semicolon_in_name() {
     // The historical input from this test, kept for continuity. It is malformed
     // for a second reason (no `AS`), so it carries no control pair.
     assert!(
-        plan_rewrite("CREATE SEMANTIC VIEW x;injection (tables := [], dimensions := [])").is_err(),
+        plan_create("CREATE SEMANTIC VIEW x;injection (tables := [], dimensions := [])").is_err(),
         "legacy named-argument CREATE form with an injected ';' must be rejected"
-    );
-}
-
-#[test]
-fn test_unicode_homoglyph() {
-    // Cyrillic 'С' (U+0421) looks like Latin 'C' but is a different byte sequence.
-    // The ASCII-only keyword matcher must return None — no near-miss confusion.
-    // Note: DuckDB may not pass Unicode-prefixed queries to extension hooks at all
-    // (StripUnicodeSpaces normalisation), but the pure-Rust parser must be safe.
-    let query = "СREATE SEMANTIC VIEW x (tables := [], dimensions := [])";
-    assert_eq!(
-        detect_ddl_kind(query),
-        None,
-        "Cyrillic С prefix should not match as DdlKind"
-    );
-    assert_eq!(
-        detect_semantic_view_ddl(query),
-        PARSE_NOT_OURS,
-        "Cyrillic С prefix should return PARSE_NOT_OURS"
     );
 }
 
@@ -915,10 +487,10 @@ fn test_unicode_homoglyph() {
 fn test_control_char_in_name() {
     // Control characters (0x01-0x1F except whitespace) in view names must not panic.
     let query = "CREATE SEMANTIC VIEW x\x01bad (tables := [], dimensions := [])";
-    let result = std::panic::catch_unwind(|| plan_rewrite(query));
+    let result = std::panic::catch_unwind(|| plan_create(query));
     assert!(
         result.is_ok(),
-        "plan_rewrite panicked on control char in name"
+        "plan_create panicked on control char in name"
     );
 }
 
@@ -1004,10 +576,10 @@ proptest! {
         let query = format!(
             "CREATE SEMANTIC VIEW {name} AS TABLES (t AS orders PRIMARY KEY (id)) {facts_clause} DIMENSIONS (t.region AS region) METRICS (t.rev AS SUM(amount))"
         );
-        let result = std::panic::catch_unwind(|| plan_rewrite(&query));
+        let result = std::panic::catch_unwind(|| plan_create(&query));
         prop_assert!(
             result.is_ok(),
-            "plan_rewrite panicked on FACTS clause: {facts_clause}"
+            "plan_create panicked on FACTS clause: {facts_clause}"
         );
         // The result is either Ok(Some(sql)) for valid DDL, Ok(None) for non-DDL, or Err(ParseError)
         // All are acceptable -- the key invariant is no panics.
@@ -1025,7 +597,7 @@ proptest! {
              DIMENSIONS (t.region AS region) \
              METRICS (t.rev AS SUM(amount))"
         );
-        let result = plan_rewrite(&query);
+        let result = plan_create(&query);
         prop_assert!(
             result.is_ok(),
             "Empty FACTS () should be accepted, got: {:?}",
@@ -1063,10 +635,10 @@ proptest! {
              DIMENSIONS (t.region AS region) \
              METRICS (t.{base_name} AS SUM(t.amount), {derived_name} AS {base_name} + 1)"
         );
-        let result = std::panic::catch_unwind(|| plan_rewrite(&query));
+        let result = std::panic::catch_unwind(|| plan_create(&query));
         prop_assert!(
             result.is_ok(),
-            "plan_rewrite panicked on derived metric entry"
+            "plan_create panicked on derived metric entry"
         );
     }
 
@@ -1087,10 +659,10 @@ proptest! {
                       {alias}.{base2} AS COUNT(*), \
                       {derived} AS {base1} + {base2})"
         );
-        let result = std::panic::catch_unwind(|| plan_rewrite(&query));
+        let result = std::panic::catch_unwind(|| plan_create(&query));
         prop_assert!(
             result.is_ok(),
-            "plan_rewrite panicked on mixed qualified/unqualified metrics"
+            "plan_create panicked on mixed qualified/unqualified metrics"
         );
     }
 }
@@ -1139,7 +711,7 @@ proptest! {
         let ddl = format!(
             "CREATE SEMANTIC VIEW v AS TABLES ({alias_from} AS orders PRIMARY KEY (id), {alias_to} AS customers PRIMARY KEY (id)) RELATIONSHIPS ({input}) DIMENSIONS ({alias_from}.r AS region) METRICS ({alias_from}.m AS SUM(amount))"
         );
-        let result = plan_rewrite(&ddl);
+        let result = plan_create(&ddl);
         prop_assert!(
             result.is_ok(),
             "Failed to parse relationship without cardinality: {:?}",
@@ -1164,7 +736,7 @@ proptest! {
              DIMENSIONS (a.name AS airport_name) \
              METRICS (f.{metric_name} {using_kw} ({rel_name}) AS COUNT(*))"
         );
-        let result = plan_rewrite(&ddl);
+        let result = plan_create(&ddl);
         prop_assert!(
             result.is_ok(),
             "Failed to parse metric with USING clause (rel={}, met={}, kw={}): {:?}",
@@ -1213,7 +785,7 @@ fn parse_error_position_is_byte_offset_into_user_input_smoke() {
     let bad_token_offset = canonical.find("TABLSE").unwrap();
 
     // Canonical case — no prefix.
-    let err = plan_rewrite(canonical).expect_err("should fail on TABLSE");
+    let err = plan_create(canonical).expect_err("should fail on TABLSE");
     let pos = err
         .position
         .expect("position should be set for clause typo");
@@ -1222,7 +794,7 @@ fn parse_error_position_is_byte_offset_into_user_input_smoke() {
     // Whitespace prefix shifts the position by its byte length.
     let prefixed = format!("   \n\t{canonical}");
     let prefix_len = prefixed.len() - canonical.len();
-    let err2 = plan_rewrite(&prefixed).expect_err("should fail with whitespace");
+    let err2 = plan_create(&prefixed).expect_err("should fail with whitespace");
     let pos2 = err2.position.expect("position should be set");
     assert_eq!(
         pos2,
@@ -1233,7 +805,7 @@ fn parse_error_position_is_byte_offset_into_user_input_smoke() {
     // Line-comment prefix.
     let with_comment = format!("-- a comment\n{canonical}");
     let comment_len = with_comment.len() - canonical.len();
-    let err3 = plan_rewrite(&with_comment).expect_err("should fail with comment");
+    let err3 = plan_create(&with_comment).expect_err("should fail with comment");
     let pos3 = err3.position.expect("position should be set");
     assert_eq!(
         pos3,
@@ -1255,7 +827,7 @@ proptest! {
         let bad_offset = canonical.find("TABLSE").unwrap();
         let full = format!("{prefix}{canonical}");
         let prefix_len = prefix.len();
-        let err = plan_rewrite(&full).expect_err("must fail on TABLSE");
+        let err = plan_create(&full).expect_err("must fail on TABLSE");
         let pos = err.position.expect("position should always be set for clause typo");
         prop_assert_eq!(pos, prefix_len + bad_offset);
     }

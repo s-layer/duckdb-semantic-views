@@ -11,7 +11,7 @@
 //! also extracted here. Cardinality inference runs on the parsed definition
 //! before it is carried structurally to the emission stage.
 //!
-//! `validate_create_body` is the entry point (called by `plan_rewrite`); the
+//! `validate_create_body` is the entry point (called by `plan_create`); the
 //! remaining functions are cluster-internal. The quote/body helpers are
 //! re-exported under `#[cfg(test)]` so the parent module's test suite can
 //! exercise them directly.

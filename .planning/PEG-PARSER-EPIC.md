@@ -411,6 +411,16 @@ What changed from the plan:
    MAINTAINER.md and TECH-DEBT #8.
 5. **#77 docs.** SHOW / DESCRIBE as subqueries, restoring the removed examples.
 
+**Deletion PR status (2026-10-25).** The override, the parse stub, the per-thread
+query record, the coexistence switch (`test-sql-grammar`, `SV_ROUTE_TO_GRAMMAR`) and
+`peg_compat.test` are deleted; `fuzz_create_text` replaces `fuzz_parser_override_ffi`
+(#60). Decisions taken by Anentropic: accept DuckDB's conventions where the override
+differed (rebuilt expression text, DuckDB carets and syntax errors, reserved-word
+names quoted in every statement, `GET_DDL` quoting them), and keep the Rust body
+parser for CREATE's body. Resolved with it: #59, #60, #85, #98, #99 (moot on 2.0 GA),
+#100 (accepted), #102, #103. Left for later PRs: the #77 docs, #91 (the shim's 1.5
+branches), #64/PARSE-9.
+
 **Bridge design.** One generic C++ bridge, not a C++ transform per statement:
 
 - The C++ transform serialises the matched `ParseResult` subtree (rule name, type,

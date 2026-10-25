@@ -85,10 +85,8 @@ true
 # The schema rendered is where the view IS, not how the caller spelled the
 # lookup — a BARE name renders `analytics` too.
 #
-# It gets there by UNIQUE MATCH, not through `search_path`. `GET_DDL` is a
-# scalar, and scalars have no named parameters, so the parser override cannot
-# hand it the caller's path (TECH-DEBT #25, blocked on #19); it uses the
-# no-path fallback — the unique match, else an ambiguity error (§7).
+# Here the bare name resolves by UNIQUE MATCH: `sales` lives in exactly one
+# schema, so the search path cannot change which view it finds.
 #
 # An earlier draft of this file set `search_path` before this call and said so
 # in the comment. The assertion passed either way, because `sales` lives in
@@ -121,8 +119,8 @@ CREATE OR REPLACE SEMANTIC VIEW analytics.sales AS
   METRICS (o.revenue AS SUM(o.amount));
 
 # It went back to analytics, not to staging where the session was.
-# `SHOW SEMANTIC VIEWS` is rewritten by the parser override and so cannot be a
-# subquery; `list_semantic_views()` is the same listing as a table function.
+# `list_semantic_views()` is the listing `SHOW SEMANTIC VIEWS` backs, as a
+# table function.
 
 query T
 SELECT schema_name FROM list_semantic_views() WHERE name = 'sales';

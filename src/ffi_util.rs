@@ -132,6 +132,24 @@ pub unsafe fn publish_owned_string(s: String, out_ptr: *mut *mut u8, out_len: *m
     publish_owned_bytes(s.into_bytes(), out_ptr, out_len);
 }
 
+/// FFI export: free a heap buffer the Rust side handed to C++ (SQL, rule
+/// text, read results).
+///
+/// Safe to call with a null pointer (no-op).
+///
+/// # Safety
+///
+/// `ptr`/`len` must be the exact pair a Rust FFI function published through
+/// its out-parameters. Calling with any other pair (or twice on the same
+/// pair) is undefined behaviour.
+#[cfg(feature = "extension")]
+#[no_mangle]
+pub unsafe extern "C" fn sv_free_buffer(ptr: *mut u8, len: usize) {
+    let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        reclaim_c_buffer(ptr, len);
+    }));
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
