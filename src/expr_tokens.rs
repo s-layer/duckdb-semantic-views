@@ -779,7 +779,14 @@ pub(crate) fn find_parameters(expr: &str) -> Vec<(usize, &str)> {
                     .copied()
                     .is_some_and(crate::util::is_ident_byte);
                 let end = run_end(i + 1, crate::util::is_ident_continue);
-                let starts_word = i == 0 || !crate::util::is_ident_byte(bytes[i - 1]);
+                // And a `$` inside a name continues it (`x$$1`), so a token
+                // starts only where no identifier byte comes before its `$`s,
+                // as `read_dollar_tag_len` reads it.
+                let mut k = i;
+                while k > 0 && bytes[k - 1] == b'$' {
+                    k -= 1;
+                }
+                let starts_word = k == 0 || !crate::util::is_ident_byte(bytes[k - 1]);
                 if starts_word && named {
                     out.push((i, &expr[i..end]));
                     i = end;

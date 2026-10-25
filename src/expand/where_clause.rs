@@ -1123,6 +1123,14 @@ mod tests {
         );
     }
 
+    /// The same rule backwards: a `$` inside a name continues it, so in
+    /// `x$$1` the `$1` is part of the name `x$$1`, not a parameter.
+    #[test]
+    fn a_dollar_digit_inside_a_name_is_no_parameter() {
+        let raw = "x$$1 = 0 AND y$2 = 1";
+        assert_eq!(rename_params(raw), raw);
+    }
+
     /// The input the fuzzer found, whose `/*` and `"` swapped roles after the
     /// rename.
     #[test]
