@@ -51,7 +51,7 @@ impl MemberKind {
 /// construct refuses them by name, with its own message.
 #[must_use]
 pub fn members(def: &SemanticViewDefinition) -> Vec<Member> {
-    let lower = |s: &str| s.to_lowercase();
+    let lower = crate::ident::normalize_ident_part;
     let table = |t: &Option<String>| t.as_deref().map(lower).unwrap_or_default();
     let mut out = Vec::new();
     for d in &def.dimensions {

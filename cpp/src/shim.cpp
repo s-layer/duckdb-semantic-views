@@ -22,13 +22,18 @@
 #include "duckdb/parser/expression/columnref_expression.hpp"
 #include "duckdb/parser/parsed_data/create_table_info.hpp"
 #include "duckdb/parser/parsed_data/create_view_info.hpp"
+#include "duckdb/parser/query_node/delete_query_node.hpp"
 #include "duckdb/parser/query_node/insert_query_node.hpp"
+#include "duckdb/parser/query_node/update_query_node.hpp"
 #include "duckdb/parser/result_modifier.hpp"
 #include "duckdb/parser/statement/copy_statement.hpp"
 #include "duckdb/parser/statement/create_statement.hpp"
+#include "duckdb/parser/statement/delete_statement.hpp"
 #include "duckdb/parser/statement/explain_statement.hpp"
 #include "duckdb/parser/statement/insert_statement.hpp"
 #include "duckdb/parser/statement/prepare_statement.hpp"
+#include "duckdb/parser/statement/set_statement.hpp"
+#include "duckdb/parser/statement/update_statement.hpp"
 #include "duckdb/parser/tableref/showref.hpp"
 #include "duckdb/planner/operator_extension.hpp"
 #include "duckdb/function/replacement_scan.hpp"
@@ -3785,12 +3790,39 @@ static string sv_std_lower(const Identifier &id) {
     return StringUtil::Lower(id.GetIdentifierName());
 }
 
+// The children of `expr` that belong to its own query block: for a subquery,
+// only its left side (`x` in `x IN (SELECT ...)`), as the subquery is a block
+// of its own.
+static void sv_std_children(const ParsedExpression &expr, const std::function<void(const ParsedExpression &)> &f) {
+    if (expr.GetExpressionClass() == ExpressionClass::SUBQUERY) {
+        auto &child = expr.Cast<SubqueryExpression>().GetChild();
+        if (child) {
+            f(*child);
+        }
+        return;
+    }
+    ParsedExpressionIterator::EnumerateChildren(expr, f);
+}
+
+static void sv_std_children(ParsedExpression &expr, const std::function<void(unique_ptr<ParsedExpression> &)> &f) {
+    if (expr.GetExpressionClass() == ExpressionClass::SUBQUERY) {
+        auto &child = expr.Cast<SubqueryExpression>().GetChildMutable();
+        if (child) {
+            f(child);
+        }
+        return;
+    }
+    ParsedExpressionIterator::EnumerateChildren(expr, f);
+}
+
+static unique_ptr<TableRef> sv_std_replacement(ClientContext &context, const BaseTableRef &ref);
+
 // Whether `ref` reads a semantic view, and if so its members. A name with a
 // table or view behind it is not one, nor is a CTE in scope.
 static bool sv_std_lookup_view(ClientContext &context, const BaseTableRef &ref,
                                const std::set<string> &ctes, vector<SvStdMember> &members) {
     auto &qn = ref.GetQualifiedName();
-    if (qn.Path().empty() && ctes.count(sv_std_lower(qn.Name()))) {
+    if (qn.Path().size() == 1 && ctes.count(sv_std_lower(qn.Name()))) {
         return false;
     }
     try {
@@ -3801,6 +3833,11 @@ static bool sv_std_lookup_view(ClientContext &context, const BaseTableRef &ref,
     } catch (std::exception &) {
         // An unknown catalog or schema holds no table, and no semantic view
         // either; the Rust lookup says which.
+    }
+    // Nor is a name a replacement scan resolves (a Python DataFrame or
+    // relation of that name), which the binder resolved before the view.
+    if (sv_std_replacement(context, ref)) {
+        return false;
     }
     const string name = qn.ToString();
     const std::vector<uint8_t> sp = sv_caller_search_path(context);
@@ -3878,6 +3915,12 @@ public:
         ForEachClauseExpression([&](unique_ptr<ParsedExpression> &e) { StripQualifier(e); });
         ForEachClauseExpression([&](unique_ptr<ParsedExpression> &e) { RefuseCorrelation(*e); });
         CollectGroups();
+        std::set<string> aliases;
+        for (auto &item : select_.select_list) {
+            if (item->HasAlias()) {
+                aliases.insert(sv_std_lower(item->GetAlias()));
+            }
+        }
         for (auto &item : select_.select_list) {
             RewriteSelectItem(item);
         }
@@ -3888,7 +3931,12 @@ public:
         for (auto &modifier : select_.modifiers) {
             if (modifier->type == ResultModifierType::ORDER_MODIFIER) {
                 for (auto &order : modifier->Cast<OrderModifier>().orders) {
-                    Replace(order.expression, Clause::ORDER_BY);
+                    // A bare name a SELECT item is aliased to is that item, as
+                    // in DuckDB and Snowflake, even when a member has the name:
+                    // left as written, it binds to the rewritten item's alias.
+                    if (!IsAlias(*order.expression, aliases)) {
+                        Replace(order.expression, Clause::ORDER_BY);
+                    }
                 }
             }
         }
@@ -3897,6 +3945,14 @@ public:
 
 private:
     enum class Clause { SELECT, HAVING, ORDER_BY };
+
+    static bool IsAlias(const ParsedExpression &expr, const std::set<string> &aliases) {
+        if (expr.GetExpressionClass() != ExpressionClass::COLUMN_REF) {
+            return false;
+        }
+        auto &ref = expr.Cast<ColumnRefExpression>();
+        return !ref.IsQualified() && aliases.count(sv_std_lower(ref.ColumnNames()[0]));
+    }
 
     [[noreturn]] void Fail(const string &message) const {
         throw BinderException("semantic view '%s': %s", view_label_, message);
@@ -3936,11 +3992,7 @@ private:
             Fail("window functions are not supported in a query over a semantic view; query it in a subquery "
                  "and apply the window to the result");
         }
-        ParsedExpressionIterator::EnumerateChildren(expr, [&](const ParsedExpression &child) {
-            if (child.GetExpressionClass() != ExpressionClass::SUBQUERY) {
-                RefuseWindows(child);
-            }
-        });
+        sv_std_children(expr, [&](const ParsedExpression &child) { RefuseWindows(child); });
     }
 
     // Every expression of the block's own clauses (not of its subqueries).
@@ -3978,11 +4030,7 @@ private:
             }
             return;
         }
-        if (expr->GetExpressionClass() == ExpressionClass::SUBQUERY) {
-            return;
-        }
-        ParsedExpressionIterator::EnumerateChildren(
-            *expr, [&](unique_ptr<ParsedExpression> &child) { StripQualifier(child); });
+        sv_std_children(*expr, [&](unique_ptr<ParsedExpression> &child) { StripQualifier(child); });
     }
 
     // A reference through a name an enclosing query binds is correlated, which
@@ -3999,11 +4047,7 @@ private:
             }
             return;
         }
-        ParsedExpressionIterator::EnumerateChildren(expr, [&](const ParsedExpression &child) {
-            if (child.GetExpressionClass() != ExpressionClass::SUBQUERY) {
-                RefuseCorrelation(child);
-            }
-        });
+        sv_std_children(expr, [&](const ParsedExpression &child) { RefuseCorrelation(child); });
     }
 
     // The members a column reference can name: by name, and by table too when
@@ -4055,16 +4099,29 @@ private:
         return copy->ToString();
     }
 
-    // The key two expressions are the same group by: a column reference that
-    // names exactly one member is that member however it is written.
+    // The key two expressions are the same group by: the expression with
+    // each column reference that names exactly one member replaced by that
+    // member, however it is written, and every other one lower-cased, as
+    // DuckDB matches identifiers case-insensitively.
     string Key(const ParsedExpression &expr) const {
-        if (expr.GetExpressionClass() == ExpressionClass::COLUMN_REF) {
-            auto found = Resolve(expr.Cast<ColumnRefExpression>());
+        auto copy = expr.Copy();
+        Canonicalize(copy);
+        return Text(*copy);
+    }
+
+    void Canonicalize(unique_ptr<ParsedExpression> &expr) const {
+        if (expr->GetExpressionClass() == ExpressionClass::COLUMN_REF) {
+            auto found = Resolve(expr->Cast<ColumnRefExpression>());
             if (found.size() == 1) {
-                return "\x01" + found[0]->table + "." + found[0]->name;
+                expr = make_uniq<ColumnRefExpression>(Identifier("\x01" + found[0]->table + "." + found[0]->name));
+                return;
             }
+            for (auto &name : expr->Cast<ColumnRefExpression>().ColumnNamesMutable()) {
+                name = Identifier(sv_std_lower(name));
+            }
+            return;
         }
-        return Text(expr);
+        sv_std_children(*expr, [&](unique_ptr<ParsedExpression> &child) { Canonicalize(child); });
     }
 
     bool IsAggregate(const FunctionExpression &f) const {
@@ -4087,10 +4144,8 @@ private:
             }
         }
         bool found = false;
-        ParsedExpressionIterator::EnumerateChildren(expr, [&](const ParsedExpression &child) {
-            if (!found && child.GetExpressionClass() != ExpressionClass::SUBQUERY) {
-                found = ContainsAggregateCall(child, rw);
-            }
+        sv_std_children(expr, [&](const ParsedExpression &child) {
+            found = found || ContainsAggregateCall(child, rw);
         });
         return found;
     }
@@ -4118,9 +4173,20 @@ private:
             }
             if (!seen) {
                 group_keys_.push_back(k);
-                dimensions_.push_back(Text(*key));
+                dimensions_.push_back(IsLoneFact(*key) ? "(" + Text(*key) + ")" : Text(*key));
             }
         }
+    }
+
+    // A key that is a fact on its own. DIMENSIONS reads a bare name as a
+    // dimension's, so the key goes in as the expression it is, as any other
+    // expression over facts does: one row per value.
+    bool IsLoneFact(const ParsedExpression &key) const {
+        if (key.GetExpressionClass() != ExpressionClass::COLUMN_REF) {
+            return false;
+        }
+        auto found = Resolve(key.Cast<ColumnRefExpression>());
+        return found.size() == 1 && found[0]->kind == 'F';
     }
 
     unique_ptr<ParsedExpression> ResolveGroup(const ParsedExpression &group) const {
@@ -4153,11 +4219,7 @@ private:
             return true;
         }
         bool found = false;
-        ParsedExpressionIterator::EnumerateChildren(expr, [&](const ParsedExpression &child) {
-            if (!found && child.GetExpressionClass() != ExpressionClass::SUBQUERY) {
-                found = HasColumnRef(child);
-            }
-        });
+        sv_std_children(expr, [&](const ParsedExpression &child) { found = found || HasColumnRef(child); });
         return found;
     }
 
@@ -4200,8 +4262,11 @@ private:
     // aggregate in `expr`; a member reference left over is the clause's to
     // judge.
     void Replace(unique_ptr<ParsedExpression> &expr, Clause clause) {
-        if (!expr || expr->GetExpressionClass() == ExpressionClass::SUBQUERY ||
-            expr->GetExpressionClass() == ExpressionClass::STAR) {
+        if (!expr || expr->GetExpressionClass() == ExpressionClass::STAR) {
+            return;
+        }
+        if (expr->GetExpressionClass() == ExpressionClass::SUBQUERY) {
+            sv_std_children(*expr, [&](unique_ptr<ParsedExpression> &child) { Replace(child, clause); });
             return;
         }
         auto alias = expr->GetAlias();
@@ -4239,8 +4304,7 @@ private:
             }
             return;
         }
-        ParsedExpressionIterator::EnumerateChildren(
-            *expr, [&](unique_ptr<ParsedExpression> &child) { Replace(child, clause); });
+        sv_std_children(*expr, [&](unique_ptr<ParsedExpression> &child) { Replace(child, clause); });
     }
 
     // Column references the rewrite left in `expr`: none is one of its own.
@@ -4253,11 +4317,7 @@ private:
             }
             return;
         }
-        ParsedExpressionIterator::EnumerateChildren(expr, [&](const ParsedExpression &child) {
-            if (child.GetExpressionClass() != ExpressionClass::SUBQUERY) {
-                Leftovers(child, out);
-            }
-        });
+        sv_std_children(expr, [&](const ParsedExpression &child) { Leftovers(child, out); });
     }
 
     static bool HasOwnColumn(const ParsedExpression &expr) {
@@ -4266,9 +4326,7 @@ private:
             return names.size() == 1 && StringUtil::StartsWith(names[0].GetIdentifierName(), "__sv");
         }
         bool found = false;
-        ParsedExpressionIterator::EnumerateChildren(expr, [&](const ParsedExpression &child) {
-            found = found || HasOwnColumn(child);
-        });
+        sv_std_children(expr, [&](const ParsedExpression &child) { found = found || HasOwnColumn(child); });
         return found;
     }
 
@@ -4364,6 +4422,19 @@ public:
         case StatementType::INSERT_STATEMENT:
             Node(*statement.Cast<InsertStatement>().node, Scope());
             break;
+        case StatementType::UPDATE_STATEMENT:
+            Node(*statement.Cast<UpdateStatement>().node, Scope());
+            break;
+        case StatementType::DELETE_STATEMENT:
+            Node(*statement.Cast<DeleteStatement>().node, Scope());
+            break;
+        case StatementType::SET_STATEMENT:
+            if (auto *set = dynamic_cast<SetVariableStatement *>(&statement)) {
+                if (set->value) {
+                    Expr(set->value, Scope());
+                }
+            }
+            break;
         case StatementType::COPY_STATEMENT: {
             auto &info = *statement.Cast<CopyStatement>().info;
             if (info.select_statement) {
@@ -4407,29 +4478,81 @@ private:
         }
     }
 
+    // The subqueries in a node's ORDER BY / LIMIT / OFFSET.
+    void Modifiers(QueryNode &node, const Scope &scope) {
+        ParsedExpressionIterator::EnumerateQueryNodeModifiers(
+            node, [&](unique_ptr<ParsedExpression> &e) { Expr(e, scope); });
+    }
+
     void Node(QueryNode &node, Scope scope) {
-        for (auto &kv : node.cte_map.map) {
-            scope.ctes.insert(sv_std_lower(kv.first));
-        }
+        // A CTE is in scope from the next one on: its own body, unless it is
+        // recursive, reads the table of its name.
         for (auto &kv : node.cte_map.map) {
             if (kv.second->query_node) {
                 Node(*kv.second->query_node, scope);
             }
+            scope.ctes.insert(sv_std_lower(kv.first));
         }
         switch (node.type) {
         case QueryNodeType::SET_OPERATION_NODE:
             for (auto &child : node.Cast<SetOperationNode>().children) {
                 Node(*child, scope);
             }
+            Modifiers(node, scope);
             return;
-        case QueryNodeType::RECURSIVE_CTE_NODE:
-            Node(*node.Cast<RecursiveCTENode>().left, scope);
-            Node(*node.Cast<RecursiveCTENode>().right, scope);
+        case QueryNodeType::RECURSIVE_CTE_NODE: {
+            auto &recursive = node.Cast<RecursiveCTENode>();
+            scope.ctes.insert(sv_std_lower(recursive.ctename));
+            Node(*recursive.left, scope);
+            Node(*recursive.right, scope);
+            Modifiers(node, scope);
             return;
+        }
         case QueryNodeType::INSERT_QUERY_NODE: {
             auto &insert = node.Cast<InsertQueryNode>();
             if (insert.select_statement) {
                 Node(*insert.select_statement->node, scope);
+            }
+            return;
+        }
+        case QueryNodeType::UPDATE_QUERY_NODE: {
+            auto &update = node.Cast<UpdateQueryNode>();
+            Scope inner = scope;
+            if (update.table) {
+                Aliases(*update.table, inner.outer);
+            }
+            if (update.from_table) {
+                Ref(update.from_table, scope);
+                Aliases(*update.from_table, inner.outer);
+            }
+            if (update.set_info) {
+                for (auto &e : update.set_info->expressions) {
+                    Expr(e, inner);
+                }
+                if (update.set_info->condition) {
+                    Expr(update.set_info->condition, inner);
+                }
+            }
+            for (auto &e : update.returning_list) {
+                Expr(e, inner);
+            }
+            return;
+        }
+        case QueryNodeType::DELETE_QUERY_NODE: {
+            auto &del = node.Cast<DeleteQueryNode>();
+            Scope inner = scope;
+            if (del.table) {
+                Aliases(*del.table, inner.outer);
+            }
+            for (auto &ref : del.using_clauses) {
+                Ref(ref, scope);
+                Aliases(*ref, inner.outer);
+            }
+            if (del.condition) {
+                Expr(del.condition, inner);
+            }
+            for (auto &e : del.returning_list) {
+                Expr(e, inner);
             }
             return;
         }
@@ -4439,9 +4562,7 @@ private:
             return;
         }
         auto &select = node.Cast<SelectNode>();
-        // What this block's subqueries see: its own FROM too. (For a subquery
-        // in that FROM, its siblings, which only a LATERAL one can refer to;
-        // counting them for every one errs on the side of refusing.)
+        // What this block's expressions' subqueries see: its own FROM too.
         Scope inner = scope;
         if (select.from_table) {
             Aliases(*select.from_table, inner.outer);
@@ -4453,11 +4574,15 @@ private:
         for (auto &item : select.select_list) {
             visit(item);
         }
+        for (auto &group : select.groups.group_expressions) {
+            visit(group);
+        }
         for (auto *clause : {&select.where_clause, &select.having, &select.qualify}) {
             if (*clause) {
                 visit(*clause);
             }
         }
+        Modifiers(node, inner);
         if (!select.from_table) {
             return;
         }
@@ -4470,7 +4595,9 @@ private:
                 return;
             }
         }
-        Ref(select.from_table, inner);
+        // A subquery in FROM sees the blocks around this one, not its own
+        // alias (Ref adds the tables to its left, which DuckDB lets it read).
+        Ref(select.from_table, scope);
     }
 
     // A name no table or CTE has may be one a replacement scan resolves to a
@@ -4479,7 +4606,7 @@ private:
     void Replace(unique_ptr<TableRef> &ref, const Scope &scope) {
         auto &base = ref->Cast<BaseTableRef>();
         auto &qn = base.GetQualifiedName();
-        if (qn.Path().empty() && scope.ctes.count(sv_std_lower(qn.Name()))) {
+        if (qn.Path().size() == 1 && scope.ctes.count(sv_std_lower(qn.Name()))) {
             return;
         }
         try {
@@ -4536,9 +4663,15 @@ private:
         case TableReferenceType::JOIN: {
             auto &join = ref->Cast<JoinRef>();
             Ref(join.left, scope, false);
-            Ref(join.right, scope, false);
+            // DuckDB lets a subquery on the right read the tables on the
+            // left (an implicit LATERAL); the condition reads both.
+            Scope right = scope;
+            Aliases(*join.left, right.outer);
+            Ref(join.right, right, false);
             if (join.condition) {
-                Expr(join.condition, scope);
+                Scope both = right;
+                Aliases(*join.right, both.outer);
+                Expr(join.condition, both);
             }
             break;
         }

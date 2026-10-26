@@ -135,7 +135,7 @@ Troubleshooting
    Facts marked ``PRIVATE`` cannot be queried directly. They can only be referenced in metric expressions and other facts. Remove the ``PRIVATE`` keyword to make a fact queryable.
 
 **Incompatible table paths**
-   A fact query returns rows as they are, so the tables it references must be joinable without multiplying them. If neither of two tables can be reached from the other without traversing a one-to-many relationship against its direction -- typically two tables that both reference a third -- the extension returns ``fact query references objects from incompatible table paths``. A chain of many-to-one relationships is fine however long it is.
+   A fact query returns rows as they are, so the tables it references must be joinable without multiplying them: one of them must reach every other without traversing a one-to-many relationship against its direction. If none does -- typically two tables that both reference a third -- the extension returns ``fact query references objects from incompatible table paths``. A chain of many-to-one relationships is fine however long it is, and so are two tables that a third one the query reads both references (a fact on ``orders`` with dimensions on ``customers`` and ``products``).
 
 
 .. _howto-query-facts-related:

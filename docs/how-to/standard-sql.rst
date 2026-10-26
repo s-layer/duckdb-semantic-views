@@ -45,7 +45,7 @@ How the Clauses Map
    * - In the query
      - Becomes
    * - ``GROUP BY`` expressions
-     - ``DIMENSIONS`` items. ``GROUP BY 1`` (a position), ``GROUP BY r`` (a ``SELECT`` alias) and ``GROUP BY ALL`` are resolved to the ``SELECT`` item first.
+     - ``DIMENSIONS`` items. ``GROUP BY 1`` (a position), ``GROUP BY r`` (a ``SELECT`` alias) and ``GROUP BY ALL`` are resolved to the ``SELECT`` item first. A grouped fact, like any expression over facts, gives one row per value.
    * - ``AGG(m)``
      - The metric ``m`` in ``METRICS``. ``MIN(m)``, ``MAX(m)`` and ``ANY_VALUE(m)`` of a metric mean the same as ``AGG(m)``.
    * - Any other aggregate, such as ``SUM(amount)`` or ``COUNT(DISTINCT customer)``
@@ -96,7 +96,7 @@ Members are named as in the construct. A name used by members of two tables is q
 Use It Anywhere a Query Goes
 ============================
 
-The query can stand wherever a ``SELECT`` can: in a subquery or CTE, joined (as a subquery) with tables, in ``UNION``, in ``CREATE TABLE ... AS``, ``INSERT ... SELECT``, ``COPY (...) TO``, ``EXPLAIN``, ``DESCRIBE``, a prepared statement, or a ``CREATE VIEW`` (which stores the construct form). From Python, ``duckdb.sql()``, ``con.sql()`` and ``con.execute()`` all accept it, and a relation over it can be read by its variable name in a later query.
+The query can stand wherever a ``SELECT`` can: in a subquery or CTE, joined (as a subquery) with tables, in ``UNION``, in ``CREATE TABLE ... AS``, ``INSERT ... SELECT``, a subquery of ``UPDATE``, ``DELETE`` or ``SET VARIABLE``, ``COPY (...) TO``, ``EXPLAIN``, ``DESCRIBE``, a prepared statement, or a ``CREATE VIEW`` (which stores the construct form). A subquery in any clause counts, ``ORDER BY`` and ``LIMIT`` included. From Python, ``duckdb.sql()``, ``con.sql()`` and ``con.execute()`` all accept it, and a relation over it can be read by its variable name in a later query. A Python DataFrame or relation with the view's name is read as itself, as DuckDB reads it, not as the view.
 
 .. code-block:: sql
 
@@ -118,7 +118,7 @@ These follow Snowflake's rules for the query form, and each is refused with an e
 - In the query block that reads the view: ``SELECT *``, a join (or a ``FROM`` list) with other tables, ``PIVOT``, window functions, ``QUALIFY``, ``GROUPING SETS`` / ``ROLLUP`` / ``CUBE``, sampling, and a column alias list on the view. Query the view in a subquery or CTE and apply these to its result.
 - A reference to a table of an enclosing query (a correlated subquery). Inside the construct the name would otherwise resolve to the view's own logical table.
 
-A name that is a table, a view or a CTE in scope is not a semantic view here: those keep their usual meaning, and so do DuckDB's own errors for statements that read no semantic view.
+A name that is a table, a view, a CTE in scope or a Python DataFrame or relation is not a semantic view here: those keep their usual meaning, and so do DuckDB's own errors for statements that read no semantic view.
 
 
 See Also

@@ -827,10 +827,11 @@ pub(super) fn check_referenced_fact_fan_traps(
 ///
 /// Snowflake constraint: "all facts and dimensions used in the query must be
 /// defined in the same logical table." For our multi-table model this is
-/// relaxed to: for every pair of `source_table` aliases, one must be reachable
-/// from the other along the join path without traversing a many-to-one edge
-/// backwards. A fact query does not aggregate, so a fan-out here does not skew
-/// a total — it silently duplicates the rows returned, which is why the pair is
+/// relaxed to: one of the query's `source_table` aliases must reach every other
+/// along the join path without traversing a many-to-one edge backwards. That
+/// table is the query's grain: each of its rows joins at most one row of every
+/// other. A fact query does not aggregate, so a fan-out here does not skew a
+/// total — it silently duplicates the rows returned, which is why the query is
 /// rejected outright rather than fenced.
 ///
 /// Skips validation when there is only one unique table (trivially valid)
@@ -865,9 +866,11 @@ pub(super) fn validate_fact_table_path(
     let adjacency = build_adjacency(def);
     let card_map = build_card_map(def);
 
-    // For each pair, one table's rows must be enrichable from the other without
-    // multiplying them — i.e. the join path between them is traversable in at
-    // least one direction without crossing a many-to-one edge backwards.
+    // One table's rows must be enrichable from every other's without
+    // multiplying them — i.e. the join path from it to each of the others is
+    // traversable without crossing a many-to-one edge backwards. Two tables
+    // that both reference a third need not reach each other: the third, when
+    // the query reads it, reaches both.
     //
     // TECH-DEBT #37: this used to ask the parent tree whether one table was an
     // ancestor of the other. Ancestry is the wrong question in both directions.
@@ -877,16 +880,22 @@ pub(super) fn validate_fact_table_path(
     // table becomes an ancestor of EVERY alias, including siblings it can only
     // reach by walking a many-to-one edge backwards. Checking the path's
     // direction answers both at once.
+    let reaches = |from: &String, to: &String| {
+        find_path(from, to, &adjacency)
+            .is_some_and(|path| fanning_edge_on_path(&path, &card_map).is_none())
+    };
+    let grain = all_tables
+        .iter()
+        .any(|root| all_tables.iter().all(|t| t == root || reaches(root, t)));
+    if grain {
+        return Ok(());
+    }
+    // Reaching along such paths orders the tables, so with no table first
+    // some pair is unordered: neither reaches the other. Name it.
     for i in 0..all_tables.len() {
         for j in (i + 1)..all_tables.len() {
-            let a = &all_tables[i];
-            let b = &all_tables[j];
-            let safe = find_path(a, b, &adjacency).is_some_and(|forward| {
-                let backward: Vec<String> = forward.iter().rev().cloned().collect();
-                fanning_edge_on_path(&forward, &card_map).is_none()
-                    || fanning_edge_on_path(&backward, &card_map).is_none()
-            });
-            if !safe {
+            let (a, b) = (&all_tables[i], &all_tables[j]);
+            if !reaches(a, b) && !reaches(b, a) {
                 return Err(ExpandError::FactPathViolation {
                     view_name: view_name.to_string(),
                     table_a: a.clone(),
@@ -895,8 +904,11 @@ pub(super) fn validate_fact_table_path(
             }
         }
     }
-
-    Ok(())
+    Err(ExpandError::FactPathViolation {
+        view_name: view_name.to_string(),
+        table_a: all_tables[0].clone(),
+        table_b: all_tables[1].clone(),
+    })
 }
 
 #[cfg(test)]
