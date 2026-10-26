@@ -130,7 +130,8 @@ src/
     │                          #   definition (always compiled)
     ├── wire.rs                #   Pure wire-format/SQL-shape helpers (always compiled + unit-tested)
     ├── raw_sql.rs             #   Raw C-API query helpers: DESCRIBE names and types, VARCHAR reads (always compiled)
-    ├── member_types.rs        #   Read-side member type probe for SHOW/DESCRIBE `data_type` (TECH-DEBT #51; always compiled)
+    ├── member_types.rs        #   Member type probe for SHOW/DESCRIBE `data_type` (TECH-DEBT #51), also
+    │                          #   CREATE's member bind (`first_unbound_member`; always compiled)
     ├── error.rs               #   Query-specific error types (extension-only)
     └── mod.rs
 
@@ -218,6 +219,10 @@ DuckDB keeps the active grammar extensions per connection (`active_grammar_exten
 2. **Connections already open**, the loading one included, through a `SemanticViewsGrammarPending` `ClientContextState` registered on each (that registry is mutex-synchronised). Its `QueryBegin` / `QueryEnd` runs on the connection's own thread, activates the grammar there and removes itself. The loading connection activates at the `QueryEnd` of its `LOAD`, so its next query has the grammar. Nothing writes another connection's `ClientConfig` from the loading thread (TECH-DEBT #103).
 
 DuckDB parses a statement before `QueryBegin`, and a statement that fails to parse begins no query. So any **other** connection that was open at the `LOAD` (and was not running a query then) parses without the grammar until it runs a statement that parses without it, such as `SELECT 1` or `LOAD semantic_views`: every semantic-view statement before that fails as a DuckDB syntax error, retries included. `test_connection_open_before_load` in `test/integration/test_load_extension_twice_idempotent.py` pins this. DuckDB offers no pre-parse hook and no global form of `active_grammar_extensions` that would avoid it (TECH-DEBT #108).
+
+#### CREATE binds every member
+
+The CREATE transform has no `ClientContext`, so the check runs in a table function's bind. `parse::native_sql::emit_native_create_sql` reads the catalog `INSERT`'s row from `__sv_check_create('<definition>', '<view>')` (every CREATE shape, `OR REPLACE` and `IF NOT EXISTS` included), and `FROM YAML FILE`'s helper bind calls the same check once it has the definition. The bind (`sv_check_create_bind` in `cpp/src/shim.cpp`) calls `sv_check_create_members` under `SvCallerScope`, which hands the caller's current database and schema to `ddl::read_ffi::check_create_members`. That stamps them on the definition as CREATE will, clears its materializations (their tables may not exist yet), notes which tables are temporary, and calls `query::member_types::first_unbound_member`. It probes every member through the same `caller_describe` path as `SHOW` / `DESCRIBE` types, so a member binds in the caller's transaction and sees its temporary tables. `PRIVATE` members are probed through a public copy, a role-played member through a single-role copy, and a window metric with its required dimensions. A member is reported only when its own probe ran and failed to bind; the error names it (`semantic view '<v>': <kind> '<name>' does not bind: ...`). `test/sql/create_binds_members.test` pins each refusal and the controls.
 
 ### Feature Flag Split
 

@@ -369,6 +369,75 @@ pub fn member_types_for_bind(
     )?)
 }
 
+/// Refuse a CREATE whose definition has a member `DuckDB` cannot bind, as
+/// Snowflake compiles every member expression at CREATE.
+///
+/// `definition` is the JSON `enrich_definition_for_create` produced. It is
+/// probed, without its materializations, as the stored view will be expanded:
+/// its names resolve in
+/// `database`.`schema` (the caller's current database and schema, which the
+/// CREATE stamps), and a table written without a schema that is a temporary
+/// table or view in the caller's session is that one (the INSERT records the
+/// same set as `temp_tables`). The probes run in the caller's context, so they
+/// see the caller's transaction.
+///
+/// # Errors
+///
+/// `semantic view '<name>': <kind> '<member>' does not bind: <DuckDB's error>`
+/// for the first member that does not bind; `Interrupted!` when the caller was
+/// cancelled, which the C++ helper raises as a bare `InterruptException`.
+pub fn check_create_members(
+    view_name: &str,
+    definition: &str,
+    database: &str,
+    schema: &str,
+) -> Result<(), String> {
+    use crate::query::member_types::{ProbeError, ProbedColumn};
+    let mut def: crate::model::SemanticViewDefinition =
+        serde_json::from_str(definition).map_err(|e| format!("internal error: {e}"))?;
+    def.database_name = Some(database.to_string());
+    def.schema_name = Some(schema.to_string());
+    def.resolution_schema_name = Some(schema.to_string());
+    // A member is bound over the view's own tables. A request a
+    // materialization covers would be routed to its table instead, which need
+    // not exist yet and says nothing about the member's expression.
+    def.materializations.clear();
+    let (database, schema) = (Some(database), Some(schema));
+    let mut temp = Vec::new();
+    for name in std::mem::take(&mut def.temp_tables) {
+        let probe = format!(
+            "SELECT * FROM \"temp\".\"main\".{} LIMIT 0",
+            crate::expand::quote_ident(&name)
+        );
+        match caller_describe(database, schema, &probe) {
+            Ok(_) => temp.push(name),
+            Err(CallerError::Interrupted(m)) => return Err(m),
+            Err(CallerError::Failed(_)) => {}
+        }
+    }
+    def.temp_tables = temp;
+    let unbound = crate::query::member_types::first_unbound_member(
+        view_name,
+        &def,
+        &bind_caller_interrupted,
+        &mut |sql| match caller_describe(database, schema, sql) {
+            Ok(cols) => Ok(cols
+                .into_iter()
+                .map(|(name, data_type)| ProbedColumn { name, data_type })
+                .collect()),
+            Err(CallerError::Interrupted(_)) => Err(ProbeError::Interrupted),
+            Err(CallerError::Failed(m)) => Err(ProbeError::Failed(m)),
+        },
+    )?;
+    match unbound {
+        None => Ok(()),
+        Some(u) => Err(format!(
+            "semantic view '{view_name}': {} '{}' does not bind: {}",
+            u.kind, u.name, u.error
+        )),
+    }
+}
+
 /// Write a NUL-terminated error message into the C-side `error_buf`,
 /// truncating to at most `buf_len - 1` payload bytes on a UTF-8 char
 /// boundary. Thin alias for the shared [`crate::ffi_util::write_error_to_buffer`]

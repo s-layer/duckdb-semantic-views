@@ -33,7 +33,6 @@ query TI
 SELECT * FROM SEMANTIC_VIEW(qk DIMENSIONS region METRICS total) ORDER BY 1;
 ----
 East	12
-North	NULL
 West	3
 
 # The relationship's own key columns unquoted, so the next two reach only the
@@ -65,7 +64,6 @@ query TI
 SELECT * FROM SEMANTIC_VIEW(qk2 DIMENSIONS region METRICS n) ORDER BY 1;
 ----
 East	2
-North	0
 West	1
 
 # A fact on the child keeps only rows with a child: c."Child Id" IS NOT NULL.

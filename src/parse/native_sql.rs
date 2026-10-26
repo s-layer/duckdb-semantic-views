@@ -261,7 +261,7 @@ fn emit_native_create_sql(
     let schema_version = crate::model::CURRENT_SCHEMA_VERSION;
     let metadata_patched_definition = format!(
         "json_merge_patch( \
-            '{enriched_escaped}'::JSON, \
+            new_def::JSON, \
             json_object( \
               'created_on', strftime(now(), '%Y-%m-%dT%H:%M:%SZ'), \
               'database_name', current_database(), \
@@ -271,7 +271,15 @@ fn emit_native_create_sql(
               'schema_version', {schema_version} \
             ) \
          )::VARCHAR",
-        temp_tables = temp_tables_expr(&format!("'{enriched_escaped}'::JSON"))
+        temp_tables = temp_tables_expr("new_def::JSON")
+    );
+    // The definition is read through the `__sv_check_create` helper TF
+    // (`cpp/src/shim.cpp`), whose bind refuses it if a member does not bind in
+    // the caller's context -- as `__sv_compute_create_from_yaml` does for FROM
+    // YAML FILE. Its one `new_def` row is the definition unchanged.
+    let helper_from = format!(
+        "FROM __sv_check_create('{enriched_escaped}', '{}')",
+        SqlLit::escape(name)
     );
 
     // The generated SQL runs on the caller's connection, so its EXISTS
@@ -301,12 +309,14 @@ fn emit_native_create_sql(
         format!(
             "INSERT OR REPLACE INTO {DEFINITIONS_TABLE} (schema_name, name, definition) \
              SELECT {schema_expr}, '{name_escaped}', {metadata_patched_definition} \
+             {helper_from} \
              RETURNING name AS view_name"
         )
     } else if if_not_exists {
         format!(
             "INSERT OR IGNORE INTO {DEFINITIONS_TABLE} (schema_name, name, definition) \
              SELECT {schema_expr}, '{name_escaped}', {metadata_patched_definition} \
+             {helper_from} \
              RETURNING name AS view_name"
         )
     } else {
@@ -321,6 +331,7 @@ fn emit_native_create_sql(
                     ELSE '{name_escaped}' \
                END, \
                {metadata_patched_definition} \
+             {helper_from} \
              RETURNING name AS view_name"
         )
     };

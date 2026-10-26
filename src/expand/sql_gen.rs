@@ -7,7 +7,7 @@ use super::facts::{
 };
 use super::fan_trap::{check_fan_traps, validate_fact_table_path};
 use super::join_resolver::resolve_joins_pkfk;
-use super::resolution::{find_dimension, find_metric, quote_ident, quote_stored_ident};
+use super::resolution::{find_dimension, find_metric, quote_stored_ident};
 use super::role_playing::{
     check_fact_role_playing_path, check_where_clause_role_playing_path, find_using_context,
 };
@@ -245,8 +245,8 @@ fn phantom_row_filter(
         .first()?;
     Some(format!(
         "{}.{} IS NOT NULL",
-        quote_ident(&alias),
-        quote_ident(pk)
+        quote_stored_ident(&alias),
+        quote_stored_ident(pk)
     ))
 }
 
@@ -724,6 +724,12 @@ fn expand_unhoisted(
             &resolved_mets,
             &queried_dim_keys,
         );
+        extra.extend(super::semi_additive::na_dim_scoped_source_tables(
+            view_name,
+            def,
+            &resolved_mets,
+            &queried_dim_keys,
+        ));
         extra.extend(where_tables.iter().cloned());
         super::per_grain::snapshot_cte_anchor(
             def,

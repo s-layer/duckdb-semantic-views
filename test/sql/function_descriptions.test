@@ -5,7 +5,7 @@
 # querying duckdb_functions(). Every registration therefore carries a
 # FunctionDescription: a description, real parameter names (never the
 # `col0`/`col1` placeholders DuckDB falls back to), and, for everything but
-# the internal CREATE ... FROM YAML helper, a runnable example.
+# the internal CREATE helpers, a runnable example.
 #
 # The registration core refuses a function with no documentation entry, so a
 # newly added function cannot silently ship undocumented; this file pins the
@@ -29,13 +29,14 @@ WHERE function_name IN (
     'show_semantic_materializations', 'show_semantic_dimensions_all',
     'show_semantic_metrics_all', 'show_semantic_facts_all',
     'show_semantic_materializations_all',
-    'show_semantic_dimensions_for_metric', '__sv_compute_create_from_yaml');
+    'show_semantic_dimensions_for_metric', '__sv_compute_create_from_yaml',
+    '__sv_check_create');
 
-# All 18 functions are registered (get_ddl has two overloads, hence 19 rows).
+# All 19 functions are registered (get_ddl has two overloads, hence 20 rows).
 query I
 SELECT count(*) FROM sv_fns;
 ----
-19
+20
 
 # --- Case 1: every overload has a description ----------------------------
 
@@ -55,12 +56,13 @@ ORDER BY ALL;
 
 query T
 SELECT function_name FROM sv_fns
-WHERE len(examples) = 0 AND function_name <> '__sv_compute_create_from_yaml'
+WHERE len(examples) = 0
+  AND function_name NOT IN ('__sv_compute_create_from_yaml', '__sv_check_create')
 ORDER BY ALL;
 ----
 
 # --- Case 3b: functions behind a SQL statement redirect to it ------------
-# Every function that a SHOW / DESCRIBE / CREATE ... FROM YAML FILE
+# Every function that a SHOW / DESCRIBE / CREATE SEMANTIC VIEW
 # statement lowers to says so, and tells the caller to use the statement.
 # coalesce: a missing description must fail these, not drop out as NULL.
 

@@ -9,7 +9,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-_No unreleased changes yet._
+### Changed
+
+- **`CREATE SEMANTIC VIEW` binds every member.** Each dimension, fact and metric,
+  `PRIVATE` ones included, is bound against the view's tables when the view is created,
+  as Snowflake compiles each expression at `CREATE`. A member DuckDB cannot bind (an
+  unknown column, table or function, a syntax error, or an argument such as
+  `date_trunc('fortnight', ...)`) now refuses the `CREATE` with
+  `semantic view '<view>': <kind> '<name>' does not bind: <DuckDB error>`, instead of
+  being stored and failing only when a query reached it. Every form is checked: `OR
+  REPLACE`, `IF NOT EXISTS`, `FROM YAML` and `FROM YAML FILE`. The bind runs in the
+  creating session, so temporary tables and tables created earlier in the same
+  transaction are visible. Materialization tables are not checked.
+
+### Fixed
+
+- **Quoted key columns and table aliases.** A view whose `PRIMARY KEY`, relationship
+  columns or table alias were written quoted (`PRIMARY KEY ("Key Col")`,
+  `"Ord Lines" AS orders`) quoted them twice in the generated SQL, so nearly every query
+  of the view failed with a "not found" error.
+- **A `USING` semi-additive metric on a role-played table.** Queried with metrics only,
+  a semi-additive metric whose `NON ADDITIVE BY` dimension sits on a table reached
+  through its `USING` relationship failed with `Referenced table "<table>__<rel>" not
+  found`.
 
 ## [0.16.0] - 2026-10-26
 

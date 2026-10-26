@@ -13,10 +13,10 @@
 require semantic_views
 
 statement ok
-CREATE TABLE sve_rows (id INTEGER, txt VARCHAR);
+CREATE TABLE sve_rows (id INTEGER, txt VARCHAR, dropped INTEGER);
 
 statement ok
-INSERT INTO sve_rows VALUES (1, '10'), (2, 'not a number');
+INSERT INTO sve_rows VALUES (1, '10', 1), (2, 'not a number', 2);
 
 statement ok
 CREATE SEMANTIC VIEW sve_view AS
@@ -24,8 +24,12 @@ CREATE SEMANTIC VIEW sve_view AS
   DIMENSIONS (e.id AS e.id)
   METRICS (
     e.bad AS sum(CAST(e.txt AS INTEGER)),
-    e.gone AS sum(e.no_such_column)
+    e.gone AS sum(e.dropped)
   );
+
+# CREATE binds every member, so `gone` loses its column after CREATE.
+statement ok
+ALTER TABLE sve_rows DROP COLUMN dropped;
 
 # Fails at execution: DuckDB's conversion error, unwrapped.
 statement error
@@ -51,7 +55,7 @@ SELECT bad FROM semantic_view('sve_view', metrics := ['e.bad'], where_clause := 
 statement error
 SELECT * FROM SEMANTIC_VIEW(sve_view METRICS gone);
 ----
-Table "e" does not have a column named "no_such_column"
+Table "e" does not have a column named "dropped"
 
 statement error
 SELECT * FROM SEMANTIC_VIEW(sve_view METRICS gone);
