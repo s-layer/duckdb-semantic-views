@@ -733,7 +733,9 @@ pub(crate) fn references_ref(expr: &str, name: &str, source_table: Option<&str>)
 /// design (SG-3) cannot occur here, and there is no needle-ordering concern: each chain
 /// resolves to exactly one key (`o.net_price` and `net_price` are distinct
 /// keys). Literal text and unmatched references are copied verbatim, so a
-/// metric name inside `'…'` or a foreign `x.net_price` is left intact.
+/// metric name inside `'…'` or a foreign `x.net_price` is left intact, as is
+/// a field of an expression's value (`(s).net_price`) or a named argument
+/// (`net_price := …`).
 ///
 /// Keys are normalized identifier keys (as produced by
 /// [`crate::ident::normalize_ident_part`]): a bare `revenue` or a qualified
@@ -763,6 +765,12 @@ fn splice_references(
     let mut out = String::with_capacity(expr.len());
     let mut copied = 0;
     for r in refs {
+        // A field of an expression's value (`(s).x`) or a named argument
+        // (`x := …`, `x => …`) only shares the member's name.
+        let after = expr[r.end..].trim_start();
+        if expr[..r.start].ends_with('.') || after.starts_with(":=") || after.starts_with("=>") {
+            continue;
+        }
         if let Some(repl) = replacements.get(&r.key()) {
             out.push_str(&expr[copied..r.start]);
             out.push_str(repl);
@@ -1174,6 +1182,28 @@ mod tests {
     }
 
     // ----- inline_references (INLINE) -----
+
+    // A field of an expression's value and a function's named argument are
+    // names of their own, so a member of the same name is not inlined there.
+    #[test]
+    fn inline_leaves_a_field_or_named_argument_alone() {
+        let mut m: HashMap<String, &str> = HashMap::new();
+        m.insert("amt".to_string(), "(o.amount)");
+        let cases = [
+            (
+                "struct_pack(amt := amt).amt",
+                "struct_pack(amt := (o.amount)).amt",
+            ),
+            ("f(amt => amt)", "f(amt => (o.amount))"),
+            ("(s).amt + amt", "(s).amt + (o.amount)"),
+        ];
+        let wrong: Vec<String> = cases
+            .iter()
+            .filter(|(expr, want)| inline_references(expr, &m) != *want)
+            .map(|(expr, _)| format!("{expr} -> {}", inline_references(expr, &m)))
+            .collect();
+        assert!(wrong.is_empty(), "{wrong:#?}");
+    }
 
     #[test]
     fn inline_bare_and_qualified_keys() {
