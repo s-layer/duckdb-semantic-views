@@ -156,8 +156,19 @@ impl IdentRef<'_> {
 /// emitted — so a fact/metric named like a function (`sum`) is never confused
 /// with the call, in either FIND or INLINE. The complementary chains (the call
 /// heads themselves) are available via [`scan_function_heads`].
+///
+/// Nor is a name of the expression's own: a field of an expression's value
+/// (`(s).x`, `struct_pack(x := 1).x`) or a function's named argument
+/// (`x := …`, `x => …`). Every FIND and INLINE goes through this scan, so
+/// they agree that a member of the same name is not referenced there.
 pub(crate) fn scan_references(expr: &str) -> Vec<IdentRef<'_>> {
     scan_chains(expr, ChainKind::Reference)
+        .into_iter()
+        .filter(|r| {
+            let after = expr[r.end..].trim_start();
+            !(expr[..r.start].ends_with('.') || after.starts_with(":=") || after.starts_with("=>"))
+        })
+        .collect()
 }
 
 /// Which class of identifier chain a scan collects: [`scan_references`] keeps
@@ -733,7 +744,9 @@ pub(crate) fn references_ref(expr: &str, name: &str, source_table: Option<&str>)
 /// design (SG-3) cannot occur here, and there is no needle-ordering concern: each chain
 /// resolves to exactly one key (`o.net_price` and `net_price` are distinct
 /// keys). Literal text and unmatched references are copied verbatim, so a
-/// metric name inside `'…'` or a foreign `x.net_price` is left intact.
+/// metric name inside `'…'` or a foreign `x.net_price` is left intact, as is
+/// a field of an expression's value (`(s).net_price`) or a named argument
+/// (`net_price := …`).
 ///
 /// Keys are normalized identifier keys (as produced by
 /// [`crate::ident::normalize_ident_part`]): a bare `revenue` or a qualified
@@ -1174,6 +1187,47 @@ mod tests {
     }
 
     // ----- inline_references (INLINE) -----
+
+    // FIND agrees with INLINE: a field or a named argument is not a reference,
+    // so the fact reach and dependency scans do not count it either.
+    #[test]
+    fn a_field_or_named_argument_is_not_a_reference() {
+        let cases = [
+            ("struct_pack(amt := o.x).amt", vec!["o.x"]),
+            ("f(amt => 1) + (s).amt", vec!["1", "s"]),
+        ];
+        let wrong: Vec<String> = cases
+            .iter()
+            .filter_map(|(expr, want)| {
+                let mut got: Vec<String> = reference_keys(expr).into_iter().collect();
+                got.sort();
+                (got != *want).then(|| format!("{expr} -> {got:?}"))
+            })
+            .collect();
+        assert!(wrong.is_empty(), "{wrong:#?}");
+    }
+
+    // A field of an expression's value and a function's named argument are
+    // names of their own, so a member of the same name is not inlined there.
+    #[test]
+    fn inline_leaves_a_field_or_named_argument_alone() {
+        let mut m: HashMap<String, &str> = HashMap::new();
+        m.insert("amt".to_string(), "(o.amount)");
+        let cases = [
+            (
+                "struct_pack(amt := amt).amt",
+                "struct_pack(amt := (o.amount)).amt",
+            ),
+            ("f(amt => amt)", "f(amt => (o.amount))"),
+            ("(s).amt + amt", "(s).amt + (o.amount)"),
+        ];
+        let wrong: Vec<String> = cases
+            .iter()
+            .filter(|(expr, want)| inline_references(expr, &m) != *want)
+            .map(|(expr, _)| format!("{expr} -> {}", inline_references(expr, &m)))
+            .collect();
+        assert!(wrong.is_empty(), "{wrong:#?}");
+    }
 
     #[test]
     fn inline_bare_and_qualified_keys() {

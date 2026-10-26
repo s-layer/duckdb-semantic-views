@@ -212,6 +212,146 @@ SELECT * FROM SEMANTIC_VIEW(exi DIMENSIONS upper(o.nope) METRICS revenue);
 ----
 'o.nope' is not a dimension, fact or metric of semantic view 'exi'
 
+# A name the view does not declare is refused, so an item cannot read a raw
+# column of a table the query joins: not one beside the view's dimensions
+# (ordered_at sits under the order_date dimension) ...
+
+statement error
+SELECT * FROM SEMANTIC_VIEW(exi DIMENSIONS region || ordered_at METRICS revenue);
+----
+'ordered_at' in 'region || ordered_at' is not a dimension, fact or metric of semantic view 'exi'
+
+# ... nor one beside a public fact inside an aggregate, the way the column under
+# a private fact could otherwise be read out.
+
+statement error
+SELECT * FROM SEMANTIC_VIEW(exi DIMENSIONS region METRICS sum(amt * 0 + customer_id) AS leak);
+----
+'customer_id' in 'sum(amt * 0 + customer_id)' is not a dimension, fact or metric of semantic view 'exi'
+
+statement error
+SELECT * FROM semantic_view('exi', dimensions := ['region'], facts := ['amt + customer_id']);
+----
+'customer_id' in 'amt + customer_id' is not a dimension, fact or metric of semantic view 'exi'
+
+# ... nor through a method call, a positional reference, COLUMNS(...) or the
+# JSON operator.
+
+statement error
+SELECT * FROM SEMANTIC_VIEW(exi DIMENSIONS region METRICS sum(amt * 0 + customer_id.abs()) AS leak);
+----
+'customer_id.abs(...)' in 'sum(amt * 0 + customer_id.abs())' calls a function by a qualified name
+
+statement error
+SELECT * FROM SEMANTIC_VIEW(exi DIMENSIONS region METRICS sum(amt * 0 + #2) AS leak);
+----
+'#2' in 'sum(amt * 0 + #2)' is not a dimension, fact or metric of semantic view 'exi'
+
+statement error
+SELECT * FROM SEMANTIC_VIEW(exi DIMENSIONS region || COLUMNS('^ordered_at$') METRICS revenue);
+----
+which selects columns by name
+
+statement error
+SELECT * FROM SEMANTIC_VIEW(exi DIMENSIONS region || (customer_id -> ('$')) METRICS revenue);
+----
+'customer_id' in 'region || (customer_id -> ('$'))' is not a dimension, fact or metric of semantic view 'exi'
+
+# A bare current_date reads a column of that name when the query joins one, so
+# an expression item calls the function instead.
+
+statement ok
+CREATE TABLE exi_stamps (id INTEGER, "current_date" INTEGER);
+
+statement ok
+INSERT INTO exi_stamps VALUES (1, 7);
+
+statement ok
+CREATE SEMANTIC VIEW exi_stamp AS
+  TABLES (s AS exi_stamps PRIMARY KEY (id))
+  DIMENSIONS (s.id AS s.id);
+
+query T
+SELECT * FROM SEMANTIC_VIEW(exi_stamp DIMENSIONS typeof(current_date) || typeof(id) AS types);
+----
+DATEINTEGER
+
+# Keywords, numbers and a lambda's parameter are not columns.
+
+query TI
+SELECT * FROM SEMANTIC_VIEW(exi
+    DIMENSIONS CASE WHEN o.amt BETWEEN 60 AND 100 THEN 'mid' ELSE 'other' END AS band
+    METRICS orders
+) ORDER BY band;
+----
+mid	2
+other	1
+
+query R
+SELECT * FROM SEMANTIC_VIEW(exi FACTS list_transform([o.amt], lambda x: x * 2)[1] AS twice) ORDER BY twice;
+----
+100.00
+140.00
+200.00
+
+query R
+SELECT * FROM SEMANTIC_VIEW(exi
+    FACTS list_transform([struct_pack(v := o.amt)], lambda "s": "s".v)[1] AS v
+) ORDER BY v;
+----
+50.00
+70.00
+100.00
+
+# A field or named argument keeps its name, even one a member or a SQL value
+# function has.
+
+query R
+SELECT * FROM SEMANTIC_VIEW(exi
+    FACTS struct_pack(user := o.amt, amt := o.amt).user + struct_pack(amt := 0).amt AS u
+) ORDER BY u;
+----
+50.00
+70.00
+100.00
+
+# Nor does such a name reach the table of a fact named like it (qty is a fact
+# on li), or make a fact depend on one.
+
+query R
+SELECT * FROM SEMANTIC_VIEW(exi FACTS struct_pack(qty := o.amt).qty AS q) ORDER BY q;
+----
+50.00
+70.00
+100.00
+
+statement ok
+CREATE SEMANTIC VIEW exi_fields AS
+  TABLES (o AS exi_orders PRIMARY KEY (id))
+  FACTS (o.a AS struct_pack(b := o.amount).b, o.b AS a + 1)
+  DIMENSIONS (o.order_date AS o.ordered_at);
+
+query R
+SELECT * FROM SEMANTIC_VIEW(exi_fields FACTS b) ORDER BY b;
+----
+51.00
+71.00
+101.00
+
+query R
+SELECT * FROM SEMANTIC_VIEW(exi
+    FACTS struct_pack(k := o.amt).k + (current_date - current_date) AS k
+) ORDER BY k;
+----
+50.00
+70.00
+100.00
+
+query T
+SELECT * FROM SEMANTIC_VIEW(exi METRICS string_agg(region COLLATE nocase, ',' ORDER BY region DESC NULLS LAST) AS regions);
+----
+US,EU,APAC
+
 statement error
 SELECT * FROM SEMANTIC_VIEW(exi METRICS sum(o.secret));
 ----
