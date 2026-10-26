@@ -283,7 +283,9 @@ pub(super) fn build_snapshot_block(
         // with no join for it). No dimension roles: `is_eligible` and
         // `snapshot_cte_anchor` withhold the scoped-alias rescue here.
         Some(a) => {
-            let needs = super::per_grain::anchor_needs(def, resolved_mets, &dims, &na_dim_sources);
+            let mut needs =
+                super::per_grain::anchor_needs(def, resolved_mets, &dims, &na_dim_sources);
+            push_scoped_na_joins(def, &na_groups, &mut needs.scoped);
             super::per_grain::anchor_joins(
                 def,
                 a,
@@ -327,6 +329,33 @@ pub(super) fn build_snapshot_block(
         inner_sql: sql,
         outer_exprs,
     })
+}
+
+/// Add the role-scoped instance each active NA dim's `ORDER BY` names
+/// (`a__r_bal`) to the joins of a snapshot anchored away from the base table.
+/// The base-anchored resolver joins it by threading the metric's `USING`.
+/// Declining the anchor instead ranked the base table's rows, and a base row
+/// with none of the metric's rows took part in the snapshot.
+fn push_scoped_na_joins<'a>(
+    def: &'a SemanticViewDefinition,
+    na_groups: &[NaGroup],
+    scoped: &mut Vec<&'a crate::model::Join>,
+) {
+    for alias in na_groups
+        .iter()
+        .flat_map(|g| g.na_dim_scoped.iter().flatten())
+    {
+        let edge = def.joins.iter().find(|j| {
+            j.name
+                .as_deref()
+                .is_some_and(|rel| super::join_resolver::scoped_join_alias(&j.table, rel) == *alias)
+        });
+        if let Some(edge) = edge {
+            if !scoped.iter().any(|j| std::ptr::eq(*j, edge)) {
+                scoped.push(edge);
+            }
+        }
+    }
 }
 
 pub(super) fn expand_semi_additive(

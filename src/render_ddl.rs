@@ -233,7 +233,14 @@ fn emit_relationships(out: &mut String, def: &SemanticViewDefinition) {
     for (i, join) in def.joins.iter().enumerate() {
         out.push_str("    ");
         if let Some(ref rel_name) = join.name {
-            out.push_str(rel_name);
+            // The entry is split at its first `AS`, so a name that is itself
+            // `AS` (storable bare only from YAML) would leave no name. Any other
+            // name, a dotted one included, is emitted as stored.
+            if rel_name.eq_ignore_ascii_case("AS") {
+                out.push_str(&crate::expand::quote_ident(rel_name));
+            } else {
+                out.push_str(rel_name);
+            }
         }
         out.push_str(" AS ");
         out.push_str(&emit_alias(&join.from_alias));

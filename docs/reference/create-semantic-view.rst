@@ -168,6 +168,13 @@ All three variants work with both the ``AS`` keyword body and the ``FROM YAML`` 
 
 .. note::
 
+   **Every member is bound at CREATE.** Each dimension, fact and metric, ``PRIVATE`` ones included, is bound in a query of its own against the view's tables, in the creating session, so a temporary table or one created earlier in the same transaction is visible. A member DuckDB cannot bind (an unknown column, table or function, a syntax error, or an argument DuckDB rejects such as ``date_trunc('fortnight', ...)``) refuses the whole ``CREATE`` with an error naming it: see :ref:`ref-err-member-bind`. This follows Snowflake, which compiles each expression at ``CREATE``. Materialization tables are not checked, since they may be created later. A source table changed after ``CREATE`` can still break a member, which then fails when a query reaches it.
+
+   .. versionchanged:: 0.17.0
+      Before, such a member was stored and its error appeared only when a query reached it.
+
+.. note::
+
    ``CREATE SEMANTIC VIEW IF NOT EXISTS`` reliably absorbs duplicates within a single connection or transaction (re-running a setup script, repeated statements in the same ``BEGIN`` block). It cannot absorb a race between two connections that both run ``CREATE IF NOT EXISTS`` against the same database at the same time -- one will succeed and the other will see a constraint error. Concurrent DDL across connections is unusual for typical DuckDB workloads, so most users will never hit this. See :ref:`explanation-txn-ddl-create-race` for the workaround.
 
 .. note::
@@ -336,7 +343,7 @@ Declares named grouping expressions available for queries.
 
 .. note::
 
-   **Column qualification in expressions.** The ``<alias>.<dim_name>`` on the left of ``AS`` (the logical name) must always carry its table-alias prefix. Column references *inside the expression* on the right of ``AS`` may be either qualified (``o.region``) or unqualified (``region``). Unqualified references resolve fine in single-table views, but in multi-table views they can raise an ambiguity error when more than one joined table exposes the same column name. Qualifying expression columns (``alias.column``) is recommended -- it is unambiguous in every case, which is why all examples in these docs use it. The same rule applies to ``METRICS`` and ``FACTS`` expressions. An unqualified column that belongs to *another* table is not rejected at ``CREATE`` (Snowflake rejects it): it binds to that table when the query happens to join it -- possibly at a different grain from the member -- and fails with a "not found" error when it does not. Qualify it, or define a fact on the other table.
+   **Column qualification in expressions.** The ``<alias>.<dim_name>`` on the left of ``AS`` (the logical name) must always carry its table-alias prefix. Column references *inside the expression* on the right of ``AS`` may be either qualified (``o.region``) or unqualified (``region``). Unqualified references resolve fine in single-table views, but in multi-table views they can raise an ambiguity error when more than one joined table exposes the same column name. Qualifying expression columns (``alias.column``) is recommended -- it is unambiguous in every case, which is why all examples in these docs use it. The same rule applies to ``METRICS`` and ``FACTS`` expressions. An unqualified column that belongs to *another* table is refused at ``CREATE`` when the member's own query does not join that table, such as a metric on a child table, which scans that table alone. When the member's own query does join it (a dimension on a child table reading a parent's column), the column binds to that table, possibly at a different grain from the member, where Snowflake rejects it. Qualify it, or define a fact on the other table.
 
 **Validation rules:**
 

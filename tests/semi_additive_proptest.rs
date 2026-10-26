@@ -56,12 +56,25 @@
 //! Filter members (`LABELS = (FILTER)`) with compound `OR` expressions are
 //! declared so member substitution is not identity and its parenthesization is
 //! load-bearing, matching the sibling harnesses.
+//!
+//! # Expression keys — `date_trunc` buckets as the snapshot dimension
+//!
+//! A snapshot dimension is usually an expression over a date column, such as
+//! `date_trunc('month', s.d)`, not the column itself. The table therefore also
+//! has a `DATE` column `d`, and the view a dimension `tsk = date_trunc('<unit>',
+//! s.d)`, with the unit drawn from `week` / `month` / `quarter`. Each case picks
+//! whether the metric is `NON ADDITIVE BY (ts)` or `NON ADDITIVE BY (tsk)`. With
+//! `tsk`, the snapshot is the latest (or earliest) *bucket*, and every row in
+//! it is summed, although the rows fall on different days: `d`'s small domain
+//! is chosen so that each unit merges different days into one bucket. Either
+//! way the other dimension may be queried too, which makes it a partition of
+//! the snapshot. The oracle ranks the same key expression with `MAX`/`MIN`.
 
 use proptest::prelude::*;
 use semantic_views::expand::{expand, DimensionName, MetricName, QueryRequest};
 use semantic_views::model::{
-    AccessModifier, Dimension, Metric, NonAdditiveDim, NullsOrder, SemanticViewDefinition,
-    SortOrder, TableRef, WindowSpec,
+    AccessModifier, Cardinality, Dimension, Join, Metric, NonAdditiveDim, NullsOrder,
+    SemanticViewDefinition, SortOrder, TableRef, WindowSpec,
 };
 
 /// Members a generated `where_clause` may name (PBT-6).
@@ -186,19 +199,55 @@ fn arb_pred() -> impl Strategy<Value = Pred> {
     })
 }
 
-/// A generated instance: rows of `(entity, ts, balance)`. `None` is a SQL NULL
-/// throughout. Small `entity`/`ts` domains force duplicate `(entity, ts)` pairs
-/// (RANK ties within a snapshot) and repeated snapshot timestamps.
+/// A generated instance: rows of `(entity, ts, balance, day)`, where `day`
+/// indexes [`DAY_OFFSETS`] for the row's `d`. `None` is a SQL NULL throughout.
+/// Small `entity`/`ts` domains force duplicate `(entity, ts)` pairs (RANK ties
+/// within a snapshot) and repeated snapshot timestamps.
 #[derive(Debug, Clone)]
 struct Instance {
-    rows: Vec<(Option<i64>, Option<i64>, Option<i64>)>,
+    rows: Vec<(Option<i64>, Option<i64>, Option<i64>, Option<usize>)>,
 }
 
+/// The days `d` takes, as offsets from 2024-01-01 (a Monday): Jan 1, Jan 4,
+/// Jan 11, Feb 10 and Apr 5. Every unit merges some of them into one bucket:
+/// the first two share a week, the first three a month, the first four a
+/// quarter.
+const DAY_OFFSETS: [i64; 5] = [0, 3, 10, 40, 95];
+
+/// The `date_trunc` units the key dimension `tsk` is drawn from.
+const UNITS: [&str; 3] = ["week", "month", "quarter"];
+
+/// Each day's bucket under each unit (indexed like [`UNITS`]), so the generator
+/// guard can tell when an instance puts different days in one bucket without
+/// asking DuckDB.
+const DAY_BUCKETS: [[u8; 5]; 3] = [[0, 0, 1, 2, 3], [0, 0, 0, 1, 3], [0, 0, 0, 0, 1]];
+
 /// Queryable dimensions and the single semi-additive metric, by stable name.
-const DIMS: [&str; 2] = ["ent", "ts"];
+const DIMS: [&str; 3] = ["ent", "ts", "tsk"];
 const METS: [&str; 1] = ["bal"];
-/// Index of the NA dimension (`ts`) within `DIMS`.
+/// Index of the `ts` dimension within `DIMS`.
 const TS_DIM: usize = 1;
+/// Index of the `date_trunc` key dimension `tsk` within `DIMS`.
+const TSK_DIM: usize = 2;
+
+/// Which dimension the metric is `NON ADDITIVE BY`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum NaKey {
+    /// The raw column `ts`.
+    Ts,
+    /// The expression key `tsk = date_trunc('<unit>', s.d)`.
+    Trunc,
+}
+
+impl NaKey {
+    /// The NA dimension's index within `DIMS`.
+    fn dim(self) -> usize {
+        match self {
+            NaKey::Ts => TS_DIM,
+            NaKey::Trunc => TSK_DIM,
+        }
+    }
+}
 
 /// A full case: an instance, the declared NA sort direction, and the non-empty
 /// subset of dims + metrics to query (indices into `DIMS` / `METS`).
@@ -206,6 +255,10 @@ const TS_DIM: usize = 1;
 struct Case {
     inst: Instance,
     order: SortOrder,
+    /// The dimension the metric is `NON ADDITIVE BY`.
+    na: NaKey,
+    /// The `date_trunc` unit of `tsk`, whether or not it is the NA dimension.
+    unit: &'static str,
     sel_dims: Vec<usize>,
     sel_metrics: Vec<usize>,
     /// The pre-aggregation predicate (PBT-6). `None` one case in four, keeping
@@ -228,13 +281,19 @@ fn arb_instance() -> impl Strategy<Value = Instance> {
         1 => Just(None),
         4 => (0i64..3).prop_map(Some),
     ];
-    let row = (ent_cell, ts_cell, bal_cell);
+    let day_cell = prop_oneof![
+        1 => Just(None),
+        4 => (0..DAY_OFFSETS.len()).prop_map(Some),
+    ];
+    let row = (ent_cell, ts_cell, bal_cell, day_cell);
     prop::collection::vec(row, 0..=20).prop_map(|rows| Instance { rows })
 }
 
 fn arb_case() -> impl Strategy<Value = Case> {
     let order = prop_oneof![Just(SortOrder::Asc), Just(SortOrder::Desc)];
-    (arb_instance(), order).prop_flat_map(|(inst, order)| {
+    let na = prop_oneof![Just(NaKey::Ts), Just(NaKey::Trunc)];
+    let unit = prop::sample::select(UNITS.to_vec());
+    (arb_instance(), order, na, unit).prop_flat_map(|(inst, order, na, unit)| {
         let dim_sel =
             prop::sample::subsequence((0..DIMS.len()).collect::<Vec<_>>(), 0..=DIMS.len());
         let met_sel =
@@ -248,20 +307,30 @@ fn arb_case() -> impl Strategy<Value = Case> {
                 "at least one of dimensions/metrics must be selected",
                 |(_, _, sel_dims, sel_metrics, _)| !sel_dims.is_empty() || !sel_metrics.is_empty(),
             )
-            .prop_map(|(inst, order, sel_dims, sel_metrics, where_pred)| Case {
-                inst,
-                order,
-                sel_dims,
-                sel_metrics,
-                where_pred,
-            })
+            .prop_map(
+                move |(inst, order, sel_dims, sel_metrics, where_pred)| Case {
+                    inst,
+                    order,
+                    na,
+                    unit,
+                    sel_dims,
+                    sel_metrics,
+                    where_pred,
+                },
+            )
     })
 }
 
-/// Build the semantic-view definition for the given NA sort direction: single
-/// table `s`, dimensions on `entity` and `ts`, and `bal = SUM(s.balance) NON
-/// ADDITIVE BY (ts <order>)`.
-fn build_def(order: SortOrder) -> SemanticViewDefinition {
+/// The SQL of the key dimension `tsk` for `unit`.
+fn tsk_expr(unit: &str) -> String {
+    format!("date_trunc('{unit}', s.d)")
+}
+
+/// Build the semantic-view definition for the given NA sort direction, NA
+/// dimension and `tsk` unit: single table `s`, dimensions on `entity`, `ts` and
+/// `tsk = date_trunc('<unit>', s.d)`, and `bal = SUM(s.balance) NON ADDITIVE BY
+/// (<ts | tsk> <order>)`.
+fn build_def(order: SortOrder, na: NaKey, unit: &str) -> SemanticViewDefinition {
     let tables = vec![TableRef {
         alias: "s".to_string(),
         table: "s".to_string(),
@@ -285,6 +354,16 @@ fn build_def(order: SortOrder) -> SemanticViewDefinition {
         Dimension {
             name: "ts".to_string(),
             expr: "s.ts".to_string(),
+            source_table: Some("s".to_string()),
+            output_type: None,
+            comment: None,
+            synonyms: vec![],
+            is_filter: false,
+            tags: Vec::new(),
+        },
+        Dimension {
+            name: "tsk".to_string(),
+            expr: tsk_expr(unit),
             source_table: Some("s".to_string()),
             output_type: None,
             comment: None,
@@ -329,7 +408,7 @@ fn build_def(order: SortOrder) -> SemanticViewDefinition {
         // is what the parser assigns for a bare `NON ADDITIVE BY (ts [DESC])`;
         // the oracle below matches that default.
         non_additive_by: vec![NonAdditiveDim {
-            dimension: "ts".to_string(),
+            dimension: DIMS[na.dim()].to_string(),
             order,
             nulls: match order {
                 SortOrder::Asc => NullsOrder::Last,
@@ -360,14 +439,20 @@ fn build_def(order: SortOrder) -> SemanticViewDefinition {
 /// Create the physical table and insert the generated rows.
 fn make_db(inst: &Instance) -> duckdb::Connection {
     let conn = duckdb::Connection::open_in_memory().expect("in-memory DuckDB");
-    conn.execute_batch("CREATE TABLE s (entity INTEGER, ts INTEGER, balance INTEGER);")
+    conn.execute_batch("CREATE TABLE s (entity INTEGER, ts INTEGER, balance INTEGER, d DATE);")
         .expect("create table");
     let cell = |c: &Option<i64>| c.map_or_else(|| "NULL".to_string(), |v| v.to_string());
+    let day = |c: &Option<usize>| {
+        c.map_or_else(
+            || "NULL".to_string(),
+            |i| format!("DATE '2024-01-01' + {}", DAY_OFFSETS[i]),
+        )
+    };
     if !inst.rows.is_empty() {
         let values: Vec<String> = inst
             .rows
             .iter()
-            .map(|(e, t, b)| format!("({},{},{})", cell(e), cell(t), cell(b)))
+            .map(|(e, t, b, d)| format!("({},{},{},{})", cell(e), cell(t), cell(b), day(d)))
             .collect();
         conn.execute_batch(&format!("INSERT INTO s VALUES {};", values.join(",")))
             .expect("insert rows");
@@ -375,13 +460,19 @@ fn make_db(inst: &Instance) -> duckdb::Connection {
     conn
 }
 
-/// Physical `SELECT` expression + output alias for a queried dimension.
-fn dim_item(i: usize) -> &'static str {
+/// The raw SQL a queried dimension stands for.
+fn dim_raw(i: usize, unit: &str) -> String {
     match DIMS[i] {
-        "ent" => "s.entity AS ent",
-        "ts" => "s.ts AS ts",
+        "ent" => "s.entity".to_string(),
+        "ts" => "s.ts".to_string(),
+        "tsk" => tsk_expr(unit),
         other => unreachable!("unexpected dim {other}"),
     }
+}
+
+/// Physical `SELECT` expression + output alias for a queried dimension.
+fn dim_item(i: usize, unit: &str) -> String {
+    format!("{} AS {}", dim_raw(i, unit), DIMS[i])
 }
 
 /// Independent oracle SQL for a case. Structurally different from the
@@ -392,10 +483,12 @@ fn oracle_sql(case: &Case) -> String {
     let dims: Vec<String> = case
         .sel_dims
         .iter()
-        .map(|&i| dim_item(i).to_string())
+        .map(|&i| dim_item(i, case.unit))
         .collect();
-    let ts_queried = case.sel_dims.contains(&TS_DIM);
+    let na_queried = case.sel_dims.contains(&case.na.dim());
     let has_metric = !case.sel_metrics.is_empty();
+    // The snapshot key: the NA dimension's expression.
+    let key = dim_raw(case.na.dim(), case.unit);
 
     // PBT-6: the predicate, rendered from raw columns. It is spliced into EVERY
     // reference to `s` below -- including the subquery that determines the
@@ -419,9 +512,9 @@ fn oracle_sql(case: &Case) -> String {
         return format!("SELECT DISTINCT {} FROM s{where_sql}", dims.join(", "));
     }
 
-    // ts is queried (or is the only projection) -> the metric is effectively
-    // regular: a plain grouped SUM, no snapshot.
-    if ts_queried {
+    // The NA dim is queried -> the metric is effectively regular: a plain
+    // grouped SUM, no snapshot.
+    if na_queried {
         let select = dims
             .iter()
             .cloned()
@@ -438,27 +531,24 @@ fn oracle_sql(case: &Case) -> String {
         return format!("SELECT {select} FROM s{where_sql} GROUP BY {group_by}");
     }
 
-    // Active snapshot. Partition = queried dims (a subset of {ent}); the NA dim
-    // `ts` is not queried here. Snapshot timestamp per partition:
-    //   ASC  / NULLS LAST : MAX(ts)                       (latest; NULL only if all NULL)
-    //   DESC / NULLS FIRST: NULL if any NULL ts, else MIN (earliest; NULL wins)
+    // Active snapshot. Partition = queried dims; the NA dim is not queried
+    // here. Snapshot key per partition (the key is `ts` or the `tsk` bucket):
+    //   ASC  / NULLS LAST : MAX(key)                       (latest; NULL only if all NULL)
+    //   DESC / NULLS FIRST: NULL if any NULL key, else MIN (earliest; NULL wins)
     let snap_expr = match case.order {
-        SortOrder::Asc => "max(s.ts)".to_string(),
-        SortOrder::Desc => {
-            "CASE WHEN count(*) FILTER (WHERE s.ts IS NULL) > 0 THEN NULL ELSE min(s.ts) END"
-                .to_string()
-        }
+        SortOrder::Asc => format!("max({key})"),
+        SortOrder::Desc => format!(
+            "CASE WHEN count(*) FILTER (WHERE {key} IS NULL) > 0 THEN NULL ELSE min({key}) END"
+        ),
     };
 
-    // Partition dimensions among the queried dims (everything except `ts`, which
-    // is not queried in this branch, so this is exactly `sel_dims`).
-    let part_cols: Vec<&str> = case
+    // Partition dimensions among the queried dims (everything except the NA
+    // dim, which is not queried in this branch, so this is exactly `sel_dims`),
+    // as (name, raw SQL).
+    let part_cols: Vec<(&str, String)> = case
         .sel_dims
         .iter()
-        .map(|&i| match DIMS[i] {
-            "ent" => "entity",
-            other => unreachable!("unexpected partition dim {other}"),
-        })
+        .map(|&i| (DIMS[i], dim_raw(i, case.unit)))
         .collect();
 
     let select = dims
@@ -474,22 +564,25 @@ fn oracle_sql(case: &Case) -> String {
         // snapshot is chosen among surviving rows) and to the outer scan.
         format!(
             "SELECT {select} FROM s, (SELECT {snap_expr} AS snap FROM s{where_sql}) m \
-             WHERE {and_pred}s.ts IS NOT DISTINCT FROM m.snap"
+             WHERE {and_pred}{key} IS NOT DISTINCT FROM m.snap"
         )
     } else {
-        let sub_group = part_cols.join(", ");
+        let sub_group = (1..=part_cols.len())
+            .map(|n| n.to_string())
+            .collect::<Vec<_>>()
+            .join(", ");
         let sub_select = part_cols
             .iter()
-            .map(|c| format!("s.{c} AS p_{c}"))
+            .map(|(name, raw)| format!("{raw} AS p_{name}"))
             .chain(std::iter::once(format!("{snap_expr} AS snap")))
             .collect::<Vec<_>>()
             .join(", ");
         let join_on = part_cols
             .iter()
-            .map(|c| format!("s.{c} IS NOT DISTINCT FROM m.p_{c}"))
-            .chain(std::iter::once(
-                "s.ts IS NOT DISTINCT FROM m.snap".to_string(),
-            ))
+            .map(|(name, raw)| format!("{raw} IS NOT DISTINCT FROM m.p_{name}"))
+            .chain(std::iter::once(format!(
+                "{key} IS NOT DISTINCT FROM m.snap"
+            )))
             .collect::<Vec<_>>()
             .join(" AND ");
         let group_by = (1..=case.sel_dims.len())
@@ -514,7 +607,7 @@ proptest! {
 
     #[test]
     fn semi_additive_snapshot_matches_independent_oracle(case in arb_case()) {
-        let def = build_def(case.order);
+        let def = build_def(case.order, case.na, case.unit);
         let req = QueryRequest {
             where_clause: case.where_pred.as_ref().map(Pred::to_member_sql),
             dimensions: case.sel_dims.iter().map(|&i| DimensionName::new(DIMS[i])).collect(),
@@ -562,8 +655,8 @@ proptest! {
         prop_assert_eq!(
             diff, 0,
             "semi-additive expansion disagrees with the independent snapshot oracle \
-             (symmetric multiset diff = {}); order={:?} dims={:?} metrics={:?}\n--- expanded:\n{}\n--- oracle:\n{}",
-            diff, case.order, case.sel_dims, case.sel_metrics, expanded, oracle
+             (symmetric multiset diff = {}); order={:?} na={:?} unit={} dims={:?} metrics={:?}\n--- expanded:\n{}\n--- oracle:\n{}",
+            diff, case.order, case.na, case.unit, case.sel_dims, case.sel_metrics, expanded, oracle
         );
     }
 }
@@ -608,7 +701,7 @@ fn generator_varies_the_predicate_and_moves_the_snapshot() {
                 }
                 if p.touches_ts() {
                     touching_ts += 1;
-                    if has_metric && !ts_queried {
+                    if case.na == NaKey::Ts && has_metric && !ts_queried {
                         active_snapshot_ts_pred += 1;
                     }
                 }
@@ -646,6 +739,75 @@ fn generator_varies_the_predicate_and_moves_the_snapshot() {
     );
 }
 
+/// Anti-vacuity guard for the expression-key axis: every `date_trunc` unit is
+/// the snapshot key of an ACTIVE snapshot (a metric queried without `tsk`) on
+/// data where that unit puts different days in one bucket, so the snapshot sums
+/// rows of several days. Without the merge the bucket would rank exactly as `d`
+/// does and the axis would test nothing a raw column does not. The two keys
+/// must also each be queried as a partition of the other's snapshot.
+#[test]
+fn generator_reaches_every_expression_key() {
+    use proptest::strategy::ValueTree;
+    use proptest::test_runner::TestRunner;
+
+    let mut runner = TestRunner::deterministic();
+    let mut merged_active = [0usize; UNITS.len()];
+    let mut ts_partitions_tsk = 0usize;
+    let mut tsk_partitions_ts = 0usize;
+
+    for _ in 0..400 {
+        let case = arb_case()
+            .new_tree(&mut runner)
+            .expect("strategy must produce a value")
+            .current();
+        if case.sel_metrics.is_empty() {
+            continue;
+        }
+        let u = UNITS
+            .iter()
+            .position(|x| *x == case.unit)
+            .expect("unit is one of UNITS");
+        let na_queried = case.sel_dims.contains(&case.na.dim());
+        match case.na {
+            NaKey::Trunc if !na_queried => {
+                let days: std::collections::HashSet<usize> =
+                    case.inst.rows.iter().filter_map(|r| r.3).collect();
+                let merges = days.iter().any(|&a| {
+                    days.iter()
+                        .any(|&b| a != b && DAY_BUCKETS[u][a] == DAY_BUCKETS[u][b])
+                });
+                if merges {
+                    merged_active[u] += 1;
+                }
+                if case.sel_dims.contains(&TS_DIM) {
+                    tsk_partitions_ts += 1;
+                }
+            }
+            NaKey::Ts if !na_queried && case.sel_dims.contains(&TSK_DIM) => {
+                ts_partitions_tsk += 1;
+            }
+            _ => {}
+        }
+    }
+
+    for (u, n) in merged_active.iter().enumerate() {
+        assert!(
+            *n > 0,
+            "no active snapshot keyed by date_trunc('{}') saw two days merged into one \
+             bucket",
+            UNITS[u]
+        );
+    }
+    assert!(
+        tsk_partitions_ts > 0,
+        "no snapshot on tsk was partitioned by ts"
+    );
+    assert!(
+        ts_partitions_tsk > 0,
+        "no snapshot on ts was partitioned by tsk"
+    );
+}
+
 /// The oracle's defining property, pinned deterministically: filtering BEFORE
 /// the snapshot is a different query from filtering AFTER it, and the extension
 /// implements the former.
@@ -667,9 +829,12 @@ fn generator_varies_the_predicate_and_moves_the_snapshot() {
 #[test]
 fn predicate_is_applied_before_the_snapshot_not_after() {
     let inst = Instance {
-        rows: vec![(Some(1), Some(2), Some(100)), (Some(1), Some(1), Some(10))],
+        rows: vec![
+            (Some(1), Some(2), Some(100), None),
+            (Some(1), Some(1), Some(10), None),
+        ],
     };
-    let def = build_def(SortOrder::Asc);
+    let def = build_def(SortOrder::Asc, NaKey::Ts, "month");
     let req = QueryRequest {
         where_clause: Some("ts < 2".to_string()),
         dimensions: vec![DimensionName::new("ent")],
@@ -774,7 +939,7 @@ fn predicate_is_applied_before_the_snapshot_not_after() {
 /// [`build_def`] plus the two dependent metrics: `dbal = bal * 2` (derived) and
 /// `wbal = SUM(bal) OVER (PARTITION BY ent)` (window over the same inner).
 fn build_def_with_dependents(order: SortOrder) -> SemanticViewDefinition {
-    let mut def = build_def(order);
+    let mut def = build_def(order, NaKey::Ts, "month");
     let dependent = |name: &str, expr: &str, window: Option<WindowSpec>| Metric {
         name: name.to_string(),
         expr: expr.to_string(),
@@ -1058,4 +1223,270 @@ fn dependent_generator_reaches_every_branch() {
         "generator produced only {} distinct predicates; search space collapsed",
         distinct.len()
     );
+}
+
+// ---------------------------------------------------------------------------
+// The snapshot dimension on a role-played table, reached through `USING`
+// ---------------------------------------------------------------------------
+//
+// `a` is referenced by two relationships, `r_bal` from `b` and `r_note` from
+// `n`, so it is role-played: each role joins it under its own alias
+// (`a__r_bal`, `a__r_note`). The metric `balance USING (r_bal) NON ADDITIVE BY
+// (snap) AS SUM(b.amt)` ranks its snapshot by `a.snap` in the `r_bal` role.
+// Queried without `snap`, the snapshot must still join that role, whether or
+// not a dimension of `b` partitions it (a metrics-only query once failed with
+// `Referenced table "a__r_bal" not found`). With `snap` queried, the dimension
+// resolves through the metric's `USING` and the metric is a plain grouped sum.
+//
+// The oracle reads `b LEFT JOIN a ON b.acct_id = a.id`, the `r_bal` path, and
+// picks the snapshot with `MAX`/`MIN` as the single-table oracle does. `b`'s
+// `acct_id` can be NULL or name no account, so rows with no snapshot value
+// take part.
+
+/// `a`'s accounts are ids `0..ROLE_ACCOUNTS`; `b.acct_id` also draws one past
+/// the end (no such account) and NULL.
+const ROLE_ACCOUNTS: i64 = 3;
+
+/// Queryable dimensions of the role-played view: `b.grp` and `a.snap`.
+const ROLE_DIMS: [&str; 2] = ["grp", "snap"];
+
+#[derive(Debug, Clone)]
+struct RoleCase {
+    /// `a.snap` for each account id.
+    snaps: Vec<Option<i64>>,
+    /// `b` rows: `(acct_id, grp, amt)`.
+    rows: Vec<(Option<i64>, Option<i64>, Option<i64>)>,
+    order: SortOrder,
+    /// Indices into `ROLE_DIMS`; the metric is always queried.
+    sel_dims: Vec<usize>,
+    /// A predicate on `grp`, applied before the snapshot is picked, so it can
+    /// move which snapshot wins. `snap` is not filtered: a `where_clause`
+    /// member on the role-played table has no `USING` to pick its role.
+    where_grp: Option<&'static str>,
+}
+
+fn arb_role_case() -> impl Strategy<Value = RoleCase> {
+    let small = |hi: i64| {
+        prop_oneof![
+            1 => Just(None),
+            4 => (0i64..hi).prop_map(Some),
+        ]
+    };
+    let snaps = prop::collection::vec(small(3), ROLE_ACCOUNTS as usize);
+    let amt = prop_oneof![
+        1 => Just(None),
+        3 => (-5i64..=5).prop_map(Some),
+    ];
+    let rows = prop::collection::vec((small(ROLE_ACCOUNTS + 1), small(2), amt), 0..=16);
+    let order = prop_oneof![Just(SortOrder::Asc), Just(SortOrder::Desc)];
+    let dims = prop::sample::subsequence(vec![0usize, 1], 0..=2);
+    let where_grp = prop_oneof![
+        2 => Just(None),
+        1 => Just(Some("grp = 0")),
+        1 => Just(Some("grp <> 0")),
+        1 => Just(Some("grp IS NULL")),
+    ];
+    (snaps, rows, order, dims, where_grp).prop_map(|(snaps, rows, order, sel_dims, where_grp)| {
+        RoleCase {
+            snaps,
+            rows,
+            order,
+            sel_dims,
+            where_grp,
+        }
+    })
+}
+
+fn role_def(order: SortOrder) -> SemanticViewDefinition {
+    let table = |alias: &str| TableRef {
+        alias: alias.to_string(),
+        table: format!("rp_{alias}"),
+        pk_columns: vec!["id".to_string()],
+        unique_constraints: vec![],
+        comment: None,
+        synonyms: vec![],
+        tags: Vec::new(),
+    };
+    let rel = |name: &str, from: &str| Join {
+        from_alias: from.to_string(),
+        table: "a".to_string(),
+        fk_columns: vec!["acct_id".to_string()],
+        ref_columns: vec!["id".to_string()],
+        name: Some(name.to_string()),
+        cardinality: Cardinality::ManyToOne,
+    };
+    let dim = |name: &str, expr: &str, table: &str| Dimension {
+        name: name.to_string(),
+        expr: expr.to_string(),
+        source_table: Some(table.to_string()),
+        output_type: None,
+        comment: None,
+        synonyms: vec![],
+        is_filter: false,
+        tags: Vec::new(),
+    };
+    SemanticViewDefinition {
+        tables: vec![table("a"), table("b"), table("n")],
+        dimensions: vec![dim("grp", "b.grp", "b"), dim("snap", "a.snap", "a")],
+        metrics: vec![Metric {
+            name: "balance".to_string(),
+            expr: "sum(b.amt)".to_string(),
+            source_table: Some("b".to_string()),
+            output_type: None,
+            using_relationships: vec!["r_bal".to_string()],
+            comment: None,
+            synonyms: vec![],
+            access: AccessModifier::Public,
+            non_additive_by: vec![NonAdditiveDim {
+                dimension: "snap".to_string(),
+                order,
+                nulls: match order {
+                    SortOrder::Asc => NullsOrder::Last,
+                    SortOrder::Desc => NullsOrder::First,
+                },
+            }],
+            window_spec: None,
+            tags: Vec::new(),
+        }],
+        joins: vec![rel("r_bal", "b"), rel("r_note", "n")],
+        // PIN: a snapshot is an aggregate shape; FACTS returns unaggregated rows and cannot express NON ADDITIVE BY. TECH-DEBT #66
+        facts: vec![],
+        materializations: vec![],
+        created_on: None,
+        database_name: None,
+        schema_name: None,
+        resolution_schema_name: None,
+        temp_tables: vec![],
+        comment: None,
+        tags: Vec::new(),
+    }
+}
+
+fn role_db(case: &RoleCase) -> duckdb::Connection {
+    let conn = duckdb::Connection::open_in_memory().expect("in-memory DuckDB");
+    let cell = |c: &Option<i64>| c.map_or_else(|| "NULL".to_string(), |v| v.to_string());
+    let accounts: Vec<String> = case
+        .snaps
+        .iter()
+        .enumerate()
+        .map(|(id, s)| format!("({id}, {})", cell(s)))
+        .collect();
+    conn.execute_batch(&format!(
+        "CREATE TABLE rp_a (id INTEGER, snap INTEGER);
+         CREATE TABLE rp_b (id INTEGER, acct_id INTEGER, grp INTEGER, amt INTEGER);
+         CREATE TABLE rp_n (id INTEGER, acct_id INTEGER);
+         INSERT INTO rp_a VALUES {};
+         INSERT INTO rp_n VALUES (0, 0);",
+        accounts.join(", ")
+    ))
+    .expect("create tables");
+    if !case.rows.is_empty() {
+        let values: Vec<String> = case
+            .rows
+            .iter()
+            .enumerate()
+            .map(|(id, (acct, grp, amt))| {
+                format!("({id}, {}, {}, {})", cell(acct), cell(grp), cell(amt))
+            })
+            .collect();
+        conn.execute_batch(&format!("INSERT INTO rp_b VALUES {};", values.join(", ")))
+            .expect("insert rows");
+    }
+    conn
+}
+
+/// Independent oracle for a role-played case, over the `r_bal` path.
+fn role_oracle_sql(case: &RoleCase) -> String {
+    // The predicate filters every reference to the rows, the snapshot
+    // subquery's included: filtering happens before the snapshot is picked.
+    let filter = case
+        .where_grp
+        .map_or_else(String::new, |p| format!(" WHERE b.{p}"));
+    let rows = format!(
+        "(SELECT b.grp, a.snap, b.amt FROM rp_b b LEFT JOIN rp_a a ON b.acct_id = a.id{filter})"
+    );
+    let dims: Vec<&str> = case.sel_dims.iter().map(|&i| ROLE_DIMS[i]).collect();
+    let select = dims
+        .iter()
+        .map(|d| format!("r.{d} AS {d}"))
+        .chain(std::iter::once("sum(r.amt) AS balance".to_string()))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let group_by = if dims.is_empty() {
+        String::new()
+    } else {
+        format!(
+            " GROUP BY {}",
+            (1..=dims.len())
+                .map(|n| n.to_string())
+                .collect::<Vec<_>>()
+                .join(", ")
+        )
+    };
+    if dims.contains(&"snap") {
+        return format!("SELECT {select} FROM {rows} r{group_by}");
+    }
+    let snap_expr = match case.order {
+        SortOrder::Asc => "max(snap)".to_string(),
+        SortOrder::Desc => {
+            "CASE WHEN count(*) FILTER (WHERE snap IS NULL) > 0 THEN NULL ELSE min(snap) END"
+                .to_string()
+        }
+    };
+    if dims.is_empty() {
+        format!(
+            "SELECT {select} FROM {rows} r, (SELECT {snap_expr} AS snap FROM {rows} s) m \
+             WHERE r.snap IS NOT DISTINCT FROM m.snap"
+        )
+    } else {
+        format!(
+            "SELECT {select} FROM {rows} r JOIN \
+             (SELECT grp, {snap_expr} AS snap FROM {rows} s GROUP BY grp) m \
+             ON r.grp IS NOT DISTINCT FROM m.grp AND r.snap IS NOT DISTINCT FROM m.snap{group_by}"
+        )
+    }
+}
+
+proptest! {
+    #![proptest_config(ProptestConfig { cases: 128, ..ProptestConfig::default() })]
+
+    #[test]
+    fn role_played_snapshot_matches_independent_oracle(case in arb_role_case()) {
+        let def = role_def(case.order);
+        let req = QueryRequest {
+            where_clause: case.where_grp.map(str::to_string),
+            dimensions: case.sel_dims.iter().map(|&i| DimensionName::new(ROLE_DIMS[i])).collect(),
+            metrics: vec![MetricName::new("balance")],
+            // PIN: a snapshot is an aggregate shape; FACTS returns unaggregated rows and cannot express NON ADDITIVE BY. TECH-DEBT #66
+            facts: vec![],
+        };
+        let expanded = match expand("rp", &def, &req) {
+            Ok(sql) => sql,
+            Err(e) => {
+                prop_assert!(false, "role-played semi-additive query rejected: {e}\ncase: {case:?}");
+                unreachable!()
+            }
+        };
+        let oracle = role_oracle_sql(&case);
+        let mut cols: Vec<&str> = case.sel_dims.iter().map(|&i| ROLE_DIMS[i]).collect();
+        cols.push("balance");
+        cols.sort_unstable();
+        let proj = cols.join(", ");
+        let cmp = format!(
+            "SELECT \
+               (SELECT count(*) FROM (SELECT {proj} FROM ({expanded}) qa \
+                                      EXCEPT ALL SELECT {proj} FROM ({oracle}) qb) e1) \
+             + (SELECT count(*) FROM (SELECT {proj} FROM ({oracle}) qc \
+                                      EXCEPT ALL SELECT {proj} FROM ({expanded}) qd) e2)"
+        );
+        let conn = role_db(&case);
+        let diff: i64 = conn.query_row(&cmp, [], |r| r.get(0)).unwrap_or_else(|e| {
+            panic!("comparison query failed: {e}\n--- expanded:\n{expanded}\n--- oracle:\n{oracle}")
+        });
+        prop_assert_eq!(
+            diff, 0,
+            "role-played snapshot disagrees with the oracle; order={:?} dims={:?} where={:?}\n--- expanded:\n{}\n--- oracle:\n{}",
+            case.order, case.sel_dims, case.where_grp, expanded, oracle
+        );
+    }
 }

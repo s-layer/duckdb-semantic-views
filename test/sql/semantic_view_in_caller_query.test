@@ -258,7 +258,9 @@ US	US	70
 # Only where_clause may refer to an enclosing query. A member expression's bare
 # column that the semantic view's tables lack still fails, as it does in a
 # query of its own, rather than reading the outer row's column of that name:
-# DuckDB binds a comma join's right side as LATERAL.
+# DuckDB binds a comma join's right side as LATERAL. CREATE binds every
+# member, so the views below are created over a `price` column that is then
+# dropped.
 
 statement ok
 CREATE TABLE cq_outer (price INTEGER);
@@ -267,9 +269,21 @@ statement ok
 INSERT INTO cq_outer VALUES (7), (9);
 
 statement ok
+CREATE TABLE cq_drift (id INTEGER, amount INTEGER, price INTEGER);
+
+statement ok
 CREATE SEMANTIC VIEW cq_bare AS
-  TABLES (o AS cq_orders PRIMARY KEY (id))
+  TABLES (o AS cq_drift PRIMARY KEY (id))
   METRICS (o.bad AS sum(price));
+
+statement ok
+CREATE SEMANTIC VIEW cq_bare_dim AS
+  TABLES (o AS cq_drift PRIMARY KEY (id))
+  DIMENSIONS (o.d AS price)
+  METRICS (o.revenue AS sum(o.amount));
+
+statement ok
+ALTER TABLE cq_drift DROP COLUMN price;
 
 statement error
 SELECT * FROM cq_outer, semantic_view('cq_bare', metrics := ['bad']);
@@ -305,12 +319,6 @@ Referenced column "price" not found
 
 # The same holds for a member that only where_clause brings into the query:
 # its expression is the semantic view's, not the caller's predicate.
-
-statement ok
-CREATE SEMANTIC VIEW cq_bare_dim AS
-  TABLES (o AS cq_orders PRIMARY KEY (id))
-  DIMENSIONS (o.d AS price)
-  METRICS (o.revenue AS sum(o.amount));
 
 statement error
 SELECT * FROM cq_outer, semantic_view('cq_bare_dim', metrics := ['revenue'], where_clause := 'd = 7');

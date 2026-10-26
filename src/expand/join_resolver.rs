@@ -7,7 +7,9 @@ use super::facts::{
     collect_derived_metric_source_tables, collect_derived_metric_using,
     collect_referenced_fact_tables, collect_transitive_metric_names,
 };
-use super::resolution::{qualify_and_quote_table_ref, quote_ident, quote_ident_if_needed};
+use super::resolution::{
+    qualify_and_quote_table_ref, quote_ident, quote_ident_if_needed, quote_stored_ident,
+};
 
 /// Build a role-playing scoped alias in the documented `{table}__{rel}` format.
 ///
@@ -51,7 +53,7 @@ pub(super) fn rewrite_to_scoped_alias(expr: &str, table: &str, scoped: &str) -> 
 /// `from_alias.fk = to_alias.pk` pairs, joined by ` AND `.
 /// Uses `join.from_alias` for the FROM side and `join.table` for the TO side.
 pub(super) fn synthesize_on_clause(join: &Join, tables: &[TableRef]) -> String {
-    synthesize_on_clause_scoped(join, tables, &join.table)
+    on_clause(join, tables, &quote_stored_ident(&join.table))
 }
 
 /// Synthesize an ON clause with a potentially scoped alias on the PK (target) side.
@@ -68,6 +70,14 @@ pub(super) fn synthesize_on_clause_scoped(
     tables: &[TableRef],
     to_alias: &str,
 ) -> String {
+    on_clause(join, tables, &quote_ident(to_alias))
+}
+
+/// The ON clause of `join` with `to_sql`, an already-quoted alias, on the
+/// referenced side. Stored aliases and key columns keep any quotes they were
+/// written with, so each is stripped and quoted once ([`quote_stored_ident`]); a
+/// scoped alias is a logical value and is quoted as is.
+fn on_clause(join: &Join, tables: &[TableRef], to_sql: &str) -> String {
     // Phase 33: Prefer ref_columns (resolved during inference).
     // Fall back to target PK for backward compat (legacy joins without ref_columns).
     let ref_cols: &[String] = if join.ref_columns.is_empty() {
@@ -87,10 +97,10 @@ pub(super) fn synthesize_on_clause_scoped(
         .map(|(fk, pk)| {
             format!(
                 "{}.{} = {}.{}",
-                quote_ident(&join.from_alias),
-                quote_ident(fk),
-                quote_ident(to_alias),
-                quote_ident(pk),
+                quote_stored_ident(&join.from_alias),
+                quote_stored_ident(fk),
+                to_sql,
+                quote_stored_ident(pk),
             )
         })
         .collect();
@@ -135,7 +145,12 @@ pub(super) fn push_join_clauses(
         sql.push_str(prefix);
         sql.push_str(&qualify_and_quote_table_ref(physical_table, def));
         sql.push_str(" AS ");
-        sql.push_str(&quote_ident(&rj.emit_alias));
+        // A scoped alias is a logical value; a bare one is stored as written.
+        sql.push_str(&if rj.scoped {
+            quote_ident(&rj.emit_alias)
+        } else {
+            quote_stored_ident(&rj.emit_alias)
+        });
         sql.push_str(" ON ");
         if rj.scoped {
             sql.push_str(&synthesize_on_clause_scoped(
@@ -651,6 +666,29 @@ mod tests {
         assert!(
             !result.contains(r#""id""#),
             "Should not use pk_columns when ref_columns are present"
+        );
+    }
+
+    /// Key columns are stored as written, so a quoted one keeps its quotes;
+    /// the ON clause must not quote it a second time.
+    #[test]
+    fn test_synthesize_on_clause_quoted_key_columns_are_quoted_once() {
+        let join = Join {
+            table: "p".to_string(),
+            from_alias: "c".to_string(),
+            fk_columns: vec!["\"Parent Ref\"".to_string()],
+            ref_columns: vec![],
+            ..Default::default()
+        };
+        let tables = vec![TableRef {
+            alias: "p".to_string(),
+            table: "parent".to_string(),
+            pk_columns: vec!["\"Key Col\"".to_string()],
+            ..Default::default()
+        }];
+        assert_eq!(
+            synthesize_on_clause_scoped(&join, &tables, "p"),
+            r#""c"."Parent Ref" = "p"."Key Col""#
         );
     }
 

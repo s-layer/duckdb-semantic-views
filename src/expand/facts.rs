@@ -5,7 +5,7 @@ use crate::ident::normalize_ident_part;
 use crate::model::{Fact, Join, TableRef};
 use crate::util::is_word_boundary_char;
 
-use super::resolution::quote_ident;
+use super::resolution::quote_stored_ident;
 
 /// Maximum allowed nesting depth for derived metric resolution.
 /// Prevents stack overflow from deeply nested metric chains that pass
@@ -898,7 +898,11 @@ pub(super) fn inline_derived_metrics_with_joins(
                     .find(|t| t.alias.to_ascii_lowercase() == st_lower)
                     .and_then(|t| t.pk_columns.first());
                 if let Some(pk) = pk {
-                    let qualified_pk = format!("{}.{}", quote_ident(&st_lower), quote_ident(pk));
+                    let qualified_pk = format!(
+                        "{}.{}",
+                        quote_stored_ident(&st_lower),
+                        quote_stored_ident(pk)
+                    );
                     // EXP-21/25/26: `COUNT(*)` is only the best-known spelling
                     // of the hazard — EVERY aggregate over the NULL-extended
                     // table needs its argument fenced. The argument guard runs

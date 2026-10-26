@@ -39,25 +39,31 @@ SELECT COUNT(*) FROM SEMANTIC_VIEW(v_good_probe METRICS total)
 1
 
 # ---- B2: a broken metric is a hard error -----------------------------------
-# A METRIC expression referencing a column that doesn't exist on the
-# underlying base table. DDL creates the view (the expressions are not run at
-# CREATE time). At query time DuckDB binds the expansion as part of the query
-# and raises its own Binder Error, verbatim — never a VARCHAR placeholder
-# column (WR-08 / D-15). Before `semantic_view()` handed DuckDB its expansion
-# to plan (TECH-DEBT #42) the error came from a LIMIT 0 probe, wrapped as
-# "type inference failed for query".
+# A METRIC expression referencing a column the base table no longer has. CREATE
+# binds every member, so the column is dropped after CREATE. At query time
+# DuckDB binds the expansion as part of the query and raises its own Binder
+# Error, verbatim — never a VARCHAR placeholder column (WR-08 / D-15). Before
+# `semantic_view()` handed DuckDB its expansion to plan (TECH-DEBT #42) the
+# error came from a LIMIT 0 probe, wrapped as "type inference failed for
+# query".
+
+statement ok
+CREATE TABLE p651_drift (order_id INTEGER, dropped INTEGER);
 
 statement ok
 CREATE SEMANTIC VIEW v_bad_probe
   AS
-    TABLES (o AS p651_orders PRIMARY KEY (order_id))
+    TABLES (o AS p651_drift PRIMARY KEY (order_id))
     DIMENSIONS (o.order_id AS o.order_id)
-    METRICS (o.bogus AS SUM(o.no_such_column));
+    METRICS (o.bogus AS SUM(o.dropped));
+
+statement ok
+ALTER TABLE p651_drift DROP COLUMN dropped;
 
 statement error
 SELECT * FROM SEMANTIC_VIEW(v_bad_probe METRICS bogus)
 ----
-Table "o" does not have a column named "no_such_column"
+Table "o" does not have a column named "dropped"
 
 # Cleanup: drop both semantic views and the base table so subsequent tests
 # in the runner cascade see a clean catalog.
@@ -70,3 +76,6 @@ DROP SEMANTIC VIEW v_bad_probe;
 
 statement ok
 DROP TABLE p651_orders;
+
+statement ok
+DROP TABLE p651_drift;

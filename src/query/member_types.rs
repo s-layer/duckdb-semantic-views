@@ -199,13 +199,7 @@ pub fn infer_member_types(
     probe: &mut dyn FnMut(&str) -> Result<Vec<ProbedColumn>, ProbeError>,
 ) -> Result<MemberTypes, Interrupted> {
     // PRIVATE members are typed too: probe a copy in which nothing is private.
-    let mut def = def.clone();
-    for m in &mut def.metrics {
-        m.access = AccessModifier::Public;
-    }
-    for f in &mut def.facts {
-        f.access = AccessModifier::Public;
-    }
+    let def = public_copy(def);
     // A member on (or below) a role-playing table cannot be queried without a
     // role, so its own probe is rejected as ambiguous. Its type does not
     // depend on the role, so such members are retried on a copy that keeps
@@ -215,6 +209,7 @@ pub fn infer_member_types(
         view_name,
         cancelled,
         probe,
+        last_failure: None,
     };
     let mut out = MemberTypes::default();
 
@@ -265,6 +260,129 @@ pub fn infer_member_types(
     Ok(out)
 }
 
+/// A member of a definition that `DuckDB` cannot bind, with the bind's error.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UnboundMember {
+    /// `dimension`, `fact` or `metric`.
+    pub kind: &'static str,
+    /// The member's name as declared.
+    pub name: String,
+    /// `DuckDB`'s error for the member's own probe.
+    pub error: String,
+}
+
+/// The first member of `def` (dimensions, then facts, then metrics, each in
+/// declaration order) that does not bind, or `None` when every member does.
+/// CREATE refuses a view with such a member, as Snowflake compiles each member
+/// expression at CREATE.
+///
+/// Members are probed as [`infer_member_types`] types them, so a member binds
+/// when it can be typed. One that cannot is probed again on its own, on the
+/// definition and on its single-role copy, and is reported only when every
+/// probe of it expanded and failed to bind: a member whose request does not
+/// expand, or whose columns do not line up, is left to the checks that own
+/// those rules.
+///
+/// # Errors
+///
+/// [`Interrupted`] when the caller cancelled while probing.
+pub fn first_unbound_member(
+    view_name: &str,
+    def: &SemanticViewDefinition,
+    cancelled: &dyn Fn() -> bool,
+    probe: &mut dyn FnMut(&str) -> Result<Vec<ProbedColumn>, ProbeError>,
+) -> Result<Option<UnboundMember>, Interrupted> {
+    let typed = infer_member_types(view_name, def, Wanted::ALL, cancelled, probe)?;
+    let def = public_copy(def);
+    let one_role = single_role_copy(&def);
+    let mut prober = Prober {
+        view_name,
+        cancelled,
+        probe,
+        last_failure: None,
+    };
+    let mut missing: Vec<(&'static str, &str)> = Vec::new();
+    missing.extend(
+        def.dimensions
+            .iter()
+            .filter(|d| !typed.dimensions.contains_key(&d.name))
+            .map(|d| ("dimension", d.name.as_str())),
+    );
+    missing.extend(
+        def.facts
+            .iter()
+            .filter(|f| !typed.facts.contains_key(&f.name))
+            .map(|f| ("fact", f.name.as_str())),
+    );
+    missing.extend(
+        def.metrics
+            .iter()
+            .filter(|m| !typed.metrics.contains_key(&m.name))
+            .map(|m| ("metric", m.name.as_str())),
+    );
+    for (kind, name) in missing {
+        let mut first_error = None;
+        let mut binds = false;
+        for d in std::iter::once(&def).chain(one_role.as_ref()) {
+            let req = member_request(d, kind, name);
+            prober.last_failure = None;
+            if prober.run(d, &req)?.is_some() {
+                binds = true;
+                break;
+            }
+            if first_error.is_none() {
+                first_error = prober.last_failure.take();
+            }
+        }
+        if let (false, Some(error)) = (binds, first_error) {
+            return Ok(Some(UnboundMember {
+                kind,
+                name: name.to_string(),
+                error,
+            }));
+        }
+    }
+    Ok(None)
+}
+
+/// A request for member `name` of `kind` on its own: a window metric with the
+/// dimensions its spec requires, as [`infer_member_types`] probes it.
+fn member_request(def: &SemanticViewDefinition, kind: &str, name: &str) -> Request {
+    match kind {
+        "dimension" => Request {
+            dimensions: vec![name.to_string()],
+            ..Request::default()
+        },
+        "fact" => Request {
+            facts: vec![name.to_string()],
+            ..Request::default()
+        },
+        _ => Request {
+            dimensions: def
+                .metrics
+                .iter()
+                .find(|m| m.name == name && m.window_spec.is_some())
+                .map(|m| crate::expand::window_required_dimensions(def, m))
+                .unwrap_or_default(),
+            metrics: vec![name.to_string()],
+            facts: Vec::new(),
+        },
+    }
+}
+
+/// A copy of `def` in which no member is PRIVATE, so every member can be
+/// requested by a probe. It is never stored or queried.
+fn public_copy(def: &SemanticViewDefinition) -> SemanticViewDefinition {
+    let mut def = def.clone();
+    for m in &mut def.metrics {
+        m.access = AccessModifier::Public;
+    }
+    for f in &mut def.facts {
+        f.access = AccessModifier::Public;
+    }
+    def
+}
+
 /// A copy of `def` keeping only the first-declared relationship between each
 /// (source, target) table pair, or `None` when no pair has more than one — the
 /// definition plays no roles. Used only to type members the role-playing
@@ -303,6 +421,8 @@ struct Prober<'a, 'p> {
     view_name: &'a str,
     cancelled: &'p dyn Fn() -> bool,
     probe: &'p mut dyn FnMut(&str) -> Result<Vec<ProbedColumn>, ProbeError>,
+    /// The error of the last probe that expanded and failed to bind.
+    last_failure: Option<String>,
 }
 
 impl Prober<'_, '_> {
@@ -395,7 +515,10 @@ impl Prober<'_, '_> {
         let cols = match (self.probe)(&format!("{sql} LIMIT 0")) {
             Ok(cols) => cols,
             Err(ProbeError::Interrupted) => return Err(Interrupted),
-            Err(ProbeError::Failed(_)) => return Ok(None),
+            Err(ProbeError::Failed(e)) => {
+                self.last_failure = Some(e);
+                return Ok(None);
+            }
         };
         // Output order is the request order: dimensions, then metrics or facts.
         let expected: Vec<&String> = req
@@ -949,5 +1072,103 @@ mod tests {
         done.store(true, std::sync::atomic::Ordering::SeqCst);
         interrupter.join().expect("interrupter thread");
         assert!(interrupted, "no probe was interrupted within the deadline");
+    }
+
+    /// [`first_unbound_member`] probing on `db`, for a caller that is never
+    /// cancelled.
+    fn unbound_on(db: &RawDb, def: &SemanticViewDefinition) -> Option<UnboundMember> {
+        first_unbound_member("v", def, &|| false, &mut |sql| unsafe {
+            probe_output_types(db.conn, sql)
+        })
+        .expect("nothing cancels this call")
+    }
+
+    /// Every member of a sound view binds: PRIVATE members, a derived metric,
+    /// a window metric and a semi-additive one included.
+    #[test]
+    fn every_member_of_a_sound_view_binds() {
+        let db = db(ORDERS);
+        assert_eq!(unbound_on(&db, &def_from(ORDERS_VIEW)), None);
+    }
+
+    /// Role-played members bind through the single-role copy, so a view over a
+    /// role-playing table is not refused.
+    #[test]
+    fn role_played_members_bind() {
+        let db = db(FLIGHTS);
+        assert_eq!(unbound_on(&db, &def_from(FLIGHTS_VIEW)), None);
+    }
+
+    fn assert_unbound(body: &str, kind: &str, name: &str, error: &str) {
+        let db = db(ORDERS);
+        let u = unbound_on(&db, &def_from(body)).unwrap_or_else(|| panic!("{name} must not bind"));
+        assert_eq!((u.kind, u.name.as_str()), (kind, name));
+        assert!(u.error.contains(error), "{}", u.error);
+    }
+
+    #[test]
+    fn an_invalid_date_part_does_not_bind() {
+        assert_unbound(
+            "AS TABLES (o AS orders PRIMARY KEY (id))
+             DIMENSIONS (o.region AS o.region, o.fn AS date_trunc('fortnight', o.placed))",
+            "dimension",
+            "fn",
+            "extract specifier \"fortnight\" not recognized",
+        );
+    }
+
+    #[test]
+    fn an_unknown_column_in_a_fact_does_not_bind() {
+        assert_unbound(
+            "AS TABLES (o AS orders PRIMARY KEY (id))
+             FACTS (PRIVATE o.f AS o.nosuch)
+             METRICS (o.n AS COUNT(*))",
+            "fact",
+            "f",
+            "nosuch",
+        );
+    }
+
+    #[test]
+    fn an_unknown_function_in_a_metric_does_not_bind() {
+        assert_unbound(
+            "AS TABLES (o AS orders PRIMARY KEY (id))
+             METRICS (o.n AS COUNT(*), o.m AS SUM(nosuch_fn(o.qty)))",
+            "metric",
+            "m",
+            "nosuch_fn",
+        );
+    }
+
+    /// A window metric is probed with the dimensions its spec requires, so
+    /// it binds; one over a metric that does not bind is reported after it.
+    #[test]
+    fn a_window_metric_is_probed_with_its_required_dimensions() {
+        assert_unbound(
+            "AS TABLES (o AS orders PRIMARY KEY (id))
+             DIMENSIONS (o.placed AS o.placed)
+             METRICS (o.bad AS SUM(o.nosuch), o.lagged AS LAG(bad, 1) OVER (ORDER BY placed))",
+            "metric",
+            "bad",
+            "nosuch",
+        );
+    }
+
+    /// A probe that does not line up with its request is not an error to
+    /// report: only a member whose probe expanded and failed to bind is.
+    #[test]
+    fn a_misaligned_probe_is_not_reported() {
+        let def = def_from(
+            "AS TABLES (o AS orders PRIMARY KEY (id))
+             DIMENSIONS (o.d1 AS o.region)",
+        );
+        let u = first_unbound_member("v", &def, &|| false, &mut |_sql| {
+            Ok(vec![ProbedColumn {
+                name: "something_else".to_string(),
+                data_type: "INTEGER".to_string(),
+            }])
+        })
+        .expect("nothing cancels this call");
+        assert_eq!(u, None);
     }
 }

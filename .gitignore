@@ -32,6 +32,8 @@ test/sql/*.db.wal
 test/sql/p651_ok.yaml
 # Runtime-written by ddl_corpus_create_forms.test (FROM YAML FILE rows) the same way.
 test/sql/ddl_corpus_s_*.yaml
+# Runtime-written by create_binds_members.test (a FROM YAML FILE refusal) the same way.
+test/sql/cbm_bad.yaml
 # Runtime-written by standard_sql_query.test (COPY ... TO) the same way.
 test/sql/ssq.csv
 

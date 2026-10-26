@@ -43,28 +43,38 @@ true
 # `GetValue<string>()` rendered a NULL argument as the literal string "NULL",
 # so arg 0 opened a file literally named `NULL` and arg 1 created a view named
 # `NULL`. Each argument is asserted separately so a regression in any one of
-# the three is visible on its own.
+# them is visible on its own.
 
 statement error
-SELECT * FROM __sv_compute_create_from_yaml(NULL, 'v', '')
+SELECT * FROM __sv_compute_create_from_yaml(NULL, 'v', '', '', false)
 ----
 file path is required (positional arg 0)
 
 statement error
-SELECT * FROM __sv_compute_create_from_yaml('__TEST_DIR__/ff15_unused.yaml', NULL, '')
+SELECT * FROM __sv_compute_create_from_yaml('__TEST_DIR__/ff15_unused.yaml', NULL, '', '', false)
 ----
 view name is required (positional arg 1)
 
 statement error
-SELECT * FROM __sv_compute_create_from_yaml('__TEST_DIR__/ff15_unused.yaml', 'v', NULL)
+SELECT * FROM __sv_compute_create_from_yaml('__TEST_DIR__/ff15_unused.yaml', 'v', NULL, '', false)
 ----
 comment is required (positional arg 2
+
+statement error
+SELECT * FROM __sv_compute_create_from_yaml('__TEST_DIR__/ff15_unused.yaml', 'v', '', NULL, false)
+----
+schema and skip_if_present are required
+
+statement error
+SELECT * FROM __sv_compute_create_from_yaml('__TEST_DIR__/ff15_unused.yaml', 'v', '', '', NULL)
+----
+schema and skip_if_present are required
 
 # The guards fire only on NULL: a non-NULL path that does not exist must still
 # reach the file-read stage and keep the `FROM YAML FILE failed: ` prefix that
 # `test/sql/phase53_yaml_file.test` pins, so the new checks did not swallow the
 # existing error surface.
 statement error
-SELECT * FROM __sv_compute_create_from_yaml('__TEST_DIR__/ff15_nonexistent.yaml', 'v', '')
+SELECT * FROM __sv_compute_create_from_yaml('__TEST_DIR__/ff15_nonexistent.yaml', 'v', '', '', false)
 ----
 FROM YAML FILE failed

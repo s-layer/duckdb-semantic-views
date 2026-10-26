@@ -387,7 +387,7 @@ SELECT * FROM semantic_view('dcf_sp', metrics := ['total']);
 ----
 300000
 
-# F-095: search_path.rs module doc (resolution follows DuckDB's search path) — PRE-EXISTING (TECH-DEBT #97): an UNQUALIFIED base table in a CREATE issued under `SET search_path = 'dcf_b'` is stamped as memory.dcf_b.dcf_orders, a table that does not exist, although DuckDB itself resolves the same name on that path to main.dcf_orders (control: the plain SELECT). The CREATE is accepted and every query of the view then fails
+# F-095: search_path.rs module doc (resolution follows DuckDB's search path) — PRE-EXISTING (TECH-DEBT #97): an UNQUALIFIED base table in a CREATE issued under `SET search_path = 'dcf_b'` is stamped as memory.dcf_b.dcf_orders, a table that does not exist, although DuckDB itself resolves the same name on that path to main.dcf_orders (control: the plain SELECT). CREATE binds every member against the stamped table, so it refuses the view
 statement ok
 SET search_path = 'dcf_b';
 
@@ -396,21 +396,10 @@ SELECT count(*) FROM dcf_orders;
 ----
 2
 
-statement ok
-CREATE SEMANTIC VIEW main.dcf_sp_unq AS TABLES (o AS dcf_orders PRIMARY KEY (id)) DIMENSIONS (o.region AS o.region) METRICS (o.total AS SUM(o.amount));
-
-query T
-SELECT bool_or(explain_output LIKE '%FROM "memory"."dcf_b"."dcf_orders"%') FROM explain_semantic_view('main.dcf_sp_unq', metrics := ['total']);
-----
-true
-
 statement error
-SELECT * FROM semantic_view('main.dcf_sp_unq', metrics := ['total']);
+CREATE SEMANTIC VIEW main.dcf_sp_unq AS TABLES (o AS dcf_orders PRIMARY KEY (id)) DIMENSIONS (o.region AS o.region) METRICS (o.total AS SUM(o.amount));
 ----
-Table with name dcf_orders does not exist
-
-statement ok
-DROP SEMANTIC VIEW main.dcf_sp_unq;
+semantic view 'dcf_sp_unq': dimension 'region' does not bind: Catalog Error: Table with name dcf_orders does not exist
 
 statement ok
 RESET search_path;
