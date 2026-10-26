@@ -303,6 +303,18 @@ SELECT * FROM SEMANTIC_VIEW(exi
 70.00
 100.00
 
+# A field or named argument keeps its name, even one a member or a SQL value
+# function has.
+
+query R
+SELECT * FROM SEMANTIC_VIEW(exi
+    FACTS struct_pack(user := o.amt, amt := o.amt).user + struct_pack(amt := 0).amt AS u
+) ORDER BY u;
+----
+50.00
+70.00
+100.00
+
 query R
 SELECT * FROM SEMANTIC_VIEW(exi
     FACTS struct_pack(k := o.amt).k + (current_date - current_date) AS k

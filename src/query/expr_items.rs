@@ -34,8 +34,8 @@ use std::collections::{HashMap, HashSet};
 
 use crate::expand::{quote_ident, ExpandError};
 use crate::expr_tokens::{
-    call_end, call_is_windowed, find_parameters, has_statement_separator, inline_references,
-    scan_function_heads, scan_references, subquery_spans, IdentRef,
+    call_end, call_is_windowed, find_parameters, has_statement_separator, scan_function_heads,
+    scan_references, subquery_spans, IdentRef,
 };
 use crate::ident::normalize_ident_part;
 use crate::model::{AccessModifier, Dimension, Fact, Metric, SemanticViewDefinition};
@@ -345,7 +345,7 @@ enum Resolved<'a> {
     RowLevel(Member<'a>, String, usize),
     Metric(&'a Metric),
     /// Nothing declared. Left as written when it is not a column reference
-    /// ([`is_not_a_column`]: a keyword, a number, a lambda's parameter, …),
+    /// ([`is_not_a_column`]: a keyword, a number, …),
     /// written as a call when it is a SQL value function, and refused
     /// otherwise ([`Lowering::refuse_undeclared`]).
     Unknown,
@@ -446,7 +446,7 @@ impl<'d> Lowering<'d, '_> {
             while let Some((span, base)) = next_aggregate.next_if(|(s, _)| s.start <= r.start) {
                 out.replace(span.clone(), &quote_ident(base));
             }
-            if r.start < out.copied {
+            if r.start < out.copied || is_local_name(text, &r, &lambdas) {
                 continue;
             }
             match self.resolve(&r, true)? {
@@ -463,7 +463,7 @@ impl<'d> Lowering<'d, '_> {
                     )));
                 }
                 Resolved::Unknown => {
-                    if let Some(call) = self.refuse_undeclared(text, &r, &lambdas, text)? {
+                    if let Some(call) = self.refuse_undeclared(text, &r, text)? {
                         out.replace(r.start..r.end, call);
                     }
                 }
@@ -498,10 +498,13 @@ impl<'d> Lowering<'d, '_> {
         span: std::ops::Range<usize>,
     ) -> Result<(String, String), ItemError> {
         let part = &text[span];
-        let mut replacements: HashMap<String, String> = HashMap::new();
+        let mut out = Splice::new(part);
         let mut table: Option<(String, String)> = None;
         let lambdas = lambda_scopes(part);
         for r in scan_references(part) {
+            if is_local_name(part, &r, &lambdas) {
+                continue;
+            }
             let (member, member_table, field_at) = match self.resolve(&r, false)? {
                 Resolved::RowLevel(member, member_table, field_at) => {
                     (member, member_table, field_at)
@@ -513,8 +516,8 @@ impl<'d> Lowering<'d, '_> {
                     )));
                 }
                 Resolved::Unknown => {
-                    if let Some(call) = self.refuse_undeclared(part, &r, &lambdas, text)? {
-                        replacements.insert(r.key(), call.to_string());
+                    if let Some(call) = self.refuse_undeclared(part, &r, text)? {
+                        out.replace(r.start..r.end, call);
                     }
                     continue;
                 }
@@ -548,18 +551,14 @@ impl<'d> Lowering<'d, '_> {
                 }
                 Member::Metric(_) => unreachable!("a metric is not row-level"),
             };
-            replacements.insert(r.key(), replacement + &r.raw[field_at..]);
+            out.replace(r.start..r.end, &(replacement + &r.raw[field_at..]));
         }
         let Some((table, _)) = table else {
             return Err(invalid(format!(
                 "'{text}' refers to no dimension or fact; {what} must use at least one"
             )));
         };
-        let borrowed: HashMap<String, &str> = replacements
-            .iter()
-            .map(|(k, v)| (k.clone(), v.as_str()))
-            .collect();
-        Ok((inline_references(part, &borrowed), table))
+        Ok((out.finish(), table))
     }
 
     /// What `r` names. Outside an aggregate of `METRICS` (`metrics_first`) a
@@ -611,14 +610,13 @@ impl<'d> Lowering<'d, '_> {
         &self,
         scanned: &str,
         r: &IdentRef<'_>,
-        lambdas: &[LambdaScope],
         item: &str,
     ) -> Result<Option<&'static str>, ItemError> {
+        if is_not_a_column(scanned, r) {
+            return Ok(None);
+        }
         if let Some(call) = sql_value_function(r) {
             return Ok(Some(call));
-        }
-        if is_not_a_column(scanned, r, lambdas) {
-            return Ok(None);
         }
         let hash = if scanned[..r.start].ends_with('#') {
             "#"
@@ -943,31 +941,35 @@ fn follows_an_operand(text: &str, at: usize) -> bool {
     }
 }
 
-/// Whether `r`, a name in `text` (which has no comments) that is no member of
-/// the view, is not a column reference: a number, a field of an expression's
-/// value, a keyword or another word of the expression grammar where the
-/// grammar reads it as one, a collation, a function's named argument, or a
-/// parameter of a lambda it is inside.
-fn is_not_a_column(text: &str, r: &IdentRef<'_>, lambdas: &[LambdaScope]) -> bool {
-    let before = text[..r.start].bytes().last();
+/// Whether `r`, a name in `text` (which has no comments), is a name of the
+/// expression's own rather than a reference to resolve: a field of an
+/// expression's value (`struct_pack(k := x).k`, `(s).k`), a function's named
+/// argument (`k := …`, `k => …`), a collation, or a parameter of a lambda it is
+/// inside. It is left as written, even when a member has its name.
+fn is_local_name(text: &str, r: &IdentRef<'_>, lambdas: &[LambdaScope]) -> bool {
+    let after = text[r.end..].trim_start();
+    text[..r.start].ends_with('.')
+        || after.starts_with(":=")
+        || after.starts_with("=>")
+        || word_before(text, r.start).eq_ignore_ascii_case("collate")
+        || is_lambda_param(r, lambdas)
+}
+
+/// Whether `r`, a name in `text` that is no member of the view and no local
+/// name ([`is_local_name`]), is not a column reference: a number, or a keyword
+/// or another word of the expression grammar where the grammar reads it as
+/// one.
+fn is_not_a_column(text: &str, r: &IdentRef<'_>) -> bool {
     if r.raw.as_bytes()[0].is_ascii_digit() {
         // `#3` is the third column of the query's tables.
-        return before != Some(b'#');
-    }
-    // A field of an expression's value: `struct_pack(k := x).k`, `(s).k`.
-    if before == Some(b'.') {
-        return true;
-    }
-    if word_before(text, r.start).eq_ignore_ascii_case("collate") || is_lambda_param(r, lambdas) {
-        return true;
+        return !text[..r.start].ends_with('#');
     }
     if !r.is_bare() || r.raw.starts_with('"') {
         return false;
     }
     let word = r.raw.to_ascii_lowercase();
-    let after = text[r.end..].trim_start();
     crate::ident::is_refused_as_name(&word)
-        || (word == "map" && after.starts_with('{'))
+        || (word == "map" && text[r.end..].trim_start().starts_with('{'))
         || (word == "between" && follows_an_operand(text, r.start))
         || (word == "nulls" && {
             let next = word_after(text, r.end);
@@ -975,8 +977,6 @@ fn is_not_a_column(text: &str, r: &IdentRef<'_>, lambdas: &[LambdaScope]) -> boo
         })
         || ((word == "first" || word == "last")
             && word_before(text, r.start).eq_ignore_ascii_case("nulls"))
-        || after.starts_with(":=")
-        || after.starts_with("=>")
 }
 
 /// Refuse the calls in `text` that read columns other than through the names
@@ -1383,6 +1383,57 @@ mod tests {
         })
         .collect();
         assert!(refused.is_empty(), "refused:\n{}", refused.join("\n"));
+    }
+
+    /// The expression each dimension item lowers to, one item at a time, or
+    /// its error.
+    fn lowered_dimensions(texts: &[&str]) -> Vec<Result<String, String>> {
+        texts
+            .iter()
+            .map(|t| {
+                lower_expression_items("v", &def(), items(&[t], &[], &[]))
+                    .map(|l| added_dimension(&l).expr.clone())
+                    .map_err(|e| format!("{e:?}"))
+            })
+            .collect()
+    }
+
+    #[test]
+    fn a_field_argument_or_lambda_name_is_left_as_written() {
+        // A field, a named argument and a lambda's parameter are names of
+        // their own, even when a member or a SQL value function has the name.
+        assert_eq!(
+            lowered_dimensions(&[
+                "struct_pack(user := region).user",
+                "current_date - struct_pack(current_date := order_date).current_date",
+                "list_transform([order_date], lambda current_date: current_date)[1]",
+                "struct_pack(region := order_date).region",
+                "list_transform([order_date], lambda region: region)[1]",
+            ]),
+            [
+                Ok("(struct_pack(user := (upper(o.region))).user)".to_string()),
+                Ok(
+                    "(current_date() - struct_pack(current_date := (o.order_date)).current_date)"
+                        .to_string()
+                ),
+                Ok(
+                    "(list_transform([(o.order_date)], lambda current_date: current_date)[1])"
+                        .to_string()
+                ),
+                Ok("(struct_pack(region := (o.order_date)).region)".to_string()),
+                Ok("(list_transform([(o.order_date)], lambda region: region)[1])".to_string()),
+            ]
+        );
+    }
+
+    #[test]
+    fn a_field_or_argument_named_like_a_metric_is_left_as_written() {
+        let lowered = lower(&[], &["revenue + struct_pack(revenue := 1).revenue"], &[]);
+        let metrics = added_metrics(&lowered);
+        assert_eq!(
+            metrics.last().map(|(_, expr, _)| expr.as_str()),
+            Some("\"revenue\" + struct_pack(revenue := 1).revenue")
+        );
     }
 
     #[test]
