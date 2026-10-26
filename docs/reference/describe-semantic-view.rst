@@ -51,13 +51,13 @@ The result contains multiple rows with 5 VARCHAR columns:
      - Description
    * - ``object_kind``
      - VARCHAR
-     - The type of object: ``TABLE``, ``RELATIONSHIP``, ``FACT``, ``DIMENSION``, ``METRIC``, ``DERIVED_METRIC``, or ``MATERIALIZATION``. Empty string on the view-level comment row.
+     - The type of object: ``TABLE``, ``RELATIONSHIP``, ``FACT``, ``DIMENSION``, ``METRIC``, ``DERIVED_METRIC``, or ``MATERIALIZATION``. Empty string on the view-level rows.
    * - ``object_name``
      - VARCHAR
-     - The name of the object (table name, relationship name, fact/dimension/metric name, materialization name). Empty string on the view-level comment row.
+     - The name of the object (table name, relationship name, fact/dimension/metric name, materialization name). Empty string on the view-level rows.
    * - ``parent_entity``
      - VARCHAR
-     - The parent table for this object. Empty string for the view-level comment row and for ``TABLE``, ``DERIVED_METRIC``, and ``MATERIALIZATION`` objects.
+     - The parent table for this object. Empty string for the view-level rows and for ``TABLE``, ``DERIVED_METRIC``, and ``MATERIALIZATION`` objects.
    * - ``property``
      - VARCHAR
      - The property name being described.
@@ -71,7 +71,7 @@ The result contains multiple rows with 5 VARCHAR columns:
 Object Kinds and Properties
 ===========================
 
-Rows appear in definition order: the view-level comment (when one is set), then ``TABLE`` objects, then ``RELATIONSHIP``, ``FACT``, ``DIMENSION``, ``METRIC``, ``DERIVED_METRIC``, and ``MATERIALIZATION``.
+Rows appear in definition order: the view-level comment and tags (when set), then ``TABLE`` objects, then ``RELATIONSHIP``, ``FACT``, ``DIMENSION``, ``METRIC``, ``DERIVED_METRIC``, and ``MATERIALIZATION``.
 
 .. versionchanged:: 0.14.0
 
@@ -80,8 +80,8 @@ Rows appear in definition order: the view-level comment (when one is set), then 
    the command runs, so views created in that window report it too, with no
    need to re-create them.
 
-**View-level comment**
-   Emitted only when a view-level comment is set (in ``CREATE`` or via :ref:`ALTER SEMANTIC VIEW SET COMMENT <ref-alter-semantic-view>`). The row describes the view itself, so ``object_kind``, ``object_name``, and ``parent_entity`` are all empty strings. Produces one property row:
+**View-level comment and tags**
+   Emitted only when a view-level comment (in ``CREATE`` or via :ref:`ALTER SEMANTIC VIEW SET COMMENT <ref-alter-semantic-view>`) or view-level tags are set. The rows describe the view itself, so ``object_kind``, ``object_name``, and ``parent_entity`` are all empty strings. Produces up to two property rows:
 
    .. list-table::
       :header-rows: 1
@@ -91,9 +91,11 @@ Rows appear in definition order: the view-level comment (when one is set), then 
         - Description
       * - ``COMMENT``
         - The view-level comment text.
+      * - ``TAGS``
+        - The view's tags as a JSON object. See ``TAGS`` below.
 
 **TABLE**
-   One block per table declared in the ``TABLES`` clause. Each table produces 3-6 property rows:
+   One block per table declared in the ``TABLES`` clause. Each table produces 3-7 property rows:
 
    .. list-table::
       :header-rows: 1
@@ -113,6 +115,10 @@ Rows appear in definition order: the view-level comment (when one is set), then 
         - The table comment text. Only emitted when a comment is set.
       * - ``SYNONYMS``
         - JSON array of synonym strings (e.g., ``["transactions","purchases"]``). Only emitted when synonyms are set.
+      * - ``TAGS``
+        - JSON object of the object's tags, in declaration order (e.g., ``{"S_LAYER_KIND":"dimension","governance.pii":"none"}``). Each key is the tag name as ``GET_DDL`` writes it. Only emitted when tags are set.
+
+          .. versionadded:: 0.17.0
 
 **RELATIONSHIP**
    One block per relationship declared in the ``RELATIONSHIPS`` clause:
@@ -151,6 +157,10 @@ Rows appear in definition order: the view-level comment (when one is set), then 
         - The fact comment text. Only emitted when a comment is set.
       * - ``SYNONYMS``
         - JSON array of synonym strings. Only emitted when synonyms are set.
+      * - ``TAGS``
+        - JSON object of the object's tags, in declaration order (e.g., ``{"S_LAYER_KIND":"dimension","governance.pii":"none"}``). Each key is the tag name as ``GET_DDL`` writes it. Only emitted when tags are set.
+
+          .. versionadded:: 0.17.0
       * - ``LABELS``
         - ``["FILTER"]`` when the fact is declared a :ref:`named filter <howto-annotations-filters>` with ``LABELS = (FILTER)``. Only emitted when labeled.
       * - ``ACCESS_MODIFIER``
@@ -175,6 +185,10 @@ Rows appear in definition order: the view-level comment (when one is set), then 
         - The dimension comment text. Only emitted when a comment is set.
       * - ``SYNONYMS``
         - JSON array of synonym strings. Only emitted when synonyms are set.
+      * - ``TAGS``
+        - JSON object of the object's tags, in declaration order (e.g., ``{"S_LAYER_KIND":"dimension","governance.pii":"none"}``). Each key is the tag name as ``GET_DDL`` writes it. Only emitted when tags are set.
+
+          .. versionadded:: 0.17.0
       * - ``LABELS``
         - ``["FILTER"]`` when the dimension is declared a :ref:`named filter <howto-annotations-filters>` with ``LABELS = (FILTER)``. Only emitted when labeled.
 
@@ -197,6 +211,10 @@ Rows appear in definition order: the view-level comment (when one is set), then 
         - The metric comment text. Only emitted when a comment is set.
       * - ``SYNONYMS``
         - JSON array of synonym strings. Only emitted when synonyms are set.
+      * - ``TAGS``
+        - JSON object of the object's tags, in declaration order (e.g., ``{"S_LAYER_KIND":"dimension","governance.pii":"none"}``). Each key is the tag name as ``GET_DDL`` writes it. Only emitted when tags are set.
+
+          .. versionadded:: 0.17.0
       * - ``ACCESS_MODIFIER``
         - ``PUBLIC`` or ``PRIVATE``. Always emitted.
       * - ``NON_ADDITIVE_BY``
@@ -221,6 +239,10 @@ Rows appear in definition order: the view-level comment (when one is set), then 
         - The derived metric comment text. Only emitted when a comment is set.
       * - ``SYNONYMS``
         - JSON array of synonym strings. Only emitted when synonyms are set.
+      * - ``TAGS``
+        - JSON object of the object's tags, in declaration order (e.g., ``{"S_LAYER_KIND":"dimension","governance.pii":"none"}``). Each key is the tag name as ``GET_DDL`` writes it. Only emitted when tags are set.
+
+          .. versionadded:: 0.17.0
       * - ``ACCESS_MODIFIER``
         - ``PUBLIC`` or ``PRIVATE``. Always emitted.
 

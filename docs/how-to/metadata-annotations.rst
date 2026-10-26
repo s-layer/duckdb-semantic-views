@@ -1,5 +1,5 @@
 .. meta::
-   :description: Add COMMENT, WITH SYNONYMS, PRIVATE/PUBLIC access modifiers, and LABELS = (FILTER) to semantic view definitions and inspect them via DESCRIBE and SHOW
+   :description: Add COMMENT, WITH SYNONYMS, PRIVATE/PUBLIC access modifiers, LABELS = (FILTER) and WITH TAG to semantic view definitions and inspect them via DESCRIBE and SHOW
 
 .. _howto-metadata-annotations:
 
@@ -7,7 +7,7 @@
 How to Use Metadata Annotations
 =====================================
 
-This guide shows how to annotate dimensions, metrics, facts, and tables with comments, synonyms, access modifiers, and named-filter labels in a semantic view definition.
+This guide shows how to annotate dimensions, metrics, facts, and tables with comments, synonyms, access modifiers, named-filter labels and tags in a semantic view definition.
 
 **Prerequisites:**
 
@@ -190,6 +190,44 @@ The label is **declarative metadata**, not an access restriction or a resolution
 ``LABELS`` is likewise valid **only on a fact or a dimension**. Writing it on a table, on a metric, or as a view-level annotation is rejected for the same reason: those entries carry no filter flag, so accepting it there would mean discarding it on the way to storage.
 
 
+.. _howto-annotations-tags:
+
+Add Tags
+========
+
+.. versionadded:: 0.17.0
+
+Tags are name/value pairs for tools that read your view's metadata, such as a governance catalog or a BI layer that needs to know what each member is. Like comments, they never change what a query returns. Add ``WITH TAG (...)`` to any table, fact, dimension or metric entry, or after the last clause to tag the view itself:
+
+.. code-block:: sql
+   :emphasize-lines: 3,7,10,11
+
+   CREATE SEMANTIC VIEW sales AS
+   TABLES (
+       o AS orders PRIMARY KEY (id) WITH TAG (governance.pii = 'none')
+   )
+   DIMENSIONS (
+       o.region AS o.region COMMENT = 'Sales region'
+           WITH TAG (s_layer_kind = 'dimension', s_layer_label = 'Region')
+   )
+   METRICS (
+       o.revenue AS SUM(o.amount) WITH TAG (s_layer_kind = 'metric')
+   )
+   WITH TAG (owner = 'analytics');
+
+The ``WITH`` is optional, as in Snowflake. A tag name can be qualified (``governance.pii``, ``db.governance.pii``) and is stored as written: there is no ``CREATE TAG`` object to create first. Values are single-quoted strings of up to 256 characters.
+
+Read the tags back from the ``TAGS`` row in ``DESCRIBE``, which holds a JSON object:
+
+.. code-block:: sql
+
+   SELECT object_name, json_extract_string(property_value, '$.s_layer_kind') AS kind
+   FROM describe_semantic_view('sales')
+   WHERE property = 'TAGS' AND object_kind IN ('DIMENSION', 'METRIC');
+
+``GET_DDL`` and :ref:`READ_YAML_FROM_SEMANTIC_VIEW() <ref-read-yaml>` write the tags back out, so they survive a dump and replay. ``SHOW`` commands don't list them, which matches Snowflake. See :ref:`Tags <ref-create-tags>` for the full rules.
+
+
 .. _howto-annotations-inspect:
 
 Inspect Annotations
@@ -209,6 +247,7 @@ Look for these property rows:
 - ``COMMENT`` -- the comment text (conditional, only when set)
 - ``SYNONYMS`` -- JSON array of synonyms (conditional, only when set)
 - ``LABELS`` -- ``["FILTER"]`` for a :ref:`named filter <howto-annotations-filters>` (conditional, only on labeled facts and dimensions)
+- ``TAGS`` -- JSON object of :ref:`tags <howto-annotations-tags>` (conditional, only when set)
 - ``ACCESS_MODIFIER`` -- ``PUBLIC`` or ``PRIVATE`` (always emitted for facts and metrics)
 - ``NON_ADDITIVE_BY`` -- non-additive dimension list (conditional, only for semi-additive metrics)
 - ``WINDOW_SPEC`` -- reconstructed OVER clause (conditional, only for window metrics)

@@ -41,6 +41,9 @@ YAML keys differ from the SQL clause names in some cases:
    * - ``COMMENT``
      - ``comment``
      - View-level comment
+   * - ``[WITH] TAG``
+     - ``tags``
+     - A list of ``{name, value}`` entries in Snowflake's shape. See `Tag`_
 
 
 .. _ref-yaml-format-example:
@@ -86,6 +89,9 @@ A YAML definition covering all supported features:
        expr: o.region
        source_table: o
        comment: Sales territory
+       tags:
+         - name: {tag: S_LAYER_KIND}
+           value: dimension
      - name: customer_name
        expr: c.name
        source_table: c
@@ -123,6 +129,9 @@ A YAML definition covering all supported features:
          - order_count
 
    comment: Revenue analytics view
+   tags:
+     - name: {database: analytics, schema: governance, tag: owner}
+       value: finance
 
 
 .. _ref-yaml-format-minimal:
@@ -213,6 +222,10 @@ Top-Level Keys
      - string
      - No
      - View-level human-readable description.
+   * - ``tags``
+     - list of `Tag`_
+     - No
+     - View-level tags.
 
 :sup:`*` Both keys must be present -- a definition without a ``metrics`` key is rejected with a "missing field" error -- and at least one of the two must be non-empty. Use ``[]`` for the empty one.
 
@@ -263,6 +276,11 @@ Each entry in the ``tables`` list declares a physical table with an alias. The f
      - No
      - ``[]``
      - Alternative names for discoverability.
+   * - ``tags``
+     - list of `Tag`_
+     - No
+     - ``[]``
+     - Name/value metadata tags.
 
 .. code-block:: yaml
 
@@ -331,6 +349,11 @@ Each entry in the ``dimensions`` list declares a named grouping expression.
      - No
      - ``[]``
      - Alternative names for discoverability.
+   * - ``tags``
+     - list of `Tag`_
+     - No
+     - ``[]``
+     - Name/value metadata tags.
    * - ``is_filter``
      - boolean
      - No
@@ -405,6 +428,11 @@ Each entry in the ``metrics`` list declares a named aggregation, derived metric,
      - No
      - ``[]``
      - Alternative names for discoverability.
+   * - ``tags``
+     - list of `Tag`_
+     - No
+     - ``[]``
+     - Name/value metadata tags.
    * - ``access``
      - string
      - No
@@ -529,6 +557,11 @@ Each entry in the ``facts`` list declares a named row-level expression. Facts ca
      - No
      - ``[]``
      - Alternative names for discoverability.
+   * - ``tags``
+     - list of `Tag`_
+     - No
+     - ``[]``
+     - Name/value metadata tags.
    * - ``access``
      - string
      - No
@@ -811,6 +844,46 @@ Used within a window spec's ``order_by`` list.
      - No
      - ``Last``
      - NULLS placement: ``Last`` or ``First``.
+
+
+.. _ref-yaml-format-tag:
+
+Tag
+===
+
+.. versionadded:: 0.17.0
+
+Used within the ``tags`` list of the view, a table, a fact, a dimension or a metric. The shape follows Snowflake's semantic-view YAML: ``name`` is a mapping with the tag's name parts.
+
+.. list-table::
+   :header-rows: 1
+   :widths: 22 18 12 10 38
+
+   * - Field
+     - Type
+     - Required
+     - Default
+     - Description
+   * - ``name``
+     - mapping
+     - Yes
+     -
+     - The tag name: ``tag`` (required), with optional ``schema`` and ``database``. A ``database`` needs a ``schema``. Parts are stored as written and compared case-insensitively.
+   * - ``value``
+     - string
+     - Yes
+     -
+     - The tag value, at most 256 characters.
+
+.. code-block:: yaml
+
+   tags:
+     - name: {tag: S_LAYER_KIND}
+       value: metric
+     - name: {schema: governance, tag: pii}
+       value: none
+
+A tag list may not name the same tag twice. Tags the SQL form could not write (an empty name part, a ``database`` without a ``schema``, a value over 256 characters, a duplicate) are rejected by ``CREATE SEMANTIC VIEW ... FROM YAML``.
 
 
 .. _ref-yaml-format-size-limit:

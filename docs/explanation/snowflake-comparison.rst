@@ -58,8 +58,8 @@ Concept Mapping
      - ``OVER`` clause with ``PARTITION BY EXCLUDING``
      - ``OVER`` clause with ``PARTITION BY EXCLUDING`` (see :ref:`howto-window-metrics`)
    * - Metadata annotations
-     - ``COMMENT``, ``WITH SYNONYMS``
-     - ``COMMENT``, ``WITH SYNONYMS`` (see :ref:`howto-metadata-annotations`)
+     - ``COMMENT``, ``WITH SYNONYMS``, ``WITH TAG``
+     - ``COMMENT``, ``WITH SYNONYMS``, ``WITH TAG`` (see :ref:`howto-metadata-annotations`)
    * - Access modifiers
      - ``PRIVATE`` / ``PUBLIC`` on metrics and facts; `"You cannot mark a dimension as private. Dimensions are always public." <https://docs.snowflake.com/en/sql-reference/sql/create-semantic-view>`_
      - Same rule: ``PRIVATE`` / ``PUBLIC`` on metrics and facts, ``PRIVATE`` rejected on dimensions. ``PUBLIC`` is accepted on a dimension as an explicit no-op, since it asserts what is already true
@@ -565,11 +565,13 @@ Snowflake ``CREATE SEMANTIC VIEW`` features that are commonly asked about, and w
      - **Supported.** An item may be an expression, in the construct and in a ``semantic_view()`` list (``'DATE_PART(''year'', o.order_date) AS year'``), with Snowflake's rules: a ``DIMENSIONS`` or ``FACTS`` expression uses dimensions and facts of one table, and a ``METRICS`` expression uses metrics and aggregates of the dimensions and facts of one table. An expression item is planned as a member of its table, so ``COUNT(DISTINCT ...)``, ratios and per-grain metrics come out right, and the fan-trap checks apply to it. Any item may take ``AS <alias>`` (optional in the construct, as in Snowflake). See :ref:`ref-sv-expression-items`.
    * - Named filters -- ``LABELS = (FILTER)`` on a fact or dimension resolving to ``BOOLEAN``, referenced bare in a query's ``WHERE`` (`Snowflake GA May 2026 <https://docs.snowflake.com/en/user-guide/views-semantic/filters>`_)
      - **Supported.** ``LABELS = (FILTER)`` is accepted on a fact or dimension entry, in any order among ``COMMENT`` / ``WITH SYNONYMS``, and survives ``GET_DDL``, YAML export, and ``DESCRIBE`` (as a ``LABELS`` property row valued ``["FILTER"]``). Referencing the member bare in the query's ``WHERE`` works via the pre-aggregation predicate above -- a filter is an ordinary boolean member, so the label declares *intent* and drives introspection rather than gating resolution. The ``BOOLEAN`` requirement is enforced by DuckDB's binder at query time, not at ``CREATE``: ``CREATE`` binds the member but does not check its type, so a non-boolean filter raises DuckDB's own type error when queried. Labels other than ``FILTER`` are rejected rather than silently dropped.
+   * - Tags -- ``[WITH] TAG (<tag_name> = '<value>', ...)`` on the view, a logical table, a fact, a dimension or a metric
+     - **Supported**, with Snowflake's placement and syntax. Tags are stored with the view and shown as a ``TAGS`` row (a JSON object) in ``DESCRIBE``; they survive ``GET_DDL`` and YAML export, and ``SHOW`` commands omit them, as Snowflake's do. Snowflake requires each tag to exist as a ``CREATE TAG`` object; DuckDB has no tag objects, so the name (up to ``database.schema.tag``) is stored as written. Values are limited to 256 characters, as in Snowflake. See :ref:`Tags <ref-create-tags>`.
    * - Column-level security
      - Out of scope; DuckDB handles access control
    * - ``ASOF`` / temporal relationships
      - Not planned; standard equi-joins cover most use cases
-   * - ``CREATE OR ALTER``, tags / other ``LABELS`` values, ``MAX_STALENESS``, and the ``AI_*`` / ``COPILOT`` clauses
+   * - ``CREATE OR ALTER``, ``LABELS`` values other than ``FILTER``, ``MAX_STALENESS``, and the ``AI_*`` / ``COPILOT`` clauses
      - Not planned; these are Snowflake-catalog or Cortex-specific and have no DuckDB equivalent
 
 

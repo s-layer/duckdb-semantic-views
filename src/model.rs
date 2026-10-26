@@ -174,6 +174,26 @@ pub fn tag_error(tags: &[Tag]) -> Option<(usize, String)> {
     None
 }
 
+/// Tags as a JSON object, `{"name":"value",...}`, in declaration order: the
+/// value of `DESCRIBE SEMANTIC VIEW`'s `TAGS` rows.
+///
+/// Each key is the tag's name as DDL writes it ([`TagName::render`]): dotted,
+/// each part bare unless it needs quoting, so `S_LAYER_KIND` reads as itself.
+/// [`tag_error`] refuses duplicate names on every path in, so no key repeats.
+#[must_use]
+pub fn tags_json(tags: &[Tag]) -> String {
+    let entries: Vec<String> = tags
+        .iter()
+        .map(|t| {
+            // Serializing a `&str` to JSON is infallible.
+            let key = serde_json::to_string(&t.name.render()).expect("a str serializes");
+            let value = serde_json::to_string(&t.value).expect("a str serializes");
+            format!("{key}:{value}")
+        })
+        .collect();
+    format!("{{{}}}", entries.join(","))
+}
+
 /// A named SQL column expression used as a dimension.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[cfg_attr(feature = "arbitrary", derive(arbitrary::Arbitrary))]
@@ -975,13 +995,14 @@ fn member_expr(kind: &str, name: &str, expr: &str) -> Result<(), String> {
     // that no longer plans (fuzz_create_text, CI run 40184213171). Window
     // arguments are not checked: they sit inside `OVER (…)`, below depth 0.
     if let Some(at) = crate::body_parser::find_annotation_start(expr) {
-        let word = expr[at..]
+        let mut words = expr[at..]
             .split(|c: char| !c.is_ascii_alphabetic())
-            .next()
-            .unwrap_or_default();
-        // `WITH` starts annotations only as `WITH SYNONYMS`; name both words.
+            .filter(|w| !w.is_empty());
+        let word = words.next().unwrap_or_default();
+        // `WITH` starts annotations only as `WITH SYNONYMS` or `WITH TAG`;
+        // name both words.
         let keyword = if word.eq_ignore_ascii_case("WITH") {
-            format!("{word} SYNONYMS")
+            format!("{word} {}", words.next().unwrap_or_default())
         } else {
             word.to_string()
         };
@@ -1717,6 +1738,117 @@ mod tests {
         );
         SemanticViewDefinition::from_yaml_with_size_cap("v", &yaml)
             .expect("a well-formed YAML definition must import");
+    }
+
+    /// Tags use Snowflake's YAML shape: `name` is a map of `database` /
+    /// `schema` / `tag`, the qualifiers optional.
+    #[test]
+    fn yaml_tags_import_in_snowflakes_shape_on_every_object() {
+        let yaml = "tables:\n  - alias: o\n    table: orders\n    tags:\n      \
+                    - name: {schema: gov, tag: pii}\n        value: none\n\
+                    dimensions:\n  - name: d\n    expr: o.d\n    source_table: o\n    tags:\n      \
+                    - name: {tag: S_LAYER_KIND}\n        value: dimension\n\
+                    facts:\n  - name: f\n    expr: o.f\n    source_table: o\n    tags:\n      \
+                    - name: {database: db, schema: gov, tag: x}\n        value: ''\n\
+                    metrics:\n  - name: total\n    expr: sum(o.amount)\n    source_table: o\n    tags:\n      \
+                    - name: {tag: s_layer_kind}\n        value: metric\n\
+                    tags:\n  - name: {tag: s_layer_kind}\n    value: view\n";
+        let def = SemanticViewDefinition::from_yaml_with_size_cap("v", yaml)
+            .expect("tagged YAML must import");
+        assert_eq!(def.tags[0].value, "view");
+        assert_eq!(def.tables[0].tags[0].name.render(), "gov.pii");
+        assert_eq!(def.dimensions[0].tags[0].name.render(), "S_LAYER_KIND");
+        assert_eq!(def.facts[0].tags[0].name.render(), "db.gov.x");
+        assert_eq!(def.metrics[0].tags[0].value, "metric");
+        // And it serializes back to the same shape, absent qualifiers omitted.
+        let out = crate::render_yaml::render_yaml_export(&def).unwrap();
+        assert!(out.contains("tag: S_LAYER_KIND"), "{out}");
+        assert!(!out.contains("database: null"), "{out}");
+        assert_eq!(SemanticViewDefinition::from_yaml("v", &out).unwrap(), def);
+    }
+
+    #[test]
+    fn yaml_tags_the_ddl_cannot_write_are_rejected() {
+        let long = "v".repeat(TAG_VALUE_MAX_CHARS + 1);
+        for (tags, needle) in [
+            ("[{name: {tag: ''}, value: x}]", "name part is empty"),
+            ("[{name: {database: db, tag: t}, value: x}]", "no schema"),
+            (
+                &*format!("[{{name: {{tag: t}}, value: {long}}}]"),
+                "257 characters",
+            ),
+            (
+                "[{name: {tag: t}, value: a}, {name: {tag: T}, value: b}]",
+                "duplicate tag 'T'",
+            ),
+        ] {
+            let yaml = format!(
+                "{VALID_TABLES}dimensions:\n  - name: d\n    expr: o.d\n    source_table: o\n    \
+                 tags: {tags}\nmetrics:\n  - name: total\n    expr: sum(o.amount)\n    source_table: o\n"
+            );
+            let e = yaml_err(&yaml);
+            assert!(
+                e.contains("dimension 'd' has an invalid tag") && e.contains(needle),
+                "{tags}: {e}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_yaml_expression_holding_a_tag_clause_names_the_clause_it_found() {
+        for (expr, keyword) in [
+            ("o.d WITH TAG (a = '1')", "'WITH TAG'"),
+            ("o.d TAG (a = '1')", "'TAG'"),
+            ("o.d WITH SYNONYMS = ('x')", "'WITH SYNONYMS'"),
+        ] {
+            let yaml = format!(
+                "{VALID_TABLES}dimensions:\n  - name: d\n    expr: \"{expr}\"\n    source_table: o\n\
+                 metrics:\n  - name: total\n    expr: sum(o.amount)\n    source_table: o\n"
+            );
+            let e = yaml_err(&yaml);
+            assert!(
+                e.contains("cannot carry") && e.contains(&format!("{keyword} at depth 0")),
+                "{expr}: {e}"
+            );
+        }
+    }
+
+    #[test]
+    fn stored_json_without_tags_still_loads_and_untagged_json_has_no_tags_key() {
+        let json = r#"{"tables":[{"alias":"o","table":"orders"}],
+            "dimensions":[{"name":"d","expr":"o.d","source_table":"o"}],"metrics":[]}"#;
+        let def = SemanticViewDefinition::from_json("v", json).unwrap();
+        assert!(def.tags.is_empty() && def.dimensions[0].tags.is_empty());
+        assert!(!serde_json::to_string(&def).unwrap().contains("tags"));
+    }
+
+    #[test]
+    fn tags_json_keeps_order_and_writes_names_as_ddl_does() {
+        let tags = vec![
+            Tag {
+                name: TagName {
+                    database: None,
+                    schema: None,
+                    tag: "S_LAYER_KIND".to_string(),
+                },
+                value: "dimension".to_string(),
+            },
+            Tag {
+                name: TagName {
+                    database: Some("db".to_string()),
+                    schema: Some("Gov".to_string()),
+                    tag: "a\"b".to_string(),
+                },
+                value: "it's \"q\"".to_string(),
+            },
+        ];
+        let json = tags_json(&tags);
+        assert_eq!(
+            json,
+            r#"{"S_LAYER_KIND":"dimension","db.Gov.\"a\"\"b\"":"it's \"q\""}"#
+        );
+        let parsed: serde_json::Value = serde_json::from_str(&json).expect("valid JSON");
+        assert_eq!(parsed["S_LAYER_KIND"], "dimension");
     }
 
     #[test]

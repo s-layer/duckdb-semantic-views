@@ -141,27 +141,6 @@ pub(crate) fn format_json_array(items: &[String]) -> String {
     serde_json::to_string(items).expect("serializing a &[String] to JSON is infallible")
 }
 
-/// Format tags as a JSON object, `{"name":"value",...}`, in declaration order.
-///
-/// Each key is the tag's name as DDL writes it ([`TagName::render`]): dotted,
-/// each part bare unless it needs quoting, so `S_LAYER_KIND` reads as itself.
-/// Duplicate names cannot occur (the TAG parser and the YAML import both refuse
-/// them), so the object has no repeated key.
-///
-/// [`TagName::render`]: crate::model::TagName::render
-pub(crate) fn format_tags_json(tags: &[crate::model::Tag]) -> String {
-    let entries: Vec<String> = tags
-        .iter()
-        .map(|t| {
-            // Serializing a `&str` to JSON is infallible.
-            let key = serde_json::to_string(&t.name.render()).expect("a str serializes");
-            let value = serde_json::to_string(&t.value).expect("a str serializes");
-            format!("{key}:{value}")
-        })
-        .collect();
-    format!("{{{}}}", entries.join(","))
-}
-
 /// Push a `TAGS` row for an object that has tags; nothing when it has none, as
 /// `COMMENT` and `SYNONYMS` are omitted when unset.
 fn push_tags_row(
@@ -177,7 +156,7 @@ fn push_tags_row(
             object_name: object_name.to_string(),
             parent_entity: parent_entity.to_string(),
             property: "TAGS".to_string(),
-            property_value: format_tags_json(tags),
+            property_value: crate::model::tags_json(tags),
         });
     }
 }

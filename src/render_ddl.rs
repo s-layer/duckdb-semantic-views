@@ -1973,4 +1973,86 @@ mod tests {
             );
         }
     }
+
+    mod tag_render {
+        use super::*;
+        use crate::model::{Fact, Tag, TagName};
+
+        fn tag(parts: &[&str], value: &str) -> Tag {
+            let mut parts: Vec<String> = parts.iter().map(|p| (*p).to_string()).collect();
+            let tag = parts.pop().unwrap();
+            let schema = parts.pop();
+            let database = parts.pop();
+            Tag {
+                name: TagName {
+                    database,
+                    schema,
+                    tag,
+                },
+                value: value.to_string(),
+            }
+        }
+
+        fn tagged_def() -> SemanticViewDefinition {
+            let mut def = minimal_def();
+            def.tags = vec![tag(&["S_LAYER_KIND"], "view")];
+            def.tables[0].comment = Some("orders".to_string());
+            def.tables[0].tags = vec![tag(&["gov", "pii"], "none")];
+            def.dimensions[0].synonyms = vec!["area".to_string()];
+            def.dimensions[0].tags = vec![
+                tag(&["s_layer_kind"], "dimension"),
+                tag(&["db", "Gov Schema", "it's"], "a'b"),
+            ];
+            def.metrics[0].tags = vec![tag(&["select"], "")];
+            def.facts = vec![Fact {
+                name: "amt".to_string(),
+                expr: "o.amount".to_string(),
+                source_table: Some("o".to_string()),
+                tags: vec![tag(&["x.y"], "z")],
+                ..Default::default()
+            }];
+            def
+        }
+
+        #[test]
+        fn tags_render_last_in_each_entry_and_after_the_last_clause() {
+            let ddl = render_create_ddl("v", &tagged_def()).unwrap();
+            for expected in [
+                "o AS orders PRIMARY KEY (id) COMMENT = 'orders' WITH TAG (gov.pii = 'none')",
+                "o.amt AS o.amount WITH TAG (\"x.y\" = 'z')",
+                "o.region AS o.region WITH SYNONYMS = ('area') WITH TAG (s_layer_kind = \
+                 'dimension', db.\"Gov Schema\".\"it's\" = 'a''b')",
+                // A keyword part is quoted; an empty value is written as ''.
+                "o.revenue AS SUM(o.amount) WITH TAG (\"select\" = '')",
+            ] {
+                assert!(ddl.contains(expected), "missing {expected:?} in:\n{ddl}");
+            }
+            assert!(
+                ddl.ends_with(")\nWITH TAG (S_LAYER_KIND = 'view')\n"),
+                "view tags follow the last clause:\n{ddl}"
+            );
+        }
+
+        #[test]
+        fn rendered_tags_parse_back_to_the_same_definition() {
+            let def = tagged_def();
+            let ddl = render_create_ddl("v", &def).unwrap();
+            let body = body_of(&ddl).expect("body");
+            let back = crate::body_parser::parse_keyword_body(body, 0)
+                .unwrap_or_else(|e| panic!("{e:?}\n{ddl}"))
+                .into_definition();
+            assert_eq!(back.tags, def.tags);
+            assert_eq!(back.tables, def.tables);
+            assert_eq!(back.facts, def.facts);
+            assert_eq!(back.dimensions, def.dimensions);
+            assert_eq!(back.metrics, def.metrics);
+            assert_render_fixpoint(&def);
+        }
+
+        #[test]
+        fn a_view_with_no_tags_renders_no_tag_clause() {
+            let ddl = render_create_ddl("v", &minimal_def()).unwrap();
+            assert!(!ddl.contains("TAG"), "{ddl}");
+        }
+    }
 }

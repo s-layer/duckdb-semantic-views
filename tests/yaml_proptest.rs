@@ -508,8 +508,8 @@ fn arb_oracle_window_spec(dim: String, metric: String) -> impl Strategy<Value = 
 /// empty part, which must be REFUSED at import.
 fn arb_oracle_tag_part() -> impl Strategy<Value = String> {
     prop_oneof![
-        4 => Just("s_layer_kind".to_string()),
-        2 => Just("S_LAYER_SPEC".to_string()),
+        8 => Just("s_layer_kind".to_string()),
+        4 => Just("S_LAYER_SPEC".to_string()),
         1 => Just("a--b".to_string()),
         1 => Just("x/*y".to_string()),
         1 => Just("we\"ird".to_string()),
@@ -525,40 +525,43 @@ fn arb_oracle_tag_part() -> impl Strategy<Value = String> {
 /// Tags for the oracle: the TAG axis of the YAML → `GET_DDL` → front door
 /// contract. Refused shapes are generated on purpose (an empty part, a database
 /// with no schema, a value one character over the limit, a case-folded
-/// duplicate) next to ones that must survive.
+/// duplicate) next to ones that must survive, at rates that leave most
+/// definitions importable (`the_oracle_is_not_all_refusals`).
 fn arb_oracle_tags() -> impl Strategy<Value = Vec<Tag>> {
     let value = prop_oneof![
-        4 => Just("dimension".to_string()),
-        1 => Just("it's -- not /* a */ comment, ) TAG (x = 'y')".to_string()),
+        8 => Just("dimension".to_string()),
+        2 => Just("it's -- not /* a */ comment, ) TAG (x = 'y')".to_string()),
         1 => Just(String::new()),
         1 => Just("é".repeat(256)),
         1 => Just("v".repeat(257)),
     ];
-    let tag = (
-        prop::option::of(arb_oracle_tag_part()),
-        prop::option::of(arb_oracle_tag_part()),
-        arb_oracle_tag_part(),
-        value,
+    let p = arb_oracle_tag_part;
+    let name = prop_oneof![
+        6 => p().prop_map(|tag| TagName { database: None, schema: None, tag }),
+        2 => (p(), p()).prop_map(|(schema, tag)| TagName { database: None, schema: Some(schema), tag }),
+        1 => (p(), p(), p()).prop_map(|(database, schema, tag)| TagName {
+            database: Some(database),
+            schema: Some(schema),
+            tag,
+        }),
+        1 => (p(), p()).prop_map(|(database, tag)| TagName { database: Some(database), schema: None, tag }),
+    ];
+    let tag = (name, value).prop_map(|(name, value)| Tag { name, value });
+    (
+        prop_oneof![1 => Just(Vec::new()), 1 => prop::collection::vec(tag, 1..=2)],
+        prop::bool::weighted(0.05),
     )
-        .prop_map(|(database, schema, tag, value)| Tag {
-            name: TagName {
-                database,
-                schema,
-                tag,
-            },
-            value,
-        });
-    (prop::collection::vec(tag, 0..=2), prop::bool::weighted(0.1)).prop_map(|(mut tags, dup)| {
-        // A case-folded repeat of the first name.
-        if dup {
-            if let Some(first) = tags.first().cloned() {
-                let mut again = first;
-                again.name.tag = again.name.tag.to_uppercase();
-                tags.push(again);
+        .prop_map(|(mut tags, dup)| {
+            // A case-folded repeat of the first name.
+            if dup {
+                if let Some(first) = tags.first().cloned() {
+                    let mut again = first;
+                    again.name.tag = again.name.tag.to_uppercase();
+                    tags.push(again);
+                }
             }
-        }
-        tags
-    })
+            tags
+        })
 }
 
 /// [`arb_oracle_def_untagged`], with tags on the view and its dimension.

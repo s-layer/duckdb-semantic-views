@@ -762,6 +762,77 @@ mod tests {
         );
     }
 
+    #[test]
+    fn view_level_tags_follow_the_last_clause_with_or_without_a_comment() {
+        use crate::model::{Tag, TagName};
+        let want = vec![Tag {
+            name: TagName {
+                database: None,
+                schema: Some("gov".to_string()),
+                tag: "S_LAYER_KIND".to_string(),
+            },
+            value: "view".to_string(),
+        }];
+        for (trailer, comment) in [
+            ("WITH TAG (gov.S_LAYER_KIND = 'view')", None),
+            ("TAG (gov.S_LAYER_KIND = 'view')", None),
+            (
+                "COMMENT = 'c' WITH TAG (gov.S_LAYER_KIND = 'view')",
+                Some("c"),
+            ),
+            (
+                "WITH TAG (gov.S_LAYER_KIND = 'view') COMMENT = 'c'",
+                Some("c"),
+            ),
+        ] {
+            let body = format!(
+                "AS TABLES (o AS orders PRIMARY KEY (id)) \
+                 METRICS (o.revenue AS sum(o.amount)) {trailer}"
+            );
+            let kb = parse_keyword_body(&body, 0).unwrap_or_else(|e| panic!("{trailer}: {e:?}"));
+            assert_eq!(kb.view_tags, want, "for {trailer:?}");
+            assert_eq!(kb.view_comment.as_deref(), comment, "for {trailer:?}");
+            assert_eq!(kb.metrics.len(), 1, "the clause region is intact");
+            let def = kb.into_definition();
+            assert_eq!(def.tags, want);
+            assert_eq!(def.comment.as_deref(), comment);
+        }
+    }
+
+    #[test]
+    fn a_tag_inside_a_clause_is_not_a_view_level_tag() {
+        let body = "AS TABLES (o AS orders PRIMARY KEY (id) WITH TAG (t = 't')) \
+                    METRICS (o.revenue AS sum(o.amount) TAG (m = 'm'))";
+        let kb = parse_keyword_body(body, 0).unwrap();
+        assert!(kb.view_tags.is_empty());
+        assert_eq!(kb.tables[0].tags[0].value, "t");
+        assert_eq!(kb.metrics[0].tags[0].value, "m");
+    }
+
+    #[test]
+    fn view_level_tag_errors_are_reported_at_the_view_level() {
+        for (trailer, needle) in [
+            ("WITH TAG (a = '1') WITH TAG (b = '2')", "Duplicate TAG"),
+            ("TAG ()", "TAG () is empty"),
+            ("WITH TAG (a = '1') junk", "Unexpected text in annotations"),
+            (
+                "WITH SYNONYMS = ('s') TAG (a = '1')",
+                "WITH SYNONYMS is not valid",
+            ),
+        ] {
+            let body = format!(
+                "AS TABLES (o AS orders PRIMARY KEY (id)) \
+                 METRICS (o.revenue AS sum(o.amount)) {trailer}"
+            );
+            let err = parse_keyword_body(&body, 0).unwrap_err();
+            assert!(
+                err.message.contains(needle),
+                "{trailer}: got {}",
+                err.message
+            );
+        }
+    }
+
     /// The guards must not cost FACTS / DIMENSIONS their label — the one place
     /// it is meant to work. Guards this pair against an over-broad rejection.
     #[test]
@@ -1593,10 +1664,11 @@ mod tests {
 
     #[test]
     fn test_annotation_with_without_synonyms_rejected() {
-        // A second WITH clause that isn't WITH SYNONYMS is an error, not junk.
+        // A second WITH clause that isn't WITH SYNONYMS or WITH TAG is an
+        // error, not junk.
         let err = parse_trailing_annotations("x COMMENT = 'a' WITH FOO", 0).unwrap_err();
         assert!(
-            err.message.contains("Expected SYNONYMS after WITH"),
+            err.message.contains("Expected SYNONYMS or TAG after WITH"),
             "got: {}",
             err.message
         );

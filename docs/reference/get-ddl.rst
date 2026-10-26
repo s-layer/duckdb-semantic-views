@@ -48,7 +48,7 @@ Parameters
 Output
 ======
 
-Returns a single VARCHAR value containing the full ``CREATE OR REPLACE SEMANTIC VIEW`` DDL statement. The DDL includes all clauses (TABLES, RELATIONSHIPS, FACTS, DIMENSIONS, METRICS, MATERIALIZATIONS) with all annotations (COMMENT, WITH SYNONYMS, PRIVATE, NON ADDITIVE BY, OVER). The ``MATERIALIZATIONS`` clause is included only when the view has materializations declared; it is omitted for views without materializations.
+Returns a single VARCHAR value containing the full ``CREATE OR REPLACE SEMANTIC VIEW`` DDL statement. The DDL includes all clauses (TABLES, RELATIONSHIPS, FACTS, DIMENSIONS, METRICS, MATERIALIZATIONS) with all annotations (COMMENT, WITH SYNONYMS, LABELS, WITH TAG, PRIVATE, NON ADDITIVE BY, OVER). View-level tags are written on their own line after the last clause. The ``MATERIALIZATIONS`` clause is included only when the view has materializations declared; it is omitted for views without materializations.
 
 The rendered DDL re-parses to the same definition. In particular:
 
