@@ -134,15 +134,15 @@ because this view has no ``COMMENT``.
 Query the Semantic View
 =======================
 
-Query the semantic view using the :ref:`semantic_view() <ref-semantic-view-function>` table function. Pick any combination of the dimensions and metrics you defined. The result is an ordinary table, so you can add ``ORDER BY``, ``LIMIT`` or a join to the outer query, as the examples below do with ``ORDER BY`` to fix the row order.
+Query the semantic view with the :ref:`SEMANTIC_VIEW(...) <ref-sv-construct>` construct in ``FROM``, the same syntax Snowflake uses. Name the view, then list the dimensions and metrics you want after the ``DIMENSIONS`` and ``METRICS`` keywords. Pick any combination of the ones you defined. The result is an ordinary table, so you can add ``ORDER BY``, ``LIMIT`` or a join to the outer query, as the examples below do with ``ORDER BY`` to fix the row order.
 
 **Dimensions and metrics together** (grouped aggregation):
 
 .. code-block:: sql
 
-   SELECT * FROM semantic_view('order_metrics',
-       dimensions := ['region', 'category'],
-       metrics := ['revenue', 'order_count']
+   SELECT * FROM SEMANTIC_VIEW(order_metrics
+       DIMENSIONS region, category
+       METRICS revenue, order_count
    )
    ORDER BY region, category;
 
@@ -161,8 +161,8 @@ Query the semantic view using the :ref:`semantic_view() <ref-semantic-view-funct
 
 .. code-block:: sql
 
-   SELECT * FROM semantic_view('order_metrics',
-       dimensions := ['region']
+   SELECT * FROM SEMANTIC_VIEW(order_metrics
+       DIMENSIONS region
    )
    ORDER BY region;
 
@@ -179,8 +179,8 @@ Query the semantic view using the :ref:`semantic_view() <ref-semantic-view-funct
 
 .. code-block:: sql
 
-   SELECT * FROM semantic_view('order_metrics',
-       metrics := ['revenue', 'order_count']
+   SELECT * FROM SEMANTIC_VIEW(order_metrics
+       METRICS revenue, order_count
    );
 
 .. code-block:: text
@@ -191,13 +191,13 @@ Query the semantic view using the :ref:`semantic_view() <ref-semantic-view-funct
    │  250.00 │           5 │
    └─────────┴─────────────┘
 
-**Filtering** with ``WHERE`` on the outer query:
+**Filtering the result** with ``WHERE`` on the outer query:
 
 .. code-block:: sql
 
-   SELECT * FROM semantic_view('order_metrics',
-       dimensions := ['region'],
-       metrics := ['revenue']
+   SELECT * FROM SEMANTIC_VIEW(order_metrics
+       DIMENSIONS region
+       METRICS revenue
    ) WHERE region = 'East';
 
 .. code-block:: text
@@ -211,9 +211,41 @@ Query the semantic view using the :ref:`semantic_view() <ref-semantic-view-funct
 .. warning::
 
    This ``WHERE`` runs on the result, **after** the metrics have been
-   aggregated, so it can only name columns the query returned -- to scope what a
-   metric measures, such as restricting ``revenue`` to a date range, use the
-   ``where_clause`` parameter described in :ref:`howto-filtering` instead.
+   aggregated, so it can only name columns the query returned. To change what a
+   metric measures, filter inside the construct instead, as the next example
+   does.
+
+**Filtering the rows a metric aggregates** with ``WHERE`` inside ``SEMANTIC_VIEW(...)``:
+
+.. code-block:: sql
+
+   SELECT * FROM SEMANTIC_VIEW(order_metrics
+       DIMENSIONS region
+       METRICS revenue, order_count
+       WHERE category = 'Hardware'
+   )
+   ORDER BY region;
+
+.. code-block:: text
+
+   ┌────────┬─────────┬─────────────┐
+   │ region │ revenue │ order_count │
+   ├────────┼─────────┼─────────────┤
+   │ East   │   75.00 │           2 │
+   │ West   │   25.00 │           1 │
+   └────────┴─────────┴─────────────┘
+
+Each region's ``revenue`` and ``order_count`` are now computed over its hardware
+orders only, although ``category`` is not in the output. :ref:`howto-filtering`
+covers both filters in depth.
+
+.. note::
+
+   ``SEMANTIC_VIEW(...)`` is shorthand for the :ref:`semantic_view()
+   <ref-semantic-view-function>` table function, which takes the same request
+   as named lists: ``semantic_view('order_metrics', dimensions := ['region'],
+   metrics := ['revenue'])``. Both are supported, and they return the same
+   result. The function form is handy when application code builds the lists.
 
 
 .. _tutorial-gs-inspect:
@@ -221,7 +253,7 @@ Query the semantic view using the :ref:`semantic_view() <ref-semantic-view-funct
 Inspect the Generated SQL
 =========================
 
-Use :ref:`explain_semantic_view() <ref-explain-semantic-view>` to see the SQL that the extension generates:
+Use :ref:`explain_semantic_view() <ref-explain-semantic-view>` to see the SQL that the extension generates. It takes the same request as ``semantic_view()``, as named lists:
 
 .. code-block:: sql
 
@@ -255,8 +287,9 @@ You now know how to:
 - Install and load the DuckDB Semantic Views extension
 - Define a semantic view with :ref:`CREATE SEMANTIC VIEW <ref-create-semantic-view>`
 - List registered views with :ref:`SHOW SEMANTIC VIEWS <ref-show-semantic-views>`
-- Query any combination of dimensions and metrics with :ref:`semantic_view() <ref-semantic-view-function>`
+- Query any combination of dimensions and metrics with :ref:`SEMANTIC_VIEW(...) <ref-sv-construct>`
 - Use the three query modes: dimensions + metrics, dimensions only, metrics only
+- Filter the result with an outer ``WHERE``, or the rows the metrics aggregate with ``WHERE`` inside the construct
 - Inspect generated SQL with :ref:`explain_semantic_view() <ref-explain-semantic-view>`
 - Drop a semantic view with :ref:`DROP SEMANTIC VIEW <ref-drop-semantic-view>`
 

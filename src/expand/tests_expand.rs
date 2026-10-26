@@ -365,7 +365,7 @@ fn test_error_display_messages() {
     };
     let msg = format!("{err}");
     assert!(msg.contains("orders"));
-    assert!(msg.contains("specify at least dimensions"));
+    assert!(msg.contains("specify at least one of DIMENSIONS, METRICS or FACTS"));
 
     // UnknownDimension with suggestion
     let err = ExpandError::UnknownDimension {

@@ -666,7 +666,7 @@ impl fmt::Display for ExpandError {
             Self::EmptyRequest { view_name } => {
                 write!(
                     f,
-                    "semantic view '{view_name}': specify at least dimensions := [...], metrics := [...], or facts := [...]."
+                    "semantic view '{view_name}': specify at least one of DIMENSIONS, METRICS or FACTS (dimensions := [...], metrics := [...] or facts := [...])."
                 )?;
                 write!(
                     f,
@@ -904,7 +904,7 @@ impl fmt::Display for ExpandError {
                 write!(
                     f,
                     "semantic view '{view_name}': cannot combine facts and metrics in the same query. \
-                     Use facts := [...] OR metrics := [...], not both."
+                     Use FACTS or METRICS (facts := [...] or metrics := [...]), not both."
                 )
             }
             Self::UnknownFact {

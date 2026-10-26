@@ -17,7 +17,7 @@ pub enum QueryError {
     /// expand (R-3, code-review 2026-07-11: these errors were previously
     /// smuggled through `ExpandError::EmptyRequest`'s `view_name` field,
     /// rendering the diagnostic inside quotes followed by irrelevant
-    /// "specify at least dimensions" advice).
+    /// "specify at least one of DIMENSIONS, METRICS or FACTS" advice).
     WildcardExpansion { view_name: String, detail: String },
     /// A query item or `column_order` entry is malformed, or the items ask
     /// for a column layout that cannot be built (two columns with one name).

@@ -214,26 +214,26 @@ Query Facts Directly
 
 .. versionadded:: 0.6.0
 
-Facts can be queried as row-level columns using the ``facts`` parameter in :ref:`semantic_view() <ref-semantic-view-function>`. Unlike metric queries, fact queries return individual rows without aggregation.
+Facts can be queried as row-level columns with the ``FACTS`` clause of :ref:`SEMANTIC_VIEW(...) <ref-sv-construct>`. Unlike metric queries, fact queries return individual rows without aggregation.
 
 .. code-block:: sql
 
-   SELECT * FROM semantic_view('analytics',
-       facts := ['net_price', 'tax_amount']
+   SELECT * FROM SEMANTIC_VIEW(analytics
+       FACTS net_price, tax_amount
    );
 
 Each row in the result contains the computed fact values. Dimensions can be included alongside facts -- they appear as columns but do not trigger ``GROUP BY``:
 
 .. code-block:: sql
 
-   SELECT * FROM semantic_view('analytics',
-       dimensions := ['region'],
-       facts := ['net_price']
+   SELECT * FROM SEMANTIC_VIEW(analytics
+       DIMENSIONS region
+       FACTS net_price
    );
 
 .. warning::
 
-   Facts and metrics cannot be combined in the same query. Use ``facts := [...]`` OR ``metrics := [...]``, not both. Attempting to mix them produces an error.
+   Facts and metrics cannot be combined in the same query. Use ``FACTS`` or ``METRICS``, not both. Attempting to mix them produces an error.
 
 For a complete guide to fact queries, including wildcard selection and troubleshooting, see :ref:`howto-query-facts`.
 
@@ -269,7 +269,7 @@ Facts accept four annotations: ``COMMENT``, ``WITH SYNONYMS``, the ``PRIVATE`` /
 
 - ``COMMENT`` adds a human-readable description, visible in :ref:`DESCRIBE SEMANTIC VIEW <ref-describe-semantic-view>` and :ref:`SHOW SEMANTIC FACTS <ref-show-semantic-facts>` output.
 - ``WITH SYNONYMS`` adds informational alternative names for discoverability.
-- ``PRIVATE`` prevents a fact from being queried directly via ``facts := [...]``, while still allowing it to be referenced in metric expressions -- here the base metric ``total_margin`` aggregates the private fact ``raw_margin``. Private facts are also excluded from wildcard expansion (``alias.*``).
+- ``PRIVATE`` prevents a fact from being queried directly (in ``FACTS``), while still allowing it to be referenced in metric expressions -- here the base metric ``total_margin`` aggregates the private fact ``raw_margin``. Private facts are also excluded from wildcard expansion (``alias.*``).
 - ``LABELS = (FILTER)`` marks a boolean fact as a reusable named filter for :ref:`where_clause <howto-filtering>` predicates. See :ref:`howto-annotations-filters`.
 
 Note that ``profit_margin`` is a :ref:`derived metric <howto-derived-metrics>`: it has no table alias and combines two base metrics by name. A derived metric may not contain an aggregate of its own, so the aggregation over ``raw_margin`` has to live in the base metric ``li.total_margin`` rather than inline in ``profit_margin``.
@@ -314,7 +314,7 @@ Troubleshooting
    DuckDB column-not-found error. Double-check fact names match exactly.
 
 **Private fact cannot be queried**
-   Facts marked ``PRIVATE`` cannot be queried via ``facts := [...]``. They return an
+   Facts marked ``PRIVATE`` cannot be queried in ``FACTS``. They return an
    error: ``fact '<name>' is private and cannot be queried directly``. Remove the
    ``PRIVATE`` keyword to make a fact queryable.
 

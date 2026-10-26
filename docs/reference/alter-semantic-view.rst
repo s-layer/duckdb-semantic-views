@@ -129,16 +129,16 @@ After the rename, queries must use the new name:
 .. code-block:: sql
 
    -- This works
-   SELECT * FROM semantic_view('revenue_view',
-       dimensions := ['region'],
-       metrics := ['total_amount']
+   SELECT * FROM SEMANTIC_VIEW(revenue_view
+       DIMENSIONS region
+       METRICS total_amount
    );
 
    -- This fails: "Semantic view 'sales_view' not found.
    -- Run SHOW SEMANTIC VIEWS to see all registered views."
-   SELECT * FROM semantic_view('sales_view',
-       dimensions := ['region'],
-       metrics := ['total_amount']
+   SELECT * FROM SEMANTIC_VIEW(sales_view
+       DIMENSIONS region
+       METRICS total_amount
    );
 
 **Rename with IF EXISTS (safe no-op):**

@@ -1,15 +1,25 @@
 .. meta::
-   :description: Syntax and parameter reference for semantic_view(), the table function that queries any combination of dimensions, metrics, or facts
+   :description: Syntax reference for querying a semantic view with the SEMANTIC_VIEW(...) construct or the semantic_view() table function: clauses, parameters, expression items, filters and output
 
 .. _ref-semantic-view-function:
 
-=====================
-semantic_view()
-=====================
+======================================
+SEMANTIC_VIEW(...) and semantic_view()
+======================================
 
-Table function that queries a semantic view with a specified combination of dimensions, metrics, or facts. The extension generates the SQL (SELECT, FROM, JOIN, GROUP BY) and returns the result set.
+Query a semantic view by naming the dimensions, metrics or facts you want. The extension generates the SQL (SELECT, FROM, JOIN, GROUP BY) and returns the result set. The same query has two spellings:
 
-You can also write the same query as Snowflake does, with the :ref:`SEMANTIC_VIEW(...) construct <ref-sv-construct>`, which the extension turns into a ``semantic_view()`` call.
+- The ``SEMANTIC_VIEW(...)`` construct in ``FROM``, written as in Snowflake. Use it in the SQL you write.
+- The ``semantic_view()`` table function, which takes the request as named lists. The construct turns into a call to it. Use it when application code builds the lists, binds them as parameters, or passes values in ``params``.
+
+.. code-block:: sql
+
+   SELECT * FROM SEMANTIC_VIEW(shop DIMENSIONS region METRICS revenue);
+
+   -- is the same query as
+   SELECT * FROM semantic_view('shop', dimensions := ['region'], metrics := ['revenue']);
+
+Both are supported and return the same result. The examples on this page use the construct, and the ``shop`` view defined under :ref:`ref-sv-examples`.
 
 
 .. _ref-sv-syntax:
@@ -17,25 +27,45 @@ You can also write the same query as Snowflake does, with the :ref:`SEMANTIC_VIE
 Syntax
 ======
 
+**The SEMANTIC_VIEW(...) construct:**
+
+.. code-block:: sqlgrammar
+
+   SELECT * FROM SEMANTIC_VIEW(
+       <view_name>
+       [ DIMENSIONS <item> [, ...] ]
+       [ METRICS <item> [, ...] ]
+       [ FACTS <item> [, ...] ]
+       [ WHERE <predicate> ]
+   )
+
+where each ``<item>`` is ``<member_name> [ [AS] <alias> ]``, ``<expression> [ [AS] <alias> ]`` or ``<table_alias>.*``. The view name and the items are identifiers, not strings, and no comma follows the view name. The clauses can come in any order, each at most once, and the order you write them in is the order of the columns. See :ref:`ref-sv-construct`.
+
+**The semantic_view() table function:**
+
 .. code-block:: sqlgrammar
 
    SELECT * FROM semantic_view(
        '<view_name>',
-       [ dimensions := [ '<dim_name>' [, ...] ] , ]
-       [ metrics := [ '<metric_name>' [, ...] ] , ]
-       [ facts := [ '<fact_name>' [, ...] ] , ]
+       [ dimensions := [ '<item>' [, ...] ] , ]
+       [ metrics := [ '<item>' [, ...] ] , ]
+       [ facts := [ '<item>' [, ...] ] , ]
        [ where_clause := '<predicate>' , ]
        [ params := row( <value> [, ...] ) , ]
        [ column_order := [ '<list_name>' [, ...] ] ]
    )
 
-Each item in ``dimensions``, ``metrics`` or ``facts`` is ``'<member_name>'``, ``'<expression>'``, either one followed by ``AS <alias>``, or ``'<table_alias>.*'``. See :ref:`ref-sv-expression-items` for what an expression may hold.
+Each item in ``dimensions``, ``metrics`` or ``facts`` is a string holding ``<member_name>`` or ``<expression>``, either one optionally followed by ``AS <alias>``, or ``<table_alias>.*``.
+
+Each clause of the construct is the function parameter of the same name, and ``WHERE`` is ``where_clause``. ``DIMENSIONS region METRICS revenue WHERE ordered_at >= DATE '2024-01-01'`` is ``dimensions := ['region'], metrics := ['revenue'], where_clause := 'ordered_at >= DATE ''2024-01-01'''``, and writing ``METRICS`` before ``DIMENSIONS`` is ``column_order := ['metrics', 'dimensions']``. See :ref:`ref-sv-expression-items` for what an expression item may hold.
 
 
 .. _ref-sv-params:
 
 Parameters
 ==========
+
+The table lists the parameters of ``semantic_view()``. The construct's clauses are the parameters of the same name, with ``WHERE`` for ``where_clause``, and its view name is the same name written as an identifier (``shop``, ``analytics.sales``) instead of a string. The construct has no ``params`` or ``column_order``: its ``WHERE`` takes prepared-statement parameters directly (see :ref:`ref-sv-construct`), and the order of its clauses sets the order of the columns.
 
 .. list-table::
    :header-rows: 1
@@ -58,7 +88,7 @@ Parameters
      - Optional list of facts to include in the result. Each item names a fact defined in the semantic view, or is an :ref:`expression <ref-sv-expression-items>`. Supports ``alias.*`` wildcard patterns.
    * - ``where_clause``
      - VARCHAR (named)
-     - Optional predicate applied **before** metrics are aggregated -- the equivalent of Snowflake's ``SEMANTIC_VIEW( ... WHERE <predicate> )``. See :ref:`ref-sv-pre-agg-filtering`. An omitted, empty, or whitespace-only value is treated as absent.
+     - Optional predicate applied **before** metrics are aggregated -- the construct's ``WHERE``, as in Snowflake's ``SEMANTIC_VIEW( ... WHERE <predicate> )``. See :ref:`ref-sv-pre-agg-filtering`. An omitted, empty, or whitespace-only value is treated as absent.
    * - ``params``
      - row (named)
      - Optional values for ``where_clause``, which refers to them as ``$1``, ``$2``, ... in order. Each is put in the predicate as a value of its own type, never as SQL text. See :ref:`values from params <ref-sv-where-params>`.
@@ -69,13 +99,63 @@ Parameters
      - VARCHAR[] (named)
      - **Reserved. Do not pass it.** The function reads the session's ``search_path`` itself, so an unqualified ``<view_name>`` resolves the way an unqualified table name does. Every table function the extension registers has this parameter (see :ref:`ref-functions-search-path`).
 
-At least one of ``dimensions``, ``metrics``, or ``facts`` must be specified. ``where_clause`` alone is not a query.
+At least one of ``dimensions``, ``metrics``, or ``facts`` (in the construct, ``DIMENSIONS``, ``METRICS`` or ``FACTS``) must be specified. A filter alone is not a query.
 
 Every argument accepts a prepared-statement parameter (``?`` or ``$1``) in place of a literal, including the view name, the three lists, ``where_clause`` and the values in ``params``. A parameter written *inside* the ``where_clause`` text is not one: pass the value in ``params`` instead (see :ref:`values from params <ref-sv-where-params>`).
 
 .. warning::
 
-   ``facts`` and ``metrics`` cannot be combined in the same query. Use ``facts := [...]`` or ``metrics := [...]``, not both.
+   Facts and metrics cannot be combined in the same query. Use ``FACTS`` or ``METRICS`` (``facts := [...]`` or ``metrics := [...]``), not both.
+
+
+.. _ref-sv-construct:
+
+The ``SEMANTIC_VIEW(...)`` Construct
+====================================
+
+Snowflake queries a semantic view with ``SEMANTIC_VIEW(...)`` in ``FROM``, and so can you. The view name and the items are written as identifiers, so a name with a space or a reserved word is double-quoted (``"Total Revenue"``, ``"order"``), and ``AS`` before an alias is optional. ``WHERE`` takes one predicate and filters the rows the metrics aggregate (see :ref:`ref-sv-pre-agg-filtering`).
+
+The clauses can come in any order, each at most once, and the order you write them in is the order of the columns:
+
+.. code-block:: sql
+
+   SELECT * FROM SEMANTIC_VIEW(shop METRICS revenue AS total DIMENSIONS region);
+
+   -- is the same query as
+   SELECT * FROM semantic_view('shop',
+       dimensions := ['region'],
+       metrics := ['revenue AS total'],
+       column_order := ['metrics', 'dimensions']
+   );
+
+The construct stands wherever a table can: in a join, a CTE, a subquery, a ``LATERAL`` join or a view body, with a table alias and column aliases:
+
+.. code-block:: sql
+
+   -- targets(r VARCHAR, goal DECIMAL) is a table of your own
+   SELECT t.r, t.goal, s.rev
+   FROM targets t
+   JOIN SEMANTIC_VIEW(shop DIMENSIONS region METRICS revenue) AS s(r, rev)
+     ON s.r = t.r;
+
+A DuckDB view over the construct stores the ``semantic_view()`` call, so it expands against the semantic view's current definition each time it is queried.
+
+A prepared statement's parameter (``?``, ``$1`` or ``$name``) in the construct's ``WHERE`` is one of the statement's parameters, numbered in the order it is written along with the rest of the statement:
+
+.. code-block:: sql
+
+   PREPARE by_region AS
+   SELECT * FROM SEMANTIC_VIEW(shop
+       DIMENSIONS region
+       METRICS revenue
+       WHERE ordered_at >= ? AND region = ?
+   );
+
+   EXECUTE by_region(DATE '2024-01-01', 'East');
+
+It lowers to ``where_clause := 'ordered_at >= $1 AND region = $2'`` with the parameters in ``params``, so each value reaches the predicate as a value, never as SQL text. A parameter anywhere else in the construct is refused.
+
+.. versionadded:: 0.16.0
 
 
 .. _ref-sv-modes:
@@ -83,15 +163,15 @@ Every argument accepts a prepared-statement parameter (``?`` or ``$1``) in place
 Query Modes
 ===========
 
-The function operates in four modes depending on which parameters are provided. The examples query the ``shop`` view defined under :ref:`ref-sv-examples`.
+A query works in one of four modes, depending on which lists it gives. The examples query the ``shop`` view defined under :ref:`ref-sv-examples`.
 
 **Dimensions + Metrics** (grouped aggregation):
 
 .. code-block:: sql
 
-   SELECT * FROM semantic_view('shop',
-       dimensions := ['region'],
-       metrics := ['revenue', 'order_count']
+   SELECT * FROM SEMANTIC_VIEW(shop
+       DIMENSIONS region
+       METRICS revenue, order_count
    ) ORDER BY region;
 
 .. code-block:: text
@@ -109,8 +189,8 @@ Generates ``SELECT <dims>, <metrics> FROM ... GROUP BY <dims>``.
 
 .. code-block:: sql
 
-   SELECT * FROM semantic_view('shop',
-       dimensions := ['region']
+   SELECT * FROM SEMANTIC_VIEW(shop
+       DIMENSIONS region
    ) ORDER BY region;
 
 .. code-block:: text
@@ -128,8 +208,8 @@ Generates ``SELECT DISTINCT <dims> FROM ...``.
 
 .. code-block:: sql
 
-   SELECT * FROM semantic_view('shop',
-       metrics := ['revenue', 'order_count']
+   SELECT * FROM SEMANTIC_VIEW(shop
+       METRICS revenue, order_count
    );
 
 .. code-block:: text
@@ -146,8 +226,8 @@ Generates ``SELECT <metrics> FROM ...`` with no GROUP BY (returns one row).
 
 .. code-block:: sql
 
-   SELECT * FROM semantic_view('shop',
-       facts := ['net_price', 'tax_amount']
+   SELECT * FROM SEMANTIC_VIEW(shop
+       FACTS net_price, tax_amount
    );
 
 .. code-block:: text
@@ -169,13 +249,13 @@ Returns one row per source row with the requested fact expressions as columns. N
 Wildcard Selection
 ==================
 
-All three list parameters accept ``alias.*`` patterns that expand to all items scoped to the specified table alias. Items declared without a table alias, such as derived metrics, count as belonging to the first table in ``TABLES``, so ``o.*`` on a view whose first table is ``o`` also returns its public derived metrics:
+``DIMENSIONS``, ``METRICS`` and ``FACTS``, and the three lists of ``semantic_view()``, accept ``alias.*`` patterns that expand to all items scoped to the specified table alias. Items declared without a table alias, such as derived metrics, count as belonging to the first table in ``TABLES``, so ``o.*`` on a view whose first table is ``o`` also returns its public derived metrics:
 
 .. code-block:: sql
 
-   SELECT * FROM semantic_view('shop',
-       dimensions := ['o.*'],
-       metrics := ['o.*']
+   SELECT * FROM SEMANTIC_VIEW(shop
+       DIMENSIONS o.*
+       METRICS o.*
    );
 
 ``PRIVATE`` metrics and facts are excluded from wildcard expansion. Bare ``*`` (unqualified) is not supported -- all wildcards must be qualified with a table alias.
@@ -188,37 +268,43 @@ When an item appears both explicitly and via wildcard expansion, it appears only
 Output
 ======
 
-Returns a result set with one column per requested dimension, metric, or fact, in the order: dimensions first (in the order requested), then metrics or facts (in the order requested). ``column_order`` changes which list's columns come first, as in ``column_order := ['metrics', 'dimensions']``; within a list the columns stay in the order requested.
+Returns a result set with one column per requested dimension, metric, or fact. In the construct, the columns come in the order of its clauses, and within a clause in the order written. In ``semantic_view()``, dimensions come first, then metrics or facts, each in the order requested; ``column_order`` changes which list's columns come first, as in ``column_order := ['metrics', 'dimensions']``.
 
-A column is named after its member, or after the alias the item gives it with ``AS``:
+A column is named after its member, or after the alias the item gives it:
 
 .. code-block:: sql
 
+   SELECT * FROM SEMANTIC_VIEW(shop
+       METRICS revenue AS "Total revenue"
+       DIMENSIONS region AS r
+   );
+
+   -- the same query with semantic_view()
    SELECT * FROM semantic_view('shop',
        dimensions := ['region AS r'],
        metrics := ['revenue AS "Total revenue"'],
        column_order := ['metrics', 'dimensions']
    );
 
-The alias is one identifier, quoted or not, or a string (``AS 'r'``). Two columns with the same name are an error, and so is an alias on a wildcard. Since the text before ``AS`` is the member, a member whose name contains the word ``as`` on its own (``Sales as of``) has to be quoted in an item: ``'"Sales as of"'``.
+The alias is one identifier, quoted or not, or a string (``AS 'r'``). Two columns with the same name are an error, and so is an alias on a wildcard. In a ``semantic_view()`` item the text before ``AS`` is the member, so a member whose name contains the word ``as`` on its own (``Sales as of``) has to be quoted there: ``'"Sales as of"'``.
 
 .. versionadded:: 0.16.0
 
    Aliases in items and the ``column_order`` parameter.
 
-DuckDB plans the generated SQL as part of the query that calls ``semantic_view()``, so the column types are the ones DuckDB gives the generated SQL: ``SUM`` over an integer column is a ``HUGEINT``, and an ``ENUM`` or ``STRUCT`` column keeps its type. Nothing is cached at ``CREATE``.
+DuckDB plans the generated SQL as part of your query, so the column types are the ones DuckDB gives the generated SQL: ``SUM`` over an integer column is a ``HUGEINT``, and an ``ENUM`` or ``STRUCT`` column keeps its type. Nothing is cached at ``CREATE``.
 
-Because it is part of your query, ``semantic_view()`` reads your open transaction, including rows you have not committed yet, and DuckDB can push your query's filters and column choices down into it. ``where_clause`` can refer to a column of an enclosing query, as in a ``LATERAL`` join:
+Because it is part of your query, a semantic-view query reads your open transaction, including rows you have not committed yet, and DuckDB can push your query's filters and column choices down into it. The ``WHERE`` predicate can refer to a column of an enclosing query, as in a ``LATERAL`` join:
 
 .. code-block:: sql
 
    SELECT t.r, s.revenue
    FROM targets t,
-        LATERAL (SELECT * FROM semantic_view('shop',
-                    metrics := ['revenue'],
-                    where_clause := 'region = t.r')) s;
+        LATERAL (SELECT * FROM SEMANTIC_VIEW(shop
+                    METRICS revenue
+                    WHERE region = t.r)) s;
 
-If the generated SQL does not bind, for example because a metric names a column that has since been dropped, the query fails with DuckDB's own error, and the caret points at the ``semantic_view(...)`` call. Use :ref:`explain_semantic_view() <ref-explain-semantic-view>` to see the generated SQL.
+If the generated SQL does not bind, for example because a metric names a column that has since been dropped, the query fails with DuckDB's own error. Its caret points at the ``semantic_view(...)`` call, or, for the construct, at the start of the query. Use :ref:`explain_semantic_view() <ref-explain-semantic-view>` to see the generated SQL.
 
 .. versionchanged:: 0.16.0
 
@@ -244,8 +330,8 @@ An item can be an expression over the view's members instead of a member's name,
 .. code-block:: sql
 
    SELECT * FROM SEMANTIC_VIEW(shop
-       DIMENSIONS DATE_PART('year', o.order_date) AS year
-       METRICS o.revenue / o.order_count AS avg_order, max(o.amount) AS biggest
+       DIMENSIONS DATE_PART('year', ordered_at) AS year
+       METRICS revenue / order_count AS avg_order, max(o.net_price) AS biggest
    );
 
 What an expression may use depends on its list:
@@ -266,56 +352,6 @@ Without an alias, the column is named by the expression as written, so ``DIMENSI
 .. versionadded:: 0.16.0
 
 
-.. _ref-sv-construct:
-
-The ``SEMANTIC_VIEW(...)`` Construct
-====================================
-
-Snowflake queries a semantic view with ``SEMANTIC_VIEW(...)`` in ``FROM``, and so can you:
-
-.. code-block:: sqlgrammar
-
-   SELECT * FROM SEMANTIC_VIEW(
-       <view_name>
-       [ DIMENSIONS <item> [, ...] ]
-       [ METRICS <item> [, ...] ]
-       [ FACTS <item> [, ...] ]
-       [ WHERE <predicate> ]
-   )
-
-where each ``<item>`` is ``<member_name> [ [AS] <alias> ]``, ``<expression> [ [AS] <alias> ]`` or ``<table_alias>.*``. The view name and the items are identifiers, not strings, and no comma follows the view name. The clauses can come in any order, each at most once, and the order you write them in is the order of the columns. ``WHERE`` takes one predicate and filters the rows the metrics aggregate, as ``where_clause`` does.
-
-.. code-block:: sql
-
-   SELECT * FROM SEMANTIC_VIEW(shop METRICS revenue AS total DIMENSIONS region);
-
-   -- is the same query as
-   SELECT * FROM semantic_view('shop',
-       dimensions := ['region'],
-       metrics := ['revenue AS total'],
-       column_order := ['metrics', 'dimensions']
-   );
-
-The construct parses wherever a table can: in a join, a CTE, a subquery or a view body, with a table alias and column aliases. A view over it stores the ``semantic_view()`` call, so it expands against the semantic view's current definition each time it is queried.
-
-A prepared statement's parameter (``?``, ``$1`` or ``$name``) in the construct's ``WHERE`` is one of the statement's parameters, numbered in the order it is written along with the rest of the statement:
-
-.. code-block:: sql
-
-   PREPARE by_region AS
-   SELECT * FROM SEMANTIC_VIEW(shop
-       DIMENSIONS region
-       METRICS revenue
-       WHERE ordered_at >= ? AND region = ?
-   );
-
-   EXECUTE by_region(DATE '2024-01-01', 'East');
-
-It lowers to ``where_clause := 'ordered_at >= $1 AND region = $2'`` with the parameters in ``params``. A parameter anywhere else in the construct is refused.
-
-.. versionadded:: 0.16.0
-
-
 .. _ref-sv-filtering:
 
 Filtering
@@ -326,13 +362,13 @@ There are two filters, and they run on opposite sides of the aggregation.
 Post-Aggregation -- Outer ``WHERE``
 -----------------------------------
 
-Use standard SQL ``WHERE`` on the outer query to filter the rows the function returns:
+Use standard SQL ``WHERE`` on the outer query to filter the rows the query returns:
 
 .. code-block:: sql
 
-   SELECT * FROM semantic_view('shop',
-       dimensions := ['region'],
-       metrics := ['revenue']
+   SELECT * FROM SEMANTIC_VIEW(shop
+       DIMENSIONS region
+       METRICS revenue
    ) WHERE region = 'East';
 
 The ``WHERE`` clause applies to the result set after the semantic view expansion. DuckDB's optimizer pushes predicates down into the generated query where possible.
@@ -340,17 +376,17 @@ The ``WHERE`` clause applies to the result set after the semantic view expansion
 
 .. _ref-sv-pre-agg-filtering:
 
-Pre-Aggregation -- ``where_clause``
------------------------------------
+Pre-Aggregation -- ``WHERE`` in the Construct, or ``where_clause``
+------------------------------------------------------------------
 
-``where_clause := '<predicate>'`` filters the rows the metrics aggregate **over**, before they are aggregated -- the equivalent of Snowflake's ``SEMANTIC_VIEW( ... WHERE <predicate> )``:
+A ``WHERE`` inside ``SEMANTIC_VIEW(...)`` filters the rows the metrics aggregate **over**, before they are aggregated, as in Snowflake. In ``semantic_view()`` the same predicate is the ``where_clause := '<predicate>'`` parameter:
 
 .. code-block:: sql
 
-   SELECT * FROM semantic_view('shop',
-       dimensions := ['region'],
-       metrics := ['revenue'],
-       where_clause := 'ordered_at >= DATE ''2024-01-01'''
+   SELECT * FROM SEMANTIC_VIEW(shop
+       DIMENSIONS region
+       METRICS revenue
+       WHERE ordered_at >= DATE '2024-01-01'
    ) ORDER BY region;
 
 .. code-block:: text
@@ -364,9 +400,21 @@ Pre-Aggregation -- ``where_clause``
 
 Each region's ``revenue`` is recomputed over only the matching orders: East loses its December 2023 order and falls from 340.0000 to 250.0000. An outer ``WHERE`` cannot express this: by then the aggregation has already run over every row, and ``ordered_at`` is not in the output to filter by.
 
+With ``semantic_view()``, the predicate is a string, so a quote inside it is doubled:
+
+.. code-block:: sql
+
+   SELECT * FROM semantic_view('shop',
+       dimensions := ['region'],
+       metrics := ['revenue'],
+       where_clause := 'ordered_at >= DATE ''2024-01-01'''
+   ) ORDER BY region;
+
+The rules below apply to both spellings.
+
 .. _ref-sv-where-params:
 
-**Values from params.** To compare against a value supplied at run time, write ``$1``, ``$2``, ... in the predicate and pass the values in ``params``, a row whose fields are taken in order:
+**Values from params.** In the construct, a value supplied at run time is a prepared-statement parameter in the ``WHERE`` (see :ref:`ref-sv-construct`). With ``semantic_view()``, write ``$1``, ``$2``, ... in the predicate and pass the values in ``params``, a row whose fields are taken in order:
 
 .. code-block:: sql
 
@@ -401,7 +449,7 @@ An omitted, empty, or whitespace-only ``where_clause`` is treated as absent. The
 
 .. warning::
 
-   The predicate is SQL text that runs with the caller's privileges, and it may contain anything a ``WHERE`` clause can, including subqueries over other tables. Passing it as a prepared-statement parameter (``where_clause := ?``) saves you quoting the string, but it does **not** make untrusted text safe. Never build the predicate from request input. Write the predicate yourself and pass each user-supplied value in ``params``, where it is a value and never SQL (see :ref:`values from params <ref-sv-where-params>`), and prefer predicates made of :ref:`named filters <howto-annotations-filters>` that you declared, so that user input chooses which filter applies rather than supplying SQL.
+   The predicate is SQL that runs with the caller's privileges, and it may contain anything a ``WHERE`` clause can, including subqueries over other tables. Never build it from request input. In the construct, bind each user-supplied value as a ``?`` parameter. With ``semantic_view()``, passing the predicate as a prepared-statement parameter (``where_clause := ?``) saves you quoting the string, but it does **not** make untrusted text safe. Write the predicate yourself and pass each user-supplied value in ``params``, where it is a value and never SQL (see :ref:`values from params <ref-sv-where-params>`), and prefer predicates made of :ref:`named filters <howto-annotations-filters>` that you declared, so that user input chooses which filter applies rather than supplying SQL.
 
 
 .. _ref-sv-ordering:
@@ -413,9 +461,9 @@ Use standard SQL ``ORDER BY`` and ``LIMIT`` on the outer query:
 
 .. code-block:: sql
 
-   SELECT * FROM semantic_view('shop',
-       dimensions := ['region'],
-       metrics := ['revenue']
+   SELECT * FROM SEMANTIC_VIEW(shop
+       DIMENSIONS region
+       METRICS revenue
    ) ORDER BY revenue DESC
    LIMIT 10;
 
@@ -433,9 +481,9 @@ DuckDB 2.0's per-query time limit, ``SET max_execution_time`` (in milliseconds),
 
    SET max_execution_time = 5000;  -- 5 seconds per query
 
-   SELECT * FROM semantic_view('shop',
-       dimensions := ['region'],
-       metrics := ['revenue']
+   SELECT * FROM SEMANTIC_VIEW(shop
+       DIMENSIONS region
+       METRICS revenue
    );
 
 .. code-block:: text
@@ -452,7 +500,7 @@ As with DuckDB's own queries, the limit counts from when the query starts runnin
 Name Resolution
 ===============
 
-Dimension, metric, and fact names are resolved case-insensitively, following DuckDB's identifier semantics: matching ignores case whether the reference is written unquoted (``'region'``, ``'REGION'``) or double-quoted (``'"Region"'``) -- DuckDB treats double-quoted identifiers as case-insensitive too, so quoting a reference only lets it carry whitespace or special characters, it does not make it case-sensitive. Names can optionally be table-qualified (e.g., ``'o.region'``), which matches against the ``source_table`` alias of the dimension, metric, or fact.
+Dimension, metric, and fact names are resolved case-insensitively, following DuckDB's identifier semantics: matching ignores case whether the reference is written unquoted (``region``, ``REGION``) or double-quoted (``"Region"``), in the construct or as a string in a ``semantic_view()`` list (``'region'``, ``'"Region"'``) -- DuckDB treats double-quoted identifiers as case-insensitive too, so quoting a reference only lets it carry whitespace or special characters, it does not make it case-sensitive. Names can optionally be table-qualified (e.g., ``o.region``), which matches against the ``source_table`` alias of the dimension, metric, or fact.
 
 Wildcard patterns (``alias.*``) are expanded before name resolution. The expansion respects ``PRIVATE`` access modifiers -- private items are excluded.
 
@@ -514,9 +562,9 @@ The examples on this page use this table and view:
 
 .. code-block:: sql
 
-   SELECT * FROM semantic_view('shop',
-       dimensions := ['customer', 'product'],
-       metrics := ['revenue', 'order_count']
+   SELECT * FROM SEMANTIC_VIEW(shop
+       DIMENSIONS customer, product
+       METRICS revenue, order_count
    ) ORDER BY customer, product;
 
 .. code-block:: text
@@ -534,9 +582,9 @@ The examples on this page use this table and view:
 
 .. code-block:: sql
 
-   SELECT * FROM semantic_view('shop',
-       dimensions := ['customer'],
-       metrics := ['revenue']
+   SELECT * FROM SEMANTIC_VIEW(shop
+       DIMENSIONS customer
+       METRICS revenue
    ) WHERE revenue > 100
    ORDER BY revenue DESC;
 
@@ -553,10 +601,10 @@ The examples on this page use this table and view:
 
 .. code-block:: sql
 
-   SELECT * FROM semantic_view('shop',
-       dimensions := ['customer'],
-       metrics := ['revenue'],
-       where_clause := 'ordered_at >= DATE ''2024-01-01'''
+   SELECT * FROM SEMANTIC_VIEW(shop
+       DIMENSIONS customer
+       METRICS revenue
+       WHERE ordered_at >= DATE '2024-01-01'
    ) ORDER BY customer;
 
 .. code-block:: text
@@ -573,9 +621,9 @@ The examples on this page use this table and view:
 
 .. code-block:: sql
 
-   SELECT * FROM semantic_view('shop',
-       dimensions := ['region'],
-       facts := ['net_price']
+   SELECT * FROM SEMANTIC_VIEW(shop
+       DIMENSIONS region
+       FACTS net_price
    );
 
 .. code-block:: text
@@ -593,22 +641,43 @@ The examples on this page use this table and view:
 
 .. code-block:: sql
 
-   SELECT * FROM semantic_view('shop',
-       dimensions := ['o.*'],
-       metrics := ['o.*']
+   SELECT * FROM SEMANTIC_VIEW(shop
+       DIMENSIONS o.*
+       METRICS o.*
    );
 
 Returns every dimension and public metric on ``o``: ``customer``, ``product``, ``region``, ``ordered_at``, ``revenue``, and ``order_count``.
 
-**Bind arguments from application code:**
+**Bind values from application code:**
 
 .. code-block:: python
+
+   import datetime
 
    import duckdb
 
    con = duckdb.connect()
    con.execute("LOAD semantic_views")
    # ... create the orders table and the shop view shown above ...
+
+   rows = con.execute(
+       """
+       SELECT * FROM SEMANTIC_VIEW(shop
+           DIMENSIONS region
+           METRICS revenue
+           WHERE ordered_at >= ?
+       ) ORDER BY region
+       """,
+       [datetime.date(2024, 1, 1)],
+   ).fetchall()
+   print(rows)
+   # [('East', Decimal('250.0000')), ('West', Decimal('330.0000'))]
+
+The date is bound as a parameter of the statement, so it reaches the predicate as a value, never as SQL text.
+
+To choose the dimensions or metrics at run time, use ``semantic_view()``, whose lists can be bound too:
+
+.. code-block:: python
 
    rows = con.execute(
        """

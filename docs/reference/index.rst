@@ -1,5 +1,5 @@
 .. meta::
-   :description: Complete SQL syntax reference for all CREATE, ALTER, DROP, DESCRIBE, SHOW, GET_DDL, READ_YAML, and query function statements, plus the full list of registered functions
+   :description: Complete SQL syntax reference for all CREATE, ALTER, DROP, DESCRIBE, SHOW, GET_DDL, READ_YAML, and query function statements, the SEMANTIC_VIEW(...) query construct, plus the full list of registered functions
 
 .. _reference:
 
@@ -26,9 +26,9 @@ SQL syntax reference for all DuckDB Semantic Views statements and functions.
 - :ref:`ref-read-yaml` -- Export a semantic view definition as a YAML string.
 - :ref:`ref-yaml-format` -- Field-by-field specification of the YAML schema accepted by ``FROM YAML``.
 
-**Query functions**
+**Querying**
 
-- :ref:`ref-semantic-view-function` -- Query a semantic view with any combination of dimensions and metrics.
+- :ref:`ref-semantic-view-function` -- Query a semantic view with any combination of dimensions, metrics and facts, with the ``SEMANTIC_VIEW(...)`` construct or the ``semantic_view()`` table function.
 - :ref:`ref-explain-semantic-view` -- Inspect the SQL generated for a semantic view query.
 
 **Functions and discovery**

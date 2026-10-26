@@ -141,7 +141,7 @@ Creating a ``VIEW`` instead of a ``TABLE`` keeps queries reading the latest Iceb
    CREATE VIEW orders AS
        SELECT * FROM iceberg_scan('s3://my-bucket/warehouse/orders');
 
-This is useful when the underlying Iceberg table changes frequently. The trade-off is that each :ref:`semantic_view() <ref-semantic-view-function>` query re-scans the Iceberg metadata.
+This is useful when the underlying Iceberg table changes frequently. The trade-off is that each :ref:`semantic-view query <ref-semantic-view-function>` re-scans the Iceberg metadata.
 
 .. _howto-ds-schema-evolution:
 
@@ -157,7 +157,7 @@ If columns are added or removed from the Iceberg table, update the semantic view
 
    For a DuckDB + Iceberg + analytics application stack, semantic views give
    the application a stable query interface over Iceberg tables. The
-   application queries :ref:`semantic_view() <ref-semantic-view-function>` with
+   application queries :ref:`SEMANTIC_VIEW(...) <ref-semantic-view-function>` with
    dimension and metric names, and the extension writes the joins and
    aggregation. Three pages cover the rest of that stack:
 
@@ -207,7 +207,7 @@ To read from Postgres at query time instead of from a copy, name the attached ta
        o.revenue AS SUM(o.amount)
    );
 
-Each :ref:`semantic_view() <ref-semantic-view-function>` query then scans Postgres through the attachment, so ``pg`` must be attached in every session that queries the view. Run the ``CREATE SEMANTIC VIEW`` itself while your session is on the database you loaded the extension into -- do not ``USE pg`` first. :ref:`explanation-txn-ddl-attach` explains why.
+Each :ref:`semantic-view query <ref-semantic-view-function>` then scans Postgres through the attachment, so ``pg`` must be attached in every session that queries the view. Run the ``CREATE SEMANTIC VIEW`` itself while your session is on the database you loaded the extension into -- do not ``USE pg`` first. :ref:`explanation-txn-ddl-attach` explains why.
 
 
 .. _howto-ds-mixed:

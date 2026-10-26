@@ -55,14 +55,14 @@ Reads Inside an Open Transaction See Your Changes
    so a view created, dropped or renamed in an open transaction did not show
    up that way until you committed.
 
-Everything that reads a semantic view runs in your transaction: :ref:`semantic_view() <ref-semantic-view-function>`, ``explain_semantic_view()``, :ref:`DESCRIBE SEMANTIC VIEW <ref-describe-semantic-view>`, :ref:`SHOW SEMANTIC VIEWS <ref-show-semantic-views>` and the other ``SHOW SEMANTIC *`` commands, :ref:`READ_YAML_FROM_SEMANTIC_VIEW <ref-read-yaml>` and :ref:`GET_DDL <ref-get-ddl>`. They see your own uncommitted changes, as a query of an ordinary table does:
+Everything that reads a semantic view runs in your transaction: :ref:`SEMANTIC_VIEW(...) and semantic_view() <ref-semantic-view-function>`, ``explain_semantic_view()``, :ref:`DESCRIBE SEMANTIC VIEW <ref-describe-semantic-view>`, :ref:`SHOW SEMANTIC VIEWS <ref-show-semantic-views>` and the other ``SHOW SEMANTIC *`` commands, :ref:`READ_YAML_FROM_SEMANTIC_VIEW <ref-read-yaml>` and :ref:`GET_DDL <ref-get-ddl>`. They see your own uncommitted changes, as a query of an ordinary table does:
 
 .. code-block:: sql
 
    BEGIN;
    CREATE SEMANTIC VIEW v AS TABLES (o AS orders) DIMENSIONS (o.r AS o.region);
    SHOW SEMANTIC VIEWS;   -- v is listed
-   SELECT * FROM semantic_view('v', dimensions := ['r']);   -- and can be queried
+   SELECT * FROM SEMANTIC_VIEW(v DIMENSIONS r);   -- and can be queried
    ROLLBACK;
    SHOW SEMANTIC VIEWS;   -- v is gone
 
@@ -196,7 +196,7 @@ The typical pattern for shipping a read-only database with pre-defined semantic 
    ro = duckdb.connect("analytics.duckdb", read_only=True)
    ro.execute("LOAD semantic_views")
    rows = ro.execute(
-       "SELECT * FROM semantic_view('orders', dimensions := ['region'], metrics := ['total'])"
+       "SELECT * FROM SEMANTIC_VIEW(orders DIMENSIONS region METRICS total)"
    ).fetchall()
 
 
@@ -224,7 +224,7 @@ you get an actionable error rather than a confusing failure or a silently-lost v
    single-catalog: manage them from the database the extension was loaded into,
    without USE-ing into an attached database.
 
-Reads (``SHOW SEMANTIC VIEWS``, ``semantic_view(...)``, ``DESCRIBE``) always resolve against the primary catalog regardless of ``USE``, so the rule is: **run semantic-view DDL from the database you loaded the extension into.** You can still reference tables from attached databases inside a view body by qualifying them (``TABLES (o AS other.main.orders ...)``) -- only the ``_definitions`` catalog is single-database.
+Reads (``SHOW SEMANTIC VIEWS``, ``SEMANTIC_VIEW(...)``, ``DESCRIBE``) always resolve against the primary catalog regardless of ``USE``, so the rule is: **run semantic-view DDL from the database you loaded the extension into.** You can still reference tables from attached databases inside a view body by qualifying them (``TABLES (o AS other.main.orders ...)``) -- only the ``_definitions`` catalog is single-database.
 
 None of this arises if you do not ``ATTACH`` a second database, or if the session stays on the primary catalog.
 
@@ -278,7 +278,7 @@ How the Extension Joins DuckDB's Parser
    ``allow_parser_override_extension`` setting could switch off. That setting
    no longer affects semantic-view statements.
 
-``CREATE SEMANTIC VIEW`` and the other semantic-view statements are not part of DuckDB's built-in grammar. When the extension loads, it adds them to the PEG grammar DuckDB 2.0 parses every statement with, so DuckDB finds them wherever its own statements of the same kind may appear, and reports a malformed one as a :ref:`syntax error <ref-err-syntax>` with a ``LINE 1: ... ^`` pointer, as it does for its own SQL.
+``CREATE SEMANTIC VIEW`` and the other semantic-view statements are not part of DuckDB's built-in grammar. When the extension loads, it adds them, and the :ref:`SEMANTIC_VIEW(...) <ref-sv-construct>` query construct, to the PEG grammar DuckDB 2.0 parses every statement with, so DuckDB finds them wherever its own statements of the same kind may appear, and reports a malformed one as a :ref:`syntax error <ref-err-syntax>` with a ``LINE 1: ... ^`` pointer, as it does for its own SQL.
 
 Two things follow from DuckDB reading the statement as tokens:
 

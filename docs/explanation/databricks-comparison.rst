@@ -46,7 +46,7 @@ Concept Mapping
      - ``METRICS`` clause
    * - Reusable row-level expressions
      - ``fields:`` entries fill both roles: later fields and measures can reference a field by name, and a numeric field can be aggregated at query time.
-     - ``FACTS`` clause, declared separately from ``DIMENSIONS`` (queryable via ``facts := [...]``)
+     - ``FACTS`` clause, declared separately from ``DIMENSIONS`` (queryable with ``FACTS`` in ``SEMANTIC_VIEW(...)``)
    * - Metric composition
      - Measures reference earlier measures through the ``MEASURE()`` function
      - Derived metrics (a metric referencing other metrics)
@@ -70,13 +70,13 @@ Concept Mapping
      - Optional alternative to the SQL DDL: ``FROM YAML`` import and :ref:`READ_YAML_FROM_SEMANTIC_VIEW() <ref-read-yaml>` export (see :ref:`howto-yaml-definitions`)
    * - View-level filter
      - ``filter:`` key, applied to every query against the view
-     - No definition-level filter. Filter per query with ``where_clause :=`` or in the outer ``SELECT`` (see :ref:`howto-filtering`).
+     - No definition-level filter. Filter per query with a ``WHERE`` inside ``SEMANTIC_VIEW(...)`` or in the outer ``SELECT`` (see :ref:`howto-filtering`).
    * - Query-time parameters
      - ``parameters:`` key, bound by calling the view as a table-valued function
-     - No equivalent
+     - No declared parameters. A prepared statement's parameter in the query's ``WHERE`` supplies a run-time value (see :ref:`ref-sv-construct`)
    * - Query interface
      - Standard SQL against the metric view name, with every measure wrapped in ``MEASURE()``
-     - :ref:`semantic_view() <ref-semantic-view-function>` table function
+     - The :ref:`SEMANTIC_VIEW(...) <ref-sv-construct>` construct, written as in Snowflake, or the :ref:`semantic_view() <ref-semantic-view-function>` table function
    * - View inspection
      - ``DESCRIBE TABLE EXTENDED``, or Catalog Explorer
      - :ref:`DESCRIBE SEMANTIC VIEW <ref-describe-semantic-view>`, :ref:`SHOW SEMANTIC VIEWS <ref-show-semantic-views>`
@@ -195,7 +195,7 @@ Query Interface
 
 .. warning::
 
-   DuckDB Semantic Views uses a table function for queries, not direct SQL.
+   DuckDB Semantic Views queries a semantic view with ``SEMANTIC_VIEW(...)`` or a table function, not direct SQL.
 
 Databricks metric views are queried with standard SQL, as if querying a regular table or view. Every measure must be wrapped in the ``MEASURE()`` aggregate function, and ``SELECT *`` is not available, so fields are listed explicitly:
 
@@ -206,11 +206,17 @@ Databricks metric views are queried with standard SQL, as if querying a regular 
    FROM main.analytics.revenue_by_region
    GROUP BY region;
 
-DuckDB Semantic Views uses the :ref:`semantic_view() <ref-semantic-view-function>` table function with explicit dimension and metric names:
+DuckDB Semantic Views names the dimensions and metrics explicitly, with Snowflake's :ref:`SEMANTIC_VIEW(...) construct <ref-sv-construct>` or the :ref:`semantic_view() <ref-semantic-view-function>` table function it turns into. ``SELECT *`` works, and no ``MEASURE()`` wrapper is needed:
 
 .. code-block:: sql
 
-   -- DuckDB: table function with named lists
+   -- DuckDB: the SEMANTIC_VIEW construct
+   SELECT * FROM SEMANTIC_VIEW(revenue_by_region
+       DIMENSIONS region
+       METRICS revenue
+   );
+
+   -- DuckDB: the same query as a table function with named lists
    SELECT * FROM semantic_view('revenue_by_region',
        dimensions := ['region'],
        metrics := ['revenue']
@@ -266,7 +272,7 @@ Features in Databricks Not in DuckDB Semantic Views
    * - Feature
      - Description
    * - Direct SQL query interface
-     - Query metric views with standard ``SELECT`` SQL, wrapping each measure in ``MEASURE()``. DuckDB uses a table function.
+     - Query metric views with standard ``SELECT`` SQL, wrapping each measure in ``MEASURE()``. DuckDB names the members in ``SEMANTIC_VIEW(...)`` or a table function.
    * - Unity Catalog integration
      - Metric views are first-class catalog objects with lineage tracking, access control, and governance.
    * - Row-level security / column masking
@@ -276,7 +282,7 @@ Features in Databricks Not in DuckDB Semantic Views
    * - Managed materialization
      - Databricks builds and refreshes materialized views from the ``materialization:`` block through a managed pipeline, then rewrites queries onto them automatically -- on an exact match, a rollup to coarser dimensions, or an unaggregated match. This extension's ``MATERIALIZATIONS`` clause routes only on an exact dimension and metric name match, to a table you build and refresh.
    * - View-level ``filter``
-     - A predicate in the definition that applies to every query against the view. This extension filters per query instead, with ``where_clause :=`` or an outer ``WHERE``.
+     - A predicate in the definition that applies to every query against the view. This extension filters per query instead, with a ``WHERE`` inside ``SEMANTIC_VIEW(...)`` or an outer ``WHERE``.
    * - Query-time parameters
      - Named values declared with ``parameters:`` and passed by calling the metric view as a table-valued function, so one definition serves several query variants.
    * - Display names and number formats

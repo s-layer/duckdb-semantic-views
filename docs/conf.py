@@ -96,7 +96,7 @@ html_theme_options = {
                 {
                     "title": "Filtering",
                     "url": "how-to/filtering",
-                    "summary": "Filter before aggregation with where_clause or after it with an outer WHERE",
+                    "summary": "Filter before aggregation inside SEMANTIC_VIEW(...) or after it with an outer WHERE",
                 },
                 {
                     "title": "Metadata Annotations",

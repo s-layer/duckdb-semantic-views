@@ -24,7 +24,7 @@ Goal-oriented guides for specific tasks with DuckDB Semantic Views.
 **Data & Queries**
 
 - :ref:`howto-data-sources` -- Connect semantic views to CSV, Parquet, Iceberg, and database tables.
-- :ref:`howto-filtering` -- Filter a query before aggregation with ``where_clause`` or after it with an outer ``WHERE``, tell which one a filter needs, and pass request values from application code safely.
+- :ref:`howto-filtering` -- Filter a query before aggregation with a ``WHERE`` inside ``SEMANTIC_VIEW(...)`` or after it with an outer ``WHERE``, tell which one a filter needs, and pass request values from application code safely.
 - :ref:`howto-query-facts` -- Query facts directly as row-level columns without aggregation.
 - :ref:`howto-wildcard-selection` -- Select all dimensions, metrics, or facts for a table alias using wildcard patterns in queries.
 

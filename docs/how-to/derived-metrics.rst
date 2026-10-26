@@ -54,13 +54,13 @@ The key distinction:
 Query Derived Metrics
 =====================
 
-Derived metrics work like any other metric in :ref:`semantic_view() <ref-semantic-view-function>`:
+Derived metrics work like any other metric in a :ref:`query <ref-semantic-view-function>`:
 
 .. code-block:: sql
 
-   SELECT * FROM semantic_view('sales',
-       dimensions := ['region'],
-       metrics := ['revenue', 'cost', 'profit']
+   SELECT * FROM SEMANTIC_VIEW(sales
+       DIMENSIONS region
+       METRICS revenue, cost, profit
    ) ORDER BY region;
 
 .. code-block:: text
@@ -76,10 +76,17 @@ You can also query a derived metric on its own. The extension resolves all under
 
 .. code-block:: sql
 
-   SELECT * FROM semantic_view('sales',
-       dimensions := ['region'],
-       metrics := ['margin']
+   SELECT * FROM SEMANTIC_VIEW(sales
+       DIMENSIONS region
+       METRICS margin
    ) ORDER BY region;
+
+.. tip::
+
+   To try a calculation before you declare it, write it as an expression in
+   the query: ``METRICS revenue, cost, revenue - cost AS profit`` gives the same
+   column as the declared ``profit``, for that query only. See
+   :ref:`ref-sv-expression-items`.
 
 
 .. _howto-derived-stacking:

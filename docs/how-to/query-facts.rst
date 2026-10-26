@@ -1,5 +1,5 @@
 .. meta::
-   :description: Query facts directly as row-level columns using the facts parameter in semantic_view(), without aggregation
+   :description: Query facts directly as row-level columns with the FACTS clause of SEMANTIC_VIEW(...), without aggregation
 
 .. _howto-query-facts:
 
@@ -7,12 +7,12 @@
 How to Query Facts Directly
 ===========================
 
-This guide shows how to query facts as row-level columns using the ``facts`` parameter in :ref:`semantic_view() <ref-semantic-view-function>`. Unlike metrics, fact queries return individual rows without aggregation.
+This guide shows how to query facts as row-level columns with the ``FACTS`` clause of :ref:`SEMANTIC_VIEW(...) <ref-sv-construct>` (the ``facts`` parameter of :ref:`semantic_view() <ref-semantic-view-function>`). Unlike metrics, fact queries return individual rows without aggregation.
 
 **Prerequisites:**
 
 - A semantic view with a ``FACTS`` clause (see :ref:`howto-facts`)
-- Familiarity with :ref:`semantic_view() <ref-semantic-view-function>` queries
+- Familiarity with :ref:`SEMANTIC_VIEW(...) <ref-semantic-view-function>` queries
 
 
 .. _howto-query-facts-basic:
@@ -20,12 +20,12 @@ This guide shows how to query facts as row-level columns using the ``facts`` par
 Query Facts
 ===========
 
-Pass fact names in the ``facts`` parameter to retrieve them as row-level columns:
+List fact names after ``FACTS`` to retrieve them as row-level columns:
 
 .. code-block:: sql
 
-   SELECT * FROM semantic_view('analytics',
-       facts := ['net_price', 'tax_amount']
+   SELECT * FROM SEMANTIC_VIEW(analytics
+       FACTS net_price, tax_amount
    );
 
 Each row in the result contains the computed fact values -- no aggregation is applied. This is equivalent to a ``SELECT`` with the fact expressions inlined.
@@ -40,12 +40,30 @@ Add dimensions alongside facts. The dimensions appear as columns but do not trig
 
 .. code-block:: sql
 
-   SELECT * FROM semantic_view('analytics',
-       dimensions := ['region'],
-       facts := ['net_price']
+   SELECT * FROM SEMANTIC_VIEW(analytics
+       DIMENSIONS region
+       FACTS net_price
    );
 
 This returns one row per source row, with ``region`` and ``net_price`` columns.
+
+
+.. _howto-query-facts-expressions:
+
+Compute a Row-Level Expression
+==============================
+
+.. versionadded:: 0.16.0
+
+An item in ``FACTS`` can be an expression over the facts and dimensions of one table, named with ``AS``. It is computed per row, like a declared fact:
+
+.. code-block:: sql
+
+   SELECT * FROM SEMANTIC_VIEW(analytics
+       FACTS net_price, net_price + tax_amount AS gross_price
+   );
+
+The expression lasts for this query only. Declare it in the ``FACTS`` clause when other queries or metrics should use it too. See :ref:`ref-sv-expression-items` for what an expression may use.
 
 
 .. _howto-query-facts-mutual:
@@ -60,15 +78,15 @@ Mutual Exclusion with Metrics
 .. code-block:: sql
 
    -- This fails:
-   SELECT * FROM semantic_view('analytics',
-       facts := ['net_price'],
-       metrics := ['total_revenue']
+   SELECT * FROM SEMANTIC_VIEW(analytics
+       METRICS total_revenue
+       FACTS net_price
    );
 
 .. code-block:: text
 
    semantic view 'analytics': cannot combine facts and metrics in the same query.
-   Use facts := [...] OR metrics := [...], not both.
+   Use FACTS or METRICS (facts := [...] or metrics := [...]), not both.
 
 To get both row-level facts and aggregated metrics, run two separate queries.
 
@@ -82,8 +100,8 @@ Use ``alias.*`` to select all public facts for a table alias:
 
 .. code-block:: sql
 
-   SELECT * FROM semantic_view('analytics',
-       facts := ['li.*']
+   SELECT * FROM SEMANTIC_VIEW(analytics
+       FACTS li.*
    );
 
 Private facts are excluded from wildcard expansion. See :ref:`howto-wildcard-selection` for details.
@@ -94,7 +112,7 @@ Private facts are excluded from wildcard expansion. See :ref:`howto-wildcard-sel
 Verify with explain_semantic_view()
 ====================================
 
-Use :ref:`explain_semantic_view() <ref-explain-semantic-view>` to see the expanded SQL and query plan for a fact query:
+Use :ref:`explain_semantic_view() <ref-explain-semantic-view>` to see the expanded SQL and query plan for a fact query. It takes the ``FACTS`` clause as its ``facts`` parameter:
 
 .. code-block:: sql
 

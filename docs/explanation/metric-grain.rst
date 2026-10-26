@@ -170,9 +170,9 @@ The base table is ``orders``, but ``n_items`` and ``total_qty`` live on
 
 .. code-block:: sql
 
-   SELECT * FROM semantic_view('shop_items',
-       dimensions := ['cust_region'],
-       metrics := ['n_items', 'total_qty']
+   SELECT * FROM SEMANTIC_VIEW(shop_items
+       DIMENSIONS cust_region
+       METRICS n_items, total_qty
    ) ORDER BY cust_region;
 
 .. code-block:: text
@@ -190,9 +190,9 @@ US comes back, carried by the metric that has rows for it:
 
 .. code-block:: sql
 
-   SELECT * FROM semantic_view('shop_items',
-       dimensions := ['cust_region'],
-       metrics := ['n_items', 'total_qty', 'order_count']
+   SELECT * FROM SEMANTIC_VIEW(shop_items
+       DIMENSIONS cust_region
+       METRICS n_items, total_qty, order_count
    ) ORDER BY cust_region;
 
 .. code-block:: text
@@ -271,9 +271,9 @@ Asking for both metrics by region is a two-grain query:
 
 .. code-block:: sql
 
-   SELECT * FROM semantic_view('accounts',
-       dimensions := ['region'],
-       metrics := ['order_count', 'total_balance']
+   SELECT * FROM SEMANTIC_VIEW(accounts
+       DIMENSIONS region
+       METRICS order_count, total_balance
    ) ORDER BY region;
 
 .. code-block:: text

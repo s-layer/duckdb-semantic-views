@@ -90,9 +90,9 @@ Query the view to verify it works:
 
 .. code-block:: sql
 
-   SELECT * FROM semantic_view('sales',
-       dimensions := ['customer'],
-       metrics := ['revenue', 'cost']
+   SELECT * FROM SEMANTIC_VIEW(sales
+       DIMENSIONS customer
+       METRICS revenue, cost
    ) ORDER BY revenue DESC;
 
 .. code-block:: text
@@ -154,9 +154,9 @@ Now the metrics read as ``SUM(li.net_total)`` and ``SUM(li.line_cost)`` instead 
 
 .. code-block:: sql
 
-   SELECT * FROM semantic_view('sales',
-       dimensions := ['customer'],
-       metrics := ['revenue', 'cost']
+   SELECT * FROM SEMANTIC_VIEW(sales
+       DIMENSIONS customer
+       METRICS revenue, cost
    ) ORDER BY revenue DESC;
 
 .. code-block:: text
@@ -176,6 +176,27 @@ Add Derived Metrics
 ===================
 
 A derived metric references other metrics by name instead of writing an aggregate expression. Derived metrics have no table alias prefix and no aggregate function. They let you compose calculations like profit and margin without repeating the aggregation logic.
+
+Before you change the view, you can try a calculation in a query. An item in ``METRICS`` can be an expression over the view's metrics, named with ``AS``:
+
+.. code-block:: sql
+
+   SELECT * FROM SEMANTIC_VIEW(sales
+       DIMENSIONS customer
+       METRICS revenue, cost, revenue - cost AS profit
+   ) ORDER BY revenue DESC;
+
+.. code-block:: text
+
+   ┌──────────┬──────────┬───────┬──────────┐
+   │ customer │ revenue  │ cost  │  profit  │
+   ├──────────┼──────────┼───────┼──────────┤
+   │ Alice    │ 236.0000 │ 95.00 │ 141.0000 │
+   │ Bob      │ 176.0000 │ 82.00 │  94.0000 │
+   │ Carol    │  60.0000 │ 25.00 │  35.0000 │
+   └──────────┴──────────┴───────┴──────────┘
+
+The expression lasts for this one query (see :ref:`ref-sv-expression-items`). Once the calculation is worth keeping, declare it in the view, so that every query can name it and it means the same thing everywhere.
 
 Add ``profit`` and ``margin`` to the view:
 
@@ -217,9 +238,9 @@ Query the complete model:
 
 .. code-block:: sql
 
-   SELECT * FROM semantic_view('sales',
-       dimensions := ['customer'],
-       metrics := ['revenue', 'cost', 'profit', 'margin']
+   SELECT * FROM SEMANTIC_VIEW(sales
+       DIMENSIONS customer
+       METRICS revenue, cost, profit, margin
    ) ORDER BY margin DESC;
 
 .. code-block:: text
@@ -238,9 +259,9 @@ You can query derived metrics with any dimension, just like base metrics. The ex
 
 .. code-block:: sql
 
-   SELECT * FROM semantic_view('sales',
-       dimensions := ['month'],
-       metrics := ['revenue', 'profit', 'margin']
+   SELECT * FROM SEMANTIC_VIEW(sales
+       DIMENSIONS month
+       METRICS revenue, profit, margin
    ) ORDER BY month;
 
 .. code-block:: text
@@ -304,6 +325,7 @@ You now know how to:
 - Define reusable row-level logic in the :ref:`FACTS <ref-create-facts>` clause
 - Refactor duplicated calculations from metrics into facts
 - Compose metrics from other metrics using :ref:`derived metrics <ref-create-metrics>`
+- Try a calculation as an expression item in the query before declaring it
 - Stack derived metrics (``margin`` references ``profit`` which references ``revenue`` and ``cost``)
 - Inspect fact inlining and metric expansion with :ref:`explain_semantic_view() <ref-explain-semantic-view>`
 

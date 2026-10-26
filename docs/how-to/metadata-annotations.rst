@@ -136,8 +136,8 @@ Metrics and facts support ``PRIVATE`` and ``PUBLIC`` access modifiers. ``PUBLIC`
 
 In this example:
 
-- ``raw_margin`` is a private fact -- it can be referenced by metrics (like ``total_margin``) and by other facts, but cannot be queried via ``facts := ['raw_margin']`` or named in ``where_clause``.
-- ``total_cost`` is a private metric -- it can be referenced by derived metrics (like ``profit``) but cannot be queried via ``metrics := ['total_cost']``.
+- ``raw_margin`` is a private fact -- it can be referenced by metrics (like ``total_margin``) and by other facts, but cannot be queried (``FACTS raw_margin``), used in a query's expression items, or named in its ``WHERE``.
+- ``total_cost`` is a private metric -- it can be referenced by derived metrics (like ``profit``) but cannot be queried (``METRICS total_cost``).
 - ``total_margin`` and ``profit`` are public (default) and use the private items to compute their values.
 
 .. warning::
@@ -170,16 +170,16 @@ A **named filter** is a boolean-valued fact or dimension meant to be reused in a
        o.revenue AS SUM(o.amount)
    );
 
-Reference the filter by name in :ref:`where_clause <ref-sv-pre-agg-filtering>`, which applies it *before* the metrics aggregate:
+Reference the filter by name in the query's :ref:`WHERE <ref-sv-pre-agg-filtering>`, which applies it *before* the metrics aggregate:
 
 .. code-block:: sql
 
-   SELECT * FROM semantic_view('sales', metrics := ['revenue'], where_clause := 'is_domestic AND is_large');
+   SELECT * FROM SEMANTIC_VIEW(sales METRICS revenue WHERE is_domestic AND is_large);
 
 The label is **declarative metadata**, not an access restriction or a resolution rule:
 
-- ``where_clause`` already substitutes any declared fact or dimension name, labeled or not. The label records that the member *exists to be filtered on*, and surfaces it in :ref:`DESCRIBE <ref-describe-semantic-view>` and :ref:`GET_DDL <ref-get-ddl>` for discoverability.
-- A filter is still a queryable member. ``dimensions := ['is_domestic']`` returns its boolean values like any other dimension. There is no way to hide a filter while keeping it usable: ``PRIVATE`` applies only to facts and metrics, and a private fact is refused in ``where_clause`` as well as in ``facts := [...]``.
+- The ``WHERE`` inside ``SEMANTIC_VIEW(...)`` (``where_clause`` in ``semantic_view()``) already substitutes any declared fact or dimension name, labeled or not. The label records that the member *exists to be filtered on*, and surfaces it in :ref:`DESCRIBE <ref-describe-semantic-view>` and :ref:`GET_DDL <ref-get-ddl>` for discoverability.
+- A filter is still a queryable member. ``DIMENSIONS is_domestic`` returns its boolean values like any other dimension. There is no way to hide a filter while keeping it usable: ``PRIVATE`` applies only to facts and metrics, and a private fact is refused in ``WHERE`` as well as in ``FACTS``.
 
 .. note::
 
@@ -249,7 +249,7 @@ Troubleshooting
    Private items return an error when queried directly, for example ``metric 'total_cost' is private and cannot be queried directly``. Reference a private metric from a derived metric, and a private fact from a metric or another fact. To make an item queryable again, recreate the view without the ``PRIVATE`` keyword.
 
 **Synonyms not affecting query resolution**
-   Synonyms are informational metadata only. They do not expand the set of names recognized by :ref:`semantic_view() <ref-semantic-view-function>` or :ref:`explain_semantic_view() <ref-explain-semantic-view>`. Use the declared name to query an item.
+   Synonyms are informational metadata only. They do not expand the set of names recognized by :ref:`SEMANTIC_VIEW(...) and semantic_view() <ref-semantic-view-function>` or :ref:`explain_semantic_view() <ref-explain-semantic-view>`. Use the declared name to query an item.
 
 **COMMENT, WITH SYNONYMS and LABELS order**
    The annotations on one entry may appear in any order -- ``o.region AS o.region WITH SYNONYMS = ('territory') COMMENT = 'c'`` parses the same as the reverse. What the parser does require is that the annotation region be *tiled* by recognized clauses: once the first annotation keyword is seen, everything after it must be a valid ``COMMENT`` / ``WITH SYNONYMS`` / ``LABELS`` clause separated by whitespace. Leftover text (``COMMENT = 'a' banana``) or a repeated clause is an error rather than being silently dropped.
@@ -261,7 +261,7 @@ Troubleshooting
    ``LABELS`` applies only to facts and dimensions -- they are the entries that carry the filter flag. On a ``TABLES`` or ``METRICS`` entry, or in the trailing view-level annotation position, it raises *LABELS is not valid on a ...*. Move the annotation to the fact or dimension you meant to mark.
 
 **A named filter still shows up in query output**
-   Expected. ``LABELS = (FILTER)`` declares intent and drives introspection; it does not hide the member. ``PRIVATE`` is not a way round this: it applies only to facts and metrics, and a private fact cannot be used in ``where_clause`` either.
+   Expected. ``LABELS = (FILTER)`` declares intent and drives introspection; it does not hide the member. ``PRIVATE`` is not a way round this: it applies only to facts and metrics, and a private fact cannot be used in ``WHERE`` either.
 
 
 .. _howto-annotations-related:
@@ -271,5 +271,5 @@ Related
 
 - :ref:`ref-create-semantic-view` -- Where each annotation fits in the ``CREATE SEMANTIC VIEW`` grammar
 - :ref:`ref-describe-semantic-view` -- The property rows annotations produce
-- :ref:`howto-filtering` -- Use named filters in ``where_clause``
+- :ref:`howto-filtering` -- Use named filters in a query's ``WHERE``
 - :ref:`howto-wildcard-selection` -- How private items are left out of ``alias.*``

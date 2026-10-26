@@ -28,6 +28,10 @@ fn test_facts_metrics_mutual_exclusion() {
         msg.contains("cannot combine facts and metrics"),
         "Error message should contain 'cannot combine facts and metrics', got: {msg}"
     );
+    assert!(
+        msg.contains("Use FACTS or METRICS (facts := [...] or metrics := [...]), not both."),
+        "Error message should name both query forms, got: {msg}"
+    );
 }
 
 #[test]

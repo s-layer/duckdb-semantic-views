@@ -14,7 +14,7 @@ You define a semantic view over one or more tables, declaring:
 - **Metrics** -- aggregates (`sum(amount)`, `count(*)`, etc.)
 - **Relationships** -- PK/FK join paths between tables, included only when the query needs them
 
-Then you query by picking which dimensions and metrics you want. The extension generates the SQL -- SELECT, FROM, JOIN, GROUP BY -- and DuckDB executes it.
+Then you query by picking which dimensions and metrics you want, with the same `SEMANTIC_VIEW(...)` construct Snowflake uses. The extension generates the SQL -- SELECT, FROM, JOIN, GROUP BY -- and DuckDB executes it.
 
 ## Quick start
 
@@ -43,35 +43,49 @@ METRICS (
 );
 
 -- Pick any combination of dimensions and metrics
+SELECT * FROM SEMANTIC_VIEW(order_metrics
+    DIMENSIONS region, category
+    METRICS revenue, order_count
+);
+
+-- Dimensions only (distinct values)
+SELECT * FROM SEMANTIC_VIEW(order_metrics
+    DIMENSIONS region
+);
+
+-- Metrics only (grand total)
+SELECT * FROM SEMANTIC_VIEW(order_metrics
+    METRICS revenue
+);
+
+-- WHERE works on the result
+SELECT * FROM SEMANTIC_VIEW(order_metrics
+    DIMENSIONS region
+    METRICS revenue
+) WHERE region = 'East';
+
+-- ...but an outer WHERE filters AFTER aggregation. To scope what a metric
+-- measures, filter before it with a WHERE inside SEMANTIC_VIEW(...):
+SELECT * FROM SEMANTIC_VIEW(order_metrics
+    DIMENSIONS region
+    METRICS revenue
+    WHERE category = 'hardware'
+);
+
+-- An item can be an expression over the view's members
+SELECT * FROM SEMANTIC_VIEW(order_metrics
+    DIMENSIONS upper(region) AS region_code
+    METRICS revenue / order_count AS avg_order
+);
+
+-- The same query as a table function, for application code that builds the lists
 SELECT * FROM semantic_view('order_metrics',
     dimensions := ['region', 'category'],
     metrics := ['revenue', 'order_count']
 );
-
--- Dimensions only (distinct values)
-SELECT * FROM semantic_view('order_metrics',
-    dimensions := ['region']
-);
-
--- Metrics only (grand total)
-SELECT * FROM semantic_view('order_metrics',
-    metrics := ['revenue']
-);
-
--- WHERE works on the result
-SELECT * FROM semantic_view('order_metrics',
-    dimensions := ['region'], metrics := ['revenue']
-) WHERE region = 'East';
-
--- ...but an outer WHERE filters AFTER aggregation. To scope what a metric
--- measures, filter before it with where_clause:
-SELECT * FROM semantic_view('order_metrics',
-    dimensions := ['region'], metrics := ['revenue'],
-    where_clause := 'category = ''hardware'''
-);
 ```
 
-> **Read-only databases:** queries (`semantic_view`, `SHOW SEMANTIC VIEWS`, `DESCRIBE SEMANTIC VIEW <name>`, etc.) work against a database opened with `read_only=True`. `CREATE` / `DROP` / `ALTER SEMANTIC VIEW` require a writable database. See the [transactional DDL and limitations](https://s-layer.github.io/duckdb-semantic-views/explanation/transactional-ddl-and-limitations.html#read-only-databases) explanation page for the bootstrap-then-reopen workflow.
+> **Read-only databases:** queries (`SEMANTIC_VIEW(...)`, `SHOW SEMANTIC VIEWS`, `DESCRIBE SEMANTIC VIEW <name>`, etc.) work against a database opened with `read_only=True`. `CREATE` / `DROP` / `ALTER SEMANTIC VIEW` require a writable database. See the [transactional DDL and limitations](https://s-layer.github.io/duckdb-semantic-views/explanation/transactional-ddl-and-limitations.html#read-only-databases) explanation page for the bootstrap-then-reopen workflow.
 
 ## Multi-table (PK/FK relationships)
 
@@ -106,15 +120,15 @@ METRICS (
 );
 
 -- Only customers table is joined (products not needed)
-SELECT * FROM semantic_view('analytics',
-    dimensions := ['customer_name'],
-    metrics := ['revenue']
+SELECT * FROM SEMANTIC_VIEW(analytics
+    DIMENSIONS customer_name
+    METRICS revenue
 );
 
 -- Both customers and products tables are joined
-SELECT * FROM semantic_view('analytics',
-    dimensions := ['customer_name', 'product_name'],
-    metrics := ['revenue']
+SELECT * FROM SEMANTIC_VIEW(analytics
+    DIMENSIONS customer_name, product_name
+    METRICS revenue
 );
 ```
 
@@ -160,7 +174,7 @@ Name common row-level calculations once and reference them in metrics. Facts are
 
 > **Clause direction:** like Snowflake, each entry is `alias.<logical_name> AS <sql_expression>` —
 > the **name comes before `AS`**, the SQL expression after. This is the reverse of a plain SQL
-> `expression AS alias`. The logical name is what you query (`facts := ['net_price']`) and what
+> `expression AS alias`. The logical name is what you query (`FACTS net_price`) and what
 > `DESCRIBE` returns as the column. A fact may be named after its own column —
 > `FACTS (s.unit_price AS s.unit_price)` defines a passthrough fact `unit_price`. The same
 > direction applies to `DIMENSIONS` and `METRICS`.
@@ -270,6 +284,8 @@ SHOW SEMANTIC METRICS [LIKE '...'] [IN name];
 SHOW SEMANTIC FACTS [LIKE '...'] [IN name];
 SHOW SEMANTIC MATERIALIZATIONS [IN name];
 SHOW COLUMNS IN SEMANTIC VIEW name;
+-- SHOW and DESCRIBE also work as subqueries:
+SELECT name, data_type FROM (SHOW SEMANTIC METRICS IN name);
 
 SELECT get_ddl('SEMANTIC_VIEW', 'name');          -- round-trippable DDL
 SELECT read_yaml_from_semantic_view('name');      -- YAML export
@@ -281,15 +297,16 @@ SELECT read_yaml_from_semantic_view('name');      -- YAML export
 
 Documented in full on the [docs site](https://s-layer.github.io/duckdb-semantic-views/):
 
-- **[Pre-aggregation filtering](https://s-layer.github.io/duckdb-semantic-views/how-to/filtering.html)** -- `where_clause :=` filters rows *before* metrics are aggregated, which an outer `WHERE` cannot express.
+- **[Pre-aggregation filtering](https://s-layer.github.io/duckdb-semantic-views/how-to/filtering.html)** -- a `WHERE` inside `SEMANTIC_VIEW(...)` (`where_clause :=` in `semantic_view()`) filters rows *before* metrics are aggregated, which an outer `WHERE` cannot express. Prepared-statement parameters work there.
 - **[Multi-grain queries](https://s-layer.github.io/duckdb-semantic-views/explanation/metric-grain.html)** -- metrics at different grains are each aggregated over their own table and joined on the queried dimensions.
 - **[Semi-additive metrics](https://s-layer.github.io/duckdb-semantic-views/how-to/semi-additive-metrics.html)** -- `NON ADDITIVE BY` picks one snapshot row per group before aggregating (balances, inventory levels).
 - **[Window metrics](https://s-layer.github.io/duckdb-semantic-views/how-to/window-metrics.html)** -- `OVER (PARTITION BY ...)` for running totals and shares of parent.
 - **[Materializations](https://s-layer.github.io/duckdb-semantic-views/how-to/materializations.html)** -- route matching queries to a pre-aggregated table.
 - **[YAML definitions](https://s-layer.github.io/duckdb-semantic-views/how-to/yaml-definitions.html)** -- define views from YAML, and export back.
 - **[Metadata annotations](https://s-layer.github.io/duckdb-semantic-views/how-to/metadata-annotations.html)** -- `COMMENT`, `WITH SYNONYMS`, `PRIVATE`, and `LABELS = (FILTER)`.
-- **[Wildcard selection](https://s-layer.github.io/duckdb-semantic-views/how-to/wildcard-selection.html)** -- `dimensions := ['c.*']`.
-- **[Querying facts directly](https://s-layer.github.io/duckdb-semantic-views/how-to/query-facts.html)** -- `facts := [...]` returns row-level values without aggregating.
+- **[Expression items](https://s-layer.github.io/duckdb-semantic-views/reference/semantic-view-function.html#expression-items)** -- `DIMENSIONS date_part('year', ordered_at) AS yr METRICS revenue / order_count AS avg_order`, computed per query.
+- **[Wildcard selection](https://s-layer.github.io/duckdb-semantic-views/how-to/wildcard-selection.html)** -- `DIMENSIONS c.*`.
+- **[Querying facts directly](https://s-layer.github.io/duckdb-semantic-views/how-to/query-facts.html)** -- `FACTS ...` returns row-level values without aggregating.
 
 ## Documentation
 

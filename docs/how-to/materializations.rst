@@ -24,7 +24,7 @@ How Materializations Work
 
 A materialization maps a set of dimensions and metrics to a physical table that already contains the pre-aggregated results for that exact combination. When a query requests that exact set of dimensions and metrics, the extension reads directly from the pre-aggregated table instead of scanning raw tables, building JOINs, and computing GROUP BY.
 
-The query interface (:ref:`semantic_view() <ref-semantic-view-function>`) does not change. Routing is transparent -- the caller does not specify which table to use. The extension decides based on the materialization declarations.
+The query (:ref:`SEMANTIC_VIEW(...) or semantic_view() <ref-semantic-view-function>`) does not change. Routing is transparent -- the caller does not specify which table to use. The extension decides based on the materialization declarations.
 
 
 .. _howto-materializations-declare:
@@ -92,16 +92,16 @@ When a match is found, the extension generates a simple ``SELECT ... FROM <mater
 
    -- This query matches the materialization (exact dims + metrics)
    -- Routes to revenue_by_region
-   SELECT * FROM semantic_view('order_metrics',
-       dimensions := ['region'],
-       metrics := ['revenue', 'order_count']
+   SELECT * FROM SEMANTIC_VIEW(order_metrics
+       DIMENSIONS region
+       METRICS revenue, order_count
    );
 
    -- This query does NOT match (different metric set)
    -- Falls back to standard expansion
-   SELECT * FROM semantic_view('order_metrics',
-       dimensions := ['region'],
-       metrics := ['revenue']
+   SELECT * FROM SEMANTIC_VIEW(order_metrics
+       DIMENSIONS region
+       METRICS revenue
    );
 
 .. warning::
@@ -182,9 +182,9 @@ When a query includes any semi-additive or window metric, the extension skips al
 
    -- This query falls back to standard expansion (semi-additive metric)
    -- even though a matching materialization exists
-   SELECT * FROM semantic_view('account_metrics',
-       dimensions := ['customer_id'],
-       metrics := ['total_balance']
+   SELECT * FROM SEMANTIC_VIEW(account_metrics
+       DIMENSIONS customer_id
+       METRICS total_balance
    );
 
 

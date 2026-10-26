@@ -146,7 +146,7 @@ All three variants work with both the ``AS`` keyword body and the ``FROM YAML`` 
 
 .. note::
 
-   **View name case.** A ``<name>`` is folded to lowercase before it is stored, whether written quoted or not, and every later reference -- ``DROP`` / ``DESCRIBE`` / ``ALTER`` / ``SHOW COLUMNS`` statements and the :ref:`semantic_view() <ref-semantic-view-function>` lookup argument -- folds the same way, so ``CREATE SEMANTIC VIEW Sales``, ``DROP SEMANTIC VIEW SALES``, and ``DROP SEMANTIC VIEW "sales"`` all refer to the same view. This follows DuckDB's identifier semantics, where double-quoted identifiers are case-insensitive too; quoting a name only lets it contain whitespace or other special characters, it does not make it case-sensitive.
+   **View name case.** A ``<name>`` is folded to lowercase before it is stored, whether written quoted or not, and every later reference -- ``DROP`` / ``DESCRIBE`` / ``ALTER`` / ``SHOW COLUMNS`` statements, the view name in :ref:`SEMANTIC_VIEW(...) <ref-sv-construct>` and the :ref:`semantic_view() <ref-semantic-view-function>` lookup argument -- folds the same way, so ``CREATE SEMANTIC VIEW Sales``, ``DROP SEMANTIC VIEW SALES``, and ``DROP SEMANTIC VIEW "sales"`` all refer to the same view. This follows DuckDB's identifier semantics, where double-quoted identifiers are case-insensitive too; quoting a name only lets it contain whitespace or other special characters, it does not make it case-sensitive.
 
    *Migration:* lookups fold the requested name to lowercase and match the stored catalog name exactly, so a view is only reachable if its **stored** name is lowercase. Unquoted ``CREATE`` always stored a lowercase name, so those views are unaffected. Only a view created before v0.11 via a *quoted* mixed-case identifier (e.g. ``CREATE SEMANTIC VIEW "Sales"``) kept its original casing in the catalog, and it is no longer reachable by any spelling -- ``sales``, ``Sales``, and ``"Sales"`` all fold to ``sales``, which does not match the stored ``Sales``. Drop and recreate it, or rename its catalog row to lowercase, to make it reachable again.
 
@@ -154,7 +154,7 @@ All three variants work with both the ``AS`` keyword body and the ``FROM YAML`` 
 
    **Semantic views live in a schema.** ``<name>`` may carry a ``<schema>.`` (or ``<database>.<schema>.``) qualifier, and that qualifier decides where the view is created -- ``CREATE SEMANTIC VIEW analytics.sales`` puts the view in ``analytics`` regardless of which schema the session is currently in. Without a qualifier the view is created in the session's current schema, exactly as an unqualified ``CREATE TABLE`` would be. Naming a schema that does not exist is an error rather than a silent fall back to the current schema.
 
-   Two schemas may each hold a view of the same name, so ``analytics.sales`` and ``staging.sales`` are two different views. A reference that names neither -- ``DROP SEMANTIC VIEW sales``, ``semantic_view('sales')`` -- resolves through the session's ``search_path``, exactly as an unqualified table reference does: the first schema on the path holding a view of that name wins. A view that is the only one of its name resolves whether or not its schema is on the path, so an ordinary single-schema setup needs no ``search_path`` at all. Reads and writes resolve identically -- ``DROP SEMANTIC VIEW v`` removes the view ``semantic_view('v')`` returns.
+   Two schemas may each hold a view of the same name, so ``analytics.sales`` and ``staging.sales`` are two different views. A reference that names neither -- ``DROP SEMANTIC VIEW sales``, ``SEMANTIC_VIEW(sales METRICS ...)`` -- resolves through the session's ``search_path``, exactly as an unqualified table reference does: the first schema on the path holding a view of that name wins. A view that is the only one of its name resolves whether or not its schema is on the path, so an ordinary single-schema setup needs no ``search_path`` at all. Reads and writes resolve identically -- ``DROP SEMANTIC VIEW v`` removes the view ``semantic_view('v')`` returns.
 
    A name that exists only in schemas *off* the path is a miss: the error names the schemas it does live in, the path that was searched, and the two ways out (qualify the reference, or add the schema to ``search_path``). ``IF EXISTS`` does not absorb it -- that clause means "do not complain if the view is absent", and a view sitting off the path is not absent.
 
@@ -289,11 +289,11 @@ Declares named row-level expressions. Facts are inlined into metric expressions 
 **Parameters:**
 
 - ``PRIVATE``, optional. When present, the fact cannot be queried directly via ``facts := [...]`` but can still be referenced in metric expressions.
-- ``<alias>.<fact_name>``, the table alias and fact name, appearing **before** ``AS``. Facts are scoped to a single table. The fact name is what you query (``facts := ['net_price']``) and what ``DESCRIBE`` returns as the output column. As in Snowflake, the entry reads ``name AS expression`` -- the reverse of a plain SQL ``expression AS alias``.
+- ``<alias>.<fact_name>``, the table alias and fact name, appearing **before** ``AS``. Facts are scoped to a single table. The fact name is what you query (``FACTS net_price``) and what ``DESCRIBE`` returns as the output column. As in Snowflake, the entry reads ``name AS expression`` -- the reverse of a plain SQL ``expression AS alias``.
 - ``<row_level_expression>``, the SQL expression **after** ``AS``: any expression that operates on individual rows. Must not contain aggregate functions. A fact may be named after its own backing column (``s.unit_price AS s.unit_price``), giving a passthrough fact.
 - ``COMMENT = '<text>'``, optional. A human-readable description.
 - ``WITH SYNONYMS = ('<synonym>', ...)``, optional. Alternative names for discoverability.
-- ``LABELS = (FILTER)``, optional. Declares the fact a :ref:`named filter <howto-annotations-filters>` -- a boolean-valued member meant for reuse in a query's :ref:`where_clause <ref-sv-pre-agg-filtering>`. Metadata only: it does not restrict querying, and the ``BOOLEAN`` requirement is enforced by DuckDB's binder at query time. ``FILTER`` is the only accepted label.
+- ``LABELS = (FILTER)``, optional. Declares the fact a :ref:`named filter <howto-annotations-filters>` -- a boolean-valued member meant for reuse in a query's :ref:`WHERE <ref-sv-pre-agg-filtering>`. Metadata only: it does not restrict querying, and the ``BOOLEAN`` requirement is enforced by DuckDB's binder at query time. ``FILTER`` is the only accepted label.
 
 **Fact chaining:**
 
@@ -332,7 +332,7 @@ Declares named grouping expressions available for queries.
 - ``<expression>``, any row-level SQL expression: no aggregate (outside a subquery or ``OVER``) and no prepared statement parameter. Can be a simple column reference (``o.region``) or a computed expression (``date_trunc('month', o.ordered_at)``).
 - ``COMMENT = '<text>'``, optional. A human-readable description.
 - ``WITH SYNONYMS = ('<synonym>', ...)``, optional. Alternative names for discoverability.
-- ``LABELS = (FILTER)``, optional. Declares the dimension a :ref:`named filter <howto-annotations-filters>` -- a boolean-valued member meant for reuse in a query's :ref:`where_clause <ref-sv-pre-agg-filtering>`. Metadata only: it does not hide the dimension from output, and the ``BOOLEAN`` requirement is enforced by DuckDB's binder at query time. ``FILTER`` is the only accepted label.
+- ``LABELS = (FILTER)``, optional. Declares the dimension a :ref:`named filter <howto-annotations-filters>` -- a boolean-valued member meant for reuse in a query's :ref:`WHERE <ref-sv-pre-agg-filtering>`. Metadata only: it does not hide the dimension from output, and the ``BOOLEAN`` requirement is enforced by DuckDB's binder at query time. ``FILTER`` is the only accepted label.
 
 .. note::
 
