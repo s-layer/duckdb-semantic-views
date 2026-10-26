@@ -44,3 +44,34 @@ SELECT * FROM SEMANTIC_VIEW(sus DIMENSIONS snap METRICS balance) ORDER BY 1;
 ----
 2024-01-31	30
 2024-02-29	12
+
+# The snapshot is ranked over the metric's own rows. An account with no
+# balances must not take part: anchored at the accounts table, its row reached
+# the ranking with no snapshot date, and an earliest-first snapshot (DESC,
+# NULLS FIRST) picked that empty row, so the metric came out NULL.
+
+statement ok
+INSERT INTO sus_acct VALUES (3, DATE '2024-03-31');
+
+statement ok
+CREATE SEMANTIC VIEW sus_first AS
+  TABLES (a AS sus_acct PRIMARY KEY (id), b AS sus_bal PRIMARY KEY (id), n AS sus_note PRIMARY KEY (id))
+  RELATIONSHIPS (r_bal AS b(acct_id) REFERENCES a, r_note AS n(acct_id) REFERENCES a)
+  DIMENSIONS (a.snap AS a.snap, b.acct AS b.acct_id)
+  METRICS (b.opening USING (r_bal) NON ADDITIVE BY (snap DESC) AS SUM(b.amt));
+
+# The earliest snapshot (2024-01-31) holds account 1's balances: 10 + 20.
+
+query I
+SELECT * FROM SEMANTIC_VIEW(sus_first METRICS opening);
+----
+30
+
+# Partitioned by a dimension of the metric's own table, each account's own
+# earliest snapshot, and no group for the account with no balances.
+
+query II
+SELECT * FROM SEMANTIC_VIEW(sus_first DIMENSIONS acct METRICS opening) ORDER BY 1;
+----
+1	30
+2	12

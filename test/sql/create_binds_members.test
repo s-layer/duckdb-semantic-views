@@ -75,6 +75,19 @@ CREATE SEMANTIC VIEW cbm_v AS
 ----
 semantic view 'cbm_v': dimension 'r' does not bind:
 
+# A member on a role-played table is bound through one role. The probe of the
+# whole view refuses it as ambiguous, so the error comes from the single-role
+# probe.
+
+statement error
+CREATE SEMANTIC VIEW cbm_v AS
+  TABLES (o AS cbm_orders PRIMARY KEY (id), c AS cbm_customers PRIMARY KEY (id))
+  RELATIONSHIPS (buyer AS o(customer_id) REFERENCES c, payer AS o(id) REFERENCES c)
+  DIMENSIONS (c.r AS upper(c.nosuch))
+  METRICS (o.bought USING (buyer) AS COUNT(*));
+----
+semantic view 'cbm_v': dimension 'r' does not bind:
+
 # --- every CREATE form binds ---------------------------------------------------------
 
 statement error
@@ -143,6 +156,53 @@ SELECT * FROM SEMANTIC_VIEW(cbm_ok DIMENSIONS region METRICS revenue);
 ----
 East	10
 
+# --- a CREATE that changes nothing binds nothing ------------------------------------
+
+# IF NOT EXISTS on a view that exists is a no-op whatever its body says, as
+# for DuckDB's own CREATE ... IF NOT EXISTS: the existing view is kept.
+
+statement ok
+CREATE SEMANTIC VIEW IF NOT EXISTS cbm_ok AS TABLES (o AS cbm_orders PRIMARY KEY (id))
+  DIMENSIONS (o.d AS o.nosuch);
+
+query TI
+SELECT * FROM SEMANTIC_VIEW(cbm_ok DIMENSIONS region METRICS revenue);
+----
+East	10
+
+statement ok
+CREATE SEMANTIC VIEW IF NOT EXISTS cbm_ok FROM YAML FILE '__TEST_DIR__/cbm_bad.yaml';
+
+# Plain CREATE of a name that exists says so, before anything about the body.
+
+statement error
+CREATE SEMANTIC VIEW cbm_ok AS TABLES (o AS cbm_orders PRIMARY KEY (id))
+  DIMENSIONS (o.d AS o.nosuch);
+----
+semantic view 'cbm_ok' already exists
+
+statement error
+CREATE SEMANTIC VIEW cbm_ok FROM YAML FILE '__TEST_DIR__/cbm_bad.yaml';
+----
+semantic view 'cbm_ok' already exists
+
+# A re-run of an idempotent IF NOT EXISTS after a source column is dropped
+# stays a no-op.
+
+statement ok
+CREATE TABLE cbm_drop (id INTEGER, x INTEGER);
+
+statement ok
+CREATE SEMANTIC VIEW IF NOT EXISTS cbm_dropv AS TABLES (t AS cbm_drop PRIMARY KEY (id))
+  DIMENSIONS (t.x AS t.x);
+
+statement ok
+ALTER TABLE cbm_drop DROP COLUMN x;
+
+statement ok
+CREATE SEMANTIC VIEW IF NOT EXISTS cbm_dropv AS TABLES (t AS cbm_drop PRIMARY KEY (id))
+  DIMENSIONS (t.x AS t.x);
+
 # A role-played table: its members bind through either relationship.
 
 statement ok
@@ -196,3 +256,17 @@ query I
 SELECT * FROM SEMANTIC_VIEW(cbm_s.cbm_in_s METRICS total);
 ----
 NULL
+
+# The view that exists is the one in the schema the CREATE lands in: the
+# qualified name finds it in cbm_s, and the unqualified one, in main, is a new
+# view whose body is bound.
+
+statement ok
+CREATE SEMANTIC VIEW IF NOT EXISTS cbm_s.cbm_in_s AS TABLES (o AS cbm_orders PRIMARY KEY (id))
+  DIMENSIONS (o.d AS o.nosuch);
+
+statement error
+CREATE SEMANTIC VIEW IF NOT EXISTS cbm_in_s AS TABLES (o AS cbm_orders PRIMARY KEY (id))
+  DIMENSIONS (o.d AS o.nosuch);
+----
+semantic view 'cbm_in_s': dimension 'd' does not bind:

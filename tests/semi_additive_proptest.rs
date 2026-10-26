@@ -73,8 +73,8 @@
 use proptest::prelude::*;
 use semantic_views::expand::{expand, DimensionName, MetricName, QueryRequest};
 use semantic_views::model::{
-    AccessModifier, Dimension, Metric, NonAdditiveDim, NullsOrder, SemanticViewDefinition,
-    SortOrder, TableRef, WindowSpec,
+    AccessModifier, Cardinality, Dimension, Join, Metric, NonAdditiveDim, NullsOrder,
+    SemanticViewDefinition, SortOrder, TableRef, WindowSpec,
 };
 
 /// Members a generated `where_clause` may name (PBT-6).
@@ -1214,4 +1214,266 @@ fn dependent_generator_reaches_every_branch() {
         "generator produced only {} distinct predicates; search space collapsed",
         distinct.len()
     );
+}
+
+// ---------------------------------------------------------------------------
+// The snapshot dimension on a role-played table, reached through `USING`
+// ---------------------------------------------------------------------------
+//
+// `a` is referenced by two relationships, `r_bal` from `b` and `r_note` from
+// `n`, so it is role-played: each role joins it under its own alias
+// (`a__r_bal`, `a__r_note`). The metric `balance USING (r_bal) NON ADDITIVE BY
+// (snap) AS SUM(b.amt)` ranks its snapshot by `a.snap` in the `r_bal` role.
+// Queried without `snap`, the snapshot must still join that role, whether or
+// not a dimension of `b` partitions it (a metrics-only query once failed with
+// `Referenced table "a__r_bal" not found`). With `snap` queried, the dimension
+// resolves through the metric's `USING` and the metric is a plain grouped sum.
+//
+// The oracle reads `b LEFT JOIN a ON b.acct_id = a.id`, the `r_bal` path, and
+// picks the snapshot with `MAX`/`MIN` as the single-table oracle does. `b`'s
+// `acct_id` can be NULL or name no account, so rows with no snapshot value
+// take part.
+
+/// `a`'s accounts are ids `0..ROLE_ACCOUNTS`; `b.acct_id` also draws one past
+/// the end (no such account) and NULL.
+const ROLE_ACCOUNTS: i64 = 3;
+
+/// Queryable dimensions of the role-played view: `b.grp` and `a.snap`.
+const ROLE_DIMS: [&str; 2] = ["grp", "snap"];
+
+#[derive(Debug, Clone)]
+struct RoleCase {
+    /// `a.snap` for each account id.
+    snaps: Vec<Option<i64>>,
+    /// `b` rows: `(acct_id, grp, amt)`.
+    rows: Vec<(Option<i64>, Option<i64>, Option<i64>)>,
+    order: SortOrder,
+    /// Indices into `ROLE_DIMS`; the metric is always queried.
+    sel_dims: Vec<usize>,
+    /// A predicate on `grp`, applied before the snapshot is picked, so it can
+    /// move which snapshot wins. `snap` is not filtered: a `where_clause`
+    /// member on the role-played table has no `USING` to pick its role.
+    where_grp: Option<&'static str>,
+}
+
+fn arb_role_case() -> impl Strategy<Value = RoleCase> {
+    let small = |hi: i64| {
+        prop_oneof![
+            1 => Just(None),
+            4 => (0i64..hi).prop_map(Some),
+        ]
+    };
+    let snaps = prop::collection::vec(small(3), ROLE_ACCOUNTS as usize);
+    let amt = prop_oneof![
+        1 => Just(None),
+        3 => (-5i64..=5).prop_map(Some),
+    ];
+    let rows = prop::collection::vec((small(ROLE_ACCOUNTS + 1), small(2), amt), 0..=16);
+    let order = prop_oneof![Just(SortOrder::Asc), Just(SortOrder::Desc)];
+    let dims = prop::sample::subsequence(vec![0usize, 1], 0..=2);
+    let where_grp = prop_oneof![
+        2 => Just(None),
+        1 => Just(Some("grp = 0")),
+        1 => Just(Some("grp <> 0")),
+        1 => Just(Some("grp IS NULL")),
+    ];
+    (snaps, rows, order, dims, where_grp).prop_map(|(snaps, rows, order, sel_dims, where_grp)| {
+        RoleCase {
+            snaps,
+            rows,
+            order,
+            sel_dims,
+            where_grp,
+        }
+    })
+}
+
+fn role_def(order: SortOrder) -> SemanticViewDefinition {
+    let table = |alias: &str| TableRef {
+        alias: alias.to_string(),
+        table: format!("rp_{alias}"),
+        pk_columns: vec!["id".to_string()],
+        unique_constraints: vec![],
+        comment: None,
+        synonyms: vec![],
+    };
+    let rel = |name: &str, from: &str| Join {
+        from_alias: from.to_string(),
+        table: "a".to_string(),
+        fk_columns: vec!["acct_id".to_string()],
+        ref_columns: vec!["id".to_string()],
+        name: Some(name.to_string()),
+        cardinality: Cardinality::ManyToOne,
+    };
+    let dim = |name: &str, expr: &str, table: &str| Dimension {
+        name: name.to_string(),
+        expr: expr.to_string(),
+        source_table: Some(table.to_string()),
+        output_type: None,
+        comment: None,
+        synonyms: vec![],
+        is_filter: false,
+    };
+    SemanticViewDefinition {
+        tables: vec![table("a"), table("b"), table("n")],
+        dimensions: vec![dim("grp", "b.grp", "b"), dim("snap", "a.snap", "a")],
+        metrics: vec![Metric {
+            name: "balance".to_string(),
+            expr: "sum(b.amt)".to_string(),
+            source_table: Some("b".to_string()),
+            output_type: None,
+            using_relationships: vec!["r_bal".to_string()],
+            comment: None,
+            synonyms: vec![],
+            access: AccessModifier::Public,
+            non_additive_by: vec![NonAdditiveDim {
+                dimension: "snap".to_string(),
+                order,
+                nulls: match order {
+                    SortOrder::Asc => NullsOrder::Last,
+                    SortOrder::Desc => NullsOrder::First,
+                },
+            }],
+            window_spec: None,
+        }],
+        joins: vec![rel("r_bal", "b"), rel("r_note", "n")],
+        // PIN: a snapshot is an aggregate shape; FACTS returns unaggregated rows and cannot express NON ADDITIVE BY. TECH-DEBT #66
+        facts: vec![],
+        materializations: vec![],
+        created_on: None,
+        database_name: None,
+        schema_name: None,
+        resolution_schema_name: None,
+        temp_tables: vec![],
+        comment: None,
+    }
+}
+
+fn role_db(case: &RoleCase) -> duckdb::Connection {
+    let conn = duckdb::Connection::open_in_memory().expect("in-memory DuckDB");
+    let cell = |c: &Option<i64>| c.map_or_else(|| "NULL".to_string(), |v| v.to_string());
+    let accounts: Vec<String> = case
+        .snaps
+        .iter()
+        .enumerate()
+        .map(|(id, s)| format!("({id}, {})", cell(s)))
+        .collect();
+    conn.execute_batch(&format!(
+        "CREATE TABLE rp_a (id INTEGER, snap INTEGER);
+         CREATE TABLE rp_b (id INTEGER, acct_id INTEGER, grp INTEGER, amt INTEGER);
+         CREATE TABLE rp_n (id INTEGER, acct_id INTEGER);
+         INSERT INTO rp_a VALUES {};
+         INSERT INTO rp_n VALUES (0, 0);",
+        accounts.join(", ")
+    ))
+    .expect("create tables");
+    if !case.rows.is_empty() {
+        let values: Vec<String> = case
+            .rows
+            .iter()
+            .enumerate()
+            .map(|(id, (acct, grp, amt))| {
+                format!("({id}, {}, {}, {})", cell(acct), cell(grp), cell(amt))
+            })
+            .collect();
+        conn.execute_batch(&format!("INSERT INTO rp_b VALUES {};", values.join(", ")))
+            .expect("insert rows");
+    }
+    conn
+}
+
+/// Independent oracle for a role-played case, over the `r_bal` path.
+fn role_oracle_sql(case: &RoleCase) -> String {
+    // The predicate filters every reference to the rows, the snapshot
+    // subquery's included: filtering happens before the snapshot is picked.
+    let filter = case
+        .where_grp
+        .map_or_else(String::new, |p| format!(" WHERE b.{p}"));
+    let rows = format!(
+        "(SELECT b.grp, a.snap, b.amt FROM rp_b b LEFT JOIN rp_a a ON b.acct_id = a.id{filter})"
+    );
+    let dims: Vec<&str> = case.sel_dims.iter().map(|&i| ROLE_DIMS[i]).collect();
+    let select = dims
+        .iter()
+        .map(|d| format!("r.{d} AS {d}"))
+        .chain(std::iter::once("sum(r.amt) AS balance".to_string()))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let group_by = if dims.is_empty() {
+        String::new()
+    } else {
+        format!(
+            " GROUP BY {}",
+            (1..=dims.len())
+                .map(|n| n.to_string())
+                .collect::<Vec<_>>()
+                .join(", ")
+        )
+    };
+    if dims.contains(&"snap") {
+        return format!("SELECT {select} FROM {rows} r{group_by}");
+    }
+    let snap_expr = match case.order {
+        SortOrder::Asc => "max(snap)".to_string(),
+        SortOrder::Desc => {
+            "CASE WHEN count(*) FILTER (WHERE snap IS NULL) > 0 THEN NULL ELSE min(snap) END"
+                .to_string()
+        }
+    };
+    if dims.is_empty() {
+        format!(
+            "SELECT {select} FROM {rows} r, (SELECT {snap_expr} AS snap FROM {rows} s) m \
+             WHERE r.snap IS NOT DISTINCT FROM m.snap"
+        )
+    } else {
+        format!(
+            "SELECT {select} FROM {rows} r JOIN \
+             (SELECT grp, {snap_expr} AS snap FROM {rows} s GROUP BY grp) m \
+             ON r.grp IS NOT DISTINCT FROM m.grp AND r.snap IS NOT DISTINCT FROM m.snap{group_by}"
+        )
+    }
+}
+
+proptest! {
+    #![proptest_config(ProptestConfig { cases: 128, ..ProptestConfig::default() })]
+
+    #[test]
+    fn role_played_snapshot_matches_independent_oracle(case in arb_role_case()) {
+        let def = role_def(case.order);
+        let req = QueryRequest {
+            where_clause: case.where_grp.map(str::to_string),
+            dimensions: case.sel_dims.iter().map(|&i| DimensionName::new(ROLE_DIMS[i])).collect(),
+            metrics: vec![MetricName::new("balance")],
+            // PIN: a snapshot is an aggregate shape; FACTS returns unaggregated rows and cannot express NON ADDITIVE BY. TECH-DEBT #66
+            facts: vec![],
+        };
+        let expanded = match expand("rp", &def, &req) {
+            Ok(sql) => sql,
+            Err(e) => {
+                prop_assert!(false, "role-played semi-additive query rejected: {e}\ncase: {case:?}");
+                unreachable!()
+            }
+        };
+        let oracle = role_oracle_sql(&case);
+        let mut cols: Vec<&str> = case.sel_dims.iter().map(|&i| ROLE_DIMS[i]).collect();
+        cols.push("balance");
+        cols.sort_unstable();
+        let proj = cols.join(", ");
+        let cmp = format!(
+            "SELECT \
+               (SELECT count(*) FROM (SELECT {proj} FROM ({expanded}) qa \
+                                      EXCEPT ALL SELECT {proj} FROM ({oracle}) qb) e1) \
+             + (SELECT count(*) FROM (SELECT {proj} FROM ({oracle}) qc \
+                                      EXCEPT ALL SELECT {proj} FROM ({expanded}) qd) e2)"
+        );
+        let conn = role_db(&case);
+        let diff: i64 = conn.query_row(&cmp, [], |r| r.get(0)).unwrap_or_else(|e| {
+            panic!("comparison query failed: {e}\n--- expanded:\n{expanded}\n--- oracle:\n{oracle}")
+        });
+        prop_assert_eq!(
+            diff, 0,
+            "role-played snapshot disagrees with the oracle; order={:?} dims={:?} where={:?}\n--- expanded:\n{}\n--- oracle:\n{}",
+            case.order, case.sel_dims, case.where_grp, expanded, oracle
+        );
+    }
 }
