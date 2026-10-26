@@ -143,4 +143,5 @@ test/sql/grammar_write_statements.test
 test/sql/grammar_create.test
 test/sql/create_binds_members.test
 test/sql/quoted_key_columns.test
+test/sql/quoted_table_alias.test
 test/sql/semi_additive_using_snapshot_join.test

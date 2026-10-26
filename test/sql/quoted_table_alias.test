@@ -1,0 +1,66 @@
+# A table alias written quoted (`"Ord Lines" AS ...`) is stored as written,
+# quotes included, and the members name it the same way (`"Ord Lines".amount`).
+# Every site that emits the alias after `AS` quotes it again, so it must strip
+# the stored quotes first, or the FROM clause names a table `"Ord Lines"` with
+# the quote characters in its name and no member's qualifier resolves. Found
+# when CREATE began binding every member: every member of such a view failed
+# to bind.
+
+require semantic_views
+
+statement ok
+CREATE TABLE qa_orders (id INTEGER PRIMARY KEY, cust_id INTEGER, amount INTEGER);
+
+statement ok
+CREATE TABLE qa_customers (id INTEGER PRIMARY KEY, region VARCHAR);
+
+statement ok
+INSERT INTO qa_orders VALUES (1, 1, 5), (2, 1, 7), (3, 2, 3);
+
+statement ok
+INSERT INTO qa_customers VALUES (1, 'East'), (2, 'West');
+
+# The base table's alias: the FROM clause.
+
+statement ok
+CREATE SEMANTIC VIEW qa_base AS
+  TABLES ("Ord Lines" AS qa_orders PRIMARY KEY (id))
+  DIMENSIONS ("Ord Lines".cust AS "Ord Lines".cust_id)
+  METRICS ("Ord Lines".total AS SUM("Ord Lines".amount));
+
+query II
+SELECT * FROM SEMANTIC_VIEW(qa_base DIMENSIONS cust METRICS total) ORDER BY 1;
+----
+1	12
+2	3
+
+# A joined table's alias, and the base alias on the referencing side of the ON
+# clause.
+
+statement ok
+CREATE SEMANTIC VIEW qa_join AS
+  TABLES ("Ord Lines" AS qa_orders PRIMARY KEY (id), "Cust" AS qa_customers PRIMARY KEY (id))
+  RELATIONSHIPS (oc AS "Ord Lines"(cust_id) REFERENCES "Cust")
+  DIMENSIONS ("Cust".region AS "Cust".region)
+  METRICS ("Ord Lines".total AS SUM("Ord Lines".amount));
+
+query TI
+SELECT * FROM SEMANTIC_VIEW(qa_join DIMENSIONS region METRICS total) ORDER BY 1;
+----
+East	12
+West	3
+
+# A fact on the base table: a row-level query.
+
+statement ok
+CREATE SEMANTIC VIEW qa_fact AS
+  TABLES ("Ord Lines" AS qa_orders PRIMARY KEY (id))
+  FACTS ("Ord Lines".amt AS "Ord Lines".amount)
+  METRICS ("Ord Lines".total AS SUM("Ord Lines".amount));
+
+query I
+SELECT * FROM SEMANTIC_VIEW(qa_fact FACTS amt) ORDER BY 1;
+----
+3
+5
+7
