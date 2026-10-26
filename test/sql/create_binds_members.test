@@ -1,0 +1,198 @@
+# CREATE SEMANTIC VIEW binds every member, as Snowflake compiles each member
+# expression at CREATE. A member DuckDB cannot bind (an unknown column or
+# function, an invalid date part) is refused at CREATE, naming the member, rather
+# than stored and failing only when it is queried. Each refusal is checked on its
+# own, and the controls show what still creates.
+
+require semantic_views
+
+statement ok
+CREATE TABLE cbm_orders (id INTEGER, customer_id INTEGER, amount INTEGER, ordered_at DATE);
+
+statement ok
+CREATE TABLE cbm_customers (id INTEGER, region VARCHAR);
+
+statement ok
+INSERT INTO cbm_orders VALUES (1, 1, 10, DATE '2024-01-01');
+
+statement ok
+INSERT INTO cbm_customers VALUES (1, 'East');
+
+# --- each member kind is bound ------------------------------------------------------
+
+# DuckDB rejects an invalid date part when it binds date_trunc, so CREATE does.
+
+statement error
+CREATE SEMANTIC VIEW cbm_v AS TABLES (o AS cbm_orders PRIMARY KEY (id))
+  DIMENSIONS (o.fn AS date_trunc('fortnight', o.ordered_at));
+----
+semantic view 'cbm_v': dimension 'fn' does not bind: Conversion Error: extract specifier "fortnight" not recognized
+
+statement error
+CREATE SEMANTIC VIEW cbm_v AS TABLES (o AS cbm_orders PRIMARY KEY (id))
+  DIMENSIONS (o.d AS o.nosuch);
+----
+semantic view 'cbm_v': dimension 'd' does not bind:
+
+statement error
+CREATE SEMANTIC VIEW cbm_v AS TABLES (o AS cbm_orders PRIMARY KEY (id))
+  FACTS (o.f AS nosuch_fn(o.amount))
+  METRICS (o.m AS SUM(o.amount));
+----
+semantic view 'cbm_v': fact 'f' does not bind:
+
+statement error
+CREATE SEMANTIC VIEW cbm_v AS TABLES (o AS cbm_orders PRIMARY KEY (id))
+  METRICS (o.m AS SUM(o.nosuch));
+----
+semantic view 'cbm_v': metric 'm' does not bind:
+
+# A derived metric is bound with the metrics it refers to inlined.
+
+statement error
+CREATE SEMANTIC VIEW cbm_v AS TABLES (o AS cbm_orders PRIMARY KEY (id))
+  METRICS (o.m AS SUM(o.amount), d AS m / nosuch_fn(2));
+----
+semantic view 'cbm_v': metric 'd' does not bind:
+
+# A PRIVATE member cannot be queried, but it is still bound.
+
+statement error
+CREATE SEMANTIC VIEW cbm_v AS TABLES (o AS cbm_orders PRIMARY KEY (id))
+  FACTS (PRIVATE o.f AS o.nosuch)
+  METRICS (o.m AS SUM(o.amount));
+----
+semantic view 'cbm_v': fact 'f' does not bind:
+
+# A member on a related table is bound across the join.
+
+statement error
+CREATE SEMANTIC VIEW cbm_v AS
+  TABLES (o AS cbm_orders PRIMARY KEY (id), c AS cbm_customers PRIMARY KEY (id))
+  RELATIONSHIPS (oc AS o(customer_id) REFERENCES c)
+  DIMENSIONS (c.r AS upper(c.nosuch))
+  METRICS (o.m AS SUM(o.amount));
+----
+semantic view 'cbm_v': dimension 'r' does not bind:
+
+# --- every CREATE form binds ---------------------------------------------------------
+
+statement error
+CREATE OR REPLACE SEMANTIC VIEW cbm_v AS TABLES (o AS cbm_orders PRIMARY KEY (id))
+  DIMENSIONS (o.d AS o.nosuch);
+----
+semantic view 'cbm_v': dimension 'd' does not bind:
+
+statement error
+CREATE SEMANTIC VIEW IF NOT EXISTS cbm_v AS TABLES (o AS cbm_orders PRIMARY KEY (id))
+  DIMENSIONS (o.d AS o.nosuch);
+----
+semantic view 'cbm_v': dimension 'd' does not bind:
+
+statement error
+CREATE SEMANTIC VIEW cbm_v FROM YAML $$
+tables:
+  - alias: o
+    table: cbm_orders
+    pk_columns: [id]
+dimensions:
+  - name: d
+    expr: o.nosuch
+    source_table: o
+metrics: []
+$$;
+----
+semantic view 'cbm_v': dimension 'd' does not bind:
+
+statement ok
+COPY (SELECT 'tables:
+  - alias: o
+    table: cbm_orders
+    pk_columns: [id]
+dimensions:
+  - name: d
+    expr: o.nosuch
+    source_table: o
+metrics: []') TO '__TEST_DIR__/cbm_bad.yaml' (FORMAT CSV, HEADER FALSE, QUOTE '');
+
+statement error
+CREATE SEMANTIC VIEW cbm_v FROM YAML FILE '__TEST_DIR__/cbm_bad.yaml';
+----
+semantic view 'cbm_v': dimension 'd' does not bind:
+
+# A refused CREATE stores nothing.
+
+query I
+SELECT count(*) FROM list_semantic_views() WHERE name = 'cbm_v';
+----
+0
+
+# --- what still creates ---------------------------------------------------------------
+
+statement ok
+CREATE SEMANTIC VIEW cbm_ok AS
+  TABLES (o AS cbm_orders PRIMARY KEY (id), c AS cbm_customers PRIMARY KEY (id))
+  RELATIONSHIPS (oc AS o(customer_id) REFERENCES c)
+  FACTS (PRIVATE o.amt AS o.amount)
+  DIMENSIONS (c.region AS c.region, o.month AS date_trunc('month', o.ordered_at))
+  METRICS (o.revenue AS SUM(o.amt), o.n AS COUNT(*), avg_order AS revenue / n,
+           o.running AS SUM(revenue) OVER (ORDER BY month));
+
+query TI
+SELECT * FROM SEMANTIC_VIEW(cbm_ok DIMENSIONS region METRICS revenue);
+----
+East	10
+
+# A role-played table: its members bind through either relationship.
+
+statement ok
+CREATE SEMANTIC VIEW cbm_roles AS
+  TABLES (o AS cbm_orders PRIMARY KEY (id), c AS cbm_customers PRIMARY KEY (id))
+  RELATIONSHIPS (buyer AS o(customer_id) REFERENCES c, payer AS o(id) REFERENCES c)
+  DIMENSIONS (c.region AS c.region)
+  METRICS (o.bought USING (buyer) AS COUNT(*), o.paid USING (payer) AS COUNT(*));
+
+# A temporary table, and a table created earlier in the same transaction.
+
+statement ok
+CREATE TEMP TABLE cbm_scratch (id INTEGER, v INTEGER);
+
+statement ok
+CREATE SEMANTIC VIEW cbm_temp AS TABLES (s AS cbm_scratch PRIMARY KEY (id))
+  METRICS (s.total AS SUM(s.v));
+
+statement ok
+BEGIN;
+
+statement ok
+CREATE TABLE cbm_new (id INTEGER, v INTEGER);
+
+statement ok
+CREATE SEMANTIC VIEW cbm_txn AS TABLES (n AS cbm_new PRIMARY KEY (id))
+  METRICS (n.total AS SUM(n.v));
+
+statement ok
+COMMIT;
+
+# A view in another schema binds against the tables its names resolve to there.
+
+statement ok
+CREATE SCHEMA cbm_s;
+
+statement ok
+CREATE TABLE cbm_s.cbm_local (id INTEGER, w INTEGER);
+
+statement ok
+USE cbm_s;
+
+statement ok
+CREATE SEMANTIC VIEW cbm_in_s AS TABLES (l AS cbm_local PRIMARY KEY (id))
+  METRICS (l.total AS SUM(l.w));
+
+statement ok
+USE main;
+
+query I
+SELECT * FROM SEMANTIC_VIEW(cbm_s.cbm_in_s METRICS total);
+----
+NULL
