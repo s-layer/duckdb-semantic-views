@@ -86,6 +86,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     Each one now switches itself when it next starts or finishes a query (see Known
     limitations).
 
+- **Two query errors name both query forms.** A query with no items now reads
+  `specify at least one of DIMENSIONS, METRICS or FACTS (dimensions := [...], metrics := [...] or facts := [...]).`,
+  and one with both facts and metrics ends `Use FACTS or METRICS (facts := [...] or metrics := [...]), not both.`,
+  instead of naming only the `semantic_view()` arguments.
+
 - **The unclosed-bracket error names its clause like the others.** It now reads
   `Unclosed '(' in clause 'METRICS'.`, as the other bracket and quote errors for a clause
   do, instead of `... for clause 'METRICS'.`

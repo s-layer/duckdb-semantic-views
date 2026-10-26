@@ -35,5 +35,4 @@ Manual SQL reference under `docs/reference/` (config `api_reference: manual`). N
 
 ## Coverage Gaps
 
-- Errors raised from the expansion still name the function's lists (`Use facts := [...] OR metrics := [...]`, `specify at least dimensions := [...]`) when the query used the construct; the error reference says how to read them.
 - For a construct query whose expanded SQL fails to bind, DuckDB's caret points at the start of the query, not at the construct; documented in the reference Output section.

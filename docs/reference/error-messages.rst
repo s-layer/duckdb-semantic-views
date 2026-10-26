@@ -716,7 +716,7 @@ For example, a definition without a ``metrics`` key fails with:
 Query Errors
 ============
 
-These errors occur at query time, when querying with the :ref:`SEMANTIC_VIEW(...) <ref-sv-construct>` construct, :ref:`semantic_view() <ref-semantic-view-function>` or :ref:`explain_semantic_view() <ref-explain-semantic-view>`. The construct turns into a ``semantic_view()`` call, so a message that names a list such as ``metrics := [...]`` means the clause of the same name, ``METRICS``, when you wrote the construct.
+These errors occur at query time, when querying with the :ref:`SEMANTIC_VIEW(...) <ref-sv-construct>` construct, :ref:`semantic_view() <ref-semantic-view-function>` or :ref:`explain_semantic_view() <ref-explain-semantic-view>`.
 
 
 .. _ref-err-construct:
@@ -748,7 +748,7 @@ Parameter outside WHERE
 
    Parser Error: prepared statement parameters are only supported in the WHERE clause of SEMANTIC_VIEW(...)
 
-**Cause:** A prepared-statement parameter (``?``, ``$1``, ``$name``) appears in ``DIMENSIONS``, ``METRICS``, ``FACTS`` or the view name of the construct.
+**Cause:** A prepared-statement parameter (``?``, ``$1``, ``$name``) appears in ``DIMENSIONS``, ``METRICS`` or ``FACTS``.
 
 **Fix:** Use parameters only in the construct's ``WHERE``. To choose the view, the dimensions or the metrics at run time, use :ref:`semantic_view() <ref-semantic-view-function>`, whose arguments can all be bound.
 

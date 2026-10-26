@@ -88,7 +88,7 @@ Mutual Exclusion with Metrics
    semantic view 'analytics': cannot combine facts and metrics in the same query.
    Use FACTS or METRICS (facts := [...] or metrics := [...]), not both.
 
-To get both row-level facts and aggregated metrics, run two separate queries. The error names the ``semantic_view()`` parameters because the construct turns into a call to it; for the construct, read them as the ``FACTS`` and ``METRICS`` clauses.
+To get both row-level facts and aggregated metrics, run two separate queries.
 
 
 .. _howto-query-facts-wildcard:
