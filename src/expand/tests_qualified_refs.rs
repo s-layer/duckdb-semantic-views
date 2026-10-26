@@ -51,6 +51,7 @@ fn qualified_ref_def() -> SemanticViewDefinition {
         resolution_schema_name: None,
         temp_tables: vec![],
         comment: None,
+        tags: Vec::new(),
     }
 }
 
@@ -129,6 +130,7 @@ fn test_expand_multiple_qualified_refs_different_tables() {
         resolution_schema_name: None,
         temp_tables: vec![],
         comment: None,
+        tags: Vec::new(),
     };
     let req = QueryRequest {
         where_clause: None,

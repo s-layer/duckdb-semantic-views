@@ -212,18 +212,8 @@ fn rewrite_ddl_keyword_body(
 
     // 2. Construct SemanticViewDefinition from KeywordBody
     let def = crate::model::SemanticViewDefinition {
-        tables: keyword_body.tables,
-        dimensions: keyword_body.dimensions,
-        metrics: keyword_body.metrics,
-        joins: keyword_body.relationships,
-        facts: keyword_body.facts,
-        materializations: keyword_body.materializations,
-        created_on: None,
-        database_name: None,
-        schema_name: None,
-        resolution_schema_name: None,
-        temp_tables: vec![],
         comment,
+        ..keyword_body.into_definition()
     };
 
     // 3. Carry the definition structurally — `rewrite_to_native_sql` hands it

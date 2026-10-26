@@ -63,6 +63,7 @@ fn def_with_join_columns() -> crate::model::SemanticViewDefinition {
         resolution_schema_name: None,
         temp_tables: vec![],
         comment: None,
+        tags: Vec::new(),
     }
 }
 

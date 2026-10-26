@@ -1,5 +1,5 @@
 .. meta::
-   :description: Add COMMENT, WITH SYNONYMS, PRIVATE/PUBLIC access modifiers, and LABELS = (FILTER) to semantic view definitions and inspect them via DESCRIBE and SHOW
+   :description: Add COMMENT, WITH SYNONYMS, PRIVATE/PUBLIC access modifiers, LABELS = (FILTER) and WITH TAG to semantic view definitions and inspect them via DESCRIBE and SHOW
 
 .. _howto-metadata-annotations:
 
@@ -7,7 +7,7 @@
 How to Use Metadata Annotations
 =====================================
 
-This guide shows how to annotate dimensions, metrics, facts, and tables with comments, synonyms, access modifiers, and named-filter labels in a semantic view definition.
+This guide shows how to annotate dimensions, metrics, facts, and tables with comments, synonyms, access modifiers, named-filter labels and tags in a semantic view definition.
 
 **Prerequisites:**
 
@@ -185,9 +185,47 @@ The label is **declarative metadata**, not an access restriction or a resolution
 
    The ``BOOLEAN`` requirement is checked by DuckDB's binder at **query** time, not at ``CREATE``. Typing an arbitrary SQL expression requires a binder, so a filter over a non-boolean expression is created successfully and raises DuckDB's own type error the first time it is used in a predicate.
 
-``FILTER`` is the only supported label. Any other value (Snowflake's tags, for instance) is rejected at ``CREATE`` rather than silently dropped, so a definition cannot round-trip having quietly lost a label you wrote.
+``FILTER`` is the only supported label. Any other value is rejected at ``CREATE`` rather than silently dropped, so a definition cannot round-trip having quietly lost a label you wrote.
 
 ``LABELS`` is likewise valid **only on a fact or a dimension**. Writing it on a table, on a metric, or as a view-level annotation is rejected for the same reason: those entries carry no filter flag, so accepting it there would mean discarding it on the way to storage.
+
+
+.. _howto-annotations-tags:
+
+Add Tags
+========
+
+.. versionadded:: 0.17.0
+
+Tags are name/value pairs for tools that read your view's metadata, such as a governance catalog or a BI layer that needs to know what each member is. Like comments, they never change what a query returns. Add ``WITH TAG (...)`` to any table, fact, dimension or metric entry, or after the last clause to tag the view itself:
+
+.. code-block:: sql
+   :emphasize-lines: 3,7,10,12
+
+   CREATE SEMANTIC VIEW sales AS
+   TABLES (
+       o AS orders PRIMARY KEY (id) WITH TAG (governance.pii = 'none')
+   )
+   DIMENSIONS (
+       o.region AS o.region COMMENT = 'Sales region'
+           WITH TAG (s_layer_kind = 'dimension', s_layer_label = 'Region')
+   )
+   METRICS (
+       o.revenue AS SUM(o.amount) WITH TAG (s_layer_kind = 'metric')
+   )
+   WITH TAG (owner = 'analytics');
+
+The ``WITH`` is optional, as in Snowflake. A tag name can be qualified (``governance.pii``, ``db.governance.pii``) and is stored as written: there is no ``CREATE TAG`` object to create first. Values are single-quoted strings of up to 256 characters.
+
+Read the tags back from the ``TAGS`` row in ``DESCRIBE``, which holds a JSON object:
+
+.. code-block:: sql
+
+   SELECT object_name, json_extract_string(property_value, '$.s_layer_kind') AS kind
+   FROM describe_semantic_view('sales')
+   WHERE property = 'TAGS' AND object_kind IN ('DIMENSION', 'METRIC');
+
+``GET_DDL`` and :ref:`READ_YAML_FROM_SEMANTIC_VIEW() <ref-read-yaml>` write the tags back out, so they survive a dump and replay. ``SHOW`` commands don't list them, which matches Snowflake. See :ref:`Tags <ref-create-tags>` for the full rules.
 
 
 .. _howto-annotations-inspect:
@@ -209,6 +247,7 @@ Look for these property rows:
 - ``COMMENT`` -- the comment text (conditional, only when set)
 - ``SYNONYMS`` -- JSON array of synonyms (conditional, only when set)
 - ``LABELS`` -- ``["FILTER"]`` for a :ref:`named filter <howto-annotations-filters>` (conditional, only on labeled facts and dimensions)
+- ``TAGS`` -- JSON object of :ref:`tags <howto-annotations-tags>` (conditional, only when set)
 - ``ACCESS_MODIFIER`` -- ``PUBLIC`` or ``PRIVATE`` (always emitted for facts and metrics)
 - ``NON_ADDITIVE_BY`` -- non-additive dimension list (conditional, only for semi-additive metrics)
 - ``WINDOW_SPEC`` -- reconstructed OVER clause (conditional, only for window metrics)
@@ -251,11 +290,11 @@ Troubleshooting
 **Synonyms not affecting query resolution**
    Synonyms are informational metadata only. They do not expand the set of names recognized by :ref:`SEMANTIC_VIEW(...) and semantic_view() <ref-semantic-view-function>` or :ref:`explain_semantic_view() <ref-explain-semantic-view>`. Use the declared name to query an item.
 
-**COMMENT, WITH SYNONYMS and LABELS order**
-   The annotations on one entry may appear in any order -- ``o.region AS o.region WITH SYNONYMS = ('territory') COMMENT = 'c'`` parses the same as the reverse. What the parser does require is that the annotation region be *tiled* by recognized clauses: once the first annotation keyword is seen, everything after it must be a valid ``COMMENT`` / ``WITH SYNONYMS`` / ``LABELS`` clause separated by whitespace. Leftover text (``COMMENT = 'a' banana``) or a repeated clause is an error rather than being silently dropped.
+**COMMENT, WITH SYNONYMS, LABELS and TAG order**
+   The annotations on one entry may appear in any order -- ``o.region AS o.region WITH SYNONYMS = ('territory') COMMENT = 'c'`` parses the same as the reverse. What the parser does require is that the annotation region be *tiled* by recognized clauses: once the first annotation keyword is seen, everything after it must be a valid ``COMMENT`` / ``WITH SYNONYMS`` / ``LABELS`` / ``[WITH] TAG`` clause separated by whitespace. Leftover text (``COMMENT = 'a' banana``) or a repeated clause is an error rather than being silently dropped.
 
 **Unsupported label**
-   ``FILTER`` is the only value accepted in ``LABELS = (...)``. Snowflake's tags and other label values are rejected at ``CREATE`` -- deliberately, so a definition cannot round-trip having quietly lost a label. Remove the unsupported value to create the view.
+   ``FILTER`` is the only value accepted in ``LABELS = (...)``. Other label values are rejected at ``CREATE`` -- deliberately, so a definition cannot round-trip having quietly lost a label. Remove the unsupported value to create the view.
 
 **LABELS rejected on a table, metric, or the view itself**
    ``LABELS`` applies only to facts and dimensions -- they are the entries that carry the filter flag. On a ``TABLES`` or ``METRICS`` entry, or in the trailing view-level annotation position, it raises *LABELS is not valid on a ...*. Move the annotation to the fact or dimension you meant to mark.

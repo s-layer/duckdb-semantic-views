@@ -168,6 +168,7 @@ fn parse_single_qualified_entry(
         expr,
         comment: annotations.comment,
         synonyms: annotations.synonyms,
+        tags: annotations.tags,
         is_filter: annotations.is_filter,
         access,
     })

@@ -338,6 +338,7 @@ fn build_def(order: SortOrder, na: NaKey, unit: &str) -> SemanticViewDefinition 
         unique_constraints: vec![],
         comment: None,
         synonyms: vec![],
+        tags: Vec::new(),
     }];
     let dimensions = vec![
         Dimension {
@@ -348,6 +349,7 @@ fn build_def(order: SortOrder, na: NaKey, unit: &str) -> SemanticViewDefinition 
             comment: None,
             synonyms: vec![],
             is_filter: false,
+            tags: Vec::new(),
         },
         Dimension {
             name: "ts".to_string(),
@@ -357,6 +359,7 @@ fn build_def(order: SortOrder, na: NaKey, unit: &str) -> SemanticViewDefinition 
             comment: None,
             synonyms: vec![],
             is_filter: false,
+            tags: Vec::new(),
         },
         Dimension {
             name: "tsk".to_string(),
@@ -366,6 +369,7 @@ fn build_def(order: SortOrder, na: NaKey, unit: &str) -> SemanticViewDefinition 
             comment: None,
             synonyms: vec![],
             is_filter: false,
+            tags: Vec::new(),
         },
         // PBT-6 filter members: never selected as output, named only by a
         // generated `where_clause`. Compound expressions, so a splice that
@@ -378,6 +382,7 @@ fn build_def(order: SortOrder, na: NaKey, unit: &str) -> SemanticViewDefinition 
             comment: None,
             synonyms: vec![],
             is_filter: true,
+            tags: Vec::new(),
         },
         Dimension {
             name: "fts".to_string(),
@@ -387,6 +392,7 @@ fn build_def(order: SortOrder, na: NaKey, unit: &str) -> SemanticViewDefinition 
             comment: None,
             synonyms: vec![],
             is_filter: true,
+            tags: Vec::new(),
         },
     ];
     let metrics = vec![Metric {
@@ -410,6 +416,7 @@ fn build_def(order: SortOrder, na: NaKey, unit: &str) -> SemanticViewDefinition 
             },
         }],
         window_spec: None,
+        tags: Vec::new(),
     }];
     SemanticViewDefinition {
         tables,
@@ -425,6 +432,7 @@ fn build_def(order: SortOrder, na: NaKey, unit: &str) -> SemanticViewDefinition 
         resolution_schema_name: None,
         temp_tables: vec![],
         comment: None,
+        tags: Vec::new(),
     }
 }
 
@@ -943,6 +951,7 @@ fn build_def_with_dependents(order: SortOrder) -> SemanticViewDefinition {
         access: AccessModifier::Public,
         non_additive_by: vec![],
         window_spec: window,
+        tags: Vec::new(),
     };
     def.metrics.push(dependent("dbal", "bal * 2", None));
     def.metrics.push(dependent(
@@ -1296,6 +1305,7 @@ fn role_def(order: SortOrder) -> SemanticViewDefinition {
         unique_constraints: vec![],
         comment: None,
         synonyms: vec![],
+        tags: Vec::new(),
     };
     let rel = |name: &str, from: &str| Join {
         from_alias: from.to_string(),
@@ -1313,6 +1323,7 @@ fn role_def(order: SortOrder) -> SemanticViewDefinition {
         comment: None,
         synonyms: vec![],
         is_filter: false,
+        tags: Vec::new(),
     };
     SemanticViewDefinition {
         tables: vec![table("a"), table("b"), table("n")],
@@ -1335,6 +1346,7 @@ fn role_def(order: SortOrder) -> SemanticViewDefinition {
                 },
             }],
             window_spec: None,
+            tags: Vec::new(),
         }],
         joins: vec![rel("r_bal", "b"), rel("r_note", "n")],
         // PIN: a snapshot is an aggregate shape; FACTS returns unaggregated rows and cannot express NON ADDITIVE BY. TECH-DEBT #66
@@ -1346,6 +1358,7 @@ fn role_def(order: SortOrder) -> SemanticViewDefinition {
         resolution_schema_name: None,
         temp_tables: vec![],
         comment: None,
+        tags: Vec::new(),
     }
 }
 

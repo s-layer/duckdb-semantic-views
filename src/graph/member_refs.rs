@@ -138,6 +138,7 @@ mod tests {
             unique_constraints: vec![],
             comment: None,
             synonyms: vec![],
+            tags: Vec::new(),
         }
     }
 
@@ -151,6 +152,7 @@ mod tests {
             synonyms: vec![],
             is_filter: false,
             access: AccessModifier::Public,
+            tags: Vec::new(),
         }
     }
 
@@ -163,6 +165,7 @@ mod tests {
             comment: None,
             synonyms: vec![],
             is_filter: false,
+            tags: Vec::new(),
         }
     }
 
@@ -178,6 +181,7 @@ mod tests {
             access: AccessModifier::Public,
             non_additive_by: vec![],
             window_spec: None,
+            tags: Vec::new(),
         }
     }
 

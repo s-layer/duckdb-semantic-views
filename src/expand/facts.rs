@@ -1238,6 +1238,7 @@ mod tests {
             access: AccessModifier::Public,
             non_additive_by: vec![],
             window_spec: None,
+            tags: Vec::new(),
         }
     }
 
@@ -1251,6 +1252,7 @@ mod tests {
             synonyms: vec![],
             is_filter: false,
             access: AccessModifier::Public,
+            tags: Vec::new(),
         }
     }
 
@@ -1497,6 +1499,7 @@ mod tests {
             synonyms: vec![],
             is_filter: false,
             access: AccessModifier::Public,
+            tags: Vec::new(),
         }];
         let topo = toposort_facts(&facts).unwrap();
         let result = inline_facts("SUM(Net_Price)", &facts, &topo);
@@ -1518,6 +1521,7 @@ mod tests {
             synonyms: vec![],
             is_filter: false,
             access: AccessModifier::Public,
+            tags: Vec::new(),
         }];
         let topo = toposort_facts(&facts).unwrap();
         // Bare reference inlined; `x.net_price` (other table's column) intact.
@@ -1548,6 +1552,7 @@ mod tests {
                 synonyms: vec![],
                 is_filter: false,
                 access: AccessModifier::Public,
+                tags: Vec::new(),
             },
             Fact {
                 name: "top".to_string(),
@@ -1559,6 +1564,7 @@ mod tests {
                 synonyms: vec![],
                 is_filter: false,
                 access: AccessModifier::Public,
+                tags: Vec::new(),
             },
         ];
         let topo = toposort_facts(&facts).unwrap();
@@ -1597,6 +1603,7 @@ mod tests {
             synonyms: vec![],
             is_filter: false,
             access: AccessModifier::Public,
+            tags: Vec::new(),
         }];
         let topo = toposort_facts(&facts).unwrap();
         assert_eq!(
@@ -1634,6 +1641,7 @@ mod tests {
             synonyms: vec![],
             is_filter: false,
             access: AccessModifier::Public,
+            tags: Vec::new(),
         }];
         let topo = toposort_facts(&facts).unwrap();
         assert_eq!(
@@ -1875,6 +1883,7 @@ mod tests {
             synonyms: vec![],
             is_filter: false,
             access: AccessModifier::Public,
+            tags: Vec::new(),
         }
     }
 

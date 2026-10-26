@@ -28,6 +28,7 @@ Syntax
            [ UNIQUE ( <column> [, <column> ...] ) ]
            [ COMMENT = '<text>' ]
            [ WITH SYNONYMS = ( '<synonym>' [, '<synonym>' ...] ) ]
+           [ [ WITH ] TAG ( <tag_name> = '<value>' [, ...] ) ]
        [, ... ]
    )
    [ RELATIONSHIPS (
@@ -40,6 +41,7 @@ Syntax
            [ COMMENT = '<text>' ]
            [ WITH SYNONYMS = ( '<synonym>' [, '<synonym>' ...] ) ]
            [ LABELS = ( FILTER ) ]
+           [ [ WITH ] TAG ( <tag_name> = '<value>' [, ...] ) ]
        [, ... ]
    ) ]
    [ DIMENSIONS (
@@ -47,6 +49,7 @@ Syntax
            [ COMMENT = '<text>' ]
            [ WITH SYNONYMS = ( '<synonym>' [, '<synonym>' ...] ) ]
            [ LABELS = ( FILTER ) ]
+           [ [ WITH ] TAG ( <tag_name> = '<value>' [, ...] ) ]
        [, ... ]
    ) ]
    [ METRICS (
@@ -57,6 +60,7 @@ Syntax
            AS <aggregate_expression>
            [ COMMENT = '<text>' ]
            [ WITH SYNONYMS = ( '<synonym>' [, '<synonym>' ...] ) ]
+           [ [ WITH ] TAG ( <tag_name> = '<value>' [, ...] ) ]
        [, [ PRIVATE ] <metric_name> AS <derived_expression> ... ]
        [, [ PRIVATE ] <alias>.<metric_name> AS
            <window_func>( <inner_metric> [, <extra_arg> ...] )
@@ -66,7 +70,8 @@ Syntax
                           [, <dim_name> ...] ]
                       [ <frame_clause> ] )
            [ COMMENT = '<text>' ]
-           [ WITH SYNONYMS = ( '<synonym>' [, '<synonym>' ...] ) ] ]
+           [ WITH SYNONYMS = ( '<synonym>' [, '<synonym>' ...] ) ]
+           [ [ WITH ] TAG ( <tag_name> = '<value>' [, ...] ) ] ]
    ) ]
    [ MATERIALIZATIONS (
        <mat_name> AS (
@@ -76,6 +81,8 @@ Syntax
        )
        [, ... ]
    ) ]
+   [ COMMENT = '<text>' ]
+   [ [ WITH ] TAG ( <tag_name> = '<value>' [, ...] ) ]
 
 .. note::
 
@@ -100,8 +107,8 @@ Syntax
 
 .. note::
 
-   **Annotation order.** ``COMMENT``, ``WITH SYNONYMS`` and ``LABELS`` may
-   appear in any order on a single entry; the grammar above shows one
+   **Annotation order.** ``COMMENT``, ``WITH SYNONYMS``, ``LABELS`` and
+   ``[WITH] TAG`` may appear in any order on a single entry; the grammar above shows one
    canonical spelling, not a required sequence. What *is* required is that the
    annotations be contiguous and complete: once the first annotation keyword is
    seen, the remainder of the entry must consist only of valid annotation
@@ -112,6 +119,49 @@ Syntax
    are the entries that carry the flag. On a ``TABLES`` or ``METRICS`` entry, or
    in the trailing view-level annotation position, it is rejected rather than
    parsed and discarded.
+
+.. _ref-create-tags:
+
+.. note::
+
+   **Tags.**
+
+   .. versionadded:: 0.17.0
+
+   ``[WITH] TAG (<tag_name> = '<value>', ...)`` attaches Snowflake-style
+   name/value tags to a logical table, fact, dimension or metric entry, or to
+   the view itself (written after the last clause, after any trailing
+   ``COMMENT``). Tags are metadata: they never change what a query returns.
+
+   - ``<tag_name>`` is a tag name with up to three dot-separated parts --
+     ``tag``, ``schema.tag`` or ``database.schema.tag`` -- each part an
+     identifier or a double-quoted identifier. No ``CREATE TAG`` object is
+     needed or looked up: the name is stored as written.
+   - ``<value>`` is a single-quoted string of at most 256 characters.
+   - After a member's expression, a bare ``TAG (`` begins the clause only
+     when a tag name and ``=`` follow, so a call to a macro or function named
+     ``tag``, such as ``tag(o.x)``, stays part of the expression. A call whose
+     first argument is ``<name> = ...``, such as ``tag(o.region = 'East')``,
+     reads as a tag clause, as in Snowflake. ``WITH TAG`` always begins the
+     clause.
+   - A tag name may appear once per object (compared case-insensitively, quoted
+     or not), and an object takes one ``TAG`` clause.
+   - Tags appear as a ``TAGS`` row in :ref:`DESCRIBE SEMANTIC VIEW
+     <ref-describe-semantic-view>` and are written back by ``GET_DDL`` and the
+     YAML export. ``SHOW SEMANTIC ...`` output does not include them, matching
+     Snowflake.
+
+   .. code-block:: sql
+
+      CREATE SEMANTIC VIEW sales AS
+        TABLES (o AS orders PRIMARY KEY (id) WITH TAG (governance.pii = 'none'))
+        DIMENSIONS (
+          o.region AS o.region
+            WITH TAG (S_LAYER_KIND = 'dimension', S_LAYER_LABEL = 'Sales region')
+        )
+        METRICS (o.revenue AS SUM(o.amount) TAG (S_LAYER_KIND = 'metric'))
+        COMMENT = 'Sales by region'
+        WITH TAG (owner = 'analytics');
 
 **YAML body (FROM YAML):**
 
@@ -211,6 +261,7 @@ Declares the physical tables available to the semantic view. Each entry assigns 
 - ``PRIMARY KEY (<column>, ...)``, optional. One or more columns forming the table's primary key. Used for JOIN synthesis and cardinality inference. This is semantic metadata, not a DuckDB constraint. Omit for fact tables that do not need to be join targets.
 - ``COMMENT = '<text>'``, optional. A human-readable description of the table.
 - ``WITH SYNONYMS = ('<synonym>', ...)``, optional. Alternative names for discoverability. May be written before or after ``COMMENT`` when both are present.
+- ``[WITH] TAG (<tag_name> = '<value>', ...)``, optional. Name/value metadata tags. See :ref:`Tags <ref-create-tags>`.
 
 **Optional: UNIQUE constraints:**
 
@@ -301,6 +352,7 @@ Declares named row-level expressions. Facts are inlined into metric expressions 
 - ``COMMENT = '<text>'``, optional. A human-readable description.
 - ``WITH SYNONYMS = ('<synonym>', ...)``, optional. Alternative names for discoverability.
 - ``LABELS = (FILTER)``, optional. Declares the fact a :ref:`named filter <howto-annotations-filters>` -- a boolean-valued member meant for reuse in a query's :ref:`WHERE <ref-sv-pre-agg-filtering>`. Metadata only: it does not restrict querying, and the ``BOOLEAN`` requirement is enforced by DuckDB's binder at query time. ``FILTER`` is the only accepted label.
+- ``[WITH] TAG (<tag_name> = '<value>', ...)``, optional. Name/value metadata tags. See :ref:`Tags <ref-create-tags>`.
 
 **Fact chaining:**
 
@@ -340,6 +392,7 @@ Declares named grouping expressions available for queries.
 - ``COMMENT = '<text>'``, optional. A human-readable description.
 - ``WITH SYNONYMS = ('<synonym>', ...)``, optional. Alternative names for discoverability.
 - ``LABELS = (FILTER)``, optional. Declares the dimension a :ref:`named filter <howto-annotations-filters>` -- a boolean-valued member meant for reuse in a query's :ref:`WHERE <ref-sv-pre-agg-filtering>`. Metadata only: it does not hide the dimension from output, and the ``BOOLEAN`` requirement is enforced by DuckDB's binder at query time. ``FILTER`` is the only accepted label.
+- ``[WITH] TAG (<tag_name> = '<value>', ...)``, optional. Name/value metadata tags. See :ref:`Tags <ref-create-tags>`.
 
 .. note::
 
@@ -478,6 +531,7 @@ See :ref:`howto-window-metrics` for details on both modes.
 - ``<window_func>(<inner_metric>, ...) OVER (...)``, for window metrics: wraps another metric in a window function.
 - ``COMMENT = '<text>'``, optional. A human-readable description.
 - ``WITH SYNONYMS = ('<synonym>', ...)``, optional. Alternative names for discoverability.
+- ``[WITH] TAG (<tag_name> = '<value>', ...)``, optional. Name/value metadata tags. See :ref:`Tags <ref-create-tags>`.
 
 **Validation rules:**
 

@@ -1,0 +1,286 @@
+# Member-level TAG support: Snowflake's `[WITH] TAG (name = 'value', ...)` on the
+# view, its logical tables, facts, dimensions and metrics. Tags are metadata:
+# accepted, stored, shown in DESCRIBE (`TAGS` rows, a JSON object), and
+# round-tripped through GET_DDL and YAML. No tag object needs to exist.
+
+require semantic_views
+
+statement ok
+CREATE TABLE mt_orders (id INTEGER PRIMARY KEY, region VARCHAR, amount INTEGER);
+
+statement ok
+INSERT INTO mt_orders VALUES (1, 'East', 10), (2, 'East', 20), (3, 'West', 5);
+
+# Snowflake's own clause order: a member's TAG between WITH SYNONYMS and
+# COMMENT, a table's after its COMMENT, the view's after its COMMENT.
+statement ok
+CREATE SEMANTIC VIEW mt_v AS
+  TABLES (
+    o AS mt_orders PRIMARY KEY (id)
+      WITH SYNONYMS = ('sales') COMMENT = 'orders' WITH TAG (gov.pii = 'none')
+  )
+  FACTS (
+    o.amt AS o.amount TAG (S_LAYER_KIND = 'fact')
+  )
+  DIMENSIONS (
+    o.region AS o.region
+      WITH SYNONYMS = ('area')
+      WITH TAG (S_LAYER_KIND = 'dimension', S_LAYER_LABEL = 'Sales region', db.gov."Owner Tag" = 'it''s')
+      COMMENT = 'where'
+  )
+  METRICS (
+    o.revenue AS SUM(o.amount) WITH TAG (S_LAYER_KIND = 'metric'),
+    double_revenue AS revenue * 2 WITH TAG (S_LAYER_SPEC = '{"format": "currency"}')
+  )
+  COMMENT = 'tagged view'
+  WITH TAG (S_LAYER_KIND = 'view')
+
+# Tags are metadata: the view queries as before.
+query TI rowsort
+SELECT * FROM semantic_view('mt_v', dimensions := ['region'], metrics := ['revenue'])
+----
+East	30
+West	5
+
+query TTTTT rowsort
+SELECT * FROM describe_semantic_view('mt_v') WHERE property = 'TAGS'
+----
+(empty)	(empty)	(empty)	TAGS	{"S_LAYER_KIND":"view"}
+DERIVED_METRIC	double_revenue	(empty)	TAGS	{"S_LAYER_SPEC":"{\"format\": \"currency\"}"}
+DIMENSION	region	mt_orders	TAGS	{"S_LAYER_KIND":"dimension","S_LAYER_LABEL":"Sales region","db.gov.\"Owner Tag\"":"it's"}
+FACT	amt	mt_orders	TAGS	{"S_LAYER_KIND":"fact"}
+METRIC	revenue	mt_orders	TAGS	{"S_LAYER_KIND":"metric"}
+TABLE	mt_orders	(empty)	TAGS	{"gov.pii":"none"}
+
+# The other annotations written around the tags are intact.
+query TTTTT rowsort
+SELECT * FROM describe_semantic_view('mt_v')
+WHERE property IN ('COMMENT', 'SYNONYMS') AND object_kind IN ('', 'TABLE', 'DIMENSION')
+----
+(empty)	(empty)	(empty)	COMMENT	tagged view
+DIMENSION	region	mt_orders	COMMENT	where
+DIMENSION	region	mt_orders	SYNONYMS	["area"]
+TABLE	mt_orders	(empty)	COMMENT	orders
+TABLE	mt_orders	(empty)	SYNONYMS	["sales"]
+
+# The reader's view of it: one JSON object per tagged object.
+query TT rowsort
+SELECT object_name, json_extract_string(property_value, '$.S_LAYER_KIND')
+FROM describe_semantic_view('mt_v')
+WHERE property = 'TAGS' AND object_kind IN ('DIMENSION', 'FACT', 'METRIC')
+----
+amt	fact
+region	dimension
+revenue	metric
+
+# ------------------------------------------------------------------
+# GET_DDL writes every tag, and its output replays to the same view
+# ------------------------------------------------------------------
+
+query I
+SELECT GET_DDL('SEMANTIC_VIEW', 'mt_v') LIKE '%o.region AS o.region COMMENT = ''where'' WITH SYNONYMS = (''area'') WITH TAG (S_LAYER_KIND = ''dimension'', S_LAYER_LABEL = ''Sales region'', db.gov."Owner Tag" = ''it''''s'')%'
+----
+true
+
+query I
+SELECT GET_DDL('SEMANTIC_VIEW', 'mt_v') LIKE '%o AS mt_orders PRIMARY KEY (id) COMMENT = ''orders'' WITH SYNONYMS = (''sales'') WITH TAG (gov.pii = ''none'')%'
+----
+true
+
+query I
+SELECT GET_DDL('SEMANTIC_VIEW', 'mt_v') LIKE '%' || chr(10) || 'WITH TAG (S_LAYER_KIND = ''view'')' || chr(10)
+----
+true
+
+# GET_DDL's output for mt_v, under another name.
+statement ok
+CREATE OR REPLACE SEMANTIC VIEW mt_replay COMMENT = 'tagged view' AS
+TABLES (
+    o AS mt_orders PRIMARY KEY (id) COMMENT = 'orders' WITH SYNONYMS = ('sales') WITH TAG (gov.pii = 'none')
+)
+FACTS (
+    o.amt AS o.amount WITH TAG (S_LAYER_KIND = 'fact')
+)
+DIMENSIONS (
+    o.region AS o.region COMMENT = 'where' WITH SYNONYMS = ('area') WITH TAG (S_LAYER_KIND = 'dimension', S_LAYER_LABEL = 'Sales region', db.gov."Owner Tag" = 'it''s')
+)
+METRICS (
+    o.revenue AS SUM(o.amount) WITH TAG (S_LAYER_KIND = 'metric'),
+    double_revenue AS revenue * 2 WITH TAG (S_LAYER_SPEC = '{"format": "currency"}')
+)
+WITH TAG (S_LAYER_KIND = 'view')
+
+query I
+SELECT replace(GET_DDL('SEMANTIC_VIEW', 'mt_v'), 'VIEW mt_v ', 'VIEW mt_replay ')
+     = GET_DDL('SEMANTIC_VIEW', 'mt_replay')
+----
+true
+
+query I
+SELECT COUNT(*) FROM (
+  SELECT object_kind, object_name, property, property_value FROM describe_semantic_view('mt_v')
+  WHERE property <> 'DATA_TYPE'
+  EXCEPT
+  SELECT object_kind, object_name, property, property_value FROM describe_semantic_view('mt_replay')
+)
+----
+0
+
+# ------------------------------------------------------------------
+# YAML: Snowflake's shape (name: {database, schema, tag}), both ways
+# ------------------------------------------------------------------
+
+query I
+SELECT read_yaml_from_semantic_view('mt_v') LIKE '%tags:%- name:%tag: S_LAYER_KIND%value: dimension%'
+----
+true
+
+statement ok
+CREATE SEMANTIC VIEW mt_yaml FROM YAML $$
+tables:
+  - alias: o
+    table: mt_orders
+    pk_columns: [id]
+    tags:
+      - name: {schema: gov, tag: pii}
+        value: none
+dimensions:
+  - name: region
+    expr: o.region
+    source_table: o
+    tags:
+      - name: {tag: S_LAYER_KIND}
+        value: dimension
+metrics:
+  - name: revenue
+    expr: SUM(o.amount)
+    source_table: o
+tags:
+  - name: {database: db, schema: gov, tag: owner}
+    value: analytics
+$$
+
+query TTTTT rowsort
+SELECT * FROM describe_semantic_view('mt_yaml') WHERE property = 'TAGS'
+----
+(empty)	(empty)	(empty)	TAGS	{"db.gov.owner":"analytics"}
+DIMENSION	region	mt_orders	TAGS	{"S_LAYER_KIND":"dimension"}
+TABLE	mt_orders	(empty)	TAGS	{"gov.pii":"none"}
+
+query I
+SELECT GET_DDL('SEMANTIC_VIEW', 'mt_yaml') LIKE '%' || chr(10) || 'WITH TAG (db.gov.owner = ''analytics'')' || chr(10)
+----
+true
+
+# A tag the DDL could not write is refused at the YAML door too.
+statement error
+CREATE SEMANTIC VIEW mt_yaml_bad FROM YAML $$
+tables:
+  - alias: o
+    table: mt_orders
+dimensions:
+  - name: region
+    expr: o.region
+    source_table: o
+    tags:
+      - name: {database: db, tag: t}
+        value: x
+metrics: []
+$$
+----
+dimension 'region' has an invalid tag: tag 't' names a database but no schema
+
+# ------------------------------------------------------------------
+# Refusals
+# ------------------------------------------------------------------
+
+statement error
+CREATE SEMANTIC VIEW mt_bad AS
+  TABLES (o AS mt_orders PRIMARY KEY (id))
+  DIMENSIONS (o.region AS o.region TAG (a.t = '1', A."T" = '2'))
+----
+Invalid TAG: duplicate tag 'A.T'
+
+statement error
+CREATE SEMANTIC VIEW mt_bad AS
+  TABLES (o AS mt_orders PRIMARY KEY (id))
+  DIMENSIONS (o.region AS o.region WITH TAG (t = '1') TAG (u = '2'))
+----
+Duplicate TAG annotation
+
+statement error
+CREATE SEMANTIC VIEW mt_bad AS
+  TABLES (o AS mt_orders PRIMARY KEY (id))
+  DIMENSIONS (o.region AS o.region)
+  WITH TAG ()
+----
+TAG () is empty
+
+statement error
+CREATE SEMANTIC VIEW mt_bad AS
+  TABLES (o AS mt_orders PRIMARY KEY (id))
+  METRICS (o.revenue AS SUM(o.amount) TAG (t = 1))
+----
+Expected a single-quoted string as the value of tag 't'
+
+# Snowflake's limit is 256 characters (not bytes): 256 two-byte characters are
+# accepted, one more is refused.
+statement ok
+CREATE SEMANTIC VIEW mt_long AS
+  TABLES (o AS mt_orders PRIMARY KEY (id))
+  DIMENSIONS (o.region AS o.region TAG (t = 'éééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééé'))
+
+query I
+SELECT length(json_extract_string(property_value, '$.t'))
+FROM describe_semantic_view('mt_long') WHERE property = 'TAGS'
+----
+256
+
+statement error
+CREATE SEMANTIC VIEW mt_bad AS
+  TABLES (o AS mt_orders PRIMARY KEY (id))
+  DIMENSIONS (o.region AS o.region TAG (t = 'ééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééé'))
+----
+is 257 characters long; a tag value is at most 256 characters
+
+# A column named `tag` is still a column: only `TAG (` begins the clause.
+statement ok
+CREATE TABLE mt_tagged (id INTEGER PRIMARY KEY, tag VARCHAR);
+
+statement ok
+INSERT INTO mt_tagged VALUES (1, 'a'), (2, 'b');
+
+statement ok
+CREATE SEMANTIC VIEW mt_col AS
+  TABLES (t AS mt_tagged PRIMARY KEY (id))
+  DIMENSIONS (t.tag AS tag)
+  METRICS (t.n AS COUNT(*) TAG (k = 'v'))
+
+query TI rowsort
+SELECT * FROM semantic_view('mt_col', dimensions := ['tag'], metrics := ['n'])
+----
+a	1
+b	1
+
+# A call to a macro named `tag` is an expression: a bare `TAG (` opens the
+# clause only when a tag name and `=` follow.
+statement ok
+CREATE MACRO tag(x) AS x || '!';
+
+statement ok
+CREATE SEMANTIC VIEW mt_macro AS
+  TABLES (o AS mt_orders PRIMARY KEY (id))
+  DIMENSIONS (o.loud AS tag(o.region) TAG (k = 'v'))
+  METRICS (o.revenue AS SUM(o.amount) + 0 * MAX(length(tag (o.region))))
+
+query TI rowsort
+SELECT * FROM semantic_view('mt_macro', dimensions := ['loud'], metrics := ['revenue'])
+----
+East!	30
+West!	5
+
+query T
+SELECT property_value FROM describe_semantic_view('mt_macro')
+WHERE object_name = 'loud' AND property = 'TAGS'
+----
+{"k":"v"}

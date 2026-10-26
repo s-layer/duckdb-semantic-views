@@ -1,9 +1,10 @@
-//! Trailing COMMENT / WITH SYNONYMS annotations and leading access modifiers.
+//! Trailing COMMENT / WITH SYNONYMS / LABELS / [WITH] TAG annotations and leading
+//! access modifiers.
 
 use super::scan::{extract_paren_prefix, is_ident_continuation, QuoteState};
 use super::split_at_depth0_commas;
 use crate::errors::ParseError;
-use crate::model::AccessModifier;
+use crate::model::{AccessModifier, Tag, TagName};
 
 /// Whether a keyword starting at `i` sits on a boundary that can legitimately
 /// begin a trailing annotation.
@@ -32,11 +33,13 @@ fn annotation_boundary_before(bytes: &[u8], i: usize) -> bool {
 }
 
 /// Trailing metadata annotations parsed from a DDL entry.
-/// Used internally to collect COMMENT and SYNONYMS from entry text.
+/// Used internally to collect COMMENT, SYNONYMS, LABELS and TAG from entry text.
 #[derive(Debug, Default)]
 pub(super) struct ParsedAnnotations {
     pub(super) comment: Option<String>,
     pub(super) synonyms: Vec<String>,
+    /// `[WITH] TAG (name = 'value', ...)`, in the order written.
+    pub(super) tags: Vec<Tag>,
     /// `LABELS = (FILTER)` was present — the member is a named filter.
     pub(super) is_filter: bool,
 }
@@ -131,9 +134,132 @@ fn parse_label_list(content: &str, base_offset: usize) -> Result<bool, ParseErro
     Ok(is_filter)
 }
 
+/// Parse the inside of a `TAG ( ... )` list: `name = 'value'` pairs, each name
+/// `tag`, `schema.tag` or `database.schema.tag` with any part double-quoted.
+///
+/// A quoted part is stored without its quotes and a bare one as written, so the
+/// stored name is the tag's identity whichever way it was spelled. The list must
+/// pass [`crate::model::tag_error`] (no empty or duplicate name, no value over
+/// 256 characters), the same rule the YAML import applies.
+fn parse_tag_list(content: &str, base_offset: usize) -> Result<Vec<Tag>, ParseError> {
+    let mut tags = Vec::new();
+    let mut offsets = Vec::new();
+    // Every entry ends with its quoted value, so a list ending in a comma has
+    // an empty last entry (which the split does not report).
+    if content.trim_end().ends_with(',') {
+        return Err(ParseError {
+            message: "Empty entry in TAG list. Expected TAG (name = 'value', ...).".to_string(),
+            position: Some(base_offset + content.trim_end().len() - 1),
+        });
+    }
+    for (_, entry) in split_at_depth0_commas(content)? {
+        let trimmed = entry.trim();
+        let entry_offset = base_offset + crate::util::byte_offset_within(content, trimmed);
+        if trimmed.is_empty() {
+            return Err(ParseError {
+                message: "Empty entry in TAG list. Expected TAG (name = 'value', ...).".to_string(),
+                position: Some(entry_offset),
+            });
+        }
+        tags.push(parse_tag_entry(trimmed, entry_offset)?);
+        offsets.push(entry_offset);
+    }
+    if tags.is_empty() {
+        return Err(ParseError {
+            message: "TAG () is empty. Expected TAG (name = 'value', ...).".to_string(),
+            position: Some(base_offset),
+        });
+    }
+    if let Some((i, message)) = crate::model::tag_error(&tags) {
+        return Err(ParseError {
+            message: format!("Invalid TAG: {message}."),
+            position: Some(offsets[i]),
+        });
+    }
+    Ok(tags)
+}
+
+/// One `name = 'value'` entry of a TAG list (already trimmed).
+fn parse_tag_entry(entry: &str, base_offset: usize) -> Result<Tag, ParseError> {
+    // The `=` that ends the name: the first one outside a quoted part.
+    let mut in_quotes = false;
+    let eq = entry.bytes().position(|b| {
+        if b == b'"' {
+            in_quotes = !in_quotes;
+        }
+        b == b'=' && !in_quotes
+    });
+    let Some(eq) = eq else {
+        return Err(ParseError {
+            message: format!("Expected '=' in TAG entry '{entry}'. Expected name = 'value'."),
+            position: Some(base_offset),
+        });
+    };
+    let name_text = entry[..eq].trim();
+    let name = parse_tag_name(name_text).map_err(|e| ParseError {
+        message: format!("Invalid tag name '{name_text}': {e}."),
+        position: Some(base_offset),
+    })?;
+    let after_eq = entry[eq + 1..].trim_start();
+    let value_offset = base_offset + crate::util::byte_offset_within(entry, after_eq);
+    let (value, consumed) =
+        crate::util::extract_single_quoted_prefix(after_eq).map_err(|e| ParseError {
+            message: match e {
+                crate::util::SingleQuoteError::NotQuoted => {
+                    format!("Expected a single-quoted string as the value of tag '{name_text}'.")
+                }
+                crate::util::SingleQuoteError::Unterminated => {
+                    "Unclosed single-quoted string.".to_string()
+                }
+            },
+            position: Some(value_offset),
+        })?;
+    let rest = after_eq[consumed..].trim();
+    if !rest.is_empty() {
+        return Err(ParseError {
+            message: format!("Unexpected text '{rest}' after the value of tag '{name_text}'."),
+            position: Some(base_offset + crate::util::byte_offset_within(entry, rest)),
+        });
+    }
+    Ok(Tag { name, value })
+}
+
+/// A tag name: one to three dot-separated parts, each a bare identifier or a
+/// double-quoted one.
+fn parse_tag_name(text: &str) -> Result<TagName, String> {
+    if text.is_empty() {
+        return Err("the name is missing".to_string());
+    }
+    let parts = crate::ident::parse_qualified_identifier_with_quoting(text)?;
+    for (part, quoted) in &parts {
+        let b = part.as_bytes();
+        let bare_ok = b
+            .first()
+            .is_some_and(|&c| crate::util::is_ident_byte(c) && !c.is_ascii_digit())
+            && b.iter().all(|&c| crate::util::is_ident_continue(c));
+        if !quoted && !bare_ok {
+            return Err(format!(
+                "'{part}' is not an identifier; double-quote it to use it as a name"
+            ));
+        }
+    }
+    let mut parts: Vec<String> = parts.into_iter().map(|(p, _)| p).collect();
+    let tag = parts.pop().unwrap_or_default();
+    let schema = parts.pop();
+    let database = parts.pop();
+    if !parts.is_empty() {
+        return Err("a tag name has at most three parts (database.schema.tag)".to_string());
+    }
+    Ok(TagName {
+        database,
+        schema,
+        tag,
+    })
+}
+
 /// Byte offset in `text` where an entry's trailing annotations begin: the
-/// first depth-0, unquoted `COMMENT`, `LABELS` or `WITH SYNONYMS` keyword at a
-/// word boundary. Everything before it is the entry's expression.
+/// first depth-0, unquoted `COMMENT`, `LABELS`, `WITH SYNONYMS`, `WITH TAG` or
+/// `TAG (` at a word boundary. Everything before it is the entry's expression.
 ///
 /// Shared with the YAML choke point (`crate::model`), which must refuse an
 /// expression the keyword grammar would split here.
@@ -178,17 +304,31 @@ pub(crate) fn find_annotation_start(text: &str) -> Option<usize> {
                         annotation_start = Some(i);
                     }
                 }
-                // Check for WITH keyword (for WITH SYNONYMS)
+                // Check for WITH keyword (for WITH SYNONYMS / WITH TAG)
                 if i + 4 <= bytes.len() && &upper_bytes[i..i + 4] == b"WITH" {
                     let before_ok = annotation_boundary_before(bytes, i);
                     let after_ok = i + 4 == bytes.len() || !is_ident_continuation(bytes[i + 4]);
                     if before_ok && after_ok {
-                        // Verify it's WITH SYNONYMS, not just any WITH
+                        // Verify it's WITH SYNONYMS or WITH TAG, not just any WITH
                         let after_with = upper[i + 4..].trim_start();
-                        if after_with.starts_with("SYNONYMS") && annotation_start.is_none() {
+                        if (after_with.starts_with("SYNONYMS")
+                            || starts_with_keyword(after_with, "TAG"))
+                            && annotation_start.is_none()
+                        {
                             annotation_start = Some(i);
                         }
                     }
+                }
+                // Check for a bare TAG keyword. Only `TAG (<name> =` counts: `TAG`
+                // alone is an ordinary name (`o.d AS tag`), and `tag(o.x)` is a
+                // call to a macro or UDF named `tag`.
+                if i + 3 <= bytes.len()
+                    && &upper_bytes[i..i + 3] == b"TAG"
+                    && annotation_boundary_before(bytes, i)
+                    && opens_tag_list(&text[i + 3..])
+                    && annotation_start.is_none()
+                {
+                    annotation_start = Some(i);
                 }
             }
         }
@@ -218,10 +358,30 @@ pub(crate) fn find_annotation_start(text: &str) -> Option<usize> {
 /// `base_offset` is the absolute byte offset of `text[0]` in the original
 /// query; every error caret in this subtree is recovered from the offending
 /// token's position within `text` (F-15, code-review 2026-07-16).
-#[allow(clippy::too_many_lines)]
 pub(super) fn parse_trailing_annotations(
     text: &str,
     base_offset: usize,
+) -> Result<(String, ParsedAnnotations), ParseError> {
+    parse_annotations(text, base_offset, false)
+}
+
+/// [`parse_trailing_annotations`] for text known to begin at an annotation
+/// keyword, such as the view-level annotations after the last clause, where no
+/// expression can precede them. There a bare `TAG` always opens the clause, so
+/// a malformed list (`TAG ()`) is reported as a TAG error rather than being
+/// taken for a call to a function named `tag`.
+pub(super) fn parse_leading_annotations(
+    text: &str,
+    base_offset: usize,
+) -> Result<(String, ParsedAnnotations), ParseError> {
+    parse_annotations(text, base_offset, true)
+}
+
+#[allow(clippy::too_many_lines)]
+fn parse_annotations(
+    text: &str,
+    base_offset: usize,
+    at_keyword: bool,
 ) -> Result<(String, ParsedAnnotations), ParseError> {
     // Re-anchor past any leading whitespace `trim` will drop, so `base_offset`
     // remains the absolute offset of `text[0]` after trimming.
@@ -229,7 +389,11 @@ pub(super) fn parse_trailing_annotations(
     let text = text.trim();
     // Absolute caret for any subslice of `text` (F-15).
     let pos_of = |sub: &str| base_offset + crate::util::byte_offset_within(text, sub);
-    let annotation_start = find_annotation_start(text);
+    let annotation_start = if at_keyword {
+        Some(0)
+    } else {
+        find_annotation_start(text)
+    };
 
     let (expr_text, annotation_text) = if let Some(start) = annotation_start {
         (text[..start].trim(), &text[start..])
@@ -248,6 +412,7 @@ pub(super) fn parse_trailing_annotations(
     let mut synonyms: Option<Vec<String>> = None;
     let mut labels_seen = false;
     let mut is_filter = false;
+    let mut tags: Option<Vec<Tag>> = None;
     let mut rest = annotation_text;
 
     loop {
@@ -294,18 +459,23 @@ pub(super) fn parse_trailing_annotations(
             comment = Some(content);
             rest = &after_eq[consumed..];
         } else if starts_with_keyword(&rest_upper, "WITH") {
+            // `WITH` is 4 ASCII bytes.
+            let after_with = rest[4..].trim_start();
+            if starts_with_keyword(&after_with.to_ascii_uppercase(), "TAG") {
+                // `WITH TAG (...)`: the same clause as a bare `TAG (...)`.
+                rest = parse_tag_clause(after_with, &mut tags, pos_of(after_with))?;
+                continue;
+            }
+            if !starts_with_keyword(&after_with.to_ascii_uppercase(), "SYNONYMS") {
+                return Err(ParseError {
+                    message: "Expected SYNONYMS or TAG after WITH keyword.".to_string(),
+                    position: Some(pos_of(after_with)),
+                });
+            }
             if synonyms.is_some() {
                 return Err(ParseError {
                     message: "Duplicate WITH SYNONYMS annotation.".to_string(),
                     position: Some(pos_of(rest)),
-                });
-            }
-            // `WITH` is 4 ASCII bytes.
-            let after_with = rest[4..].trim_start();
-            if !starts_with_keyword(&after_with.to_ascii_uppercase(), "SYNONYMS") {
-                return Err(ParseError {
-                    message: "Expected SYNONYMS after WITH keyword.".to_string(),
-                    position: Some(pos_of(after_with)),
                 });
             }
             // `SYNONYMS` is 8 ASCII bytes. Snowflake makes the `=` optional, so
@@ -322,6 +492,8 @@ pub(super) fn parse_trailing_annotations(
             })?;
             synonyms = Some(parse_synonym_list(content, pos_of(content))?);
             rest = &after_eq[consumed..];
+        } else if starts_with_keyword(&rest_upper, "TAG") {
+            rest = parse_tag_clause(rest, &mut tags, pos_of(rest))?;
         } else if starts_with_keyword(&rest_upper, "LABELS") {
             if labels_seen {
                 return Err(ParseError {
@@ -343,7 +515,7 @@ pub(super) fn parse_trailing_annotations(
         } else {
             return Err(ParseError {
                 message: format!(
-                    "Unexpected text in annotations: '{rest}'. Expected COMMENT = '...', WITH SYNONYMS = (...), or LABELS = (FILTER)."
+                    "Unexpected text in annotations: '{rest}'. Expected COMMENT = '...', WITH SYNONYMS = (...), LABELS = (FILTER), or [WITH] TAG (name = 'value', ...)."
                 ),
                 position: Some(pos_of(rest)),
             });
@@ -355,9 +527,85 @@ pub(super) fn parse_trailing_annotations(
         ParsedAnnotations {
             comment,
             synonyms: synonyms.unwrap_or_default(),
+            tags: tags.unwrap_or_default(),
             is_filter,
         },
     ))
+}
+
+/// Read one `TAG ( ... )` clause from `text`, which starts at the `TAG` keyword
+/// (`WITH`, if written, is already consumed), into `tags`. Returns the text
+/// after the closing parenthesis. `base_offset` is the absolute offset of
+/// `text[0]`.
+fn parse_tag_clause<'t>(
+    text: &'t str,
+    tags: &mut Option<Vec<Tag>>,
+    base_offset: usize,
+) -> Result<&'t str, ParseError> {
+    if tags.is_some() {
+        return Err(ParseError {
+            message: "Duplicate TAG annotation.".to_string(),
+            position: Some(base_offset),
+        });
+    }
+    // `TAG` is 3 ASCII bytes.
+    let after_kw = text[3..].trim_start();
+    let list_offset = base_offset + crate::util::byte_offset_within(text, after_kw);
+    let (content, consumed) = extract_paren_prefix(after_kw).ok_or_else(|| ParseError {
+        message: "Expected parenthesized list after TAG.".to_string(),
+        position: Some(list_offset),
+    })?;
+    *tags = Some(parse_tag_list(
+        content,
+        base_offset + crate::util::byte_offset_within(text, content),
+    )?);
+    Ok(&after_kw[consumed..])
+}
+
+/// Whether `rest` (the text after a bare `TAG`) opens a tag list: `(`, a
+/// possibly qualified, possibly quoted name, then `=` (not `==`). That is what
+/// tells `TAG (t = 'v')` from a call such as `tag(o.x)`.
+fn opens_tag_list(rest: &str) -> bool {
+    let Some(inner) = rest.trim_start().strip_prefix('(') else {
+        return false;
+    };
+    let bytes = inner.trim_start().as_bytes();
+    let mut pos = 0;
+    loop {
+        if bytes.get(pos) == Some(&b'"') {
+            pos += 1;
+            loop {
+                match bytes.get(pos) {
+                    None => return false,
+                    Some(b'"') if bytes.get(pos + 1) == Some(&b'"') => pos += 2,
+                    Some(b'"') => {
+                        pos += 1;
+                        break;
+                    }
+                    Some(_) => pos += 1,
+                }
+            }
+        } else {
+            // A part may be empty here (`TAG (a..b = '1')`, `TAG (= '1')`): no
+            // call reads that way, and the clause parser reports it precisely.
+            while bytes.get(pos).is_some_and(|&b| is_ident_continuation(b)) {
+                pos += 1;
+            }
+        }
+        while bytes.get(pos).is_some_and(u8::is_ascii_whitespace) {
+            pos += 1;
+        }
+        match bytes.get(pos) {
+            Some(b'.') => {
+                pos += 1;
+                while bytes.get(pos).is_some_and(u8::is_ascii_whitespace) {
+                    pos += 1;
+                }
+            }
+            Some(b'=') => return bytes.get(pos + 1) != Some(&b'='),
+            _ => return false,
+        }
+    }
 }
 
 /// True when `upper` (already ASCII-uppercased) begins with `keyword` (also
@@ -503,5 +751,196 @@ mod label_tests {
         let (expr, is_filter) = parse("o.\"labels\" IS NOT NULL");
         assert_eq!(expr, "o.\"labels\" IS NOT NULL");
         assert!(!is_filter);
+    }
+}
+
+#[cfg(test)]
+mod tag_tests {
+    use super::parse_trailing_annotations;
+    use crate::model::{Tag, TagName};
+
+    fn tag(database: Option<&str>, schema: Option<&str>, name: &str, value: &str) -> Tag {
+        Tag {
+            name: TagName {
+                database: database.map(str::to_string),
+                schema: schema.map(str::to_string),
+                tag: name.to_string(),
+            },
+            value: value.to_string(),
+        }
+    }
+
+    fn tags_of(text: &str) -> (String, Vec<Tag>) {
+        let (expr, ann) = parse_trailing_annotations(text, 0).expect("should parse");
+        (expr, ann.tags)
+    }
+
+    fn err_of(text: &str) -> (String, Option<usize>) {
+        let err = parse_trailing_annotations(text, 0).unwrap_err();
+        (err.message, err.position)
+    }
+
+    #[test]
+    fn with_tag_and_bare_tag_both_parse_and_are_stripped_from_the_expression() {
+        for text in [
+            "o.region WITH TAG (s_layer_kind = 'dimension')",
+            "o.region TAG (s_layer_kind = 'dimension')",
+            "o.region with tag(s_layer_kind='dimension')",
+            "o.region Tag (s_layer_kind = 'dimension')",
+        ] {
+            let (expr, tags) = tags_of(text);
+            assert_eq!(expr, "o.region", "for {text:?}");
+            assert_eq!(
+                tags,
+                vec![tag(None, None, "s_layer_kind", "dimension")],
+                "for {text:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn tags_keep_their_order_and_qualified_names_split_into_parts() {
+        let (_, tags) = tags_of(
+            "x WITH TAG (S_LAYER_KIND = 'k', gov.pii = 'none', db.gov.\"Owner Tag\" = 'a''b')",
+        );
+        assert_eq!(
+            tags,
+            vec![
+                tag(None, None, "S_LAYER_KIND", "k"),
+                tag(None, Some("gov"), "pii", "none"),
+                tag(Some("db"), Some("gov"), "Owner Tag", "a'b"),
+            ]
+        );
+    }
+
+    #[test]
+    fn tag_composes_with_the_other_annotations_in_any_order() {
+        for text in [
+            "x WITH SYNONYMS = ('s') WITH TAG (t = 'v') COMMENT = 'c'",
+            "x COMMENT = 'c' TAG (t = 'v') WITH SYNONYMS = ('s')",
+            "x TAG (t = 'v') LABELS = (FILTER) COMMENT = 'c' WITH SYNONYMS = ('s')",
+        ] {
+            let (expr, ann) = parse_trailing_annotations(text, 0).expect("should parse");
+            assert_eq!(expr, "x", "for {text:?}");
+            assert_eq!(ann.tags, vec![tag(None, None, "t", "v")], "for {text:?}");
+            assert_eq!(ann.comment.as_deref(), Some("c"), "for {text:?}");
+            assert_eq!(ann.synonyms, vec!["s".to_string()], "for {text:?}");
+        }
+    }
+
+    #[test]
+    fn a_name_called_tag_is_still_an_expression() {
+        // Only `TAG (` begins the clause; a bare or qualified `tag` is a name.
+        let mut failures = Vec::new();
+        for text in [
+            "tag",
+            "o.tag",
+            "o.tag + 1",
+            "CONCAT(tag, 'x')",
+            "o.\"tag\" (1)",
+            // A call to a user macro or UDF named `tag` is an expression too:
+            // only `TAG (` followed by a tag name and `=` begins the clause.
+            "tag(o.x)",
+            "SUM(o.a) + tag (o.y)",
+            "tag()",
+            "tag(o.x, 'k')",
+            "tag(\"o\".x)",
+        ] {
+            // Every case is checked before failing, so each one reports.
+            match parse_trailing_annotations(text, 0) {
+                Ok((expr, ann)) if expr == text && ann.tags.is_empty() => {}
+                other => failures.push(format!("{text:?}: {other:?}")),
+            }
+        }
+        assert!(failures.is_empty(), "{failures:#?}");
+    }
+
+    #[test]
+    fn a_call_whose_first_argument_is_name_equals_reads_as_a_tag_clause() {
+        // `tag(<name> = ...)` looks exactly like `TAG (<name> = ...)`; it is
+        // read as the clause, as Snowflake's grammar reads it. The broken
+        // remainder then fails at CREATE instead of being stored.
+        let (expr, tags) = tags_of("tag(o.region = 'East')");
+        assert_eq!(expr, "");
+        assert_eq!(tags, vec![tag(None, Some("o"), "region", "East")]);
+        let (expr, _) = tags_of("o.a + tag(o.r = 'E')");
+        assert_eq!(expr, "o.a +");
+    }
+
+    #[test]
+    fn a_tag_value_may_hold_annotation_keywords_and_punctuation() {
+        let (expr, tags) = tags_of("x TAG (t = 'COMMENT = ''y'', TAG (z), WITH SYNONYMS')");
+        assert_eq!(expr, "x");
+        assert_eq!(
+            tags,
+            vec![tag(
+                None,
+                None,
+                "t",
+                "COMMENT = 'y', TAG (z), WITH SYNONYMS"
+            )]
+        );
+    }
+
+    #[test]
+    fn a_value_of_256_characters_is_accepted_and_257_is_refused() {
+        let ok = format!("x TAG (t = '{}')", "é".repeat(256));
+        assert_eq!(tags_of(&ok).1[0].value.chars().count(), 256);
+        let long = format!("x TAG (t = '{}')", "é".repeat(257));
+        let (message, position) = err_of(&long);
+        assert!(message.contains("257 characters"), "got: {message}");
+        assert_eq!(position, Some(7), "caret at the entry");
+    }
+
+    #[test]
+    fn duplicate_tag_names_are_refused_case_insensitively() {
+        let (message, position) = err_of("x TAG (a.t = '1', A.\"T\" = '2')");
+        assert!(message.contains("duplicate tag 'A.T'"), "got: {message}");
+        assert_eq!(position, Some(18));
+        // Different qualifiers are different names.
+        assert_eq!(tags_of("x TAG (a.t = '1', t = '2')").1.len(), 2);
+    }
+
+    #[test]
+    fn a_second_tag_clause_is_refused() {
+        let (message, _) = err_of("x TAG (a = '1') WITH TAG (b = '2')");
+        assert!(message.contains("Duplicate TAG"), "got: {message}");
+    }
+
+    #[test]
+    fn malformed_tag_lists_are_refused() {
+        // Lists that do not begin `<name> =` are written with WITH: after a
+        // member's expression a bare `TAG (` opens the clause only when a name
+        // and `=` follow (otherwise it is a call to a function named `tag`).
+        for (text, needle) in [
+            ("x WITH TAG ()", "TAG () is empty"),
+            ("x TAG (a = '1',)", "Empty entry"),
+            ("x WITH TAG (a '1')", "Expected '='"),
+            ("x TAG (a = 1)", "single-quoted string"),
+            ("x TAG (a = '1' b)", "Unexpected text 'b'"),
+            ("x TAG (= '1')", "the name is missing"),
+            ("x WITH TAG (a b = '1')", "is not an identifier"),
+            ("x WITH TAG (1a = '1')", "is not an identifier"),
+            ("x TAG (a.b.c.d = '1')", "at most three parts"),
+            ("x TAG (a..b = '1')", "Invalid tag name"),
+            ("x TAG (\"\" = '1')", "Invalid tag name"),
+            (
+                "x WITH TAG a = '1'",
+                "Expected parenthesized list after TAG",
+            ),
+            (
+                "x COMMENT = 'c' WITH TAGS (a = '1')",
+                "Expected SYNONYMS or TAG",
+            ),
+        ] {
+            let (message, _) = err_of(text);
+            assert!(message.contains(needle), "for {text:?}: got {message}");
+        }
+    }
+
+    #[test]
+    fn a_quoted_name_may_hold_an_equals_sign() {
+        let (_, tags) = tags_of("x TAG (\"a=b\" = 'v')");
+        assert_eq!(tags, vec![tag(None, None, "a=b", "v")]);
     }
 }

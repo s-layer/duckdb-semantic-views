@@ -1,7 +1,8 @@
 use proptest::prelude::*;
 use semantic_views::model::{
     AccessModifier, Cardinality, Dimension, Fact, Join, Materialization, Metric, NonAdditiveDim,
-    NullsOrder, SemanticViewDefinition, SortOrder, TableRef, WindowOrderBy, WindowSpec,
+    NullsOrder, SemanticViewDefinition, SortOrder, TableRef, Tag, TagName, WindowOrderBy,
+    WindowSpec,
 };
 
 // ---------------------------------------------------------------------------
@@ -70,6 +71,28 @@ fn arb_cardinality() -> impl Strategy<Value = Cardinality> {
     prop_oneof![Just(Cardinality::ManyToOne), Just(Cardinality::OneToOne),]
 }
 
+/// Tags vary on every object: the qualifiers independently present or absent,
+/// payload-shaped names and values (quotes, unicode, punctuation).
+fn arb_tags() -> impl Strategy<Value = Vec<Tag>> {
+    proptest::collection::vec(
+        (
+            proptest::option::of(arb_payload()),
+            proptest::option::of(arb_payload()),
+            arb_payload(),
+            arb_payload(),
+        )
+            .prop_map(|(database, schema, tag, value)| Tag {
+                name: TagName {
+                    database,
+                    schema,
+                    tag,
+                },
+                value,
+            }),
+        0..=2,
+    )
+}
+
 fn arb_table_ref() -> impl Strategy<Value = TableRef> {
     (
         arb_name(),
@@ -78,15 +101,17 @@ fn arb_table_ref() -> impl Strategy<Value = TableRef> {
         proptest::collection::vec(proptest::collection::vec(arb_name(), 1..=2), 0..=2),
         proptest::option::of(arb_payload()),
         proptest::collection::vec(arb_payload(), 0..=2),
+        arb_tags(),
     )
         .prop_map(
-            |(alias, table, pk_columns, unique_constraints, comment, synonyms)| TableRef {
+            |(alias, table, pk_columns, unique_constraints, comment, synonyms, tags)| TableRef {
                 alias,
                 table,
                 pk_columns,
                 unique_constraints,
                 comment,
                 synonyms,
+                tags,
             },
         )
 }
@@ -102,15 +127,17 @@ fn arb_dimension() -> impl Strategy<Value = Dimension> {
         // make any assertion on it vacuous (CLAUDE.md), so the YAML round-trip
         // would silently stop covering LABELS = (FILTER).
         proptest::bool::ANY,
+        arb_tags(),
     )
         .prop_map(
-            |(name, expr, source_table, comment, synonyms, is_filter)| Dimension {
+            |(name, expr, source_table, comment, synonyms, is_filter, tags)| Dimension {
                 name,
                 expr,
                 source_table,
                 output_type: None,
                 comment,
                 synonyms,
+                tags,
                 is_filter,
             },
         )
@@ -172,6 +199,7 @@ fn arb_metric() -> impl Strategy<Value = Metric> {
         proptest::option::of(arb_window_spec()),
         proptest::option::of(arb_payload()),
         proptest::collection::vec(arb_payload(), 0..=2),
+        arb_tags(),
     )
         .prop_map(
             |(
@@ -183,6 +211,7 @@ fn arb_metric() -> impl Strategy<Value = Metric> {
                 window_spec,
                 comment,
                 synonyms,
+                tags,
             )| {
                 Metric {
                     name,
@@ -192,6 +221,7 @@ fn arb_metric() -> impl Strategy<Value = Metric> {
                     using_relationships: vec![],
                     comment,
                     synonyms,
+                    tags,
                     access,
                     non_additive_by,
                     window_spec,
@@ -210,15 +240,17 @@ fn arb_fact() -> impl Strategy<Value = Fact> {
         proptest::collection::vec(arb_payload(), 0..=2),
         // Varied independently of `access` — see `arb_dimension`.
         proptest::bool::ANY,
+        arb_tags(),
     )
         .prop_map(
-            |(name, expr, source_table, access, comment, synonyms, is_filter)| Fact {
+            |(name, expr, source_table, access, comment, synonyms, is_filter, tags)| Fact {
                 name,
                 expr,
                 source_table,
                 output_type: None,
                 comment,
                 synonyms,
+                tags,
                 is_filter,
                 access,
             },
@@ -270,9 +302,10 @@ fn arb_definition() -> impl Strategy<Value = SemanticViewDefinition> {
         proptest::collection::vec(arb_fact(), 0..=2),
         proptest::option::of("[a-z ]{1,30}"),
         proptest::collection::vec(arb_materialization(), 0..=2),
+        arb_tags(),
     )
         .prop_map(
-            |(tables, dimensions, metrics, joins, facts, comment, materializations)| {
+            |(tables, dimensions, metrics, joins, facts, comment, materializations, tags)| {
                 SemanticViewDefinition {
                     tables,
                     dimensions,
@@ -286,6 +319,7 @@ fn arb_definition() -> impl Strategy<Value = SemanticViewDefinition> {
                     resolution_schema_name: None,
                     temp_tables: vec![],
                     comment,
+                    tags,
                 }
             },
         )
@@ -469,11 +503,86 @@ fn arb_oracle_window_spec(dim: String, metric: String) -> impl Strategy<Value = 
         )
 }
 
+/// One tag-name part: plain spellings, and the characters a renderer has to
+/// protect (comment markers, quotes, list punctuation, keywords) — plus the
+/// empty part, which must be REFUSED at import.
+fn arb_oracle_tag_part() -> impl Strategy<Value = String> {
+    prop_oneof![
+        8 => Just("s_layer_kind".to_string()),
+        4 => Just("S_LAYER_SPEC".to_string()),
+        1 => Just("a--b".to_string()),
+        1 => Just("x/*y".to_string()),
+        1 => Just("we\"ird".to_string()),
+        1 => Just("a = 'b', c".to_string()),
+        1 => Just("tag".to_string()),
+        1 => Just("select".to_string()),
+        1 => Just("with".to_string()),
+        1 => Just("Ünï code".to_string()),
+        1 => Just(String::new()),
+    ]
+}
+
+/// Tags for the oracle: the TAG axis of the YAML → `GET_DDL` → front door
+/// contract. Refused shapes are generated on purpose (an empty part, a database
+/// with no schema, a value one character over the limit, a case-folded
+/// duplicate) next to ones that must survive, at rates that leave most
+/// definitions importable (`the_oracle_is_not_all_refusals`).
+fn arb_oracle_tags() -> impl Strategy<Value = Vec<Tag>> {
+    let value = prop_oneof![
+        8 => Just("dimension".to_string()),
+        2 => Just("it's -- not /* a */ comment, ) TAG (x = 'y')".to_string()),
+        1 => Just(String::new()),
+        1 => Just("é".repeat(256)),
+        1 => Just("v".repeat(257)),
+    ];
+    let p = arb_oracle_tag_part;
+    let name = prop_oneof![
+        6 => p().prop_map(|tag| TagName { database: None, schema: None, tag }),
+        2 => (p(), p()).prop_map(|(schema, tag)| TagName { database: None, schema: Some(schema), tag }),
+        1 => (p(), p(), p()).prop_map(|(database, schema, tag)| TagName {
+            database: Some(database),
+            schema: Some(schema),
+            tag,
+        }),
+        1 => (p(), p()).prop_map(|(database, tag)| TagName { database: Some(database), schema: None, tag }),
+    ];
+    let tag = (name, value).prop_map(|(name, value)| Tag { name, value });
+    (
+        prop_oneof![1 => Just(Vec::new()), 1 => prop::collection::vec(tag, 1..=2)],
+        prop::bool::weighted(0.05),
+    )
+        .prop_map(|(mut tags, dup)| {
+            // A case-folded repeat of the first name.
+            if dup {
+                if let Some(first) = tags.first().cloned() {
+                    let mut again = first;
+                    again.name.tag = again.name.tag.to_ascii_uppercase();
+                    tags.push(again);
+                }
+            }
+            tags
+        })
+}
+
+/// [`arb_oracle_def_untagged`], with tags on the view and its dimension.
+fn arb_oracle_def() -> impl Strategy<Value = SemanticViewDefinition> {
+    (
+        arb_oracle_def_untagged(),
+        arb_oracle_tags(),
+        arb_oracle_tags(),
+    )
+        .prop_map(|(mut def, view_tags, dim_tags)| {
+            def.tags = view_tags;
+            def.dimensions[0].tags = dim_tags;
+            def
+        })
+}
+
 /// A definition anchored at one table `o`, with one dimension, one base metric
 /// and an optional window metric over them, plus an optional materialization.
 /// Shapes that are supposed to be REFUSED are generated on purpose — the
 /// property's contract covers both outcomes.
-fn arb_oracle_def() -> impl Strategy<Value = SemanticViewDefinition> {
+fn arb_oracle_def_untagged() -> impl Strategy<Value = SemanticViewDefinition> {
     (
         arb_safe_name("d"),
         arb_safe_name("m"),
@@ -614,15 +723,7 @@ fn front_door_replay(ddl: &str) -> Result<SemanticViewDefinition, String> {
         .strip_prefix(&format!("CREATE OR REPLACE SEMANTIC VIEW {VIEW} ")[..])
         .ok_or_else(|| format!("rendered header shape changed:\n{ddl}"))?;
     let kb = parse_keyword_body(body, 0).map_err(|e| e.message)?;
-    Ok(SemanticViewDefinition {
-        tables: kb.tables,
-        joins: kb.relationships,
-        facts: kb.facts,
-        dimensions: kb.dimensions,
-        metrics: kb.metrics,
-        materializations: kb.materializations,
-        ..Default::default()
-    })
+    Ok(kb.into_definition())
 }
 
 proptest! {
@@ -661,6 +762,7 @@ proptest! {
             "materializations drift\n{}",
             ddl
         );
+        prop_assert_eq!(&replayed.tags, &imported.tags, "view tags drift\n{}", ddl);
 
         // Metrics are compared field-by-field with ONE documented exemption: a
         // window metric's `expr` is REBUILT from its `WindowSpec` at render
@@ -748,6 +850,33 @@ fn generator_varies_output_type_and_window_specs() {
             .any(|m| m.source_table.is_none() && m.name.eq_ignore_ascii_case("public"))),
         "no derived metric was ever named `public` — RT-9's twin keyword is unreached"
     );
+}
+
+#[test]
+fn generator_reaches_both_outcomes_on_the_tag_axis() {
+    let defs = sample_defs(512);
+    let tagged =
+        |d: &SemanticViewDefinition| !d.tags.is_empty() || !d.dimensions[0].tags.is_empty();
+    let imports = |d: &SemanticViewDefinition| {
+        let yaml = yaml_serde::to_string(d).expect("YAML serialize");
+        SemanticViewDefinition::from_yaml_with_size_cap(VIEW, &yaml)
+    };
+    assert!(
+        defs.iter().any(|d| tagged(d) && imports(d).is_ok()),
+        "no tagged definition ever imported — the TAG round trip is unreached"
+    );
+    for (label, needle) in [
+        ("an empty name part", "name part is empty"),
+        ("a database with no schema", "no schema"),
+        ("a value over the limit", "257 characters"),
+        ("a duplicate name", "duplicate tag"),
+    ] {
+        assert!(
+            defs.iter()
+                .any(|d| imports(d).is_err_and(|e| e.contains(needle))),
+            "no definition was refused for {label}"
+        );
+    }
 }
 
 #[test]

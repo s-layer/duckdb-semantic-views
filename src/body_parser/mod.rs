@@ -59,6 +59,7 @@ pub(super) struct ParsedQualifiedEntry {
     pub(super) expr: String,
     pub(super) comment: Option<String>,
     pub(super) synonyms: Vec<String>,
+    pub(super) tags: Vec<crate::model::Tag>,
     /// `LABELS = (FILTER)` — the member is a named filter.
     pub(super) is_filter: bool,
     pub(super) access: AccessModifier,
@@ -77,6 +78,7 @@ pub(super) struct ParsedMetric {
     pub(super) using_relationships: Vec<String>,
     pub(super) comment: Option<String>,
     pub(super) synonyms: Vec<String>,
+    pub(super) tags: Vec<crate::model::Tag>,
     pub(super) access: AccessModifier,
     pub(super) non_additive_by: Vec<NonAdditiveDim>,
     pub(super) window_spec: Option<WindowSpec>,
@@ -95,6 +97,29 @@ pub struct KeywordBody {
     /// (Snowflake's comment position, F-6). `None` when absent; the caller
     /// merges it with any comment written between the name and `AS`.
     pub view_comment: Option<String>,
+    /// A trailing view-level `[WITH] TAG (...)` after the last clause
+    /// (Snowflake's position for the view's tags). Empty when absent.
+    pub view_tags: Vec<crate::model::Tag>,
+}
+
+impl KeywordBody {
+    /// The definition this body describes, with no CREATE-time context
+    /// stamped (that, and cardinality inference, are the front door's job).
+    /// The view-level comment and tags come from the body's trailing region.
+    #[must_use]
+    pub fn into_definition(self) -> crate::model::SemanticViewDefinition {
+        crate::model::SemanticViewDefinition {
+            tables: self.tables,
+            dimensions: self.dimensions,
+            metrics: self.metrics,
+            joins: self.relationships,
+            facts: self.facts,
+            materializations: self.materializations,
+            comment: self.view_comment,
+            tags: self.view_tags,
+            ..Default::default()
+        }
+    }
 }
 
 /// Parse the keyword body after "AS" into structured clause data.
@@ -132,7 +157,8 @@ pub fn parse_keyword_body(text: &str, base_offset: usize) -> Result<KeywordBody,
     // F-6 (code-review 2026-07-16): peel an optional trailing view-level
     // `COMMENT = '...'` (Snowflake places it after the last clause) before the
     // clause scan, so the COMMENT keyword is not read as an unknown clause.
-    let (after_as, view_comment) = split_trailing_view_comment(after_as, after_as_offset)?;
+    let (after_as, view_comment, view_tags) =
+        split_trailing_view_annotations(after_as, after_as_offset)?;
 
     let bounds = find_clause_bounds(after_as, after_as_offset)?;
 
@@ -206,6 +232,7 @@ pub fn parse_keyword_body(text: &str, base_offset: usize) -> Result<KeywordBody,
             output_type: None,
             comment: e.comment,
             synonyms: e.synonyms,
+            tags: e.tags,
             is_filter: e.is_filter,
             access: e.access,
         })
@@ -222,6 +249,7 @@ pub fn parse_keyword_body(text: &str, base_offset: usize) -> Result<KeywordBody,
             output_type: None,
             comment: e.comment,
             synonyms: e.synonyms,
+            tags: e.tags,
             is_filter: e.is_filter,
         })
         .collect();
@@ -236,6 +264,7 @@ pub fn parse_keyword_body(text: &str, base_offset: usize) -> Result<KeywordBody,
             using_relationships: m.using_relationships,
             comment: m.comment,
             synonyms: m.synonyms,
+            tags: m.tags,
             access: m.access,
             non_additive_by: m.non_additive_by,
             window_spec: m.window_spec,
@@ -266,39 +295,47 @@ pub fn parse_keyword_body(text: &str, base_offset: usize) -> Result<KeywordBody,
         metrics,
         materializations,
         view_comment,
+        view_tags,
     })
 }
 
-/// Peel an optional trailing view-level `COMMENT = '...'` off the clause region.
+/// Peel the optional trailing view-level annotations off the clause region:
+/// `COMMENT = '...'` and `[WITH] TAG (...)`, in either order.
 ///
-/// Snowflake places the view-level comment AFTER the last clause
-/// (`... METRICS (...) COMMENT = '...'`), whereas this parser historically only
-/// accepted it between the name and `AS`. Without peeling it here the trailing
-/// `COMMENT` keyword is read as an unknown clause (F-6, code-review 2026-07-16).
+/// Snowflake places both AFTER the last clause
+/// (`... METRICS (...) COMMENT = '...' WITH TAG (...)`), whereas this parser
+/// historically only accepted the comment between the name and `AS`. Without
+/// peeling them here the trailing keyword is read as an unknown clause (F-6,
+/// code-review 2026-07-16).
 ///
-/// The comment is the region from the first depth-0 `COMMENT` keyword to the end
-/// of `after_as` — a `COMMENT` inside a clause's `(...)` sits at depth > 0 and is
-/// inert. Returns the clause region with the comment sliced off, plus the parsed
-/// comment. `WITH SYNONYMS` is not a view-level annotation and is rejected.
-fn split_trailing_view_comment(
+/// The region runs from the first depth-0 `COMMENT`, `WITH` or `TAG` keyword to
+/// the end of `after_as` — one inside a clause's `(...)` sits at depth > 0 and
+/// is inert, and no clause keyword is one of the three. Returns the clause
+/// region with the annotations sliced off, plus the parsed comment and tags.
+/// `WITH SYNONYMS` and `LABELS` are member annotations and are rejected here.
+fn split_trailing_view_annotations(
     after_as: &str,
     base_offset: usize,
-) -> Result<(&str, Option<String>), ParseError> {
+) -> Result<(&str, Option<String>, Vec<crate::model::Tag>), ParseError> {
     let cur = cursor::Cursor::new(after_as, base_offset);
-    let Some(comment_tok) = cur.find_kw_depth0("COMMENT") else {
-        return Ok((after_as, None));
+    let Some(first_tok) = cur
+        .find_all_kw_depth0(&["COMMENT", "WITH", "TAG"])
+        .into_iter()
+        .next()
+    else {
+        return Ok((after_as, None, Vec::new()));
     };
-    let trailing = &after_as[comment_tok.start..];
-    let (leftover, ann) = annotations::parse_trailing_annotations(trailing, cur.abs_of(trailing))?;
-    // `trailing` begins at the COMMENT keyword, so the "expression" prefix the
+    let trailing = &after_as[first_tok.start..];
+    let (leftover, ann) = annotations::parse_leading_annotations(trailing, cur.abs_of(trailing))?;
+    // `trailing` begins at an annotation keyword, so the "expression" prefix the
     // annotation parser peels off must be empty.
     if !leftover.trim().is_empty() {
         return Err(ParseError {
             message: format!(
-                "Unexpected text '{}' before the trailing view-level COMMENT.",
+                "Unexpected text '{}' before the trailing view-level annotations.",
                 leftover.trim()
             ),
-            position: Some(base_offset + comment_tok.start),
+            position: Some(base_offset + first_tok.start),
         });
     }
     if !ann.synonyms.is_empty() {
@@ -306,17 +343,17 @@ fn split_trailing_view_comment(
             message: "WITH SYNONYMS is not valid at the view level; it applies to tables, \
                       dimensions, facts, and metrics."
                 .to_string(),
-            position: Some(base_offset + comment_tok.start),
+            position: Some(base_offset + first_tok.start),
         });
     }
     if ann.is_filter {
         return Err(ParseError {
             message: "LABELS is not valid at the view level; it applies to facts and dimensions."
                 .to_string(),
-            position: Some(base_offset + comment_tok.start),
+            position: Some(base_offset + first_tok.start),
         });
     }
-    Ok((&after_as[..comment_tok.start], ann.comment))
+    Ok((&after_as[..first_tok.start], ann.comment, ann.tags))
 }
 
 #[cfg(test)]
@@ -723,6 +760,77 @@ mod tests {
             "got: {}",
             err.message
         );
+    }
+
+    #[test]
+    fn view_level_tags_follow_the_last_clause_with_or_without_a_comment() {
+        use crate::model::{Tag, TagName};
+        let want = vec![Tag {
+            name: TagName {
+                database: None,
+                schema: Some("gov".to_string()),
+                tag: "S_LAYER_KIND".to_string(),
+            },
+            value: "view".to_string(),
+        }];
+        for (trailer, comment) in [
+            ("WITH TAG (gov.S_LAYER_KIND = 'view')", None),
+            ("TAG (gov.S_LAYER_KIND = 'view')", None),
+            (
+                "COMMENT = 'c' WITH TAG (gov.S_LAYER_KIND = 'view')",
+                Some("c"),
+            ),
+            (
+                "WITH TAG (gov.S_LAYER_KIND = 'view') COMMENT = 'c'",
+                Some("c"),
+            ),
+        ] {
+            let body = format!(
+                "AS TABLES (o AS orders PRIMARY KEY (id)) \
+                 METRICS (o.revenue AS sum(o.amount)) {trailer}"
+            );
+            let kb = parse_keyword_body(&body, 0).unwrap_or_else(|e| panic!("{trailer}: {e:?}"));
+            assert_eq!(kb.view_tags, want, "for {trailer:?}");
+            assert_eq!(kb.view_comment.as_deref(), comment, "for {trailer:?}");
+            assert_eq!(kb.metrics.len(), 1, "the clause region is intact");
+            let def = kb.into_definition();
+            assert_eq!(def.tags, want);
+            assert_eq!(def.comment.as_deref(), comment);
+        }
+    }
+
+    #[test]
+    fn a_tag_inside_a_clause_is_not_a_view_level_tag() {
+        let body = "AS TABLES (o AS orders PRIMARY KEY (id) WITH TAG (t = 't')) \
+                    METRICS (o.revenue AS sum(o.amount) TAG (m = 'm'))";
+        let kb = parse_keyword_body(body, 0).unwrap();
+        assert!(kb.view_tags.is_empty());
+        assert_eq!(kb.tables[0].tags[0].value, "t");
+        assert_eq!(kb.metrics[0].tags[0].value, "m");
+    }
+
+    #[test]
+    fn view_level_tag_errors_are_reported_at_the_view_level() {
+        for (trailer, needle) in [
+            ("WITH TAG (a = '1') WITH TAG (b = '2')", "Duplicate TAG"),
+            ("TAG ()", "TAG () is empty"),
+            ("WITH TAG (a = '1') junk", "Unexpected text in annotations"),
+            (
+                "WITH SYNONYMS = ('s') TAG (a = '1')",
+                "WITH SYNONYMS is not valid",
+            ),
+        ] {
+            let body = format!(
+                "AS TABLES (o AS orders PRIMARY KEY (id)) \
+                 METRICS (o.revenue AS sum(o.amount)) {trailer}"
+            );
+            let err = parse_keyword_body(&body, 0).unwrap_err();
+            assert!(
+                err.message.contains(needle),
+                "{trailer}: got {}",
+                err.message
+            );
+        }
     }
 
     /// The guards must not cost FACTS / DIMENSIONS their label — the one place
@@ -1556,10 +1664,11 @@ mod tests {
 
     #[test]
     fn test_annotation_with_without_synonyms_rejected() {
-        // A second WITH clause that isn't WITH SYNONYMS is an error, not junk.
+        // A second WITH clause that isn't WITH SYNONYMS or WITH TAG is an
+        // error, not junk.
         let err = parse_trailing_annotations("x COMMENT = 'a' WITH FOO", 0).unwrap_err();
         assert!(
-            err.message.contains("Expected SYNONYMS after WITH"),
+            err.message.contains("Expected SYNONYMS or TAG after WITH"),
             "got: {}",
             err.message
         );

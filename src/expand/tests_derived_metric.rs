@@ -104,6 +104,7 @@ fn inline_derived_with_facts() {
         synonyms: vec![],
         is_filter: false,
         access: AccessModifier::Public,
+        tags: Vec::new(),
     }];
     let topo_order = toposort_facts(&facts).unwrap();
     let resolved = inline_derived_metrics(&metrics, &facts, &topo_order, &[])
@@ -265,6 +266,7 @@ fn expand_derived_only_no_base_metrics_requested() {
         resolution_schema_name: None,
         temp_tables: vec![],
         comment: None,
+        tags: Vec::new(),
     };
     let req = QueryRequest {
         where_clause: None,
@@ -356,6 +358,7 @@ fn resolve_joins_includes_transitive_deps_from_derived() {
         resolution_schema_name: None,
         temp_tables: vec![],
         comment: None,
+        tags: Vec::new(),
     };
     let req = QueryRequest {
         where_clause: None,
@@ -404,6 +407,7 @@ fn expand_derived_metric_with_facts_chain() {
             synonyms: vec![],
             is_filter: false,
             access: AccessModifier::Public,
+            tags: Vec::new(),
         }],
         materializations: vec![],
         created_on: None,
@@ -412,6 +416,7 @@ fn expand_derived_metric_with_facts_chain() {
         resolution_schema_name: None,
         temp_tables: vec![],
         comment: None,
+        tags: Vec::new(),
     };
     let req = QueryRequest {
         where_clause: None,

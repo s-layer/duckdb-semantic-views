@@ -44,6 +44,7 @@ fn child_def() -> SemanticViewDefinition {
                 unique_constraints: vec![],
                 comment: None,
                 synonyms: vec![],
+                tags: Vec::new(),
             },
             TableRef {
                 alias: "li".to_string(),
@@ -52,6 +53,7 @@ fn child_def() -> SemanticViewDefinition {
                 unique_constraints: vec![],
                 comment: None,
                 synonyms: vec![],
+                tags: Vec::new(),
             },
         ],
         dimensions: vec![
@@ -63,6 +65,7 @@ fn child_def() -> SemanticViewDefinition {
                 comment: None,
                 synonyms: vec![],
                 is_filter: false,
+                tags: Vec::new(),
             },
             // The base-anchored fallback's dimension: see the module docs.
             Dimension {
@@ -73,6 +76,7 @@ fn child_def() -> SemanticViewDefinition {
                 comment: None,
                 synonyms: vec![],
                 is_filter: false,
+                tags: Vec::new(),
             },
         ],
         // An order-grain metric, co-queried to bring the childless parent's row in.
@@ -98,6 +102,7 @@ fn child_def() -> SemanticViewDefinition {
         resolution_schema_name: None,
         temp_tables: vec![],
         comment: None,
+        tags: Vec::new(),
     }
 }
 

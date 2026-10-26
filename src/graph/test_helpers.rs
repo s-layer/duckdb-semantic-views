@@ -21,6 +21,7 @@ pub(super) fn make_def(
                 unique_constraints: vec![],
                 comment: None,
                 synonyms: vec![],
+                tags: Vec::new(),
             })
             .collect(),
         joins: joins
@@ -42,6 +43,7 @@ pub(super) fn make_def(
                 comment: None,
                 synonyms: vec![],
                 is_filter: false,
+                tags: Vec::new(),
             })
             .collect(),
         metrics: metrics
@@ -57,6 +59,7 @@ pub(super) fn make_def(
                 access: AccessModifier::Public,
                 non_additive_by: vec![],
                 window_spec: None,
+                tags: Vec::new(),
             })
             .collect(),
         facts: vec![],
@@ -68,6 +71,7 @@ pub(super) fn make_def(
         resolution_schema_name: None,
         temp_tables: vec![],
         comment: None,
+        tags: Vec::new(),
     }
 }
 
@@ -86,6 +90,7 @@ pub(super) fn make_def_with_facts(
                 unique_constraints: vec![],
                 comment: None,
                 synonyms: vec![],
+                tags: Vec::new(),
             })
             .collect(),
         facts: facts
@@ -99,6 +104,7 @@ pub(super) fn make_def_with_facts(
                 synonyms: vec![],
                 is_filter: false,
                 access: AccessModifier::Public,
+                tags: Vec::new(),
             })
             .collect(),
         dimensions: vec![],
@@ -112,6 +118,7 @@ pub(super) fn make_def_with_facts(
         resolution_schema_name: None,
         temp_tables: vec![],
         comment: None,
+        tags: Vec::new(),
     }
 }
 
@@ -133,6 +140,7 @@ pub(super) fn make_def_with_derived_metrics(
             access: AccessModifier::Public,
             non_additive_by: vec![],
             window_spec: None,
+            tags: Vec::new(),
         });
     }
     for (name, expr) in derived_metrics {
@@ -147,6 +155,7 @@ pub(super) fn make_def_with_derived_metrics(
             access: AccessModifier::Public,
             non_additive_by: vec![],
             window_spec: None,
+            tags: Vec::new(),
         });
     }
     SemanticViewDefinition {
@@ -157,6 +166,7 @@ pub(super) fn make_def_with_derived_metrics(
             unique_constraints: vec![],
             comment: None,
             synonyms: vec![],
+            tags: Vec::new(),
         }],
         metrics,
         dimensions: vec![],
@@ -170,6 +180,7 @@ pub(super) fn make_def_with_derived_metrics(
         resolution_schema_name: None,
         temp_tables: vec![],
         comment: None,
+        tags: Vec::new(),
     }
 }
 
@@ -189,6 +200,7 @@ pub(super) fn make_def_with_named_joins(
                 unique_constraints: vec![],
                 comment: None,
                 synonyms: vec![],
+                tags: Vec::new(),
             })
             .collect(),
         joins: joins
@@ -215,6 +227,7 @@ pub(super) fn make_def_with_named_joins(
                 access: AccessModifier::Public,
                 non_additive_by: vec![],
                 window_spec: None,
+                tags: Vec::new(),
             })
             .collect(),
         facts: vec![],
@@ -226,5 +239,6 @@ pub(super) fn make_def_with_named_joins(
         resolution_schema_name: None,
         temp_tables: vec![],
         comment: None,
+        tags: Vec::new(),
     }
 }

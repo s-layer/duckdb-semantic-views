@@ -354,6 +354,7 @@ fn build_def() -> SemanticViewDefinition {
             unique_constraints: vec![],
             comment: None,
             synonyms: vec![],
+            tags: Vec::new(),
         },
         TableRef {
             alias: "u".to_string(),
@@ -362,6 +363,7 @@ fn build_def() -> SemanticViewDefinition {
             unique_constraints: vec![],
             comment: None,
             synonyms: vec![],
+            tags: Vec::new(),
         },
     ];
     let dimensions = vec![
@@ -373,6 +375,7 @@ fn build_def() -> SemanticViewDefinition {
             comment: None,
             synonyms: vec![],
             is_filter: false,
+            tags: Vec::new(),
         },
         Dimension {
             name: "ucat".to_string(),
@@ -382,6 +385,7 @@ fn build_def() -> SemanticViewDefinition {
             comment: None,
             synonyms: vec![],
             is_filter: false,
+            tags: Vec::new(),
         },
         // TECH-DEBT #54: a dimension whose expression names a FACT on its own
         // table, the form Snowflake's validation rules explicitly permit.
@@ -393,6 +397,7 @@ fn build_def() -> SemanticViewDefinition {
             comment: None,
             synonyms: vec![],
             is_filter: false,
+            tags: Vec::new(),
         },
         // PBT-6 filter members: never selected as output, named only by a
         // generated `where_clause`. Compound expressions, so a splice that
@@ -405,6 +410,7 @@ fn build_def() -> SemanticViewDefinition {
             comment: None,
             synonyms: vec![],
             is_filter: true,
+            tags: Vec::new(),
         },
         Dimension {
             name: "fucat".to_string(),
@@ -414,6 +420,7 @@ fn build_def() -> SemanticViewDefinition {
             comment: None,
             synonyms: vec![],
             is_filter: true,
+            tags: Vec::new(),
         },
         // EXP-27: declared on the PARENT, but its expression names a fact on
         // the CHILD. Resolving it joins `t`, which fans `u` — so a predicate
@@ -427,6 +434,7 @@ fn build_def() -> SemanticViewDefinition {
             comment: None,
             synonyms: vec![],
             is_filter: true,
+            tags: Vec::new(),
         },
     ];
     let base_metric = |name: &str, expr: &str, source: Option<&str>| Metric {
@@ -440,6 +448,7 @@ fn build_def() -> SemanticViewDefinition {
         access: AccessModifier::Public,
         non_additive_by: vec![],
         window_spec: None,
+        tags: Vec::new(),
     };
     let metrics = vec![
         base_metric("sv", "sum(t.v)", Some("t")),
@@ -475,6 +484,7 @@ fn build_def() -> SemanticViewDefinition {
                 synonyms: vec![],
                 is_filter: false,
                 access: AccessModifier::Public,
+                tags: Vec::new(),
             },
             // EXP-27: the CHILD-side fact the parent-declared `fchain` member
             // reaches. Compound, so a splice that loses the parentheses
@@ -488,6 +498,7 @@ fn build_def() -> SemanticViewDefinition {
                 synonyms: vec![],
                 is_filter: false,
                 access: AccessModifier::Public,
+                tags: Vec::new(),
             },
         ],
         materializations: vec![],
@@ -497,6 +508,7 @@ fn build_def() -> SemanticViewDefinition {
         resolution_schema_name: None,
         temp_tables: vec![],
         comment: None,
+        tags: Vec::new(),
     }
 }
 

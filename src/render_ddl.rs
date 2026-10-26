@@ -42,6 +42,28 @@ fn emit_labels(out: &mut String, is_filter: bool) {
     }
 }
 
+/// Append ` WITH TAG (<name> = '<escaped>', ...)` to `out` if non-empty.
+///
+/// Emitted last in an entry's annotation region, as Snowflake writes a member's
+/// tags after its synonyms (the parser accepts the clauses in any order). Each
+/// name renders through [`crate::model::TagName::render`], which quotes any part
+/// that would not re-read as itself.
+fn emit_tags(out: &mut String, tags: &[crate::model::Tag]) {
+    if !tags.is_empty() {
+        out.push_str(" WITH TAG (");
+        for (i, t) in tags.iter().enumerate() {
+            if i > 0 {
+                out.push_str(", ");
+            }
+            out.push_str(&t.name.render());
+            out.push_str(" = '");
+            out.push_str(&escape_single_quote(&t.value));
+            out.push('\'');
+        }
+        out.push(')');
+    }
+}
+
 /// Append ` WITH SYNONYMS = ('<escaped1>', '<escaped2>')` to `out` if non-empty.
 fn emit_synonyms(out: &mut String, synonyms: &[String]) {
     if !synonyms.is_empty() {
@@ -196,6 +218,7 @@ fn emit_tables(out: &mut String, def: &SemanticViewDefinition) {
         }
         emit_comment(out, table.comment.as_deref());
         emit_synonyms(out, &table.synonyms);
+        emit_tags(out, &table.tags);
         if i + 1 < def.tables.len() {
             out.push(',');
         }
@@ -299,6 +322,7 @@ fn emit_facts(out: &mut String, def: &SemanticViewDefinition) {
         emit_comment(out, fact.comment.as_deref());
         emit_synonyms(out, &fact.synonyms);
         emit_labels(out, fact.is_filter);
+        emit_tags(out, &fact.tags);
         if i + 1 < def.facts.len() {
             out.push(',');
         }
@@ -319,6 +343,7 @@ fn emit_dimensions(out: &mut String, def: &SemanticViewDefinition) {
         emit_comment(out, dim.comment.as_deref());
         emit_synonyms(out, &dim.synonyms);
         emit_labels(out, dim.is_filter);
+        emit_tags(out, &dim.tags);
         if i + 1 < def.dimensions.len() {
             out.push(',');
         }
@@ -451,6 +476,7 @@ fn emit_metrics(out: &mut String, def: &SemanticViewDefinition) {
         }
         emit_comment(out, metric.comment.as_deref());
         emit_synonyms(out, &metric.synonyms);
+        emit_tags(out, &metric.tags);
         if i + 1 < def.metrics.len() {
             out.push(',');
         }
@@ -579,6 +605,14 @@ pub fn render_create_ddl_qualified(
     }
     if !def.materializations.is_empty() {
         emit_materializations(&mut out, def);
+    }
+    // View-level tags follow the last clause, Snowflake's position for them.
+    // (The view comment stays in the header, where it always rendered.)
+    if !def.tags.is_empty() {
+        let mut tags = String::new();
+        emit_tags(&mut tags, &def.tags);
+        out.push_str(tags.trim_start());
+        out.push('\n');
     }
 
     Ok(out)
@@ -1397,15 +1431,7 @@ mod tests {
     fn assert_render_fixpoint(def: &SemanticViewDefinition) {
         use crate::body_parser::{parse_keyword_body, KeywordBody};
         fn kb_to_def(kb: KeywordBody) -> SemanticViewDefinition {
-            SemanticViewDefinition {
-                tables: kb.tables,
-                joins: kb.relationships,
-                facts: kb.facts,
-                dimensions: kb.dimensions,
-                metrics: kb.metrics,
-                materializations: kb.materializations,
-                ..Default::default()
-            }
+            kb.into_definition()
         }
         // Stage 0 GENERATES a candidate; it asserts nothing. The
         // `validate_ddl_representable` precondition RT-5 put here was removed
@@ -1945,6 +1971,88 @@ mod tests {
                 ),
                 "{ddl}"
             );
+        }
+    }
+
+    mod tag_render {
+        use super::*;
+        use crate::model::{Fact, Tag, TagName};
+
+        fn tag(parts: &[&str], value: &str) -> Tag {
+            let mut parts: Vec<String> = parts.iter().map(|p| (*p).to_string()).collect();
+            let tag = parts.pop().unwrap();
+            let schema = parts.pop();
+            let database = parts.pop();
+            Tag {
+                name: TagName {
+                    database,
+                    schema,
+                    tag,
+                },
+                value: value.to_string(),
+            }
+        }
+
+        fn tagged_def() -> SemanticViewDefinition {
+            let mut def = minimal_def();
+            def.tags = vec![tag(&["S_LAYER_KIND"], "view")];
+            def.tables[0].comment = Some("orders".to_string());
+            def.tables[0].tags = vec![tag(&["gov", "pii"], "none")];
+            def.dimensions[0].synonyms = vec!["area".to_string()];
+            def.dimensions[0].tags = vec![
+                tag(&["s_layer_kind"], "dimension"),
+                tag(&["db", "Gov Schema", "it's"], "a'b"),
+            ];
+            def.metrics[0].tags = vec![tag(&["select"], "")];
+            def.facts = vec![Fact {
+                name: "amt".to_string(),
+                expr: "o.amount".to_string(),
+                source_table: Some("o".to_string()),
+                tags: vec![tag(&["x.y"], "z")],
+                ..Default::default()
+            }];
+            def
+        }
+
+        #[test]
+        fn tags_render_last_in_each_entry_and_after_the_last_clause() {
+            let ddl = render_create_ddl("v", &tagged_def()).unwrap();
+            for expected in [
+                "o AS orders PRIMARY KEY (id) COMMENT = 'orders' WITH TAG (gov.pii = 'none')",
+                "o.amt AS o.amount WITH TAG (\"x.y\" = 'z')",
+                "o.region AS o.region WITH SYNONYMS = ('area') WITH TAG (s_layer_kind = \
+                 'dimension', db.\"Gov Schema\".\"it's\" = 'a''b')",
+                // A keyword part is quoted; an empty value is written as ''.
+                "o.revenue AS SUM(o.amount) WITH TAG (\"select\" = '')",
+            ] {
+                assert!(ddl.contains(expected), "missing {expected:?} in:\n{ddl}");
+            }
+            assert!(
+                ddl.ends_with(")\nWITH TAG (S_LAYER_KIND = 'view')\n"),
+                "view tags follow the last clause:\n{ddl}"
+            );
+        }
+
+        #[test]
+        fn rendered_tags_parse_back_to_the_same_definition() {
+            let def = tagged_def();
+            let ddl = render_create_ddl("v", &def).unwrap();
+            let body = body_of(&ddl).expect("body");
+            let back = crate::body_parser::parse_keyword_body(body, 0)
+                .unwrap_or_else(|e| panic!("{e:?}\n{ddl}"))
+                .into_definition();
+            assert_eq!(back.tags, def.tags);
+            assert_eq!(back.tables, def.tables);
+            assert_eq!(back.facts, def.facts);
+            assert_eq!(back.dimensions, def.dimensions);
+            assert_eq!(back.metrics, def.metrics);
+            assert_render_fixpoint(&def);
+        }
+
+        #[test]
+        fn a_view_with_no_tags_renders_no_tag_clause() {
+            let ddl = render_create_ddl("v", &minimal_def()).unwrap();
+            assert!(!ddl.contains("TAG"), "{ddl}");
         }
     }
 }

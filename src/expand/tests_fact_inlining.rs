@@ -27,6 +27,7 @@ fn toposort_facts_independent() {
             synonyms: vec![],
             is_filter: false,
             access: AccessModifier::Public,
+            tags: Vec::new(),
         },
         Fact {
             name: "b".to_string(),
@@ -37,6 +38,7 @@ fn toposort_facts_independent() {
             synonyms: vec![],
             is_filter: false,
             access: AccessModifier::Public,
+            tags: Vec::new(),
         },
     ];
     let order = toposort_facts(&facts).unwrap();
@@ -57,6 +59,7 @@ fn toposort_facts_chain() {
             synonyms: vec![],
             is_filter: false,
             access: AccessModifier::Public,
+            tags: Vec::new(),
         },
         Fact {
             name: "b".to_string(),
@@ -67,6 +70,7 @@ fn toposort_facts_chain() {
             synonyms: vec![],
             is_filter: false,
             access: AccessModifier::Public,
+            tags: Vec::new(),
         },
     ];
     let order = toposort_facts(&facts).unwrap();
@@ -88,6 +92,7 @@ fn toposort_facts_three_level_chain() {
             synonyms: vec![],
             is_filter: false,
             access: AccessModifier::Public,
+            tags: Vec::new(),
         },
         Fact {
             name: "b".to_string(),
@@ -98,6 +103,7 @@ fn toposort_facts_three_level_chain() {
             synonyms: vec![],
             is_filter: false,
             access: AccessModifier::Public,
+            tags: Vec::new(),
         },
         Fact {
             name: "c".to_string(),
@@ -108,6 +114,7 @@ fn toposort_facts_three_level_chain() {
             synonyms: vec![],
             is_filter: false,
             access: AccessModifier::Public,
+            tags: Vec::new(),
         },
     ];
     let order = toposort_facts(&facts).unwrap();
@@ -136,6 +143,7 @@ fn inline_facts_single_fact() {
         synonyms: vec![],
         is_filter: false,
         access: AccessModifier::Public,
+        tags: Vec::new(),
     }];
     let order = toposort_facts(&facts).unwrap();
     let result = inline_facts("SUM(net_price)", &facts, &order);
@@ -154,6 +162,7 @@ fn inline_facts_multi_level() {
             synonyms: vec![],
             is_filter: false,
             access: AccessModifier::Public,
+            tags: Vec::new(),
         },
         Fact {
             name: "b".to_string(),
@@ -164,6 +173,7 @@ fn inline_facts_multi_level() {
             synonyms: vec![],
             is_filter: false,
             access: AccessModifier::Public,
+            tags: Vec::new(),
         },
     ];
     let order = toposort_facts(&facts).unwrap();
@@ -182,6 +192,7 @@ fn inline_facts_preserves_parenthesization() {
         synonyms: vec![],
         is_filter: false,
         access: AccessModifier::Public,
+        tags: Vec::new(),
     }];
     let order = toposort_facts(&facts).unwrap();
     let result = inline_facts("x * total", &facts, &order);
@@ -199,6 +210,7 @@ fn inline_facts_word_boundary_prevents_collision() {
         synonyms: vec![],
         is_filter: false,
         access: AccessModifier::Public,
+        tags: Vec::new(),
     }];
     let order = toposort_facts(&facts).unwrap();
     let result = inline_facts("SUM(net_price_total)", &facts, &order);
@@ -219,6 +231,7 @@ fn inline_facts_with_qualified_name_in_metric() {
         synonyms: vec![],
         is_filter: false,
         access: AccessModifier::Public,
+        tags: Vec::new(),
     }];
     let order = toposort_facts(&facts).unwrap();
     let result = inline_facts("SUM(li.net_price)", &facts, &order);

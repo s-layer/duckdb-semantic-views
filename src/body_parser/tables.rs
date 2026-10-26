@@ -224,6 +224,7 @@ fn parse_single_table_entry(entry: &str, entry_offset: usize) -> Result<TableRef
         unique_constraints,
         comment: annotations.comment,
         synonyms: annotations.synonyms,
+        tags: annotations.tags,
     })
 }
 

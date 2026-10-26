@@ -295,6 +295,7 @@ fn build_def(func: WFunc, mode: &PartMode) -> SemanticViewDefinition {
         unique_constraints: vec![],
         comment: None,
         synonyms: vec![],
+        tags: Vec::new(),
     }];
     let dimensions = (0..NDIMS)
         .map(|i| Dimension {
@@ -305,6 +306,7 @@ fn build_def(func: WFunc, mode: &PartMode) -> SemanticViewDefinition {
             comment: None,
             synonyms: vec![],
             is_filter: false,
+            tags: Vec::new(),
         })
         // PBT-6 filter members: never selected as output, never part of the
         // partition config, named only by a generated `where_clause`. Compound
@@ -318,6 +320,7 @@ fn build_def(func: WFunc, mode: &PartMode) -> SemanticViewDefinition {
             comment: None,
             synonyms: vec![],
             is_filter: true,
+            tags: Vec::new(),
         }))
         .collect();
     let (excluding_dims, partition_dims) = match mode {
@@ -345,6 +348,7 @@ fn build_def(func: WFunc, mode: &PartMode) -> SemanticViewDefinition {
             order_by: vec![],
             frame_clause: None,
         }),
+        tags: Vec::new(),
     }];
     SemanticViewDefinition {
         tables,
@@ -360,6 +364,7 @@ fn build_def(func: WFunc, mode: &PartMode) -> SemanticViewDefinition {
         resolution_schema_name: None,
         temp_tables: vec![],
         comment: None,
+        tags: Vec::new(),
     }
 }
 

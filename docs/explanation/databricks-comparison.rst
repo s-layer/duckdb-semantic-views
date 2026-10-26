@@ -58,7 +58,7 @@ Concept Mapping
      - ``OVER`` clause with ``PARTITION BY EXCLUDING`` (see :ref:`howto-window-metrics`)
    * - Metadata annotations
      - ``comment``, ``synonyms``, ``display_name``, and ``format`` on fields and measures
-     - ``COMMENT``, ``WITH SYNONYMS``, and ``LABELS = (FILTER)`` (see :ref:`howto-metadata-annotations`)
+     - ``COMMENT``, ``WITH SYNONYMS``, ``LABELS = (FILTER)``, and ``WITH TAG`` (see :ref:`howto-metadata-annotations`)
    * - Access modifiers
      - Unity Catalog ``GRANT`` on the view, plus row filters and column masks
      - ``PRIVATE`` / ``PUBLIC`` on metrics and facts (see :ref:`howto-annotations-access`)
@@ -289,7 +289,7 @@ Features in Databricks Not in DuckDB Semantic Views
    * - Query-time parameters
      - Named values declared with ``parameters:`` and passed by calling the metric view as a table-valued function, so one definition serves several query variants.
    * - Display names and number formats
-     - ``display_name`` and ``format`` on fields and measures drive labels and value formatting in downstream tools. This extension carries ``COMMENT`` and ``WITH SYNONYMS``, but no display name or format.
+     - ``display_name`` and ``format`` on fields and measures drive labels and value formatting in downstream tools. This extension carries ``COMMENT``, ``WITH SYNONYMS`` and free-form ``WITH TAG`` name/value pairs, but no built-in display name or format.
 
 
 .. _explanation-db-choosing:
