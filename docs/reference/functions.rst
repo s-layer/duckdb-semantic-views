@@ -7,7 +7,7 @@
 Functions
 =========
 
-Loading the extension registers 19 SQL functions (18 names; ``get_ddl`` has two overloads). Most day-to-day work goes through the statements -- ``CREATE``, ``SHOW``, ``DESCRIBE`` -- and two query functions. This page lists every registered function, says which ones to call directly and which ones back a statement, and shows how a tool or agent can read their descriptions, parameters, and examples over SQL.
+Loading the extension registers 20 SQL functions (19 names; ``get_ddl`` has two overloads). Most day-to-day work goes through the statements -- ``CREATE``, ``SHOW``, ``DESCRIBE`` -- and two query functions. This page lists every registered function, says which ones to call directly and which ones back a statement, and shows how a tool or agent can read their descriptions, parameters, and examples over SQL.
 
 
 .. _ref-functions-inventory:
