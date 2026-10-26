@@ -346,7 +346,8 @@ enum Resolved<'a> {
     Metric(&'a Metric),
     /// Nothing declared. Left as written when it is not a column reference
     /// ([`is_not_a_column`]: a keyword, a number, a lambda's parameter, …),
-    /// and refused otherwise ([`Lowering::refuse_undeclared`]).
+    /// written as a call when it is a SQL value function, and refused
+    /// otherwise ([`Lowering::refuse_undeclared`]).
     Unknown,
 }
 
@@ -355,6 +356,7 @@ impl<'d> Lowering<'d, '_> {
     /// name.
     fn lower(&mut self, group: Group, text: &str) -> Result<String, ItemError> {
         check_one_expression(text)?;
+        check_calls(text)?;
         if group == Group::Metrics {
             return self.lower_metric(text);
         }
@@ -460,7 +462,11 @@ impl<'d> Lowering<'d, '_> {
                         member.kind()
                     )));
                 }
-                Resolved::Unknown => self.refuse_undeclared(text, &r, &lambdas, text)?,
+                Resolved::Unknown => {
+                    if let Some(call) = self.refuse_undeclared(text, &r, &lambdas, text)? {
+                        out.replace(r.start..r.end, call);
+                    }
+                }
             }
         }
         for (span, base) in next_aggregate {
@@ -507,7 +513,9 @@ impl<'d> Lowering<'d, '_> {
                     )));
                 }
                 Resolved::Unknown => {
-                    self.refuse_undeclared(part, &r, &lambdas, text)?;
+                    if let Some(call) = self.refuse_undeclared(part, &r, &lambdas, text)? {
+                        replacements.insert(r.key(), call.to_string());
+                    }
                     continue;
                 }
             };
@@ -594,22 +602,32 @@ impl<'d> Lowering<'d, '_> {
 
     /// Refuse `r`, a name in `scanned` (part of the item `item`) that is no
     /// member of the view, unless it is not a column reference at all
-    /// ([`is_not_a_column`]). An expression item reads only the view's
-    /// members: any other name would read a column of a table the query joins
-    /// that the view does not expose, such as the column under a private fact.
+    /// ([`is_not_a_column`]), or is a SQL value function, when it returns the
+    /// call to write in its place ([`sql_value_function`]). An expression item
+    /// reads only the view's members: any other name would read a column of a
+    /// table the query joins that the view does not expose, such as the column
+    /// under a private fact.
     fn refuse_undeclared(
         &self,
         scanned: &str,
         r: &IdentRef<'_>,
         lambdas: &[LambdaScope],
         item: &str,
-    ) -> Result<(), ItemError> {
-        if is_not_a_column(scanned, r, lambdas) {
-            return Ok(());
+    ) -> Result<Option<&'static str>, ItemError> {
+        if let Some(call) = sql_value_function(r) {
+            return Ok(Some(call));
         }
+        if is_not_a_column(scanned, r, lambdas) {
+            return Ok(None);
+        }
+        let hash = if scanned[..r.start].ends_with('#') {
+            "#"
+        } else {
+            ""
+        };
         Err(invalid(format!(
-            "'{}' in '{item}' is not a dimension, fact or metric of semantic view '{}'; an \
-             expression item can only read the view's members",
+            "'{hash}{}' in '{item}' is not a dimension, fact or metric of semantic view '{}'; \
+             an expression item can only read the view's members",
             r.raw, self.view_name
         )))
     }
@@ -768,33 +786,52 @@ fn check_one_expression(text: &str) -> Result<(), ItemError> {
     Ok(())
 }
 
-/// Words `DuckDB` reads as syntax in an expression although it also accepts
-/// them as names, so [`crate::ident::is_refused_as_name`] does not list them,
-/// and the functions it calls without parentheses. Sorted.
-const SYNTAX_WORDS: &[&str] = &[
-    "between",
-    "current_date",
-    "current_time",
-    "current_timestamp",
-    "localtime",
-    "localtimestamp",
-    "map",
+/// The SQL value functions `DuckDB` calls without parentheses, and the call
+/// its binder makes of each, sorted. A bare `current_date` reads a column of
+/// that name when the query joins one and calls the function only when none
+/// does, so an expression item writes the call itself.
+const SQL_VALUE_FUNCTIONS: &[(&str, &str)] = &[
+    ("current_catalog", "current_catalog()"),
+    ("current_date", "current_date()"),
+    ("current_role", "current_role()"),
+    ("current_schema", "current_schema()"),
+    ("current_time", "get_current_time()"),
+    ("current_timestamp", "get_current_timestamp()"),
+    ("current_user", "current_user()"),
+    ("localtime", "current_localtime()"),
+    ("localtimestamp", "current_localtimestamp()"),
+    ("session_user", "session_user()"),
+    // `user()` is a macro over a bare `current_user`, which a column would
+    // capture in the same way.
+    ("user", "current_user()"),
 ];
 
-/// A lambda in an expression: its parameters' keys, and the span from its
-/// parameter list to the end of its body, where they name the parameters.
+/// The call that a bare, unquoted `r` stands for when it names a SQL value
+/// function.
+fn sql_value_function(r: &IdentRef<'_>) -> Option<&'static str> {
+    if !r.is_bare() || r.raw.starts_with('"') {
+        return None;
+    }
+    let word = r.raw.to_ascii_lowercase();
+    SQL_VALUE_FUNCTIONS
+        .binary_search_by(|(name, _)| name.cmp(&word.as_str()))
+        .ok()
+        .map(|i| SQL_VALUE_FUNCTIONS[i].1)
+}
+
+/// A `lambda x, y: body` in an expression: its parameters' keys, and the span
+/// from the `lambda` to the end of its body, where they name the parameters.
+/// `DuckDB` refuses the deprecated arrow spelling (`x -> body`) unless a
+/// setting allows it, and reads `->` as the JSON operator otherwise, so a name
+/// beside `->` is never taken for a parameter.
 struct LambdaScope {
     params: Vec<String>,
     span: std::ops::Range<usize>,
 }
 
-/// The lambdas in `text`, in both spellings: `lambda x, y: body` and
-/// `x -> body` / `(x, y) -> body`. A `->` followed by a string or a number is
-/// the JSON operator (`j->'a'`), not a lambda, and `->>` is always JSON.
+/// The lambdas in `text`, which has no comments.
 fn lambda_scopes(text: &str) -> Vec<LambdaScope> {
     let bytes = text.as_bytes();
-    let blanked = crate::util::blank_sql_comments(text);
-    let live = blanked.as_bytes();
     let refs = scan_references(text);
     let mut out = Vec::new();
     for r in &refs {
@@ -804,15 +841,15 @@ fn lambda_scopes(text: &str) -> Vec<LambdaScope> {
         let mut params = Vec::new();
         let mut i = r.end;
         loop {
-            i = skip_spaces(live, i);
-            let Some(param) = refs.iter().find(|p| p.start == i) else {
+            i = skip_spaces(bytes, i);
+            let Some(param) = refs.iter().find(|p| p.start == i && p.is_bare()) else {
                 break;
             };
             params.push(param.key());
-            i = skip_spaces(live, param.end);
-            match live.get(i) {
+            i = skip_spaces(bytes, param.end);
+            match bytes.get(i) {
                 Some(b',') => i += 1,
-                Some(b':') if live.get(i + 1) != Some(&b':') => {
+                Some(b':') if bytes.get(i + 1) != Some(&b':') => {
                     out.push(LambdaScope {
                         params,
                         span: r.start..body_end(bytes, i + 1),
@@ -823,36 +860,16 @@ fn lambda_scopes(text: &str) -> Vec<LambdaScope> {
             }
         }
     }
-    let mut quotes = crate::util::QuoteState::default();
-    let mut i = 0;
-    while i < live.len() {
-        let (next, is_live) = quotes.step(live, i);
-        if is_live && live[i] == b'-' && live.get(i + 1) == Some(&b'>') {
-            let after = skip_spaces(live, i + 2);
-            let json = matches!(live.get(i + 2), Some(b'>'))
-                || matches!(live.get(after), Some(b'\'' | b'0'..=b'9'));
-            if !json {
-                let before = text[..i].trim_end().len();
-                let params_at = if live.get(before.wrapping_sub(1)) == Some(&b')') {
-                    matching_open(live, before - 1)
-                } else {
-                    refs.iter().find(|p| p.end == before).map(|p| p.start)
-                };
-                if let Some(start) = params_at {
-                    out.push(LambdaScope {
-                        params: refs
-                            .iter()
-                            .filter(|p| p.start >= start && p.end <= before)
-                            .map(IdentRef::key)
-                            .collect(),
-                        span: start..body_end(bytes, i + 2),
-                    });
-                }
-            }
-        }
-        i = next;
-    }
     out
+}
+
+/// Whether the name or call head `r` starts with a parameter of a lambda it
+/// is inside: `x`, `"x"`, `s.a`, `x.lower()`.
+fn is_lambda_param(r: &IdentRef<'_>, lambdas: &[LambdaScope]) -> bool {
+    let first = r.first_part_key();
+    lambdas
+        .iter()
+        .any(|l| l.span.contains(&r.start) && l.params.contains(&first))
 }
 
 fn skip_spaces(bytes: &[u8], mut i: usize) -> usize {
@@ -883,12 +900,6 @@ fn body_end(bytes: &[u8], from: usize) -> usize {
     bytes.len()
 }
 
-/// The `(` that the `)` at `close` closes, in a lambda's parameter list
-/// (names and commas only).
-fn matching_open(bytes: &[u8], close: usize) -> Option<usize> {
-    bytes[..close].iter().rposition(|&b| b == b'(')
-}
-
 /// The word that ends just before `at` in `text`, skipping whitespace.
 fn word_before(text: &str, at: usize) -> &str {
     let head = text[..at].trim_end();
@@ -909,21 +920,45 @@ fn word_after(text: &str, at: usize) -> &str {
     &tail[..end]
 }
 
-/// Whether `r`, a name in `text` that is no member of the view, is not a
-/// column reference: text inside a comment, a number, a field of an
-/// expression's value, a keyword or another word of the expression grammar, a
-/// collation, a function's named argument, or a parameter of a lambda it is
-/// inside.
+/// Whether the text before `at` ends with an operand, so that a `BETWEEN` at
+/// `at` is the operator rather than a column of that name: a name, a literal,
+/// a bracket's close, `NULL`, `TRUE`, `FALSE` or a `CASE`'s `END`, and the
+/// operand before a `NOT`. After an operator, a keyword that takes an
+/// expression (`WHEN`, `AND`, `AT TIME ZONE`, a `BETWEEN`) or nothing, the
+/// word is a column.
+fn follows_an_operand(text: &str, at: usize) -> bool {
+    let head = text[..at].trim_end();
+    match head.bytes().last() {
+        Some(b')' | b']' | b'}' | b'\'' | b'"') => true,
+        Some(b) if crate::util::is_ident_byte(b) => {
+            let word = word_before(text, at).to_ascii_lowercase();
+            match word.as_str() {
+                "not" => follows_an_operand(text, head.len() - word.len()),
+                "null" | "true" | "false" | "end" => true,
+                "between" | "zone" => false,
+                w => !crate::ident::is_refused_as_name(w),
+            }
+        }
+        _ => false,
+    }
+}
+
+/// Whether `r`, a name in `text` (which has no comments) that is no member of
+/// the view, is not a column reference: a number, a field of an expression's
+/// value, a keyword or another word of the expression grammar where the
+/// grammar reads it as one, a collation, a function's named argument, or a
+/// parameter of a lambda it is inside.
 fn is_not_a_column(text: &str, r: &IdentRef<'_>, lambdas: &[LambdaScope]) -> bool {
-    let blanked = crate::util::blank_sql_comments(text);
-    if blanked[r.start..r.end].trim().is_empty() || r.raw.as_bytes()[0].is_ascii_digit() {
-        return true;
+    let before = text[..r.start].bytes().last();
+    if r.raw.as_bytes()[0].is_ascii_digit() {
+        // `#3` is the third column of the query's tables.
+        return before != Some(b'#');
     }
     // A field of an expression's value: `struct_pack(k := x).k`, `(s).k`.
-    if r.start > 0 && text.as_bytes()[r.start - 1] == b'.' {
+    if before == Some(b'.') {
         return true;
     }
-    if word_before(text, r.start).eq_ignore_ascii_case("collate") {
+    if word_before(text, r.start).eq_ignore_ascii_case("collate") || is_lambda_param(r, lambdas) {
         return true;
     }
     if !r.is_bare() || r.raw.starts_with('"') {
@@ -932,7 +967,8 @@ fn is_not_a_column(text: &str, r: &IdentRef<'_>, lambdas: &[LambdaScope]) -> boo
     let word = r.raw.to_ascii_lowercase();
     let after = text[r.end..].trim_start();
     crate::ident::is_refused_as_name(&word)
-        || SYNTAX_WORDS.binary_search(&word.as_str()).is_ok()
+        || (word == "map" && after.starts_with('{'))
+        || (word == "between" && follows_an_operand(text, r.start))
         || (word == "nulls" && {
             let next = word_after(text, r.end);
             next.eq_ignore_ascii_case("first") || next.eq_ignore_ascii_case("last")
@@ -941,9 +977,33 @@ fn is_not_a_column(text: &str, r: &IdentRef<'_>, lambdas: &[LambdaScope]) -> boo
             && word_before(text, r.start).eq_ignore_ascii_case("nulls"))
         || after.starts_with(":=")
         || after.starts_with("=>")
-        || lambdas
-            .iter()
-            .any(|l| l.span.contains(&r.start) && l.params.contains(&word))
+}
+
+/// Refuse the calls in `text` that read columns other than through the names
+/// the scan checks: `COLUMNS(...)`, which selects columns by name, and a call
+/// by a qualified name, which `DuckDB` reads as a method call on a column
+/// (`x.abs()` is `abs(x)`) when the qualifier names one. A schema-qualified
+/// call is refused with it; a method call on a lambda's parameter is kept.
+fn check_calls(text: &str) -> Result<(), ItemError> {
+    let lambdas = lambda_scopes(text);
+    for head in scan_function_heads(text) {
+        let last = head.last_part_key();
+        if last == "columns" {
+            return Err(invalid(format!(
+                "'{text}' holds {}(...), which selects columns by name; an expression item can \
+                 only read the view's members",
+                head.raw
+            )));
+        }
+        if !head.is_bare() && !is_lambda_param(&head, &lambdas) {
+            return Err(invalid(format!(
+                "'{}(...)' in '{text}' calls a function by a qualified name; an expression \
+                 item can only call a function by its own name, as in {last}(...)",
+                head.raw
+            )));
+        }
+    }
+    Ok(())
 }
 
 fn window_refused(text: &str) -> ItemError {
@@ -1212,6 +1272,145 @@ mod tests {
         assert!(undeclared("tier", &msg), "{msg}");
     }
 
+    /// Each case is lowered on its own, and every one that is accepted is
+    /// reported, so that no case hides behind another.
+    fn assert_each_refused(cases: &[(&str, &str, &str)]) {
+        let mut accepted = Vec::new();
+        for &(group, text, want) in cases {
+            let one = [text];
+            let (d, m, f): (&[&str], &[&str], &[&str]) = match group {
+                "dimension" => (&one, &[], &[]),
+                "metric" => (&[], &one, &[]),
+                _ => (&[], &[], &one),
+            };
+            match lower_expression_items("v", &def(), items(d, m, f)) {
+                Err(ItemError::Invalid(msg)) if msg.contains(want) => {}
+                Err(e) => accepted.push(format!("{group} {text}: {e:?}")),
+                Ok(_) => accepted.push(format!("{group} {text}: accepted")),
+            }
+        }
+        assert!(accepted.is_empty(), "not refused:\n{}", accepted.join("\n"));
+    }
+
+    #[test]
+    fn an_undeclared_column_beside_a_json_arrow_is_refused() {
+        // DuckDB reads `->` as the JSON operator unless it is the deprecated
+        // lambda arrow, which it refuses by default; either way a name beside
+        // it is not a lambda's parameter here.
+        let tier = "'tier' in '";
+        assert_each_refused(&[
+            ("dimension", "region || (tier -> ('$'))", tier),
+            ("dimension", "region || ((tier::VARCHAR) -> ('$'))", tier),
+            ("dimension", "(region || tier) -> ('a')", tier),
+            ("dimension", "region || (tier -> -1)", tier),
+            ("dimension", "region || (tier -> E'$.a')", tier),
+            ("dimension", "region || (tier -> $$a$$)", tier),
+            ("dimension", "region || (o -> ('$'))", "'o' in '"),
+            (
+                "dimension",
+                "list_transform([amount], x -> x + 1)[1]",
+                "'x' in '",
+            ),
+        ]);
+    }
+
+    #[test]
+    fn a_method_call_or_a_columns_expression_is_refused() {
+        let method = "calls a function by a qualified name";
+        assert_each_refused(&[
+            ("metric", "sum(amount * 0 + tier.abs())", method),
+            ("dimension", "region || tier.lower()", method),
+            ("dimension", "region || region.lower()", method),
+            ("dimension", "COLUMNS('^tier$')", "selects columns by name"),
+            (
+                "metric",
+                "sum(columns('amount'))",
+                "selects columns by name",
+            ),
+        ]);
+    }
+
+    #[test]
+    fn a_positional_reference_is_refused() {
+        assert_each_refused(&[
+            ("metric", "sum(amount * 0 + #3)", "'#3'"),
+            ("dimension", "region || #1", "'#1'"),
+        ]);
+    }
+
+    #[test]
+    fn a_column_named_like_a_word_of_the_grammar_is_refused() {
+        assert_each_refused(&[
+            ("dimension", "region || map", "'map' in '"),
+            ("dimension", "region || between", "'between' in '"),
+            ("dimension", "NOT between OR amount > 0", "'between' in '"),
+            (
+                "dimension",
+                "CASE WHEN between THEN amount END",
+                "'between' in '",
+            ),
+            (
+                "dimension",
+                "order_date AT TIME ZONE between",
+                "'between' in '",
+            ),
+            (
+                "dimension",
+                "amount BETWEEN between AND 3",
+                "'between' in '",
+            ),
+            (
+                "dimension",
+                "amount BETWEEN 1 AND between",
+                "'between' in '",
+            ),
+        ]);
+    }
+
+    #[test]
+    fn a_lambda_parameter_is_not_a_column_quoted_or_with_a_field() {
+        let refused: Vec<String> = [
+            "list_transform([struct_pack(a := amount)], lambda s: s.a)[1]",
+            "list_transform([amount], lambda \"x\": \"x\" + 1)[1]",
+            "list_transform([amount], lambda X: x + 1)[1]",
+            "list_transform([region], lambda x: x.lower())[1]",
+        ]
+        .into_iter()
+        .filter_map(|d| {
+            lower_expression_items("v", &def(), items(&[d], &[], &[]))
+                .err()
+                .map(|e| format!("{d}: {e:?}"))
+        })
+        .collect();
+        assert!(refused.is_empty(), "refused:\n{}", refused.join("\n"));
+    }
+
+    #[test]
+    fn a_sql_value_function_is_called_rather_than_read_as_a_column() {
+        // A bare `current_date` reads a column of that name when the query
+        // joins one, so it is written as the function DuckDB would call.
+        let lowered = lower(
+            &[
+                "current_date - order_date",
+                "order_date < current_timestamp",
+            ],
+            &[],
+            &[],
+        );
+        let dims = &lowered.def.as_ref().unwrap().dimensions;
+        let exprs: Vec<_> = dims[dims.len() - 2..]
+            .iter()
+            .map(|d| d.expr.as_str())
+            .collect();
+        assert_eq!(
+            exprs,
+            [
+                "(current_date() - (o.order_date))",
+                "((o.order_date) < get_current_timestamp())"
+            ]
+        );
+    }
+
     #[test]
     fn an_undeclared_column_named_like_a_lambda_parameter_elsewhere_is_refused() {
         // `x` is a parameter inside the lambda only.
@@ -1236,8 +1435,9 @@ mod tests {
             "region LIKE 'E%' ESCAPE '!' OR region ILIKE 'e%'",
             "current_date - order_date",
             "list_transform([amount], lambda x: x + 1)",
-            "list_transform([amount], x -> x + 1)",
-            "list_reduce([amount], (a, b) -> a + b)",
+            "amount NOT BETWEEN 1 AND 2 OR (amount) BETWEEN 1 AND 2",
+            "amount::INTEGER BETWEEN 1 AND 2 AND [amount] BETWEEN [1] AND [2]",
+            "list_reduce([amount], lambda a, b: a + b)",
             "struct_pack(k := region)",
             "struct_pack(k := region).k || (struct_pack(k := region)).k",
             "region IN ('EU', 'US')",
