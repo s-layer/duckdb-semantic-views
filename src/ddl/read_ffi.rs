@@ -369,6 +369,25 @@ pub fn member_types_for_bind(
     )?)
 }
 
+/// Whether the caller's catalog holds a semantic view `name` in `schema`, as
+/// the caller's transaction sees it. The CREATE helpers ask before binding the
+/// members: a CREATE that will not write (IF NOT EXISTS on a view that exists,
+/// or a plain CREATE that will report "already exists") has nothing to check.
+///
+/// # Errors
+///
+/// The catalog scan's error.
+pub fn view_present(name: &str, schema: &str) -> Result<bool, String> {
+    let defs = caller_definitions(Some(name))?;
+    Ok(defs.present
+        && defs.rows.iter().any(|(row_schema, row_name, _)| {
+            row_name.as_deref() == Some(name)
+                && row_schema
+                    .as_deref()
+                    .is_some_and(|s| s.eq_ignore_ascii_case(schema))
+        }))
+}
+
 /// Refuse a CREATE whose definition has a member `DuckDB` cannot bind, as
 /// Snowflake compiles every member expression at CREATE.
 ///

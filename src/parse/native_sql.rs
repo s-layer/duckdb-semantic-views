@@ -62,6 +62,18 @@ fn escaped_parts(view: &ViewRef) -> (SqlLit, SchemaTarget) {
     (SqlLit::escape(&view.name), target)
 }
 
+/// The `schema, skip_if_present` arguments of the CREATE helper TFs: the
+/// schema qualifier as written (`''` for none, meaning the caller's current
+/// schema) and whether a view already there skips the member check.
+#[cfg(feature = "extension")]
+fn check_skip_args(target: &SchemaTarget, skip_if_present: bool) -> String {
+    let schema = match target {
+        SchemaTarget::Unqualified => String::new(),
+        SchemaTarget::Named(s) => s.to_string(),
+    };
+    format!("'{schema}', {skip_if_present}")
+}
+
 /// The name as it should be *written back* in an error suggesting a qualified
 /// spelling — identifier-quoted when it needs to be, then SQL-escaped for
 /// embedding. Quoting has to happen before the SQL escape, which is why this
@@ -276,10 +288,13 @@ fn emit_native_create_sql(
     // The definition is read through the `__sv_check_create` helper TF
     // (`cpp/src/shim.cpp`), whose bind refuses it if a member does not bind in
     // the caller's context -- as `__sv_compute_create_from_yaml` does for FROM
-    // YAML FILE. Its one `new_def` row is the definition unchanged.
+    // YAML FILE. Its one `new_def` row is the definition unchanged. Unless the
+    // CREATE replaces, a view already in the target schema skips the check, so
+    // IF NOT EXISTS stays a no-op and plain CREATE reports "already exists".
     let helper_from = format!(
-        "FROM __sv_check_create('{enriched_escaped}', '{}')",
-        SqlLit::escape(name)
+        "FROM __sv_check_create('{enriched_escaped}', '{}', {})",
+        SqlLit::escape(name),
+        check_skip_args(&schema_target, !or_replace)
     );
 
     // The generated SQL runs on the caller's connection, so its EXISTS
@@ -408,7 +423,8 @@ fn emit_native_create_from_yaml_file(
     );
     let helper_from = format!(
         "FROM __sv_compute_create_from_yaml('{path_escaped}', \
-            '{name_escaped}', '{comment_escaped}')"
+            '{name_escaped}', '{comment_escaped}', {})",
+        check_skip_args(&schema_target, !or_replace)
     );
 
     // Three INSERT shapes mirror the inline CREATE path

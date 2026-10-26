@@ -724,12 +724,6 @@ fn expand_unhoisted(
             &resolved_mets,
             &queried_dim_keys,
         );
-        extra.extend(super::semi_additive::na_dim_scoped_source_tables(
-            view_name,
-            def,
-            &resolved_mets,
-            &queried_dim_keys,
-        ));
         extra.extend(where_tables.iter().cloned());
         super::per_grain::snapshot_cte_anchor(
             def,

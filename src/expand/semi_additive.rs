@@ -283,7 +283,9 @@ pub(super) fn build_snapshot_block(
         // with no join for it). No dimension roles: `is_eligible` and
         // `snapshot_cte_anchor` withhold the scoped-alias rescue here.
         Some(a) => {
-            let needs = super::per_grain::anchor_needs(def, resolved_mets, &dims, &na_dim_sources);
+            let mut needs =
+                super::per_grain::anchor_needs(def, resolved_mets, &dims, &na_dim_sources);
+            push_scoped_na_joins(def, &na_groups, &mut needs.scoped);
             super::per_grain::anchor_joins(
                 def,
                 a,
@@ -327,6 +329,33 @@ pub(super) fn build_snapshot_block(
         inner_sql: sql,
         outer_exprs,
     })
+}
+
+/// Add the role-scoped instance each active NA dim's `ORDER BY` names
+/// (`a__r_bal`) to the joins of a snapshot anchored away from the base table.
+/// The base-anchored resolver joins it by threading the metric's `USING`.
+/// Declining the anchor instead ranked the base table's rows, and a base row
+/// with none of the metric's rows took part in the snapshot.
+fn push_scoped_na_joins<'a>(
+    def: &'a SemanticViewDefinition,
+    na_groups: &[NaGroup],
+    scoped: &mut Vec<&'a crate::model::Join>,
+) {
+    for alias in na_groups
+        .iter()
+        .flat_map(|g| g.na_dim_scoped.iter().flatten())
+    {
+        let edge = def.joins.iter().find(|j| {
+            j.name
+                .as_deref()
+                .is_some_and(|rel| super::join_resolver::scoped_join_alias(&j.table, rel) == *alias)
+        });
+        if let Some(edge) = edge {
+            if !scoped.iter().any(|j| std::ptr::eq(*j, edge)) {
+                scoped.push(edge);
+            }
+        }
+    }
 }
 
 pub(super) fn expand_semi_additive(
@@ -837,44 +866,6 @@ pub(super) fn na_dim_source_tables(
     collect_na_groups(view_name, def, resolved_mets, queried_dim_keys)
         .map(|groups| collect_na_dim_source_tables(def, &groups))
         .unwrap_or_default()
-}
-
-/// The source tables of a query's active NA dimensions that resolved to a
-/// role-playing scoped alias (`na_dim_scoped` is `Some`), for the anchor
-/// decision in `sql_gen`. The snapshot ORDER BY names that scoped instance
-/// (`a__r_bal`), which only the base-anchored path joins, as it threads the
-/// owning metric's `USING`; a snapshot re-anchored at the metric's own table
-/// joined nothing for it, so a query with no dimension on that table failed to
-/// bind. Counting these tables as touched makes
-/// `per_grain::snapshot_cte_anchor` decline, as it does when such a table is
-/// queried.
-pub(super) fn na_dim_scoped_source_tables(
-    view_name: &str,
-    def: &SemanticViewDefinition,
-    resolved_mets: &[&Metric],
-    queried_dim_keys: &HashSet<String>,
-) -> Vec<String> {
-    let Ok(groups) = collect_na_groups(view_name, def, resolved_mets, queried_dim_keys) else {
-        return Vec::new();
-    };
-    let mut sources: Vec<String> = Vec::new();
-    for group in &groups {
-        for (nd, scoped) in group.na_dims.iter().zip(&group.na_dim_scoped) {
-            if scoped.is_none() {
-                continue;
-            }
-            let Some(dim) = super::resolution::find_dimension(def, &nd.dimension) else {
-                continue;
-            };
-            if let Some(ref st) = dim.source_table {
-                let alias = st.to_ascii_lowercase();
-                if !sources.contains(&alias) {
-                    sources.push(alias);
-                }
-            }
-        }
-    }
-    sources
 }
 
 /// A `(metric index, NA dimension name, lowercased source table)` triple —

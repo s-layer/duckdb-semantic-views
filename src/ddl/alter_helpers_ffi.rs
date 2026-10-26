@@ -219,6 +219,9 @@ pub unsafe extern "C" fn sv_check_create_members_rust(
     database_len: usize,
     schema_ptr: *const u8,
     schema_len: usize,
+    target_schema_ptr: *const u8,
+    target_schema_len: usize,
+    skip_if_present: u8,
     out_ptr: *mut *mut u8,
     out_len: *mut usize,
     error_buf: *mut u8,
@@ -234,11 +237,12 @@ pub unsafe extern "C" fn sv_check_create_members_rust(
             }
             std::str::from_utf8(std::slice::from_raw_parts(ptr, len)).ok()
         };
-        let (Some(name), Some(def), Some(database), Some(schema)) = (
+        let (Some(name), Some(def), Some(database), Some(schema), Some(target_schema)) = (
             text(name_ptr, name_len),
             text(def_ptr, def_len),
             text(database_ptr, database_len),
             text(schema_ptr, schema_len),
+            text(target_schema_ptr, target_schema_len),
         ) else {
             write_error_buf(
                 error_buf,
@@ -247,6 +251,25 @@ pub unsafe extern "C" fn sv_check_create_members_rust(
             );
             return 3_u8;
         };
+        let present = if skip_if_present != 0 {
+            let target = if target_schema.is_empty() {
+                schema
+            } else {
+                target_schema
+            };
+            match crate::ddl::read_ffi::view_present(name, target) {
+                Ok(present) => present,
+                Err(message) => {
+                    publish_owned_string(message, out_ptr, out_len);
+                    return 1_u8;
+                }
+            }
+        } else {
+            false
+        };
+        if present {
+            return 0_u8;
+        }
         match crate::ddl::read_ffi::check_create_members(name, def, database, schema) {
             Ok(()) => 0_u8,
             Err(message) => {

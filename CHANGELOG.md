@@ -18,7 +18,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `date_trunc('fortnight', ...)`) now refuses the `CREATE` with
   `semantic view '<view>': <kind> '<name>' does not bind: <DuckDB error>`, instead of
   being stored and failing only when a query reached it. Every form is checked: `OR
-  REPLACE`, `IF NOT EXISTS`, `FROM YAML` and `FROM YAML FILE`. The bind runs in the
+  REPLACE`, `IF NOT EXISTS`, `FROM YAML` and `FROM YAML FILE`. A `CREATE` that would
+  change nothing binds nothing: `IF NOT EXISTS` on a view that exists stays a no-op, and
+  a plain `CREATE` of one still reports that it already exists. The bind runs in the
   creating session, so temporary tables and tables created earlier in the same
   transaction are visible. Materialization tables are not checked.
 
@@ -28,10 +30,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   columns or table alias were written quoted (`PRIMARY KEY ("Key Col")`,
   `"Ord Lines" AS orders`) quoted them twice in the generated SQL, so nearly every query
   of the view failed with a "not found" error.
-- **A `USING` semi-additive metric on a role-played table.** Queried with metrics only,
-  a semi-additive metric whose `NON ADDITIVE BY` dimension sits on a table reached
-  through its `USING` relationship failed with `Referenced table "<table>__<rel>" not
-  found`.
+- **A `USING` semi-additive metric on a role-played table.** Queried without its
+  `NON ADDITIVE BY` dimension, a semi-additive metric whose snapshot dimension sits on a
+  table reached through its `USING` relationship failed with `Referenced table
+  "<table>__<rel>" not found`.
+- **A relationship named `AS` in `GET_DDL`.** A view imported from YAML with a
+  relationship named `as` rendered DDL that did not parse back (`as AS o(fk)
+  REFERENCES c`). The name is now quoted.
 
 ## [0.16.0] - 2026-10-26
 
