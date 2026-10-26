@@ -942,17 +942,12 @@ fn follows_an_operand(text: &str, at: usize) -> bool {
 }
 
 /// Whether `r`, a name in `text` (which has no comments), is a name of the
-/// expression's own rather than a reference to resolve: a field of an
-/// expression's value (`struct_pack(k := x).k`, `(s).k`), a function's named
-/// argument (`k := …`, `k => …`), a collation, or a parameter of a lambda it is
-/// inside. It is left as written, even when a member has its name.
+/// expression's own rather than a reference to resolve: a collation, or a
+/// parameter of a lambda it is inside. It is left as written, even when a
+/// member has its name. (A field of an expression's value and a named argument
+/// are not scanned as references at all: [`scan_references`].)
 fn is_local_name(text: &str, r: &IdentRef<'_>, lambdas: &[LambdaScope]) -> bool {
-    let after = text[r.end..].trim_start();
-    text[..r.start].ends_with('.')
-        || after.starts_with(":=")
-        || after.starts_with("=>")
-        || word_before(text, r.start).eq_ignore_ascii_case("collate")
-        || is_lambda_param(r, lambdas)
+    word_before(text, r.start).eq_ignore_ascii_case("collate") || is_lambda_param(r, lambdas)
 }
 
 /// Whether `r`, a name in `text` that is no member of the view and no local

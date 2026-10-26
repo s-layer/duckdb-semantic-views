@@ -156,8 +156,19 @@ impl IdentRef<'_> {
 /// emitted — so a fact/metric named like a function (`sum`) is never confused
 /// with the call, in either FIND or INLINE. The complementary chains (the call
 /// heads themselves) are available via [`scan_function_heads`].
+///
+/// Nor is a name of the expression's own: a field of an expression's value
+/// (`(s).x`, `struct_pack(x := 1).x`) or a function's named argument
+/// (`x := …`, `x => …`). Every FIND and INLINE goes through this scan, so
+/// they agree that a member of the same name is not referenced there.
 pub(crate) fn scan_references(expr: &str) -> Vec<IdentRef<'_>> {
     scan_chains(expr, ChainKind::Reference)
+        .into_iter()
+        .filter(|r| {
+            let after = expr[r.end..].trim_start();
+            !(expr[..r.start].ends_with('.') || after.starts_with(":=") || after.starts_with("=>"))
+        })
+        .collect()
 }
 
 /// Which class of identifier chain a scan collects: [`scan_references`] keeps
@@ -765,12 +776,6 @@ fn splice_references(
     let mut out = String::with_capacity(expr.len());
     let mut copied = 0;
     for r in refs {
-        // A field of an expression's value (`(s).x`) or a named argument
-        // (`x := …`, `x => …`) only shares the member's name.
-        let after = expr[r.end..].trim_start();
-        if expr[..r.start].ends_with('.') || after.starts_with(":=") || after.starts_with("=>") {
-            continue;
-        }
         if let Some(repl) = replacements.get(&r.key()) {
             out.push_str(&expr[copied..r.start]);
             out.push_str(repl);
@@ -1182,6 +1187,25 @@ mod tests {
     }
 
     // ----- inline_references (INLINE) -----
+
+    // FIND agrees with INLINE: a field or a named argument is not a reference,
+    // so the fact reach and dependency scans do not count it either.
+    #[test]
+    fn a_field_or_named_argument_is_not_a_reference() {
+        let cases = [
+            ("struct_pack(amt := o.x).amt", vec!["o.x"]),
+            ("f(amt => 1) + (s).amt", vec!["1", "s"]),
+        ];
+        let wrong: Vec<String> = cases
+            .iter()
+            .filter_map(|(expr, want)| {
+                let mut got: Vec<String> = reference_keys(expr).into_iter().collect();
+                got.sort();
+                (got != *want).then(|| format!("{expr} -> {got:?}"))
+            })
+            .collect();
+        assert!(wrong.is_empty(), "{wrong:#?}");
+    }
 
     // A field of an expression's value and a function's named argument are
     // names of their own, so a member of the same name is not inlined there.
