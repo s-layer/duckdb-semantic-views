@@ -315,6 +315,29 @@ SELECT * FROM SEMANTIC_VIEW(exi
 70.00
 100.00
 
+# Nor does such a name reach the table of a fact named like it (qty is a fact
+# on li), or make a fact depend on one.
+
+query R
+SELECT * FROM SEMANTIC_VIEW(exi FACTS struct_pack(qty := o.amt).qty AS q) ORDER BY q;
+----
+50.00
+70.00
+100.00
+
+statement ok
+CREATE SEMANTIC VIEW exi_fields AS
+  TABLES (o AS exi_orders PRIMARY KEY (id))
+  FACTS (o.a AS struct_pack(b := o.amount).b, o.b AS a + 1)
+  DIMENSIONS (o.order_date AS o.ordered_at);
+
+query R
+SELECT * FROM SEMANTIC_VIEW(exi_fields FACTS b) ORDER BY b;
+----
+51.00
+71.00
+101.00
+
 query R
 SELECT * FROM SEMANTIC_VIEW(exi
     FACTS struct_pack(k := o.amt).k + (current_date - current_date) AS k
