@@ -185,7 +185,7 @@ The label is **declarative metadata**, not an access restriction or a resolution
 
    The ``BOOLEAN`` requirement is checked by DuckDB's binder at **query** time, not at ``CREATE``. Typing an arbitrary SQL expression requires a binder, so a filter over a non-boolean expression is created successfully and raises DuckDB's own type error the first time it is used in a predicate.
 
-``FILTER`` is the only supported label. Any other value (Snowflake's tags, for instance) is rejected at ``CREATE`` rather than silently dropped, so a definition cannot round-trip having quietly lost a label you wrote.
+``FILTER`` is the only supported label. Any other value is rejected at ``CREATE`` rather than silently dropped, so a definition cannot round-trip having quietly lost a label you wrote.
 
 ``LABELS`` is likewise valid **only on a fact or a dimension**. Writing it on a table, on a metric, or as a view-level annotation is rejected for the same reason: those entries carry no filter flag, so accepting it there would mean discarding it on the way to storage.
 
@@ -200,7 +200,7 @@ Add Tags
 Tags are name/value pairs for tools that read your view's metadata, such as a governance catalog or a BI layer that needs to know what each member is. Like comments, they never change what a query returns. Add ``WITH TAG (...)`` to any table, fact, dimension or metric entry, or after the last clause to tag the view itself:
 
 .. code-block:: sql
-   :emphasize-lines: 3,7,10,11
+   :emphasize-lines: 3,7,10,12
 
    CREATE SEMANTIC VIEW sales AS
    TABLES (
@@ -290,11 +290,11 @@ Troubleshooting
 **Synonyms not affecting query resolution**
    Synonyms are informational metadata only. They do not expand the set of names recognized by :ref:`SEMANTIC_VIEW(...) and semantic_view() <ref-semantic-view-function>` or :ref:`explain_semantic_view() <ref-explain-semantic-view>`. Use the declared name to query an item.
 
-**COMMENT, WITH SYNONYMS and LABELS order**
-   The annotations on one entry may appear in any order -- ``o.region AS o.region WITH SYNONYMS = ('territory') COMMENT = 'c'`` parses the same as the reverse. What the parser does require is that the annotation region be *tiled* by recognized clauses: once the first annotation keyword is seen, everything after it must be a valid ``COMMENT`` / ``WITH SYNONYMS`` / ``LABELS`` clause separated by whitespace. Leftover text (``COMMENT = 'a' banana``) or a repeated clause is an error rather than being silently dropped.
+**COMMENT, WITH SYNONYMS, LABELS and TAG order**
+   The annotations on one entry may appear in any order -- ``o.region AS o.region WITH SYNONYMS = ('territory') COMMENT = 'c'`` parses the same as the reverse. What the parser does require is that the annotation region be *tiled* by recognized clauses: once the first annotation keyword is seen, everything after it must be a valid ``COMMENT`` / ``WITH SYNONYMS`` / ``LABELS`` / ``[WITH] TAG`` clause separated by whitespace. Leftover text (``COMMENT = 'a' banana``) or a repeated clause is an error rather than being silently dropped.
 
 **Unsupported label**
-   ``FILTER`` is the only value accepted in ``LABELS = (...)``. Snowflake's tags and other label values are rejected at ``CREATE`` -- deliberately, so a definition cannot round-trip having quietly lost a label. Remove the unsupported value to create the view.
+   ``FILTER`` is the only value accepted in ``LABELS = (...)``. Other label values are rejected at ``CREATE`` -- deliberately, so a definition cannot round-trip having quietly lost a label. Remove the unsupported value to create the view.
 
 **LABELS rejected on a table, metric, or the view itself**
    ``LABELS`` applies only to facts and dimensions -- they are the entries that carry the filter flag. On a ``TABLES`` or ``METRICS`` entry, or in the trailing view-level annotation position, it raises *LABELS is not valid on a ...*. Move the annotation to the fact or dimension you meant to mark.

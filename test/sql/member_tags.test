@@ -261,3 +261,26 @@ SELECT * FROM semantic_view('mt_col', dimensions := ['tag'], metrics := ['n'])
 ----
 a	1
 b	1
+
+# A call to a macro named `tag` is an expression: a bare `TAG (` opens the
+# clause only when a tag name and `=` follow.
+statement ok
+CREATE MACRO tag(x) AS x || '!';
+
+statement ok
+CREATE SEMANTIC VIEW mt_macro AS
+  TABLES (o AS mt_orders PRIMARY KEY (id))
+  DIMENSIONS (o.loud AS tag(o.region) TAG (k = 'v'))
+  METRICS (o.revenue AS SUM(o.amount) + 0 * MAX(length(tag (o.region))))
+
+query TI rowsort
+SELECT * FROM semantic_view('mt_macro', dimensions := ['loud'], metrics := ['revenue'])
+----
+East!	30
+West!	5
+
+query T
+SELECT property_value FROM describe_semantic_view('mt_macro')
+WHERE object_name = 'loud' AND property = 'TAGS'
+----
+{"k":"v"}

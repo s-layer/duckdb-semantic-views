@@ -112,7 +112,12 @@ pub fn arb_canonical_tags() -> impl Strategy<Value = Vec<Tag>> {
         let mut seen: Vec<Vec<String>> = Vec::new();
         tags.into_iter()
             .filter(|t| {
-                let key: Vec<String> = t.name.parts().iter().map(|p| p.to_lowercase()).collect();
+                let key: Vec<String> = t
+                    .name
+                    .parts()
+                    .iter()
+                    .map(|p| p.to_ascii_lowercase())
+                    .collect();
                 let fresh = !seen.contains(&key);
                 seen.push(key);
                 fresh

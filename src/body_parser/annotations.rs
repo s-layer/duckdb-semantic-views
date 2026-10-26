@@ -319,13 +319,13 @@ pub(crate) fn find_annotation_start(text: &str) -> Option<usize> {
                         }
                     }
                 }
-                // Check for a bare TAG keyword. Only `TAG (` counts: `TAG` alone is
-                // an ordinary name (`o.d AS tag`), and no expression continues
-                // with a parenthesised list after one.
+                // Check for a bare TAG keyword. Only `TAG (<name> =` counts: `TAG`
+                // alone is an ordinary name (`o.d AS tag`), and `tag(o.x)` is a
+                // call to a macro or UDF named `tag`.
                 if i + 3 <= bytes.len()
                     && &upper_bytes[i..i + 3] == b"TAG"
                     && annotation_boundary_before(bytes, i)
-                    && upper[i + 3..].trim_start().starts_with('(')
+                    && opens_tag_list(&text[i + 3..])
                     && annotation_start.is_none()
                 {
                     annotation_start = Some(i);
@@ -358,10 +358,30 @@ pub(crate) fn find_annotation_start(text: &str) -> Option<usize> {
 /// `base_offset` is the absolute byte offset of `text[0]` in the original
 /// query; every error caret in this subtree is recovered from the offending
 /// token's position within `text` (F-15, code-review 2026-07-16).
-#[allow(clippy::too_many_lines)]
 pub(super) fn parse_trailing_annotations(
     text: &str,
     base_offset: usize,
+) -> Result<(String, ParsedAnnotations), ParseError> {
+    parse_annotations(text, base_offset, false)
+}
+
+/// [`parse_trailing_annotations`] for text known to begin at an annotation
+/// keyword, such as the view-level annotations after the last clause, where no
+/// expression can precede them. There a bare `TAG` always opens the clause, so
+/// a malformed list (`TAG ()`) is reported as a TAG error rather than being
+/// taken for a call to a function named `tag`.
+pub(super) fn parse_leading_annotations(
+    text: &str,
+    base_offset: usize,
+) -> Result<(String, ParsedAnnotations), ParseError> {
+    parse_annotations(text, base_offset, true)
+}
+
+#[allow(clippy::too_many_lines)]
+fn parse_annotations(
+    text: &str,
+    base_offset: usize,
+    at_keyword: bool,
 ) -> Result<(String, ParsedAnnotations), ParseError> {
     // Re-anchor past any leading whitespace `trim` will drop, so `base_offset`
     // remains the absolute offset of `text[0]` after trimming.
@@ -369,7 +389,11 @@ pub(super) fn parse_trailing_annotations(
     let text = text.trim();
     // Absolute caret for any subslice of `text` (F-15).
     let pos_of = |sub: &str| base_offset + crate::util::byte_offset_within(text, sub);
-    let annotation_start = find_annotation_start(text);
+    let annotation_start = if at_keyword {
+        Some(0)
+    } else {
+        find_annotation_start(text)
+    };
 
     let (expr_text, annotation_text) = if let Some(start) = annotation_start {
         (text[..start].trim(), &text[start..])
@@ -536,6 +560,52 @@ fn parse_tag_clause<'t>(
         base_offset + crate::util::byte_offset_within(text, content),
     )?);
     Ok(&after_kw[consumed..])
+}
+
+/// Whether `rest` (the text after a bare `TAG`) opens a tag list: `(`, a
+/// possibly qualified, possibly quoted name, then `=` (not `==`). That is what
+/// tells `TAG (t = 'v')` from a call such as `tag(o.x)`.
+fn opens_tag_list(rest: &str) -> bool {
+    let Some(inner) = rest.trim_start().strip_prefix('(') else {
+        return false;
+    };
+    let bytes = inner.trim_start().as_bytes();
+    let mut pos = 0;
+    loop {
+        if bytes.get(pos) == Some(&b'"') {
+            pos += 1;
+            loop {
+                match bytes.get(pos) {
+                    None => return false,
+                    Some(b'"') if bytes.get(pos + 1) == Some(&b'"') => pos += 2,
+                    Some(b'"') => {
+                        pos += 1;
+                        break;
+                    }
+                    Some(_) => pos += 1,
+                }
+            }
+        } else {
+            // A part may be empty here (`TAG (a..b = '1')`, `TAG (= '1')`): no
+            // call reads that way, and the clause parser reports it precisely.
+            while bytes.get(pos).is_some_and(|&b| is_ident_continuation(b)) {
+                pos += 1;
+            }
+        }
+        while bytes.get(pos).is_some_and(u8::is_ascii_whitespace) {
+            pos += 1;
+        }
+        match bytes.get(pos) {
+            Some(b'.') => {
+                pos += 1;
+                while bytes.get(pos).is_some_and(u8::is_ascii_whitespace) {
+                    pos += 1;
+                }
+            }
+            Some(b'=') => return bytes.get(pos + 1) != Some(&b'='),
+            _ => return false,
+        }
+    }
 }
 
 /// True when `upper` (already ASCII-uppercased) begins with `keyword` (also
@@ -761,17 +831,28 @@ mod tag_tests {
     #[test]
     fn a_name_called_tag_is_still_an_expression() {
         // Only `TAG (` begins the clause; a bare or qualified `tag` is a name.
+        let mut failures = Vec::new();
         for text in [
             "tag",
             "o.tag",
             "o.tag + 1",
             "CONCAT(tag, 'x')",
             "o.\"tag\" (1)",
+            // A call to a user macro or UDF named `tag` is an expression too:
+            // only `TAG (` followed by a tag name and `=` begins the clause.
+            "tag(o.x)",
+            "SUM(o.a) + tag (o.y)",
+            "tag()",
+            "tag(o.x, 'k')",
+            "tag(\"o\".x)",
         ] {
-            let (expr, tags) = tags_of(text);
-            assert_eq!(expr, text);
-            assert!(tags.is_empty(), "for {text:?}");
+            // Every case is checked before failing, so each one reports.
+            match parse_trailing_annotations(text, 0) {
+                Ok((expr, ann)) if expr == text && ann.tags.is_empty() => {}
+                other => failures.push(format!("{text:?}: {other:?}")),
+            }
         }
+        assert!(failures.is_empty(), "{failures:#?}");
     }
 
     #[test]
@@ -816,15 +897,18 @@ mod tag_tests {
 
     #[test]
     fn malformed_tag_lists_are_refused() {
+        // Lists that do not begin `<name> =` are written with WITH: after a
+        // member's expression a bare `TAG (` opens the clause only when a name
+        // and `=` follow (otherwise it is a call to a function named `tag`).
         for (text, needle) in [
-            ("x TAG ()", "TAG () is empty"),
+            ("x WITH TAG ()", "TAG () is empty"),
             ("x TAG (a = '1',)", "Empty entry"),
-            ("x TAG (a '1')", "Expected '='"),
+            ("x WITH TAG (a '1')", "Expected '='"),
             ("x TAG (a = 1)", "single-quoted string"),
             ("x TAG (a = '1' b)", "Unexpected text 'b'"),
             ("x TAG (= '1')", "the name is missing"),
-            ("x TAG (a b = '1')", "is not an identifier"),
-            ("x TAG (1a = '1')", "is not an identifier"),
+            ("x WITH TAG (a b = '1')", "is not an identifier"),
+            ("x WITH TAG (1a = '1')", "is not an identifier"),
             ("x TAG (a.b.c.d = '1')", "at most three parts"),
             ("x TAG (a..b = '1')", "Invalid tag name"),
             ("x TAG (\"\" = '1')", "Invalid tag name"),

@@ -303,7 +303,7 @@ Documented in full on the [docs site](https://s-layer.github.io/duckdb-semantic-
 - **[Window metrics](https://s-layer.github.io/duckdb-semantic-views/how-to/window-metrics.html)** -- `OVER (PARTITION BY ...)` for running totals and shares of parent.
 - **[Materializations](https://s-layer.github.io/duckdb-semantic-views/how-to/materializations.html)** -- route matching queries to a pre-aggregated table.
 - **[YAML definitions](https://s-layer.github.io/duckdb-semantic-views/how-to/yaml-definitions.html)** -- define views from YAML, and export back.
-- **[Metadata annotations](https://s-layer.github.io/duckdb-semantic-views/how-to/metadata-annotations.html)** -- `COMMENT`, `WITH SYNONYMS`, `PRIVATE`, and `LABELS = (FILTER)`.
+- **[Metadata annotations](https://s-layer.github.io/duckdb-semantic-views/how-to/metadata-annotations.html)** -- `COMMENT`, `WITH SYNONYMS`, `PRIVATE`, `LABELS = (FILTER)`, and `WITH TAG`.
 - **[Expression items](https://s-layer.github.io/duckdb-semantic-views/reference/semantic-view-function.html#expression-items)** -- `DIMENSIONS date_part('year', ordered_at) AS yr METRICS revenue / order_count AS avg_order`, computed per query.
 - **[Wildcard selection](https://s-layer.github.io/duckdb-semantic-views/how-to/wildcard-selection.html)** -- `DIMENSIONS c.*`.
 - **[Querying facts directly](https://s-layer.github.io/duckdb-semantic-views/how-to/query-facts.html)** -- `FACTS ...` returns row-level values without aggregating.

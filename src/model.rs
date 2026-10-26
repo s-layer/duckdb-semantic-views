@@ -97,7 +97,10 @@ impl TagName {
 
     /// Case-insensitive identity, for duplicate detection.
     fn key(&self) -> Vec<String> {
-        self.parts().into_iter().map(str::to_lowercase).collect()
+        self.parts()
+            .into_iter()
+            .map(str::to_ascii_lowercase)
+            .collect()
     }
 }
 
@@ -1811,6 +1814,22 @@ mod tests {
                 "{expr}: {e}"
             );
         }
+    }
+
+    #[test]
+    fn tag_names_differing_beyond_ascii_case_are_not_duplicates() {
+        // Tag names fold ASCII case only, as identifiers do (`ident_matches`).
+        let tag = |name: &str| Tag {
+            name: TagName {
+                database: None,
+                schema: None,
+                tag: name.to_string(),
+            },
+            value: "v".to_string(),
+        };
+        assert_eq!(tag_error(&[tag("É"), tag("é")]), None);
+        assert_eq!(tag_error(&[tag("k"), tag("\u{212A}")]), None);
+        assert!(tag_error(&[tag("Ab"), tag("aB")]).is_some());
     }
 
     #[test]

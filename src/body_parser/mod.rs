@@ -326,7 +326,7 @@ fn split_trailing_view_annotations(
         return Ok((after_as, None, Vec::new()));
     };
     let trailing = &after_as[first_tok.start..];
-    let (leftover, ann) = annotations::parse_trailing_annotations(trailing, cur.abs_of(trailing))?;
+    let (leftover, ann) = annotations::parse_leading_annotations(trailing, cur.abs_of(trailing))?;
     // `trailing` begins at an annotation keyword, so the "expression" prefix the
     // annotation parser peels off must be empty.
     if !leftover.trim().is_empty() {

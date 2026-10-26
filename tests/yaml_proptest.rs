@@ -556,7 +556,7 @@ fn arb_oracle_tags() -> impl Strategy<Value = Vec<Tag>> {
             if dup {
                 if let Some(first) = tags.first().cloned() {
                     let mut again = first;
-                    again.name.tag = again.name.tag.to_uppercase();
+                    again.name.tag = again.name.tag.to_ascii_uppercase();
                     tags.push(again);
                 }
             }
