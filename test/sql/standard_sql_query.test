@@ -1,0 +1,396 @@
+# Standard-SQL queries over a semantic view by name (Phase 5), as in
+# Snowflake: SELECT ... FROM <semantic view> ... GROUP BY ..., with each
+# metric passed to AGG. The shim rewrites the query block into the
+# SEMANTIC_VIEW(...) construct, so each case here checks the rewrite reaches
+# the rows the construct returns, and that it does so wherever a query block
+# can stand. The refusals are in standard_sql_query_refusals.test.
+
+require semantic_views
+
+statement ok
+CREATE TABLE ssq_customers (id INTEGER, name VARCHAR, region VARCHAR, tier VARCHAR);
+
+statement ok
+INSERT INTO ssq_customers VALUES (1, 'Acme', 'East', 'gold'), (2, 'Globex', 'East', 'silver'), (3, 'Initech', 'West', 'gold');
+
+statement ok
+CREATE TABLE ssq_orders (id INTEGER, customer_id INTEGER, amount DECIMAL(10,2), cost DECIMAL(10,2), channel VARCHAR, ordered_at DATE);
+
+statement ok
+INSERT INTO ssq_orders VALUES
+  (1, 1, 100.00,  60.00, 'web',    DATE '2023-12-15'),
+  (2, 1, 250.00, 150.00, 'web',    DATE '2024-01-10'),
+  (3, 2,  80.00,  50.00, 'retail', DATE '2024-02-03'),
+  (4, 3, 300.00, 200.00, 'retail', DATE '2024-03-21'),
+  (5, 3, 150.00,  90.00, 'web',    DATE '2024-04-02');
+
+statement ok
+CREATE SEMANTIC VIEW ssq AS
+  TABLES (o AS ssq_orders PRIMARY KEY (id), c AS ssq_customers PRIMARY KEY (id))
+  RELATIONSHIPS (order_customer AS o(customer_id) REFERENCES c)
+  FACTS (o.amount AS o.amount, PRIVATE o.unit_cost AS o.cost)
+  DIMENSIONS (c.customer AS c.name, c.region AS c.region, c.tier AS c.tier,
+              o.channel AS o.channel, o.ordered_at AS o.ordered_at)
+  METRICS (o.revenue AS SUM(o.amount), o.order_count AS COUNT(*),
+           o.margin AS SUM(o.amount - o.unit_cost));
+
+# --- the query form and the construct return the same rows ----------------------
+
+query TT rowsort
+SELECT region, AGG(revenue) FROM ssq GROUP BY region;
+----
+East	430.00
+West	450.00
+
+query TT rowsort
+SELECT * FROM SEMANTIC_VIEW(ssq DIMENSIONS region METRICS revenue);
+----
+East	430.00
+West	450.00
+
+# Each column is named as DuckDB names the SELECT item as written.
+
+query T
+SELECT column_name FROM (DESCRIBE SELECT region, AGG(revenue), AGG(revenue) * 10, tier AS t FROM ssq GROUP BY region, tier);
+----
+region
+agg(revenue)
+(agg(revenue) * 10)
+t
+
+# --- WHERE, HAVING, ORDER BY, LIMIT, DISTINCT -----------------------------------
+
+# WHERE filters rows before the metrics are computed (it moves into the
+# construct); HAVING filters the groups after (it stays outside).
+
+query TT
+SELECT region, AGG(revenue) FROM ssq WHERE channel = 'web' GROUP BY region ORDER BY region;
+----
+East	350.00
+West	150.00
+
+query TT
+SELECT region, AGG(revenue) FROM ssq WHERE channel = 'web' GROUP BY region HAVING AGG(revenue) > 200;
+----
+East	350.00
+
+# A HAVING aggregate the SELECT list does not return.
+
+query T
+SELECT region FROM ssq GROUP BY region HAVING AGG(order_count) > 2;
+----
+East
+
+query TT
+SELECT region, AGG(revenue) FROM ssq GROUP BY region ORDER BY AGG(revenue) DESC LIMIT 1;
+----
+West	450.00
+
+query T
+SELECT region FROM ssq GROUP BY region ORDER BY AGG(order_count);
+----
+West
+East
+
+query T
+SELECT DISTINCT tier FROM ssq GROUP BY tier, region ORDER BY 1;
+----
+gold
+silver
+
+# --- metrics, ad-hoc aggregates, facts, dimension expressions --------------------
+
+query TTT
+SELECT region, AGG(revenue) * 10 AS rev10, AGG(revenue) / AGG(order_count) AS aov FROM ssq GROUP BY region ORDER BY region;
+----
+East	4300.00	143.33333333333334
+West	4500.00	225.0
+
+# MIN, MAX and ANY_VALUE of a metric evaluate it, as AGG does.
+
+query TTTT
+SELECT region, MIN(revenue), MAX(revenue), ANY_VALUE(revenue) FROM ssq GROUP BY region ORDER BY region;
+----
+East	430.00	430.00	430.00
+West	450.00	450.00	450.00
+
+# Any other aggregate over dimensions and facts is an ad-hoc metric.
+
+query TTTT
+SELECT region, SUM(amount), AGG(order_count), COUNT(DISTINCT customer) FROM ssq GROUP BY region ORDER BY region;
+----
+East	430.00	3	2
+West	450.00	2	1
+
+query TT
+SELECT year(ordered_at) AS y, AGG(revenue) FROM ssq GROUP BY year(ordered_at) ORDER BY y;
+----
+2023	100.00
+2024	780.00
+
+query T
+SELECT AGG(revenue) FROM ssq;
+----
+880.00
+
+query T rowsort
+SELECT tier FROM ssq GROUP BY tier;
+----
+gold
+silver
+
+# Neither grouped nor aggregated, an item over facts is a fact: one row each.
+
+query T
+SELECT amount * 2 AS dbl FROM ssq ORDER BY 1;
+----
+160.00
+200.00
+300.00
+500.00
+600.00
+
+query TT
+SELECT channel, amount FROM ssq GROUP BY channel ORDER BY 1, 2;
+----
+retail	80.00
+retail	300.00
+web	100.00
+web	150.00
+web	250.00
+
+# --- names: qualifiers, GROUP BY spellings, case, schema ----------------------------
+
+# A qualifier naming the view (its alias, else its name) is dropped; one naming
+# a logical table of the view is the construct's, and a key matches however it
+# is written.
+
+query TT rowsort
+SELECT s.region, AGG(s.revenue) FROM ssq s GROUP BY s.region;
+----
+East	430.00
+West	450.00
+
+query TT rowsort
+SELECT ssq.region, AGG(revenue) FROM ssq GROUP BY ssq.region;
+----
+East	430.00
+West	450.00
+
+query TT rowsort
+SELECT c.region, AGG(o.revenue) FROM ssq GROUP BY region;
+----
+East	430.00
+West	450.00
+
+query TT rowsort
+SELECT region, AGG(revenue) FROM ssq GROUP BY 1;
+----
+East	430.00
+West	450.00
+
+query TT rowsort
+SELECT region AS r, AGG(revenue) AS rev FROM ssq GROUP BY r;
+----
+East	430.00
+West	450.00
+
+query TTT rowsort
+SELECT region, tier, AGG(revenue) FROM ssq GROUP BY ALL;
+----
+East	gold	350.00
+East	silver	80.00
+West	gold	450.00
+
+query TT rowsort
+SELECT REGION, agg(REVENUE) FROM SSQ GROUP BY Region;
+----
+East	430.00
+West	450.00
+
+query TT rowsort
+SELECT region, AGG(revenue) FROM main.ssq GROUP BY region;
+----
+East	430.00
+West	450.00
+
+# --- wherever a query block can stand ---------------------------------------------
+
+query TT rowsort
+SELECT * FROM (SELECT region, AGG(revenue) AS rev FROM ssq GROUP BY region) WHERE rev > 440;
+----
+West	450.00
+
+query T
+WITH r AS (SELECT region, AGG(revenue) AS rev FROM ssq GROUP BY region) SELECT sum(rev) FROM r;
+----
+880.00
+
+query TTT rowsort
+SELECT r.region, r.rev, count(*) FROM (SELECT region, AGG(revenue) AS rev FROM ssq GROUP BY region) r
+JOIN ssq_customers c ON c.region = r.region GROUP BY ALL;
+----
+East	430.00	2
+West	450.00	1
+
+query TT rowsort
+SELECT region, AGG(revenue) FROM ssq GROUP BY region UNION ALL SELECT 'all', AGG(revenue) FROM ssq;
+----
+East	430.00
+West	450.00
+all	880.00
+
+query T
+SELECT (SELECT AGG(revenue) FROM ssq) AS total;
+----
+880.00
+
+# An unaliased subquery's column is named by its text as written.
+
+query T
+SELECT column_name FROM (DESCRIBE SELECT (SELECT AGG(revenue) FROM ssq));
+----
+(SELECT agg(revenue) FROM ssq)
+
+# A correlated subquery outside the block that reads the view is DuckDB's.
+
+query T
+SELECT name FROM ssq_customers c WHERE EXISTS (SELECT 1 FROM (SELECT region, AGG(revenue) AS rev FROM ssq GROUP BY region) r WHERE r.region = c.region AND r.rev > 440);
+----
+Initech
+
+query T
+SELECT name FROM ssq_customers WHERE region IN (SELECT region FROM ssq GROUP BY region HAVING AGG(revenue) > 440);
+----
+Initech
+
+# A query form inside the WHERE of another is rewritten before it moves into
+# that one's construct.
+
+query TT
+SELECT region, AGG(revenue) FROM ssq WHERE region IN (SELECT region FROM ssq WHERE tier = 'silver' GROUP BY region) GROUP BY region;
+----
+East	430.00
+
+statement ok
+CREATE TABLE ssq_ctas AS SELECT region, AGG(revenue) AS rev FROM ssq GROUP BY region;
+
+query TT rowsort
+SELECT * FROM ssq_ctas;
+----
+East	430.00
+West	450.00
+
+statement ok
+INSERT INTO ssq_ctas SELECT 'all', AGG(revenue) FROM ssq;
+
+query T
+SELECT rev FROM ssq_ctas WHERE region = 'all';
+----
+880.00
+
+# A view over the query form stores the rewritten construct, so reading it
+# needs no rewrite.
+
+statement ok
+CREATE VIEW ssq_v AS SELECT region, AGG(revenue) AS rev FROM ssq GROUP BY region;
+
+query TT rowsort
+SELECT * FROM ssq_v;
+----
+East	430.00
+West	450.00
+
+query T
+SELECT sql LIKE '%semantic_view(''ssq''%' FROM duckdb_views() WHERE view_name = 'ssq_v';
+----
+true
+
+statement ok
+COPY (SELECT region, AGG(revenue) FROM ssq GROUP BY region ORDER BY region) TO '__TEST_DIR__/ssq.csv';
+
+query TT
+SELECT * FROM read_csv('__TEST_DIR__/ssq.csv') ORDER BY 1;
+----
+East	430.0
+West	450.0
+
+statement ok
+EXPLAIN SELECT region, AGG(revenue) FROM ssq GROUP BY region;
+
+query TT
+SELECT column_name, column_type FROM (DESCRIBE SELECT region, AGG(order_count) FROM ssq GROUP BY region);
+----
+region	VARCHAR
+agg(order_count)	BIGINT
+
+statement ok
+PREPARE ssq_p AS SELECT region, AGG(revenue) FROM ssq WHERE channel = $1 GROUP BY region ORDER BY region;
+
+query TT
+EXECUTE ssq_p('retail');
+----
+East	80.00
+West	300.00
+
+# --- only a semantic view is rewritten -------------------------------------------
+
+# A CTE of the same name shadows the view, and a table of the same name wins
+# over it: neither is rewritten.
+
+query T
+WITH ssq AS (SELECT 1 AS region) SELECT region FROM ssq GROUP BY region;
+----
+1
+
+statement ok
+CREATE TABLE ssq_twin (region VARCHAR);
+
+statement ok
+INSERT INTO ssq_twin VALUES ('t');
+
+statement ok
+CREATE SEMANTIC VIEW ssq_twin AS TABLES (c AS ssq_customers PRIMARY KEY (id)) DIMENSIONS (c.region AS c.region);
+
+query T
+SELECT region FROM ssq_twin GROUP BY region;
+----
+t
+
+# A statement no semantic view is read by keeps DuckDB's own error.
+
+statement error
+SELECT region FROM ssq_nosuch GROUP BY region;
+----
+Table with name ssq_nosuch does not exist
+
+statement error
+SELECT nosuch FROM ssq_customers;
+----
+Referenced column "nosuch" not found
+
+# --- transactions -------------------------------------------------------------------
+
+# A semantic view is visible to the query form in the transaction that created
+# it, and gone after ROLLBACK.
+
+statement ok
+BEGIN;
+
+statement ok
+CREATE SEMANTIC VIEW ssq_t AS TABLES (o AS ssq_orders PRIMARY KEY (id))
+  DIMENSIONS (o.channel AS o.channel) METRICS (o.n AS COUNT(*));
+
+query TT rowsort
+SELECT channel, AGG(n) FROM ssq_t GROUP BY channel;
+----
+retail	2
+web	3
+
+statement ok
+ROLLBACK;
+
+statement error
+SELECT channel, AGG(n) FROM ssq_t GROUP BY channel;
+----
+Table with name ssq_t does not exist

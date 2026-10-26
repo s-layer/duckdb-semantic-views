@@ -131,6 +131,8 @@ src/
     ├── wire.rs                #   Pure wire-format/SQL-shape helpers (always compiled + unit-tested)
     ├── raw_sql.rs             #   Raw C-API query helpers: DESCRIBE names and types, VARCHAR reads (always compiled)
     ├── member_types.rs        #   Read-side member type probe for SHOW/DESCRIBE `data_type` (TECH-DEBT #51; always compiled)
+    ├── standard.rs            #   Members a standard-SQL query over a view by name is classified by (Phase 5);
+    │                          #   the listing is always compiled, its FFI entrypoint extension-only
     ├── error.rs               #   Query-specific error types (extension-only)
     └── mod.rs
 
@@ -219,6 +221,10 @@ DuckDB keeps the active grammar extensions per connection (`active_grammar_exten
 
 DuckDB parses a statement before `QueryBegin`, and a statement that fails to parse begins no query. So any **other** connection that was open at the `LOAD` (and was not running a query then) parses without the grammar until it runs a statement that parses without it, such as `SELECT 1` or `LOAD semantic_views`: every semantic-view statement before that fails as a DuckDB syntax error, retries included. `test_connection_open_before_load` in `test/integration/test_load_extension_twice_idempotent.py` pins this. DuckDB offers no pre-parse hook and no global form of `active_grammar_extensions` that would avoid it (TECH-DEBT #108).
 
+#### Standard-SQL queries by view name
+
+`SELECT region, AGG(revenue) FROM sv GROUP BY region` (Phase 5) is handled by `SvStandardQuery`, an `OperatorExtension` that `sv_register_grammar` registers once per database (`cpp/src/shim.cpp`). DuckDB calls an operator extension's `Bind` only after its own binder fails, so a statement that reads no semantic view never reaches it and keeps DuckDB's error. The hook re-parses the statement's own text (unwrapping `PREPARE`), and `SvStandardWalker` walks every query block, CTE and subquery, following Python replacement scans so a relation read by its variable name is walked too. A `FROM` naming a semantic view (and no CTE, table or view of that name) becomes a `SvStandardRewrite`: it classifies each name with the member listing from `sv_standard_query_view_rust` (`src/query/standard.rs`), enforces the query form's rules, and grafts in the `SEMANTIC_VIEW(...)` construct, so every check the construct runs (fan traps, role-playing paths, private members, `WHERE` over a metric) applies unchanged. The rewritten statement is bound by a child binder (`Binder::CreateBinder(context, &binder)`), which shares the parameters and table indexes but none of the failed attempt's bindings; if nothing was rewritten the hook declines and the planner rethrows the original error. This is the only hook every bind path goes through: `ClientContext::BindStatement` (Python's `duckdb.sql()` / `con.sql()`, and the sqllogictest runner) skips the `OnPlanningError` rebind hook.
+
 ### Feature Flag Split
 
 The crate has two Cargo feature configurations (think of features as build-time toggles, like Python's `extras_require`):
@@ -230,7 +236,7 @@ The crate has two Cargo feature configurations (think of features as build-time 
 
 This split exists because DuckDB loadable extensions cannot be tested as standalone binaries -- the function-pointer stubs are only initialized when DuckDB loads the extension at runtime. The `bundled` feature sidesteps this for unit tests.
 
-The `ddl/` module and the FFI entrypoints in `query/` (`table_function.rs`, `explain.rs`, `error.rs`) are gated behind `#[cfg(feature = "extension")]` -- they are excluded from `cargo test` compilation because they use DuckDB APIs only available in the extension build. `query/wire.rs`, `query/items.rs`, `query/expr_items.rs`, `query/raw_sql.rs` and `query/member_types.rs` are always compiled: `items.rs` and `expr_items.rs` are pure, and the others take a raw `duckdb_connection`, so `cargo test` drives them against the bundled DuckDB (`test_helpers::RawDb`).
+The `ddl/` module and the FFI entrypoints in `query/` (`table_function.rs`, `explain.rs`, `error.rs`) are gated behind `#[cfg(feature = "extension")]` -- they are excluded from `cargo test` compilation because they use DuckDB APIs only available in the extension build. `query/wire.rs`, `query/items.rs`, `query/expr_items.rs`, `query/raw_sql.rs`, `query/member_types.rs` and `query/standard.rs` are always compiled (`standard.rs` gates only its FFI entrypoint): `items.rs`, `expr_items.rs` and `standard.rs` are pure, and the others take a raw `duckdb_connection`, so `cargo test` drives them against the bundled DuckDB (`test_helpers::RawDb`).
 
 ### Catalog Persistence
 

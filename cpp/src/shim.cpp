@@ -19,6 +19,19 @@
 
 #include "parser_extension_compat.hpp"
 #include "shim.hpp"
+#include "duckdb/parser/expression/columnref_expression.hpp"
+#include "duckdb/parser/parsed_data/create_table_info.hpp"
+#include "duckdb/parser/parsed_data/create_view_info.hpp"
+#include "duckdb/parser/query_node/insert_query_node.hpp"
+#include "duckdb/parser/result_modifier.hpp"
+#include "duckdb/parser/statement/copy_statement.hpp"
+#include "duckdb/parser/statement/create_statement.hpp"
+#include "duckdb/parser/statement/explain_statement.hpp"
+#include "duckdb/parser/statement/insert_statement.hpp"
+#include "duckdb/parser/statement/prepare_statement.hpp"
+#include "duckdb/parser/tableref/showref.hpp"
+#include "duckdb/planner/operator_extension.hpp"
+#include "duckdb/function/replacement_scan.hpp"
 #include <chrono>
 #include <cstdint>
 #include <cstring>
@@ -274,6 +287,17 @@ extern "C" {
         size_t param_count,
         const uint8_t *order_ptr, size_t order_len,
         uint8_t fence,
+        char **out_ptr, size_t *out_len,
+        char *error_buf, size_t error_buf_len);
+
+    // Rust dispatcher for a standard-SQL query over a semantic view
+    // (`sv_standard_query_bind`), run in the caller's scope like the other read-side
+    // dispatchers. Empty payload: the name is no semantic view the caller can
+    // see. Otherwise `view\n`, then one `<kind>\t<table>\t<name>\n` line per
+    // member (kind D, M or F; table empty for a derived metric).
+    uint8_t sv_standard_query_view_rust(
+        const uint8_t *name_ptr, size_t name_len,
+        const uint8_t *sp_ptr, size_t sp_len,
         char **out_ptr, size_t *out_len,
         char *error_buf, size_t error_buf_len);
 }
@@ -3710,6 +3734,887 @@ static void sv_grammar_activate(ClientContext &context) {
     ActiveGrammarExtensionsSetting::SetLocal(context, Value::LIST(LogicalType::VARCHAR, std::move(names)));
 }
 
+// ---------------------------------------------------------------------------
+// Standard-SQL queries over a semantic view by name (Phase 5)
+// ---------------------------------------------------------------------------
+// A semantic view can be queried with an ordinary SELECT, as in Snowflake:
+//
+//     SELECT region, AGG(revenue) FROM shop WHERE channel = 'web' GROUP BY region
+//
+// `shop` names no table, so the statement fails to bind. The planner then
+// offers the statement to each operator extension's Bind (planner.cpp, the
+// fallback after a bind error), and SvStandardQuery's re-parses its text,
+// rewrites each query block that reads a semantic view into the
+// SEMANTIC_VIEW(...) construct, and binds that:
+//
+//     SELECT __svd0 AS region, __svm0 AS "agg(revenue)"
+//     FROM SEMANTIC_VIEW(shop DIMENSIONS region AS __svd0 METRICS revenue AS __svm0
+//                        WHERE channel = 'web')
+//
+// The block's GROUP BY expressions become DIMENSIONS items, each AGG(m) and
+// each other aggregate a METRICS item, and each SELECT item that is neither
+// (an expression over facts) a FACTS item; WHERE moves into the construct and
+// HAVING becomes the outer WHERE. Everything from member resolution on is the
+// construct's, with its checks. The rewrite enforces only the rules that are
+// the query form's own (Snowflake's): a metric is passed to AGG, a dimension
+// in SELECT is in GROUP BY, HAVING refers only to aggregated metrics, and the
+// block that reads the view has no join, window function, QUALIFY, PIVOT,
+// sample or SELECT *.
+//
+// The planner fallback is the one hook every bind path goes through: a query,
+// a prepared statement, and ClientContext::BindStatement, which the Python
+// client's relational API (`duckdb.sql()`, `con.query()`) binds with. (A
+// ClientContextState's OnPlanningError covers only the first two.) It hands
+// over the binder of the failed attempt, which still holds that attempt's
+// bindings, and a statement binding may have changed in place; so the
+// statement is parsed afresh from its text, and bound with a child of that
+// binder, which shares the query's table indexes and parameters but none of
+// its bindings.
+//
+// A statement no semantic view is read by keeps DuckDB's own error: the
+// fallback binds nothing unless it rewrote something.
+
+// One member of the view, as `sv_standard_query_view_rust` lists it.
+struct SvStdMember {
+    char kind; // 'D', 'M' or 'F'
+    string table;
+    string name;
+};
+
+static string sv_std_lower(const Identifier &id) {
+    return StringUtil::Lower(id.GetIdentifierName());
+}
+
+// Whether `ref` reads a semantic view, and if so its members. A name with a
+// table or view behind it is not one, nor is a CTE in scope.
+static bool sv_std_lookup_view(ClientContext &context, const BaseTableRef &ref,
+                               const std::set<string> &ctes, vector<SvStdMember> &members) {
+    auto &qn = ref.GetQualifiedName();
+    if (qn.Path().empty() && ctes.count(sv_std_lower(qn.Name()))) {
+        return false;
+    }
+    try {
+        EntryLookupInfo lookup(CatalogType::TABLE_ENTRY, qn);
+        if (Catalog::GetEntry(context, lookup, OnEntryNotFound::RETURN_NULL)) {
+            return false;
+        }
+    } catch (std::exception &) {
+        // An unknown catalog or schema holds no table, and no semantic view
+        // either; the Rust lookup says which.
+    }
+    const string name = qn.ToString();
+    const std::vector<uint8_t> sp = sv_caller_search_path(context);
+    SvCallerScope caller(context);
+    SvOwnedBuffer payload;
+    char error_buf[1024];
+    std::memset(error_buf, 0, sizeof(error_buf));
+    uint8_t rc = sv_standard_query_view_rust(reinterpret_cast<const uint8_t *>(name.data()), name.size(),
+                                             sp.empty() ? nullptr : sp.data(), sp.size(), &payload.ptr,
+                                             &payload.len, error_buf, sizeof(error_buf));
+    caller.ThrowIfCancelled();
+    if (rc != 0) {
+        throw BinderException(string(error_buf));
+    }
+    string text(payload.ptr ? payload.ptr : "", payload.len);
+    if (!StringUtil::StartsWith(text, "view\n")) {
+        return false;
+    }
+    for (auto &line : StringUtil::Split(text.substr(5), '\n')) {
+        auto fields = StringUtil::Split(line, '\t');
+        // Split drops empty fields: a derived metric has no table.
+        if (fields.size() == 3) {
+            members.push_back({fields[0][0], fields[1], fields[2]});
+        } else if (fields.size() == 2) {
+            members.push_back({fields[0][0], string(), fields[1]});
+        }
+    }
+    return true;
+}
+
+// The table a replacement scan puts in place of `ref`, as the binder asks
+// for it when no catalog entry has the name (Binder::BindWithReplacementScan,
+// connection-scoped scans first). The Python client resolves a relation used
+// by its variable name this way, to a subquery over the relation's own text,
+// which the statement's text does not hold.
+static unique_ptr<TableRef> sv_std_replacement(ClientContext &context, const BaseTableRef &ref) {
+    if (!context.config.use_replacement_scans) {
+        return nullptr;
+    }
+    try {
+        ReplacementScanInput input(ref.GetQualifiedName());
+        for (const auto &scan : context.config.replacement_scans) {
+            if (auto result = scan->function(context, input, scan->data.get())) {
+                return result;
+            }
+        }
+        for (const auto &scan : DBConfig::GetConfig(context).replacement_scans.Snapshot()) {
+            if (auto result = scan->function(context, input, scan->data.get())) {
+                return result;
+            }
+        }
+    } catch (std::exception &) {
+        // The binder asks again, and reports what it finds.
+    }
+    return nullptr;
+}
+
+class SvStandardRewrite {
+public:
+    SvStandardRewrite(ClientContext &context, SelectNode &select, BaseTableRef &base, vector<SvStdMember> members,
+                      const std::set<string> &outer)
+        : context_(context), select_(select), base_(base), members_(std::move(members)), outer_(outer) {
+        auto &qn = base_.GetQualifiedName();
+        view_label_ = qn.Name().GetIdentifierName();
+        qualifier_ = base_.alias.empty() ? sv_std_lower(qn.Name()) : sv_std_lower(base_.alias);
+        for (auto &m : members_) {
+            if (!m.table.empty()) {
+                tables_.insert(m.table);
+            }
+        }
+    }
+
+    void Run() {
+        Refuse();
+        ForEachClauseExpression([&](unique_ptr<ParsedExpression> &e) { StripQualifier(e); });
+        ForEachClauseExpression([&](unique_ptr<ParsedExpression> &e) { RefuseCorrelation(*e); });
+        CollectGroups();
+        for (auto &item : select_.select_list) {
+            RewriteSelectItem(item);
+        }
+        if (select_.having) {
+            Replace(select_.having, Clause::HAVING);
+            RefuseLeftoverInHaving(*select_.having);
+        }
+        for (auto &modifier : select_.modifiers) {
+            if (modifier->type == ResultModifierType::ORDER_MODIFIER) {
+                for (auto &order : modifier->Cast<OrderModifier>().orders) {
+                    Replace(order.expression, Clause::ORDER_BY);
+                }
+            }
+        }
+        Graft();
+    }
+
+private:
+    enum class Clause { SELECT, HAVING, ORDER_BY };
+
+    [[noreturn]] void Fail(const string &message) const {
+        throw BinderException("semantic view '%s': %s", view_label_, message);
+    }
+
+    // What the query form leaves out (Snowflake's list, plus what has no
+    // meaning over a semantic view).
+    void Refuse() {
+        if (select_.qualify) {
+            Fail("QUALIFY is not supported in a query over a semantic view; query it in a subquery and filter "
+                 "the result");
+        }
+        if (select_.sample || base_.sample) {
+            Fail("sampling is not supported in a query over a semantic view; query it in a subquery and "
+                 "sample the result");
+        }
+        if (base_.at_clause) {
+            Fail("AT (time travel) is not supported on a semantic view");
+        }
+        if (!base_.column_name_alias.empty()) {
+            Fail("a column alias list is not supported on a semantic view; alias the SELECT items instead");
+        }
+        if (select_.groups.grouping_sets.size() > 1) {
+            Fail("GROUPING SETS, ROLLUP and CUBE are not supported in a query over a semantic view");
+        }
+        for (auto &item : select_.select_list) {
+            if (item->GetExpressionClass() == ExpressionClass::STAR) {
+                Fail("SELECT * is not supported in a query over a semantic view; name the dimensions, metrics "
+                     "and facts to return");
+            }
+        }
+        ForEachClauseExpression([&](unique_ptr<ParsedExpression> &e) { RefuseWindows(*e); });
+    }
+
+    void RefuseWindows(const ParsedExpression &expr) const {
+        if (expr.GetExpressionClass() == ExpressionClass::WINDOW) {
+            Fail("window functions are not supported in a query over a semantic view; query it in a subquery "
+                 "and apply the window to the result");
+        }
+        ParsedExpressionIterator::EnumerateChildren(expr, [&](const ParsedExpression &child) {
+            if (child.GetExpressionClass() != ExpressionClass::SUBQUERY) {
+                RefuseWindows(child);
+            }
+        });
+    }
+
+    // Every expression of the block's own clauses (not of its subqueries).
+    template <typename F>
+    void ForEachClauseExpression(F &&f) {
+        for (auto &item : select_.select_list) {
+            f(item);
+        }
+        for (auto &group : select_.groups.group_expressions) {
+            f(group);
+        }
+        for (auto *clause : {&select_.where_clause, &select_.having}) {
+            if (*clause) {
+                f(*clause);
+            }
+        }
+        for (auto &modifier : select_.modifiers) {
+            if (modifier->type == ResultModifierType::ORDER_MODIFIER) {
+                for (auto &order : modifier->Cast<OrderModifier>().orders) {
+                    f(order.expression);
+                }
+            }
+        }
+    }
+
+    // `s.region` in `FROM shop s` (or `shop.region` in `FROM shop`) names the
+    // member `region`: drop the qualifier. One that names a logical table of
+    // the view (`c.region`) stays, for the construct to resolve.
+    void StripQualifier(unique_ptr<ParsedExpression> &expr) {
+        if (expr->GetExpressionClass() == ExpressionClass::COLUMN_REF) {
+            auto &names = expr->Cast<ColumnRefExpression>().ColumnNamesMutable();
+            if (names.size() >= 2 && sv_std_lower(names[0]) == qualifier_ &&
+                (names.size() == 3 || !tables_.count(qualifier_))) {
+                names.erase(names.begin());
+            }
+            return;
+        }
+        if (expr->GetExpressionClass() == ExpressionClass::SUBQUERY) {
+            return;
+        }
+        ParsedExpressionIterator::EnumerateChildren(
+            *expr, [&](unique_ptr<ParsedExpression> &child) { StripQualifier(child); });
+    }
+
+    // A reference through a name an enclosing query binds is correlated, which
+    // Snowflake refuses; and WHERE moves into the construct, where such a name
+    // would silently resolve to the view's own logical table of that name.
+    void RefuseCorrelation(const ParsedExpression &expr) const {
+        if (expr.GetExpressionClass() == ExpressionClass::COLUMN_REF) {
+            auto &names = expr.Cast<ColumnRefExpression>().ColumnNames();
+            if (names.size() >= 2 && outer_.count(sv_std_lower(names[0]))) {
+                Fail("'" + Text(expr) + "' refers to '" + names[0].GetIdentifierName() +
+                     "' of an enclosing query; correlated references are not supported in a query over a "
+                     "semantic view (if '" + names[0].GetIdentifierName() +
+                     "' is meant as the view's own table, give the enclosing one another alias)");
+            }
+            return;
+        }
+        ParsedExpressionIterator::EnumerateChildren(expr, [&](const ParsedExpression &child) {
+            if (child.GetExpressionClass() != ExpressionClass::SUBQUERY) {
+                RefuseCorrelation(child);
+            }
+        });
+    }
+
+    // The members a column reference can name: by name, and by table too when
+    // it is qualified.
+    vector<const SvStdMember *> Resolve(const ColumnRefExpression &ref) const {
+        vector<const SvStdMember *> out;
+        auto &names = ref.ColumnNames();
+        if (names.size() > 2) {
+            return out;
+        }
+        const string name = sv_std_lower(names.back());
+        const string table = names.size() == 2 ? sv_std_lower(names[0]) : string();
+        for (auto &m : members_) {
+            if (m.name == name && (names.size() == 1 || m.table == table)) {
+                out.push_back(&m);
+            }
+        }
+        return out;
+    }
+
+    static bool AllOfKind(const vector<const SvStdMember *> &found, char kind) {
+        if (found.empty()) {
+            return false;
+        }
+        for (auto *m : found) {
+            if (m->kind != kind) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    // An expression's text, without its alias.
+    static string Text(const ParsedExpression &expr) {
+        auto copy = expr.Copy();
+        copy->ClearAlias();
+        if (copy->GetExpressionClass() == ExpressionClass::FUNCTION) {
+            auto &f = copy->Cast<FunctionExpression>();
+            if (sv_std_lower(f.FunctionName()) == "count_star" && f.GetArguments().empty()) {
+                // COUNT(*) parses as count_star(), which reads back as no
+                // function the construct knows.
+                string text = "COUNT(*)";
+                if (f.Filter()) {
+                    text += " FILTER (WHERE " + f.Filter()->ToString() + ")";
+                }
+                return text;
+            }
+        }
+        return copy->ToString();
+    }
+
+    // The key two expressions are the same group by: a column reference that
+    // names exactly one member is that member however it is written.
+    string Key(const ParsedExpression &expr) const {
+        if (expr.GetExpressionClass() == ExpressionClass::COLUMN_REF) {
+            auto found = Resolve(expr.Cast<ColumnRefExpression>());
+            if (found.size() == 1) {
+                return "\x01" + found[0]->table + "." + found[0]->name;
+            }
+        }
+        return Text(expr);
+    }
+
+    bool IsAggregate(const FunctionExpression &f) const {
+        try {
+            // Functions share one catalog set: a lookup by name finds a
+            // scalar function of that name too.
+            EntryLookupInfo lookup(CatalogType::AGGREGATE_FUNCTION_ENTRY, f.GetQualifiedName());
+            auto entry = Catalog::GetEntry(context_, lookup, OnEntryNotFound::RETURN_NULL);
+            return entry && entry->type == CatalogType::AGGREGATE_FUNCTION_ENTRY;
+        } catch (std::exception &) {
+            return false;
+        }
+    }
+
+    static bool ContainsAggregateCall(const ParsedExpression &expr, const SvStandardRewrite &rw) {
+        if (expr.GetExpressionClass() == ExpressionClass::FUNCTION) {
+            auto &f = expr.Cast<FunctionExpression>();
+            if (sv_std_lower(f.FunctionName()) == "agg" || rw.IsAggregate(f)) {
+                return true;
+            }
+        }
+        bool found = false;
+        ParsedExpressionIterator::EnumerateChildren(expr, [&](const ParsedExpression &child) {
+            if (!found && child.GetExpressionClass() != ExpressionClass::SUBQUERY) {
+                found = ContainsAggregateCall(child, rw);
+            }
+        });
+        return found;
+    }
+
+    // The GROUP BY keys, with ordinals, SELECT aliases and GROUP BY ALL
+    // resolved to the SELECT item they stand for.
+    void CollectGroups() {
+        vector<unique_ptr<ParsedExpression>> keys;
+        if (select_.aggregate_handling == AggregateHandling::FORCE_AGGREGATES) {
+            for (auto &item : select_.select_list) {
+                if (!ContainsAggregateCall(*item, *this) && HasColumnRef(*item)) {
+                    keys.push_back(item->Copy());
+                }
+            }
+        }
+        for (auto &group : select_.groups.group_expressions) {
+            keys.push_back(ResolveGroup(*group));
+        }
+        for (auto &key : keys) {
+            key->ClearAlias();
+            auto k = Key(*key);
+            bool seen = false;
+            for (auto &existing : group_keys_) {
+                seen = seen || existing == k;
+            }
+            if (!seen) {
+                group_keys_.push_back(k);
+                dimensions_.push_back(Text(*key));
+            }
+        }
+    }
+
+    unique_ptr<ParsedExpression> ResolveGroup(const ParsedExpression &group) const {
+        if (group.GetExpressionClass() == ExpressionClass::CONSTANT) {
+            auto &value = group.Cast<ConstantExpression>().GetLiteral();
+            int64_t ordinal = 0;
+            if (value.IsNumeric() && value.TryGetInt64(ordinal)) {
+                if (ordinal < 1 || idx_t(ordinal) > select_.select_list.size()) {
+                    Fail(StringUtil::Format("GROUP BY position %lld is not in the SELECT list",
+                                            static_cast<long long>(ordinal)));
+                }
+                return select_.select_list[idx_t(ordinal) - 1]->Copy();
+            }
+        }
+        if (group.GetExpressionClass() == ExpressionClass::COLUMN_REF) {
+            auto &ref = group.Cast<ColumnRefExpression>();
+            if (!ref.IsQualified() && Resolve(ref).empty()) {
+                for (auto &item : select_.select_list) {
+                    if (item->HasAlias() && sv_std_lower(item->GetAlias()) == sv_std_lower(ref.GetColumnName())) {
+                        return item->Copy();
+                    }
+                }
+            }
+        }
+        return group.Copy();
+    }
+
+    static bool HasColumnRef(const ParsedExpression &expr) {
+        if (expr.GetExpressionClass() == ExpressionClass::COLUMN_REF) {
+            return true;
+        }
+        bool found = false;
+        ParsedExpressionIterator::EnumerateChildren(expr, [&](const ParsedExpression &child) {
+            if (!found && child.GetExpressionClass() != ExpressionClass::SUBQUERY) {
+                found = HasColumnRef(child);
+            }
+        });
+        return found;
+    }
+
+    static unique_ptr<ParsedExpression> Column(const string &prefix, idx_t i) {
+        return make_uniq<ColumnRefExpression>(Identifier(prefix + std::to_string(i)));
+    }
+
+    static idx_t Add(vector<string> &items, const string &text) {
+        for (idx_t i = 0; i < items.size(); i++) {
+            if (items[i] == text) {
+                return i;
+            }
+        }
+        items.push_back(text);
+        return items.size() - 1;
+    }
+
+    // A metric aggregated: AGG(m), or MIN / MAX / ANY_VALUE(m), which Snowflake
+    // evaluates as AGG(m). Returns the METRICS item, or empty for another call.
+    string MetricOf(const FunctionExpression &f) const {
+        const string name = sv_std_lower(f.FunctionName());
+        const bool plain = !f.Distinct() && !f.Filter() && (!f.OrderBy() || f.OrderBy()->orders.empty());
+        if (name == "agg") {
+            if (f.GetArguments().size() != 1 || !plain) {
+                Fail("AGG takes one metric, e.g. AGG(revenue)");
+            }
+            return Text(f.GetArguments()[0].GetExpression());
+        }
+        if ((name == "min" || name == "max" || name == "any_value") && f.GetArguments().size() == 1 && plain) {
+            auto &arg = f.GetArguments()[0].GetExpression();
+            if (arg.GetExpressionClass() == ExpressionClass::COLUMN_REF &&
+                AllOfKind(Resolve(arg.Cast<ColumnRefExpression>()), 'M')) {
+                return Text(arg);
+            }
+        }
+        return string();
+    }
+
+    // Put the construct's column in place of each group key and each
+    // aggregate in `expr`; a member reference left over is the clause's to
+    // judge.
+    void Replace(unique_ptr<ParsedExpression> &expr, Clause clause) {
+        if (!expr || expr->GetExpressionClass() == ExpressionClass::SUBQUERY ||
+            expr->GetExpressionClass() == ExpressionClass::STAR) {
+            return;
+        }
+        auto alias = expr->GetAlias();
+        auto key = Key(*expr);
+        for (idx_t i = 0; i < group_keys_.size(); i++) {
+            if (group_keys_[i] == key && HasColumnRef(*expr)) {
+                if (clause == Clause::HAVING) {
+                    Fail("HAVING may refer only to metrics passed to AGG or another aggregate, not '" +
+                         Text(*expr) + "'; filter dimensions in WHERE");
+                }
+                expr = Column("__svd", i);
+                expr->SetAlias(alias);
+                return;
+            }
+        }
+        if (expr->GetExpressionClass() == ExpressionClass::FUNCTION) {
+            auto &f = expr->Cast<FunctionExpression>();
+            auto metric = MetricOf(f);
+            if (metric.empty() && IsAggregate(f)) {
+                metric = Text(f);
+            }
+            if (!metric.empty()) {
+                expr = Column("__svm", Add(metrics_, metric));
+                expr->SetAlias(alias);
+                return;
+            }
+        }
+        if (expr->GetExpressionClass() == ExpressionClass::COLUMN_REF) {
+            auto found = Resolve(expr->Cast<ColumnRefExpression>());
+            if (AllOfKind(found, 'M')) {
+                Fail("metric '" + Text(*expr) + "' must be passed to AGG, e.g. AGG(" + Text(*expr) + ")");
+            }
+            if (AllOfKind(found, 'D') && clause != Clause::HAVING) {
+                Fail("dimension '" + Text(*expr) + "' must appear in GROUP BY");
+            }
+            return;
+        }
+        ParsedExpressionIterator::EnumerateChildren(
+            *expr, [&](unique_ptr<ParsedExpression> &child) { Replace(child, clause); });
+    }
+
+    // Column references the rewrite left in `expr`: none is one of its own.
+    static void Leftovers(const ParsedExpression &expr, vector<const ColumnRefExpression *> &out) {
+        if (expr.GetExpressionClass() == ExpressionClass::COLUMN_REF) {
+            auto &ref = expr.Cast<ColumnRefExpression>();
+            auto first = ref.ColumnNames()[0].GetIdentifierName();
+            if (!(ref.ColumnNames().size() == 1 && StringUtil::StartsWith(first, "__sv"))) {
+                out.push_back(&ref);
+            }
+            return;
+        }
+        ParsedExpressionIterator::EnumerateChildren(expr, [&](const ParsedExpression &child) {
+            if (child.GetExpressionClass() != ExpressionClass::SUBQUERY) {
+                Leftovers(child, out);
+            }
+        });
+    }
+
+    static bool HasOwnColumn(const ParsedExpression &expr) {
+        if (expr.GetExpressionClass() == ExpressionClass::COLUMN_REF) {
+            auto &names = expr.Cast<ColumnRefExpression>().ColumnNames();
+            return names.size() == 1 && StringUtil::StartsWith(names[0].GetIdentifierName(), "__sv");
+        }
+        bool found = false;
+        ParsedExpressionIterator::EnumerateChildren(expr, [&](const ParsedExpression &child) {
+            found = found || HasOwnColumn(child);
+        });
+        return found;
+    }
+
+    // A SELECT item keeps its column name (DuckDB's for the item as written)
+    // whatever it is rewritten to. Neither grouped nor aggregated, an item
+    // over members is a FACTS item.
+    void RewriteSelectItem(unique_ptr<ParsedExpression> &item) {
+        const Identifier name = item->GetName();
+        Replace(item, Clause::SELECT);
+        vector<const ColumnRefExpression *> left;
+        Leftovers(*item, left);
+        if (!left.empty()) {
+            if (HasOwnColumn(*item)) {
+                Fail("'" + Text(*left[0]) + "' must be passed to an aggregate or appear in GROUP BY");
+            }
+            auto text = Text(*item);
+            item = Column("__svf", Add(facts_, text));
+        }
+        item->SetAlias(name);
+    }
+
+    void RefuseLeftoverInHaving(const ParsedExpression &having) const {
+        vector<const ColumnRefExpression *> left;
+        Leftovers(having, left);
+        if (!left.empty()) {
+            Fail("HAVING may refer only to metrics passed to AGG or another aggregate, not '" + Text(*left[0]) +
+                 "'");
+        }
+    }
+
+    // Replace the view with the construct, and the block's grouping with the
+    // construct's.
+    void Graft() {
+        string sql = "SELECT * FROM SEMANTIC_VIEW(" + base_.GetQualifiedName().ToString();
+        auto clause = [&](const char *keyword, const vector<string> &items, const char *prefix) {
+            for (idx_t i = 0; i < items.size(); i++) {
+                sql += (i ? ", " : string(" ") + keyword + " ") + items[i] + " AS " + prefix + std::to_string(i);
+            }
+        };
+        clause("DIMENSIONS", dimensions_, "__svd");
+        clause("METRICS", metrics_, "__svm");
+        clause("FACTS", facts_, "__svf");
+        if (select_.where_clause) {
+            sql += " WHERE " + select_.where_clause->ToString();
+        }
+        sql += ")";
+        Parser parser(context_);
+        parser.ParseQuery(sql);
+        auto &inner = parser.statements[0]->Cast<SelectStatement>().node->Cast<SelectNode>();
+        auto alias = base_.alias;
+        select_.from_table = std::move(inner.from_table);
+        select_.from_table->alias = alias;
+        select_.where_clause = std::move(select_.having);
+        select_.groups.group_expressions.clear();
+        select_.groups.grouping_sets.clear();
+        select_.aggregate_handling = AggregateHandling::STANDARD_HANDLING;
+    }
+
+    ClientContext &context_;
+    SelectNode &select_;
+    BaseTableRef &base_;
+    vector<SvStdMember> members_;
+    const std::set<string> &outer_;
+    std::set<string> tables_;
+    string view_label_;
+    string qualifier_;
+    vector<string> group_keys_;
+    vector<string> dimensions_;
+    vector<string> metrics_;
+    vector<string> facts_;
+};
+
+// Walks a statement for the query blocks that read a semantic view, and
+// rewrites each. `changed` records whether any was.
+class SvStandardWalker {
+public:
+    explicit SvStandardWalker(ClientContext &context) : context_(context) {
+    }
+
+    bool changed = false;
+
+    void Statement(SQLStatement &statement) {
+        switch (statement.type) {
+        case StatementType::SELECT_STATEMENT:
+            Node(*statement.Cast<SelectStatement>().node, Scope());
+            break;
+        case StatementType::EXPLAIN_STATEMENT:
+            Statement(*statement.Cast<ExplainStatement>().stmt);
+            break;
+        case StatementType::PREPARE_STATEMENT:
+            Statement(*statement.Cast<PrepareStatement>().statement);
+            break;
+        case StatementType::INSERT_STATEMENT:
+            Node(*statement.Cast<InsertStatement>().node, Scope());
+            break;
+        case StatementType::COPY_STATEMENT: {
+            auto &info = *statement.Cast<CopyStatement>().info;
+            if (info.select_statement) {
+                Node(*info.select_statement, Scope());
+            }
+            break;
+        }
+        case StatementType::CREATE_STATEMENT: {
+            auto &info = *statement.Cast<CreateStatement>().info;
+            if (info.type == CatalogType::VIEW_ENTRY && info.Cast<CreateViewInfo>().query) {
+                Node(*info.Cast<CreateViewInfo>().query->node, Scope());
+            } else if (info.type == CatalogType::TABLE_ENTRY && info.Cast<CreateTableInfo>().query) {
+                Node(*info.Cast<CreateTableInfo>().query->node, Scope());
+            }
+            break;
+        }
+        default:
+            break;
+        }
+    }
+
+private:
+    // What a query block sees from the blocks around it: the CTEs in scope,
+    // and the names (aliases, else table names) their FROM clauses bind,
+    // which a reference from inside it would be correlated through.
+    struct Scope {
+        std::set<string> ctes;
+        std::set<string> outer;
+    };
+
+    static void Aliases(const TableRef &ref, std::set<string> &out) {
+        if (ref.type == TableReferenceType::JOIN) {
+            Aliases(*ref.Cast<JoinRef>().left, out);
+            Aliases(*ref.Cast<JoinRef>().right, out);
+            return;
+        }
+        if (!ref.alias.empty()) {
+            out.insert(sv_std_lower(ref.alias));
+        } else if (ref.type == TableReferenceType::BASE_TABLE) {
+            out.insert(sv_std_lower(ref.Cast<BaseTableRef>().GetQualifiedName().Name()));
+        }
+    }
+
+    void Node(QueryNode &node, Scope scope) {
+        for (auto &kv : node.cte_map.map) {
+            scope.ctes.insert(sv_std_lower(kv.first));
+        }
+        for (auto &kv : node.cte_map.map) {
+            if (kv.second->query_node) {
+                Node(*kv.second->query_node, scope);
+            }
+        }
+        switch (node.type) {
+        case QueryNodeType::SET_OPERATION_NODE:
+            for (auto &child : node.Cast<SetOperationNode>().children) {
+                Node(*child, scope);
+            }
+            return;
+        case QueryNodeType::RECURSIVE_CTE_NODE:
+            Node(*node.Cast<RecursiveCTENode>().left, scope);
+            Node(*node.Cast<RecursiveCTENode>().right, scope);
+            return;
+        case QueryNodeType::INSERT_QUERY_NODE: {
+            auto &insert = node.Cast<InsertQueryNode>();
+            if (insert.select_statement) {
+                Node(*insert.select_statement->node, scope);
+            }
+            return;
+        }
+        case QueryNodeType::SELECT_NODE:
+            break;
+        default:
+            return;
+        }
+        auto &select = node.Cast<SelectNode>();
+        // What this block's subqueries see: its own FROM too. (For a subquery
+        // in that FROM, its siblings, which only a LATERAL one can refer to;
+        // counting them for every one errs on the side of refusing.)
+        Scope inner = scope;
+        if (select.from_table) {
+            Aliases(*select.from_table, inner.outer);
+        }
+        // Subqueries first: one in the WHERE of a block that reads a semantic
+        // view moves into the construct as text, and is planned there as
+        // written.
+        auto visit = [&](unique_ptr<ParsedExpression> &e) { Expr(e, inner); };
+        for (auto &item : select.select_list) {
+            visit(item);
+        }
+        for (auto *clause : {&select.where_clause, &select.having, &select.qualify}) {
+            if (*clause) {
+                visit(*clause);
+            }
+        }
+        if (!select.from_table) {
+            return;
+        }
+        if (select.from_table->type == TableReferenceType::BASE_TABLE) {
+            auto &base = select.from_table->Cast<BaseTableRef>();
+            vector<SvStdMember> members;
+            if (sv_std_lookup_view(context_, base, scope.ctes, members)) {
+                SvStandardRewrite(context_, select, base, std::move(members), scope.outer).Run();
+                changed = true;
+                return;
+            }
+        }
+        Ref(select.from_table, inner);
+    }
+
+    // A name no table or CTE has may be one a replacement scan resolves to a
+    // subquery (a Python relation); if that subquery reads a semantic view, it
+    // goes in the name's place, rewritten.
+    void Replace(unique_ptr<TableRef> &ref, const Scope &scope) {
+        auto &base = ref->Cast<BaseTableRef>();
+        auto &qn = base.GetQualifiedName();
+        if (qn.Path().empty() && scope.ctes.count(sv_std_lower(qn.Name()))) {
+            return;
+        }
+        try {
+            EntryLookupInfo lookup(CatalogType::TABLE_ENTRY, qn);
+            if (Catalog::GetEntry(context_, lookup, OnEntryNotFound::RETURN_NULL)) {
+                return;
+            }
+        } catch (std::exception &) {
+        }
+        auto replacement = sv_std_replacement(context_, base);
+        if (!replacement || replacement->type != TableReferenceType::SUBQUERY) {
+            return;
+        }
+        auto &subquery = replacement->Cast<SubqueryRef>();
+        const bool before = changed;
+        changed = false;
+        Node(*subquery.subquery->node, Scope());
+        if (changed) {
+            replacement->alias = base.alias.empty() ? qn.Name() : base.alias;
+            subquery.column_name_alias = base.column_name_alias;
+            ref = std::move(replacement);
+        }
+        changed = changed || before;
+    }
+
+    void Expr(unique_ptr<ParsedExpression> &expr, const Scope &scope) {
+        if (expr->GetExpressionClass() == ExpressionClass::SUBQUERY) {
+            auto &sub = expr->Cast<SubqueryExpression>().SubqueryMutable();
+            if (sub && sub->node) {
+                // A subquery's column is named by its text, which the rewrite
+                // changes: keep the text as written.
+                const bool before = changed;
+                const string text = expr->ToString();
+                changed = false;
+                Node(*sub->node, scope);
+                if (changed && !expr->HasAlias()) {
+                    expr->SetAlias(Identifier(text));
+                }
+                changed = changed || before;
+            }
+        }
+        ParsedExpressionIterator::EnumerateChildren(
+            *expr, [&](unique_ptr<ParsedExpression> &child) { Expr(child, scope); });
+    }
+
+    // A FROM other than a lone table: a semantic view in it is joined,
+    // pivoted or listed with other tables, which the query form refuses.
+    // `lone` is a block's whole FROM, which Node has already looked up.
+    void Ref(unique_ptr<TableRef> &ref, const Scope &scope, bool lone = true) {
+        switch (ref->type) {
+        case TableReferenceType::SUBQUERY:
+            Node(*ref->Cast<SubqueryRef>().subquery->node, scope);
+            break;
+        case TableReferenceType::JOIN: {
+            auto &join = ref->Cast<JoinRef>();
+            Ref(join.left, scope, false);
+            Ref(join.right, scope, false);
+            if (join.condition) {
+                Expr(join.condition, scope);
+            }
+            break;
+        }
+        case TableReferenceType::PIVOT:
+            Ref(ref->Cast<PivotRef>().source, scope, false);
+            break;
+        case TableReferenceType::SHOW_REF:
+            // DESCRIBE / SUMMARIZE of a query.
+            if (ref->Cast<ShowRef>().query) {
+                Node(*ref->Cast<ShowRef>().query, scope);
+            }
+            break;
+        case TableReferenceType::BASE_TABLE: {
+            vector<SvStdMember> members;
+            if (!lone && sv_std_lookup_view(context_, ref->Cast<BaseTableRef>(), scope.ctes, members)) {
+                throw BinderException("semantic view '%s' cannot be joined, pivoted or read alongside other "
+                                      "tables; query it on its own (in a subquery or CTE) and join the result",
+                                      ref->Cast<BaseTableRef>().GetQualifiedName().Name().GetIdentifierName());
+            }
+            Replace(ref, scope);
+            break;
+        }
+        default:
+            break;
+        }
+    }
+
+    ClientContext &context_;
+};
+
+// The planner's fallback after a bind error (see the top of this section).
+// A plan-less BoundStatement declines, and the planner rethrows the error.
+static BoundStatement sv_standard_query_bind(ClientContext &context, Binder &binder, OperatorExtensionInfo *,
+                                            SQLStatement &statement) {
+    if (statement.query.empty()) {
+        return BoundStatement();
+    }
+    Parser parser(context);
+    try {
+        parser.ParseQuery(statement.query);
+    } catch (std::exception &) {
+        return BoundStatement();
+    }
+    if (parser.statements.size() != 1) {
+        return BoundStatement();
+    }
+    // PREPARE plans its statement with a planner of its own, whose statement
+    // keeps the PREPARE's text.
+    SQLStatement *fresh = parser.statements[0].get();
+    if (fresh->type == StatementType::PREPARE_STATEMENT && statement.type != StatementType::PREPARE_STATEMENT) {
+        fresh = fresh->Cast<PrepareStatement>().statement.get();
+    }
+    if (!fresh || fresh->type != statement.type) {
+        return BoundStatement();
+    }
+    SvStandardWalker walker(context);
+    walker.Statement(*fresh);
+    if (!walker.changed) {
+        return BoundStatement();
+    }
+    return Binder::CreateBinder(context, &binder)->Bind(*fresh);
+}
+
+class SvStandardQuery final : public OperatorExtension {
+public:
+    SvStandardQuery() {
+        Bind = sv_standard_query_bind;
+    }
+    std::string GetName() override {
+        return "semantic_views_standard_query";
+    }
+    unique_ptr<LogicalExtensionOperator> Deserialize(Deserializer &) override {
+        throw InternalException("semantic_views_standard_query plans no operator of its own");
+    }
+};
+
 class SemanticViewsGrammarActivation final : public ExtensionCallback {
 public:
     void OnConnectionOpened(ClientContext &context) override {
@@ -3753,12 +4658,14 @@ private:
 // those opened later through the ExtensionCallback, and those open now through
 // SemanticViewsGrammarPending. The registry each connection keeps its states in
 // is synchronised, so registering one from the loading thread is safe, where
-// changing the connection's settings from here is not.
+// changing the connection's settings from here is not. The standard-SQL
+// query form's binder fallback (SvStandardQuery) is registered with them.
 static void sv_register_grammar(DatabaseInstance &db) {
     auto &config = DBConfig::GetConfig(db);
     if (!config.GetCallbackManager().FindGrammarExtension(SV_GRAMMAR_NAME)) {
         GrammarExtension::Register(db, make_shared_ptr<SemanticViewsGrammar>(sv_grammar_changes()));
         ExtensionCallback::Register(config, make_shared_ptr<SemanticViewsGrammarActivation>());
+        OperatorExtension::Register(config, make_shared_ptr<SvStandardQuery>());
     }
     for (auto &context : db.GetConnectionManager().GetConnectionList()) {
         context->registered_state->GetOrCreate<SemanticViewsGrammarPending>(SV_GRAMMAR_PENDING_KEY);

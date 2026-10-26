@@ -45,6 +45,9 @@ Extensions so far:
     hand-written aggregate-then-window reference.
   - T-1 wildcard section: `['*']` requests must equal the explicit
     full-list requests (routing equivalence, incl. a window metric).
+  - Phase 5 standard-SQL form: every request is also run as
+    `SELECT ... FROM diff_sv ... GROUP BY ...` (four spellings of the GROUP
+    BY keys, with WHERE and HAVING in rotation) against its own reference.
 
 Usage:
     uv run test/integration/test_differential.py
@@ -173,8 +176,10 @@ CREATE SEMANTIC VIEW diff_sv AS
 """
 
 
-def reference_sql(dims: list[str], mets: list[str]) -> str:
-    """Independent hand-written equivalent of the semantic_view() request."""
+def reference_sql(dims: list[str], mets: list[str], where: str = "", having: str = "") -> str:
+    """Independent hand-written equivalent of the semantic_view() request.
+    `where` and `having` are reference-SQL predicates (over `o`, and over the
+    aggregates), added to the query as written."""
     select_items = [DIMS[d][1] for d in dims] + [METRICS[m] for m in mets]
     joins = []
     needed = {DIMS[d][2] for d in dims} - {None}
@@ -188,8 +193,47 @@ def reference_sql(dims: list[str], mets: list[str]) -> str:
         joins.append("LEFT JOIN categories cat ON p.category_id = cat.id")
     sql = f"SELECT {'DISTINCT ' if not mets else ''}{', '.join(select_items)}\n"
     sql += "FROM orders o\n" + "\n".join(joins)
+    if where:
+        sql += f"\nWHERE {where}"
     if dims and mets:
         sql += f"\nGROUP BY {', '.join(str(i + 1) for i in range(len(dims)))}"
+    if having:
+        sql += f"\nHAVING {having}"
+    return sql
+
+
+# Phase 5: the same request written as a standard-SQL query over the view by
+# name. Each request takes one of these spellings in turn, so every way the
+# rewrite resolves a GROUP BY key (by name, qualified by the view's alias and
+# by ordinal, GROUP BY ALL, by SELECT alias) meets every dims×metrics shape;
+# every second request also filters (WHERE, which moves into the construct),
+# and every third grouped one with metrics filters on an aggregate (HAVING,
+# which the rewrite keeps outside it).
+STANDARD_FORM_WHERE = ("region <> 'east'", "o.region <> 'east'")
+STANDARD_FORM_HAVING = ("AGG(order_count) > 30", "COUNT(*) > 30")
+
+
+def standard_form_sql(i: int, dims: list[str], mets: list[str], where: str, having: str) -> str:
+    """The request as `SELECT ... FROM diff_sv ... GROUP BY ...`."""
+    spelling = i % 4
+    q = "s." if spelling == 1 else ""
+    dim_items = [f"{q}{d}" + (f" AS g{k}" if spelling == 3 else "") for k, d in enumerate(dims)]
+    met_items = [f"AGG({q}{m})" for m in mets]
+    sql = f"SELECT {', '.join(dim_items + met_items)} FROM diff_sv"
+    if spelling == 1:
+        sql += " s"
+    if where:
+        sql += f" WHERE {where}"
+    if dims:
+        keys = {
+            0: dims,
+            1: [str(k + 1) for k in range(len(dims))],
+            2: ["ALL"],
+            3: [f"g{k}" for k in range(len(dims))],
+        }[spelling]
+        sql += f" GROUP BY {', '.join(keys)}"
+    if having:
+        sql += f" HAVING {having}"
     return sql
 
 
@@ -601,6 +645,7 @@ def run_harness() -> int:
 
     total = 0
     failures = 0
+    std_i = 0
     for dims in dim_choices:
         for mets in metric_choices + ([[]] if dims else []):
             if not dims and not mets:
@@ -632,6 +677,20 @@ def run_harness() -> int:
                     if not (len(g) == len(w) and all(values_equal(a, b) for a, b in zip(g, w))):
                         print(f"  first differing row: got={g!r} want={w!r}")
                         break
+
+            # The standard-SQL form of the request, against its own reference.
+            # Its own counter, so the rotations below cover every residue.
+            total += 1
+            std_i += 1
+            where = STANDARD_FORM_WHERE if std_i % 2 else ("", "")
+            having = STANDARD_FORM_HAVING if dims and mets and std_i % 3 == 0 else ("", "")
+            failures += _check(
+                conn,
+                f"standard form #{std_i} spelling={std_i % 4} dims={dims} mets={mets} "
+                f"where={bool(where[0])} having={bool(having[0])}",
+                standard_form_sql(std_i, dims, mets, where[0], having[0]),
+                reference_sql(dims, mets, where[1], having[1]),
+            )
 
     # --- Multi-grain (SG-1 / v0.12.0 per-grain): each metric at its own grain -
     # A separate view with a metric on a ManyToOne child of the base. The

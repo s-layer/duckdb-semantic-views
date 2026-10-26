@@ -1,0 +1,243 @@
+# Standard-SQL queries over a semantic view by name (Phase 5): what the query
+# form refuses. The rules are Snowflake's: a metric is passed to AGG, a
+# dimension in SELECT is in GROUP BY, HAVING refers only to aggregated
+# metrics, and the query block that reads the view has no join, window
+# function, QUALIFY or PIVOT. Member resolution and the construct's own rules
+# (private members, WHERE over metrics) are the construct's, with its errors.
+# The rewrites are in standard_sql_query.test.
+
+require semantic_views
+
+statement ok
+CREATE TABLE ssr_customers (id INTEGER, region VARCHAR);
+
+statement ok
+CREATE TABLE ssr_orders (id INTEGER, customer_id INTEGER, amount DECIMAL(10,2), cost DECIMAL(10,2), channel VARCHAR);
+
+statement ok
+INSERT INTO ssr_customers VALUES (1, 'East'), (2, 'West');
+
+statement ok
+INSERT INTO ssr_orders VALUES (1, 1, 100.00, 60.00, 'web'), (2, 2, 80.00, 50.00, 'retail');
+
+statement ok
+CREATE SEMANTIC VIEW ssr AS
+  TABLES (o AS ssr_orders PRIMARY KEY (id), c AS ssr_customers PRIMARY KEY (id))
+  RELATIONSHIPS (order_customer AS o(customer_id) REFERENCES c)
+  FACTS (o.amount AS o.amount, PRIVATE o.unit_cost AS o.cost)
+  DIMENSIONS (c.region AS c.region, o.channel AS o.channel)
+  METRICS (o.revenue AS SUM(o.amount), o.order_count AS COUNT(*));
+
+# --- the query form's own rules -------------------------------------------------------
+
+statement error
+SELECT region, revenue FROM ssr GROUP BY region;
+----
+semantic view 'ssr': metric 'revenue' must be passed to AGG, e.g. AGG(revenue)
+
+statement error
+SELECT region, AGG(revenue) FROM ssr;
+----
+semantic view 'ssr': dimension 'region' must appear in GROUP BY
+
+statement error
+SELECT region, AGG(revenue) FROM ssr GROUP BY channel;
+----
+semantic view 'ssr': dimension 'region' must appear in GROUP BY
+
+statement error
+SELECT region FROM ssr GROUP BY region ORDER BY channel;
+----
+semantic view 'ssr': dimension 'channel' must appear in GROUP BY
+
+statement error
+SELECT region, AGG(revenue) FROM ssr GROUP BY region HAVING region = 'East';
+----
+semantic view 'ssr': HAVING may refer only to metrics passed to AGG or another aggregate, not 'region'
+
+statement error
+SELECT region, AGG(revenue) AS rev FROM ssr GROUP BY region HAVING rev > 1;
+----
+semantic view 'ssr': HAVING may refer only to metrics passed to AGG or another aggregate, not 'rev'
+
+statement error
+SELECT amount + AGG(revenue) FROM ssr;
+----
+semantic view 'ssr': 'amount' must be passed to an aggregate or appear in GROUP BY
+
+statement error
+SELECT AGG(revenue, 1) FROM ssr;
+----
+semantic view 'ssr': AGG takes one metric, e.g. AGG(revenue)
+
+statement error
+SELECT AGG(DISTINCT revenue) FROM ssr;
+----
+semantic view 'ssr': AGG takes one metric, e.g. AGG(revenue)
+
+statement error
+SELECT region, AGG(revenue) FROM ssr GROUP BY 3;
+----
+semantic view 'ssr': GROUP BY position 3 is not in the SELECT list
+
+# --- what the query block that reads the view cannot hold -------------------------------
+
+statement error
+SELECT * FROM ssr;
+----
+semantic view 'ssr': SELECT * is not supported in a query over a semantic view
+
+statement error
+SELECT region, AGG(revenue) FROM ssr GROUP BY ROLLUP (region);
+----
+semantic view 'ssr': GROUPING SETS, ROLLUP and CUBE are not supported
+
+statement error
+SELECT region, AGG(revenue) FROM ssr GROUP BY GROUPING SETS ((region), ());
+----
+semantic view 'ssr': GROUPING SETS, ROLLUP and CUBE are not supported
+
+statement error
+SELECT region, rank() OVER (ORDER BY AGG(revenue)) FROM ssr GROUP BY region;
+----
+semantic view 'ssr': window functions are not supported in a query over a semantic view
+
+statement error
+SELECT region, AGG(revenue) FROM ssr GROUP BY region QUALIFY true;
+----
+semantic view 'ssr': QUALIFY is not supported in a query over a semantic view
+
+statement error
+SELECT region FROM ssr TABLESAMPLE 50% GROUP BY region;
+----
+semantic view 'ssr': sampling is not supported in a query over a semantic view
+
+statement error
+SELECT r FROM ssr AS s(r) GROUP BY r;
+----
+semantic view 'ssr': a column alias list is not supported on a semantic view
+
+statement error
+SELECT region FROM ssr JOIN ssr_customers ON true GROUP BY region;
+----
+semantic view 'ssr' cannot be joined, pivoted or read alongside other tables
+
+statement error
+SELECT region FROM ssr_customers, ssr GROUP BY region;
+----
+semantic view 'ssr' cannot be joined, pivoted or read alongside other tables
+
+statement error
+SELECT * FROM ssr PIVOT (sum(amount) FOR channel IN ('web'));
+----
+semantic view 'ssr' cannot be joined, pivoted or read alongside other tables
+
+# A reference to an enclosing query is correlated, which Snowflake refuses.
+# Inside the construct, `c` would otherwise resolve to the view's own table
+# `c`, silently ignoring the outer row.
+
+statement error
+SELECT region, (SELECT AGG(revenue) FROM ssr WHERE region = c.region) FROM ssr_customers c;
+----
+semantic view 'ssr': 'c.region' refers to 'c' of an enclosing query; correlated references are not supported
+
+statement error
+SELECT cu.id, r.rev FROM ssr_customers cu, LATERAL (SELECT AGG(revenue) AS rev FROM ssr WHERE region = cu.region) r;
+----
+semantic view 'ssr': 'cu.region' refers to 'cu' of an enclosing query; correlated references are not supported
+
+statement error
+SELECT id FROM ssr_customers c WHERE EXISTS (SELECT region FROM ssr GROUP BY region HAVING AGG(revenue) > c.id);
+----
+semantic view 'ssr': 'c.id' refers to 'c' of an enclosing query; correlated references are not supported
+
+# The same block in a subquery or CTE can be joined.
+
+query TT rowsort
+SELECT r.region, c.id FROM (SELECT region FROM ssr GROUP BY region) r JOIN ssr_customers c USING (region);
+----
+East	1
+West	2
+
+# --- the construct's rules, reached through the rewrite --------------------------------
+
+statement error
+SELECT unit_cost FROM ssr;
+----
+fact 'unit_cost' is private and cannot be queried directly
+
+statement error
+SELECT region, AGG(revenue) FROM ssr WHERE revenue > 1 GROUP BY region;
+----
+where_clause cannot reference the metric 'revenue'
+
+statement error
+SELECT region, SUM(revenue) FROM ssr GROUP BY region;
+----
+'revenue' in 'sum(revenue)' is a metric; an aggregate in METRICS can only use dimensions and facts
+
+statement error
+SELECT nosuch, AGG(revenue) FROM ssr GROUP BY nosuch;
+----
+unknown dimension 'nosuch'
+
+# The construct's fences hold: an ad-hoc metric on customers, grouped by a
+# dimension on orders, would count each customer once per order.
+
+statement error
+SELECT channel, COUNT(DISTINCT region) FROM ssr GROUP BY channel;
+----
+fan trap detected
+
+statement error
+SELECT 1 FROM ssr;
+----
+specify at least one of DIMENSIONS, METRICS or FACTS
+
+# The role-playing checks hold too. A dimension on a table reached by two
+# relationships resolves through a metric's USING, and is ambiguous otherwise,
+# in GROUP BY and in WHERE alike.
+
+statement ok
+CREATE TABLE ssr_airports (code VARCHAR, city VARCHAR);
+
+statement ok
+INSERT INTO ssr_airports VALUES ('SFO', 'San Francisco'), ('JFK', 'New York');
+
+statement ok
+CREATE TABLE ssr_flights (id INTEGER, dep VARCHAR, arr VARCHAR, carrier VARCHAR);
+
+statement ok
+INSERT INTO ssr_flights VALUES (1, 'SFO', 'JFK', 'AA'), (2, 'JFK', 'SFO', 'BA'), (3, 'SFO', 'JFK', 'AA');
+
+statement ok
+CREATE SEMANTIC VIEW ssr_fl AS
+  TABLES (f AS ssr_flights PRIMARY KEY (id), a AS ssr_airports PRIMARY KEY (code))
+  RELATIONSHIPS (dep_airport AS f(dep) REFERENCES a, arr_airport AS f(arr) REFERENCES a)
+  DIMENSIONS (a.city AS a.city, f.carrier AS f.carrier)
+  METRICS (f.departures USING (dep_airport) AS COUNT(*), f.arrivals USING (arr_airport) AS COUNT(*),
+           total AS departures + arrivals);
+
+query TT rowsort
+SELECT city, AGG(departures) FROM ssr_fl GROUP BY city;
+----
+New York	1
+San Francisco	2
+
+statement error
+SELECT city, AGG(total) FROM ssr_fl GROUP BY city;
+----
+dimension 'city' is ambiguous
+
+statement error
+SELECT carrier, AGG(total) FROM ssr_fl WHERE city = 'New York' GROUP BY carrier;
+----
+where_clause member 'city' is ambiguous
+
+# The database stays usable.
+
+query TT rowsort
+SELECT region, AGG(revenue) FROM ssr GROUP BY region;
+----
+East	100.00
+West	80.00
