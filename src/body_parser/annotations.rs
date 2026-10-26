@@ -856,6 +856,18 @@ mod tag_tests {
     }
 
     #[test]
+    fn a_call_whose_first_argument_is_name_equals_reads_as_a_tag_clause() {
+        // `tag(<name> = ...)` looks exactly like `TAG (<name> = ...)`; it is
+        // read as the clause, as Snowflake's grammar reads it. The broken
+        // remainder then fails at CREATE instead of being stored.
+        let (expr, tags) = tags_of("tag(o.region = 'East')");
+        assert_eq!(expr, "");
+        assert_eq!(tags, vec![tag(None, Some("o"), "region", "East")]);
+        let (expr, _) = tags_of("o.a + tag(o.r = 'E')");
+        assert_eq!(expr, "o.a +");
+    }
+
+    #[test]
     fn a_tag_value_may_hold_annotation_keywords_and_punctuation() {
         let (expr, tags) = tags_of("x TAG (t = 'COMMENT = ''y'', TAG (z), WITH SYNONYMS')");
         assert_eq!(expr, "x");

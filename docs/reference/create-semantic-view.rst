@@ -140,8 +140,10 @@ Syntax
    - ``<value>`` is a single-quoted string of at most 256 characters.
    - After a member's expression, a bare ``TAG (`` begins the clause only
      when a tag name and ``=`` follow, so a call to a macro or function named
-     ``tag``, such as ``tag(o.x)``, stays part of the expression. ``WITH TAG``
-     always begins the clause.
+     ``tag``, such as ``tag(o.x)``, stays part of the expression. A call whose
+     first argument is ``<name> = ...``, such as ``tag(o.region = 'East')``,
+     reads as a tag clause, as in Snowflake. ``WITH TAG`` always begins the
+     clause.
    - A tag name may appear once per object (compared case-insensitively, quoted
      or not), and an object takes one ``TAG`` clause.
    - Tags appear as a ``TAGS`` row in :ref:`DESCRIBE SEMANTIC VIEW
