@@ -1421,6 +1421,7 @@ mod tests {
                 unique_constraints: vec![],
                 comment: None,
                 synonyms: vec![],
+                tags: Vec::new(),
             }],
             joins: vec![Join {
                 table: "customers".to_string(),
@@ -1438,6 +1439,7 @@ mod tests {
             resolution_schema_name: None,
             temp_tables: vec![],
             comment: None,
+            tags: Vec::new(),
         };
         let err = validate_graph(&def)
             .expect_err("an FK-less relationship must be rejected on a one-table view too")
@@ -1652,6 +1654,7 @@ mod tests {
                 resolution_schema_name: None,
                 temp_tables: vec![],
                 comment: None,
+                tags: Vec::new(),
             }
         }
 
@@ -1666,6 +1669,7 @@ mod tests {
                         unique_constraints: vec![],
                         comment: None,
                         synonyms: vec![],
+                        tags: Vec::new(),
                     },
                     TableRef {
                         alias: "c".to_string(),
@@ -1674,6 +1678,7 @@ mod tests {
                         unique_constraints: vec![],
                         comment: None,
                         synonyms: vec![],
+                        tags: Vec::new(),
                     },
                 ],
                 vec![Join {
@@ -1702,6 +1707,7 @@ mod tests {
                         unique_constraints: vec![],
                         comment: None,
                         synonyms: vec![],
+                        tags: Vec::new(),
                     },
                     TableRef {
                         alias: "c".to_string(),
@@ -1710,6 +1716,7 @@ mod tests {
                         unique_constraints: vec![vec!["email".to_string()]],
                         comment: None,
                         synonyms: vec![],
+                        tags: Vec::new(),
                     },
                 ],
                 vec![Join {
@@ -1738,6 +1745,7 @@ mod tests {
                         unique_constraints: vec![],
                         comment: None,
                         synonyms: vec![],
+                        tags: Vec::new(),
                     },
                     TableRef {
                         alias: "c".to_string(),
@@ -1746,6 +1754,7 @@ mod tests {
                         unique_constraints: vec![vec!["email".to_string()]],
                         comment: None,
                         synonyms: vec![],
+                        tags: Vec::new(),
                     },
                 ],
                 vec![Join {
@@ -1778,6 +1787,7 @@ mod tests {
                         unique_constraints: vec![],
                         comment: None,
                         synonyms: vec![],
+                        tags: Vec::new(),
                     },
                     TableRef {
                         alias: "c".to_string(),
@@ -1786,6 +1796,7 @@ mod tests {
                         unique_constraints: vec![],
                         comment: None,
                         synonyms: vec![],
+                        tags: Vec::new(),
                     },
                 ],
                 vec![Join {
@@ -1816,6 +1827,7 @@ mod tests {
                         unique_constraints: vec![],
                         comment: None,
                         synonyms: vec![],
+                        tags: Vec::new(),
                     },
                     TableRef {
                         alias: "c".to_string(),
@@ -1824,6 +1836,7 @@ mod tests {
                         unique_constraints: vec![],
                         comment: None,
                         synonyms: vec![],
+                        tags: Vec::new(),
                     },
                 ],
                 vec![Join {
@@ -1853,6 +1866,7 @@ mod tests {
                         unique_constraints: vec![],
                         comment: None,
                         synonyms: vec![],
+                        tags: Vec::new(),
                     },
                     TableRef {
                         alias: "c".to_string(),
@@ -1861,6 +1875,7 @@ mod tests {
                         unique_constraints: vec![],
                         comment: None,
                         synonyms: vec![],
+                        tags: Vec::new(),
                     },
                 ],
                 vec![Join {

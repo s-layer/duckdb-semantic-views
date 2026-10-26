@@ -75,5 +75,6 @@ proptest! {
             "materializations drift\n{}",
             rendered
         );
+        prop_assert_eq!(&reparsed.view_tags, &def.tags, "view tags drift\n{}", rendered);
     }
 }

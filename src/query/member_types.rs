@@ -498,6 +498,7 @@ mod tests {
             resolution_schema_name: None,
             temp_tables: vec![],
             comment: None,
+            tags: Vec::new(),
         }
     }
 

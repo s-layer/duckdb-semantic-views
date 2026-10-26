@@ -297,6 +297,7 @@ fn build_def() -> SemanticViewDefinition {
         unique_constraints: vec![],
         comment: None,
         synonyms: vec![],
+        tags: Vec::new(),
     };
     // `t` is listed first: base_table() == the first declared table, and the
     // FROM is anchored there with LEFT JOINs outward along the chain.
@@ -309,6 +310,7 @@ fn build_def() -> SemanticViewDefinition {
         comment: None,
         synonyms: vec![],
         is_filter: false,
+        tags: Vec::new(),
     };
     // PBT-6: the three filter members (`LABELS = (FILTER)`), one per grain.
     // Never selected as output — they exist to be named by a generated
@@ -322,6 +324,7 @@ fn build_def() -> SemanticViewDefinition {
         comment: None,
         synonyms: vec![],
         is_filter: true,
+        tags: Vec::new(),
     };
     let dimensions = vec![
         dim("td", "t.d", "t"),
@@ -342,6 +345,7 @@ fn build_def() -> SemanticViewDefinition {
         access: AccessModifier::Public,
         non_additive_by: vec![],
         window_spec: None,
+        tags: Vec::new(),
     };
     let metrics = vec![
         base_metric("sv", "sum(t.v)", Some("t")),
@@ -381,6 +385,7 @@ fn build_def() -> SemanticViewDefinition {
         resolution_schema_name: None,
         temp_tables: vec![],
         comment: None,
+        tags: Vec::new(),
     }
 }
 

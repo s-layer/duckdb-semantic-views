@@ -83,6 +83,7 @@ unsafe fn describe_view_rows(
             property_value: comment.clone(),
         });
     }
+    push_tags_row(&mut internal, "", "", "", &def.tags);
     collect_table_rows(&def, &mut internal);
     collect_relationship_rows(&def, &alias_map, &mut internal);
     collect_fact_rows(&def, &base_table, &alias_map, &types, &mut internal);
@@ -138,6 +139,47 @@ pub(crate) fn format_json_array(items: &[String]) -> String {
     // non-string map keys, in-memory writer), so `expect` documents an
     // impossibility rather than swallowing a real error.
     serde_json::to_string(items).expect("serializing a &[String] to JSON is infallible")
+}
+
+/// Format tags as a JSON object, `{"name":"value",...}`, in declaration order.
+///
+/// Each key is the tag's name as DDL writes it ([`TagName::render`]): dotted,
+/// each part bare unless it needs quoting, so `S_LAYER_KIND` reads as itself.
+/// Duplicate names cannot occur (the TAG parser and the YAML import both refuse
+/// them), so the object has no repeated key.
+///
+/// [`TagName::render`]: crate::model::TagName::render
+pub(crate) fn format_tags_json(tags: &[crate::model::Tag]) -> String {
+    let entries: Vec<String> = tags
+        .iter()
+        .map(|t| {
+            // Serializing a `&str` to JSON is infallible.
+            let key = serde_json::to_string(&t.name.render()).expect("a str serializes");
+            let value = serde_json::to_string(&t.value).expect("a str serializes");
+            format!("{key}:{value}")
+        })
+        .collect();
+    format!("{{{}}}", entries.join(","))
+}
+
+/// Push a `TAGS` row for an object that has tags; nothing when it has none, as
+/// `COMMENT` and `SYNONYMS` are omitted when unset.
+fn push_tags_row(
+    rows: &mut Vec<DescribeRow>,
+    object_kind: &str,
+    object_name: &str,
+    parent_entity: &str,
+    tags: &[crate::model::Tag],
+) {
+    if !tags.is_empty() {
+        rows.push(DescribeRow {
+            object_kind: object_kind.to_string(),
+            object_name: object_name.to_string(),
+            parent_entity: parent_entity.to_string(),
+            property: "TAGS".to_string(),
+            property_value: format_tags_json(tags),
+        });
+    }
 }
 
 /// Collect TABLE property rows from the definition.
@@ -200,12 +242,13 @@ fn collect_table_rows(def: &SemanticViewDefinition, rows: &mut Vec<DescribeRow>)
         if !table.synonyms.is_empty() {
             rows.push(DescribeRow {
                 object_kind: "TABLE".to_string(),
-                object_name: obj_name,
+                object_name: obj_name.clone(),
                 parent_entity: String::new(),
                 property: "SYNONYMS".to_string(),
                 property_value: format_json_array(&table.synonyms),
             });
         }
+        push_tags_row(rows, "TABLE", &obj_name, "", &table.tags);
     }
 }
 
@@ -269,7 +312,7 @@ fn collect_relationship_rows(
 /// Collect FACT property rows from the definition.
 ///
 /// Each fact emits: `TABLE`, `EXPRESSION`, `DATA_TYPE`, `ACCESS_MODIFIER`, plus
-/// `COMMENT` / `SYNONYMS` / `LABELS` when set. `LABELS` is `["FILTER"]` for a
+/// `COMMENT` / `SYNONYMS` / `TAGS` / `LABELS` when set. `LABELS` is `["FILTER"]` for a
 /// named filter — like `ACCESS_MODIFIER`, it is surfaced here rather than as a
 /// `SHOW SEMANTIC FACTS` column, which stays at its 8 Snowflake-aligned columns.
 fn collect_fact_rows(
@@ -325,6 +368,7 @@ fn collect_fact_rows(
                 property_value: format_json_array(&fact.synonyms),
             });
         }
+        push_tags_row(rows, "FACT", &fact.name, &parent, &fact.tags);
         if fact.is_filter {
             rows.push(DescribeRow {
                 object_kind: "FACT".to_string(),
@@ -350,7 +394,7 @@ fn collect_fact_rows(
 /// Collect DIMENSION property rows from the definition.
 ///
 /// Each dimension emits: `TABLE`, `EXPRESSION`, `DATA_TYPE`, plus `COMMENT` /
-/// `SYNONYMS` / `LABELS` when set. `LABELS` is `["FILTER"]` for a named filter.
+/// `SYNONYMS` / `TAGS` / `LABELS` when set. `LABELS` is `["FILTER"]` for a named filter.
 fn collect_dimension_rows(
     def: &SemanticViewDefinition,
     base_table: &str,
@@ -404,6 +448,7 @@ fn collect_dimension_rows(
                 property_value: format_json_array(&dim.synonyms),
             });
         }
+        push_tags_row(rows, "DIMENSION", &dim.name, &parent, &dim.tags);
         if dim.is_filter {
             rows.push(DescribeRow {
                 object_kind: "DIMENSION".to_string(),
@@ -489,6 +534,7 @@ fn collect_metric_rows(
                 property_value: format_json_array(&metric.synonyms),
             });
         }
+        push_tags_row(rows, object_kind, &metric.name, &parent, &metric.tags);
         rows.push(DescribeRow {
             object_kind: object_kind.to_string(),
             object_name: metric.name.clone(),

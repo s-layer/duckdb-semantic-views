@@ -599,6 +599,7 @@ fn build_def(s: &Schema) -> SemanticViewDefinition {
             comment: None,
             synonyms: vec![],
             is_filter: false,
+            tags: Vec::new(),
         })
         .chain((0..s.n_dims).map(|i| Dimension {
             name: format!("f{i}"),
@@ -608,6 +609,7 @@ fn build_def(s: &Schema) -> SemanticViewDefinition {
             comment: None,
             synonyms: vec![],
             is_filter: true,
+            tags: Vec::new(),
         }))
         .collect();
     let metrics = s
@@ -625,6 +627,7 @@ fn build_def(s: &Schema) -> SemanticViewDefinition {
             access: AccessModifier::Public,
             non_additive_by: vec![],
             window_spec: None,
+            tags: Vec::new(),
         })
         .collect();
     SemanticViewDefinition {
@@ -635,6 +638,7 @@ fn build_def(s: &Schema) -> SemanticViewDefinition {
             unique_constraints: vec![],
             comment: None,
             synonyms: vec![],
+            tags: Vec::new(),
         }],
         dimensions,
         metrics,
@@ -655,6 +659,7 @@ fn build_def(s: &Schema) -> SemanticViewDefinition {
                 synonyms: vec![],
                 is_filter: false,
                 access: AccessModifier::Public,
+                tags: Vec::new(),
             })
             .collect(),
         materializations: vec![],
@@ -664,6 +669,7 @@ fn build_def(s: &Schema) -> SemanticViewDefinition {
         resolution_schema_name: None,
         temp_tables: vec![],
         comment: None,
+        tags: Vec::new(),
     }
 }
 

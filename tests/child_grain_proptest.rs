@@ -577,6 +577,7 @@ fn build_def() -> SemanticViewDefinition {
             unique_constraints: vec![],
             comment: None,
             synonyms: vec![],
+            tags: Vec::new(),
         },
         TableRef {
             alias: "li".to_string(),
@@ -585,6 +586,7 @@ fn build_def() -> SemanticViewDefinition {
             unique_constraints: vec![],
             comment: None,
             synonyms: vec![],
+            tags: Vec::new(),
         },
         // TC2: the grandchild, two descending hops from the base.
         TableRef {
@@ -594,6 +596,7 @@ fn build_def() -> SemanticViewDefinition {
             unique_constraints: vec![],
             comment: None,
             synonyms: vec![],
+            tags: Vec::new(),
         },
     ];
     let dimension = |name: &str, expr: &str, source: &str, is_filter: bool| Dimension {
@@ -604,6 +607,7 @@ fn build_def() -> SemanticViewDefinition {
         comment: None,
         synonyms: vec![],
         is_filter,
+        tags: Vec::new(),
     };
     let dimensions = vec![
         dimension("region", "o.region", "o", false),
@@ -627,6 +631,7 @@ fn build_def() -> SemanticViewDefinition {
         access: AccessModifier::Public,
         non_additive_by: vec![],
         window_spec: None,
+        tags: Vec::new(),
     };
     let metrics = vec![
         base_metric("n_star", "COUNT(*)", Some("li")),
@@ -681,6 +686,7 @@ fn build_def() -> SemanticViewDefinition {
             synonyms: vec![],
             access: AccessModifier::Public,
             is_filter: false,
+            tags: Vec::new(),
         },
         Fact {
             name: "f_amt".to_string(),
@@ -691,6 +697,7 @@ fn build_def() -> SemanticViewDefinition {
             synonyms: vec![],
             access: AccessModifier::Public,
             is_filter: false,
+            tags: Vec::new(),
         },
     ];
     let joins = vec![
@@ -724,6 +731,7 @@ fn build_def() -> SemanticViewDefinition {
         resolution_schema_name: None,
         temp_tables: vec![],
         comment: None,
+        tags: Vec::new(),
     }
 }
 

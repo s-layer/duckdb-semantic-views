@@ -380,6 +380,7 @@ mod tests {
             resolution_schema_name: schema.map(str::to_string),
             temp_tables: vec![],
             comment: None,
+            tags: Vec::new(),
         }
     }
 

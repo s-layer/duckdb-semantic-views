@@ -21,7 +21,7 @@
 use proptest::prelude::*;
 use semantic_views::model::{
     AccessModifier, Dimension, Fact, Join, Materialization, Metric, NonAdditiveDim, NullsOrder,
-    SemanticViewDefinition, SortOrder, TableRef,
+    SemanticViewDefinition, SortOrder, TableRef, Tag, TagName,
 };
 
 /// Bare identifier — safe to emit unquoted.
@@ -73,6 +73,52 @@ pub fn arb_payload() -> impl Strategy<Value = String> {
         Just("has -- and /* inside */".to_string()),
         Just("back\\slash and ' quote".to_string()),
     ]
+}
+
+/// One part of a tag name, stored unquoted: plain lower- and upper-case names
+/// (which render bare) and hostile content (which renders quoted).
+pub fn arb_tag_part() -> impl Strategy<Value = String> {
+    prop_oneof![
+        arb_bare_ident().boxed(),
+        "[A-Z_][A-Z0-9_]{0,10}".boxed(),
+        arb_quoted_content().boxed(),
+    ]
+}
+
+/// A tag list the DDL grammar can produce: names of one to three parts, no two
+/// the same (case-insensitively; a repeat is dropped), values up to and at the
+/// 256-character limit, multibyte included.
+pub fn arb_canonical_tags() -> impl Strategy<Value = Vec<Tag>> {
+    let tag = (
+        prop::option::of(arb_tag_part()),
+        prop::option::of(arb_tag_part()),
+        arb_tag_part(),
+        prop_oneof![
+            4 => arb_payload().boxed(),
+            1 => Just("v".repeat(256)).boxed(),
+            1 => Just("é".repeat(256)).boxed(),
+        ],
+    )
+        .prop_map(|(database, schema, tag, value)| Tag {
+            name: TagName {
+                // A database qualifier needs a schema between it and the tag.
+                database: schema.as_ref().and(database),
+                schema,
+                tag,
+            },
+            value,
+        });
+    prop::collection::vec(tag, 0..=3).prop_map(|tags| {
+        let mut seen: Vec<Vec<String>> = Vec::new();
+        tags.into_iter()
+            .filter(|t| {
+                let key: Vec<String> = t.name.parts().iter().map(|p| p.to_lowercase()).collect();
+                let fresh = !seen.contains(&key);
+                seen.push(key);
+                fresh
+            })
+            .collect()
+    })
 }
 
 /// A canonical expression: composed so that no depth-0 comma or annotation
@@ -187,9 +233,22 @@ pub fn arb_canonical_def() -> impl Strategy<Value = SemanticViewDefinition> {
         prop::collection::vec(entry_spec(3), 0..=2), // facts
         prop::collection::vec(metric_spec, 0..=2),
         prop::collection::vec(materialization_spec, 0..=2),
+        // Tags for the view and every table and member, dealt from one pool
+        // (VARIED on all of them, so the round-trip covers TAG everywhere).
+        prop::collection::vec(arb_canonical_tags(), 12),
     )
         .prop_map(
-            |(table_specs, join_specs, dim_specs, fact_specs, metric_specs, mat_specs)| {
+            |(
+                table_specs,
+                join_specs,
+                dim_specs,
+                fact_specs,
+                metric_specs,
+                mat_specs,
+                tag_pool,
+            )| {
+                let mut tag_pool = tag_pool.into_iter();
+                let mut next_tags = move || tag_pool.next().unwrap_or_default();
                 let tables: Vec<TableRef> = table_specs
                     .into_iter()
                     .enumerate()
@@ -204,6 +263,7 @@ pub fn arb_canonical_def() -> impl Strategy<Value = SemanticViewDefinition> {
                             unique_constraints,
                             comment,
                             synonyms,
+                            tags: next_tags(),
                             ..Default::default()
                         },
                     )
@@ -279,6 +339,7 @@ pub fn arb_canonical_def() -> impl Strategy<Value = SemanticViewDefinition> {
                                 // round-trips here instead of the assertion
                                 // being vacuous on a field always left false.
                                 is_filter: private,
+                                tags: next_tags(),
                                 ..Default::default()
                             }
                         },
@@ -307,6 +368,7 @@ pub fn arb_canonical_def() -> impl Strategy<Value = SemanticViewDefinition> {
                             // use, for access) so a filter fact is generated at
                             // both access levels.
                             is_filter: i % 2 == 0,
+                            tags: next_tags(),
                             ..Default::default()
                         },
                     )
@@ -345,6 +407,7 @@ pub fn arb_canonical_def() -> impl Strategy<Value = SemanticViewDefinition> {
                             },
                             comment,
                             synonyms,
+                            tags: next_tags(),
                             ..Default::default()
                         }
                     })
@@ -416,6 +479,7 @@ pub fn arb_canonical_def() -> impl Strategy<Value = SemanticViewDefinition> {
                     facts,
                     metrics,
                     materializations,
+                    tags: next_tags(),
                     ..Default::default()
                 }
             },

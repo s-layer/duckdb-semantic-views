@@ -31,6 +31,7 @@ fn table(alias: &str, pk: &[&str]) -> TableRef {
         unique_constraints: vec![],
         comment: None,
         synonyms: vec![],
+        tags: Vec::new(),
     }
 }
 

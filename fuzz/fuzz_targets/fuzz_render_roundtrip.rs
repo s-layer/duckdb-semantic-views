@@ -58,15 +58,7 @@ fn body_of(ddl: &str) -> Option<&str> {
 /// Assemble the subset of a parsed [`KeywordBody`] that `render_create_ddl`
 /// consumes into a `SemanticViewDefinition`.
 fn kb_to_def(kb: KeywordBody) -> SemanticViewDefinition {
-    SemanticViewDefinition {
-        tables: kb.tables,
-        joins: kb.relationships,
-        facts: kb.facts,
-        dimensions: kb.dimensions,
-        metrics: kb.metrics,
-        materializations: kb.materializations,
-        ..Default::default()
-    }
+    kb.into_definition()
 }
 
 fuzz_target!(|def: SemanticViewDefinition| {

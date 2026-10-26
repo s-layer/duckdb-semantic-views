@@ -18,6 +18,7 @@ fn simple_definition() -> SemanticViewDefinition {
             unique_constraints: vec![],
             comment: None,
             synonyms: vec![],
+            tags: Vec::new(),
         }],
         dimensions: vec![
             Dimension {
@@ -29,6 +30,7 @@ fn simple_definition() -> SemanticViewDefinition {
                 comment: None,
                 synonyms: vec![],
                 is_filter: false,
+                tags: Vec::new(),
             },
             Dimension {
                 name: "month".to_string(),
@@ -39,6 +41,7 @@ fn simple_definition() -> SemanticViewDefinition {
                 comment: None,
                 synonyms: vec![],
                 is_filter: false,
+                tags: Vec::new(),
             },
             Dimension {
                 name: "status".to_string(),
@@ -49,6 +52,7 @@ fn simple_definition() -> SemanticViewDefinition {
                 comment: None,
                 synonyms: vec![],
                 is_filter: false,
+                tags: Vec::new(),
             },
         ],
         metrics: vec![
@@ -63,6 +67,7 @@ fn simple_definition() -> SemanticViewDefinition {
                 access: AccessModifier::Public,
                 non_additive_by: vec![],
                 window_spec: None,
+                tags: Vec::new(),
             },
             Metric {
                 name: "order_count".to_string(),
@@ -75,6 +80,7 @@ fn simple_definition() -> SemanticViewDefinition {
                 access: AccessModifier::Public,
                 non_additive_by: vec![],
                 window_spec: None,
+                tags: Vec::new(),
             },
             Metric {
                 name: "avg_amount".to_string(),
@@ -87,6 +93,7 @@ fn simple_definition() -> SemanticViewDefinition {
                 access: AccessModifier::Public,
                 non_additive_by: vec![],
                 window_spec: None,
+                tags: Vec::new(),
             },
         ],
 
@@ -101,6 +108,7 @@ fn simple_definition() -> SemanticViewDefinition {
         resolution_schema_name: None,
         temp_tables: vec![],
         comment: None,
+        tags: Vec::new(),
     }
 }
 
@@ -116,6 +124,7 @@ fn joined_definition() -> SemanticViewDefinition {
                 unique_constraints: vec![],
                 comment: None,
                 synonyms: vec![],
+                tags: Vec::new(),
             },
             semantic_views::model::TableRef {
                 alias: "customers".to_string(),
@@ -124,6 +133,7 @@ fn joined_definition() -> SemanticViewDefinition {
                 unique_constraints: vec![],
                 comment: None,
                 synonyms: vec![],
+                tags: Vec::new(),
             },
             semantic_views::model::TableRef {
                 alias: "products".to_string(),
@@ -132,6 +142,7 @@ fn joined_definition() -> SemanticViewDefinition {
                 unique_constraints: vec![],
                 comment: None,
                 synonyms: vec![],
+                tags: Vec::new(),
             },
         ],
         dimensions: vec![
@@ -144,6 +155,7 @@ fn joined_definition() -> SemanticViewDefinition {
                 comment: None,
                 synonyms: vec![],
                 is_filter: false,
+                tags: Vec::new(),
             },
             Dimension {
                 name: "customer_name".to_string(),
@@ -154,6 +166,7 @@ fn joined_definition() -> SemanticViewDefinition {
                 comment: None,
                 synonyms: vec![],
                 is_filter: false,
+                tags: Vec::new(),
             },
             Dimension {
                 name: "month".to_string(),
@@ -164,6 +177,7 @@ fn joined_definition() -> SemanticViewDefinition {
                 comment: None,
                 synonyms: vec![],
                 is_filter: false,
+                tags: Vec::new(),
             },
             Dimension {
                 name: "product_category".to_string(),
@@ -174,6 +188,7 @@ fn joined_definition() -> SemanticViewDefinition {
                 comment: None,
                 synonyms: vec![],
                 is_filter: false,
+                tags: Vec::new(),
             },
         ],
         metrics: vec![
@@ -188,6 +203,7 @@ fn joined_definition() -> SemanticViewDefinition {
                 access: AccessModifier::Public,
                 non_additive_by: vec![],
                 window_spec: None,
+                tags: Vec::new(),
             },
             Metric {
                 name: "customer_count".to_string(),
@@ -200,6 +216,7 @@ fn joined_definition() -> SemanticViewDefinition {
                 access: AccessModifier::Public,
                 non_additive_by: vec![],
                 window_spec: None,
+                tags: Vec::new(),
             },
             Metric {
                 name: "product_count".to_string(),
@@ -212,6 +229,7 @@ fn joined_definition() -> SemanticViewDefinition {
                 access: AccessModifier::Public,
                 non_additive_by: vec![],
                 window_spec: None,
+                tags: Vec::new(),
             },
         ],
 
@@ -250,6 +268,7 @@ fn joined_definition() -> SemanticViewDefinition {
         resolution_schema_name: None,
         temp_tables: vec![],
         comment: None,
+        tags: Vec::new(),
     }
 }
 

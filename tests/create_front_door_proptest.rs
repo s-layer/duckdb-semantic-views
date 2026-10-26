@@ -61,6 +61,7 @@ proptest! {
                 prop_assert_eq!(&got.dimensions, &def.dimensions, "dimensions drift\n{}", ddl);
                 prop_assert_eq!(&got.facts, &def.facts, "facts drift\n{}", ddl);
                 prop_assert_eq!(&got.metrics, &def.metrics, "metrics drift\n{}", ddl);
+                prop_assert_eq!(&got.tags, &def.tags, "view tags drift\n{}", ddl);
             }
             other => prop_assert!(false, "expected Create route, got: {:?}\n{}", other, ddl),
         }

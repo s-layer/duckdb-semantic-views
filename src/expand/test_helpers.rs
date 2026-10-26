@@ -22,6 +22,7 @@ pub(super) fn orders_view() -> SemanticViewDefinition {
             unique_constraints: vec![],
             comment: None,
             synonyms: vec![],
+            tags: Vec::new(),
         }],
         dimensions: vec![
             Dimension {
@@ -32,6 +33,7 @@ pub(super) fn orders_view() -> SemanticViewDefinition {
                 comment: None,
                 synonyms: vec![],
                 is_filter: false,
+                tags: Vec::new(),
             },
             Dimension {
                 name: "status".to_string(),
@@ -41,6 +43,7 @@ pub(super) fn orders_view() -> SemanticViewDefinition {
                 comment: None,
                 synonyms: vec![],
                 is_filter: false,
+                tags: Vec::new(),
             },
         ],
         metrics: vec![
@@ -55,6 +58,7 @@ pub(super) fn orders_view() -> SemanticViewDefinition {
                 access: AccessModifier::Public,
                 non_additive_by: vec![],
                 window_spec: None,
+                tags: Vec::new(),
             },
             Metric {
                 name: "order_count".to_string(),
@@ -67,6 +71,7 @@ pub(super) fn orders_view() -> SemanticViewDefinition {
                 access: AccessModifier::Public,
                 non_additive_by: vec![],
                 window_spec: None,
+                tags: Vec::new(),
             },
         ],
         joins: vec![],
@@ -78,6 +83,7 @@ pub(super) fn orders_view() -> SemanticViewDefinition {
         resolution_schema_name: None,
         temp_tables: vec![],
         comment: None,
+        tags: Vec::new(),
     }
 }
 
@@ -101,6 +107,7 @@ pub(super) fn minimal_def(
             unique_constraints: vec![],
             comment: None,
             synonyms: vec![],
+            tags: Vec::new(),
         }],
         dimensions: vec![Dimension {
             name: dim_name.to_string(),
@@ -110,6 +117,7 @@ pub(super) fn minimal_def(
             comment: None,
             synonyms: vec![],
             is_filter: false,
+            tags: Vec::new(),
         }],
         metrics: vec![Metric {
             name: metric_name.to_string(),
@@ -122,6 +130,7 @@ pub(super) fn minimal_def(
             access: AccessModifier::Public,
             non_additive_by: vec![],
             window_spec: None,
+            tags: Vec::new(),
         }],
         joins: vec![],
         facts: vec![],
@@ -132,6 +141,7 @@ pub(super) fn minimal_def(
         resolution_schema_name: None,
         temp_tables: vec![],
         comment: None,
+        tags: Vec::new(),
     }
 }
 
@@ -180,6 +190,7 @@ impl TestFixtureExt for SemanticViewDefinition {
             comment: None,
             synonyms: vec![],
             is_filter: false,
+            tags: Vec::new(),
         });
         self
     }
@@ -196,6 +207,7 @@ impl TestFixtureExt for SemanticViewDefinition {
             access: AccessModifier::Public,
             non_additive_by: vec![],
             window_spec: None,
+            tags: Vec::new(),
         });
         self
     }
@@ -208,6 +220,7 @@ impl TestFixtureExt for SemanticViewDefinition {
             unique_constraints: vec![],
             comment: None,
             synonyms: vec![],
+            tags: Vec::new(),
         });
         self
     }
@@ -222,6 +235,7 @@ impl TestFixtureExt for SemanticViewDefinition {
             synonyms: vec![],
             is_filter: false,
             access: AccessModifier::Public,
+            tags: Vec::new(),
         });
         self
     }
@@ -236,6 +250,7 @@ impl TestFixtureExt for SemanticViewDefinition {
             synonyms: vec![],
             is_filter: false,
             access: AccessModifier::Private,
+            tags: Vec::new(),
         });
         self
     }

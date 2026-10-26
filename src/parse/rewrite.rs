@@ -548,6 +548,7 @@ mod tests {
                     .collect(),
                 comment: None,
                 synonyms: vec![],
+                tags: Vec::new(),
             }
         }
 
