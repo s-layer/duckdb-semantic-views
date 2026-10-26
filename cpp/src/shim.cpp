@@ -3749,6 +3749,339 @@ private:
     }
 };
 
+// ===========================================================================
+// PHASE 5 SPIKE (not for merge): standard-SQL `SELECT ... FROM sv GROUP BY`
+// through the planner's operator-extension bind fallback, and a BI
+// placeholder view whose bound plan reroutes to the same fallback.
+// ===========================================================================
+#include "duckdb/planner/operator_extension.hpp"
+#include "duckdb/planner/planner_extension.hpp"
+#include "duckdb/planner/operator/logical_get.hpp"
+#include "duckdb/parser/expression/columnref_expression.hpp"
+#include "duckdb/parser/result_modifier.hpp"
+#include "duckdb/parser/tableref/subqueryref.hpp"
+#include "duckdb/parser/tableref/joinref.hpp"
+#include "duckdb/catalog/catalog_entry/view_catalog_entry.hpp"
+#include "duckdb/parser/statement/explain_statement.hpp"
+#include "duckdb/parser/statement/insert_statement.hpp"
+#include "duckdb/parser/statement/copy_statement.hpp"
+#include "duckdb/parser/statement/create_statement.hpp"
+#include "duckdb/parser/parsed_data/create_view_info.hpp"
+#include "duckdb/parser/parsed_data/create_table_info.hpp"
+#include "duckdb/parser/query_node/insert_query_node.hpp"
+namespace {
+
+const std::set<string> SV_SPIKE_AGGREGATES = {"sum", "count", "count_star", "avg", "mean", "min", "max",
+                                              "any_value", "median", "stddev", "variance", "approx_count_distinct",
+                                              "string_agg", "list", "first", "last", "bool_and", "bool_or"};
+
+struct SvSpikeRewrite {
+    vector<string> group_keys;
+    vector<string> metrics;
+};
+
+string sv_spike_lower(const Identifier &id) {
+    return StringUtil::Lower(id.GetIdentifierName());
+}
+
+void sv_spike_replace(unique_ptr<ParsedExpression> &expr, SvSpikeRewrite &rw) {
+    if (!expr) {
+        return;
+    }
+    auto saved_alias = expr->GetAlias();
+    expr->ClearAlias();
+    auto text = expr->ToString();
+    expr->SetAlias(saved_alias);
+    for (idx_t i = 0; i < rw.group_keys.size(); i++) {
+        if (rw.group_keys[i] == text) {
+            expr = make_uniq<ColumnRefExpression>(Identifier("__svd" + std::to_string(i)));
+            return;
+        }
+    }
+    if (expr->GetExpressionClass() == ExpressionClass::FUNCTION) {
+        auto &f = expr->Cast<FunctionExpression>();
+        auto name = sv_spike_lower(f.FunctionName());
+        string metric;
+        if (name == "agg" && f.GetArguments().size() == 1) {
+            metric = f.GetArguments()[0].GetExpression().ToString();
+        } else if (SV_SPIKE_AGGREGATES.count(name)) {
+            metric = text;
+        }
+        if (!metric.empty()) {
+            idx_t k = 0;
+            while (k < rw.metrics.size() && rw.metrics[k] != metric) {
+                k++;
+            }
+            if (k == rw.metrics.size()) {
+                rw.metrics.push_back(metric);
+            }
+            expr = make_uniq<ColumnRefExpression>(Identifier("__svm" + std::to_string(k)));
+            return;
+        }
+    }
+    ParsedExpressionIterator::EnumerateChildren(
+        *expr, [&](unique_ptr<ParsedExpression> &child) { sv_spike_replace(child, rw); });
+}
+
+// Is `ref` a semantic view: a name with no table or view, or a placeholder view.
+bool sv_spike_is_semantic(ClientContext &context, BaseTableRef &ref, const std::set<string> &ctes) {
+    auto &qn = ref.GetQualifiedName();
+    if (qn.Schema().empty() && qn.Catalog().empty() && ctes.count(sv_spike_lower(qn.Name()))) {
+        return false;
+    }
+    EntryLookupInfo lookup(CatalogType::TABLE_ENTRY, qn);
+    auto entry = Catalog::GetEntry(context, lookup, OnEntryNotFound::RETURN_NULL);
+    if (!entry) {
+        return true;
+    }
+    if (entry->type == CatalogType::VIEW_ENTRY) {
+        auto &view = entry->Cast<ViewCatalogEntry>();
+        return view.query && StringUtil::Contains(view.query->ToString(), "__sv_placeholder");
+    }
+    return false;
+}
+
+void sv_spike_rewrite_node(ClientContext &context, QueryNode &node, std::set<string> ctes, bool &changed);
+
+void sv_spike_rewrite_expr(ClientContext &context, unique_ptr<ParsedExpression> &expr, const std::set<string> &ctes,
+                           bool &changed) {
+    if (!expr) {
+        return;
+    }
+    if (expr->GetExpressionClass() == ExpressionClass::SUBQUERY) {
+        auto &sub = expr->Cast<SubqueryExpression>();
+        if (sub.SubqueryMutable()) {
+            sv_spike_rewrite_node(context, *sub.SubqueryMutable()->node, ctes, changed);
+        }
+    }
+    ParsedExpressionIterator::EnumerateChildren(
+        *expr, [&](unique_ptr<ParsedExpression> &child) { sv_spike_rewrite_expr(context, child, ctes, changed); });
+}
+
+void sv_spike_rewrite_ref(ClientContext &context, TableRef &ref, const std::set<string> &ctes, bool &changed) {
+    if (ref.type == TableReferenceType::SUBQUERY) {
+        sv_spike_rewrite_node(context, *ref.Cast<SubqueryRef>().subquery->node, ctes, changed);
+    } else if (ref.type == TableReferenceType::JOIN) {
+        auto &join = ref.Cast<JoinRef>();
+        sv_spike_rewrite_ref(context, *join.left, ctes, changed);
+        sv_spike_rewrite_ref(context, *join.right, ctes, changed);
+        sv_spike_rewrite_expr(context, join.condition, ctes, changed);
+    }
+}
+
+void sv_spike_rewrite_node(ClientContext &context, QueryNode &node, std::set<string> ctes, bool &changed) {
+    for (auto &kv : node.cte_map.map) {
+        ctes.insert(sv_spike_lower(kv.first));
+    }
+    for (auto &kv : node.cte_map.map) {
+        if (kv.second->query_node) {
+            sv_spike_rewrite_node(context, *kv.second->query_node, ctes, changed);
+        }
+    }
+    switch (node.type) {
+    case QueryNodeType::SET_OPERATION_NODE:
+        for (auto &child : node.Cast<SetOperationNode>().children) {
+            sv_spike_rewrite_node(context, *child, ctes, changed);
+        }
+        return;
+    case QueryNodeType::RECURSIVE_CTE_NODE:
+        sv_spike_rewrite_node(context, *node.Cast<RecursiveCTENode>().left, ctes, changed);
+        sv_spike_rewrite_node(context, *node.Cast<RecursiveCTENode>().right, ctes, changed);
+        return;
+    case QueryNodeType::INSERT_QUERY_NODE: {
+        auto &insert = node.Cast<InsertQueryNode>();
+        if (insert.select_statement) {
+            sv_spike_rewrite_node(context, *insert.select_statement->node, ctes, changed);
+        }
+        return;
+    }
+    case QueryNodeType::SELECT_NODE:
+        break;
+    default:
+        return;
+    }
+    auto &select = node.Cast<SelectNode>();
+    if (!select.from_table) {
+        for (auto &item : select.select_list) {
+            sv_spike_rewrite_expr(context, item, ctes, changed);
+        }
+        return;
+    }
+    if (select.from_table->type != TableReferenceType::BASE_TABLE ||
+        !sv_spike_is_semantic(context, select.from_table->Cast<BaseTableRef>(), ctes)) {
+        sv_spike_rewrite_ref(context, *select.from_table, ctes, changed);
+        for (auto &item : select.select_list) {
+            sv_spike_rewrite_expr(context, item, ctes, changed);
+        }
+        sv_spike_rewrite_expr(context, select.where_clause, ctes, changed);
+        sv_spike_rewrite_expr(context, select.having, ctes, changed);
+        return;
+    }
+    auto &base = select.from_table->Cast<BaseTableRef>();
+    SvSpikeRewrite rw;
+    for (auto &g : select.groups.group_expressions) {
+        rw.group_keys.push_back(g->ToString());
+    }
+    for (auto &item : select.select_list) {
+        Identifier alias = item->HasAlias() ? item->GetAlias() : Identifier(item->ToString());
+        sv_spike_replace(item, rw);
+        item->SetAlias(alias);
+    }
+    sv_spike_replace(select.having, rw);
+    for (auto &modifier : select.modifiers) {
+        if (modifier->type == ResultModifierType::ORDER_MODIFIER) {
+            for (auto &order : modifier->Cast<OrderModifier>().orders) {
+                sv_spike_replace(order.expression, rw);
+            }
+        }
+    }
+    auto qn = base.GetQualifiedName();
+    string sql = "SELECT * FROM SEMANTIC_VIEW(" + qn.ToString();
+    if (!rw.metrics.empty()) {
+        sql += " METRICS ";
+        for (idx_t k = 0; k < rw.metrics.size(); k++) {
+            sql += (k ? ", " : "") + rw.metrics[k] + " AS __svm" + std::to_string(k);
+        }
+    }
+    if (!rw.group_keys.empty()) {
+        sql += " DIMENSIONS ";
+        for (idx_t i = 0; i < rw.group_keys.size(); i++) {
+            sql += (i ? ", " : "") + rw.group_keys[i] + " AS __svd" + std::to_string(i);
+        }
+    }
+    if (select.where_clause) {
+        sql += " WHERE " + select.where_clause->ToString();
+    }
+    sql += ")";
+    Parser parser(context);
+    parser.ParseQuery(sql);
+    auto &inner = parser.statements[0]->Cast<SelectStatement>().node->Cast<SelectNode>();
+    select.from_table = std::move(inner.from_table);
+    if (!base.alias.empty()) {
+        select.from_table->alias = base.alias;
+    }
+    select.where_clause = std::move(select.having);
+    select.groups.group_expressions.clear();
+    select.groups.grouping_sets.clear();
+    changed = true;
+}
+
+void sv_spike_rewrite_statement(ClientContext &context, SQLStatement &statement, bool &changed) {
+    switch (statement.type) {
+    case StatementType::SELECT_STATEMENT:
+        sv_spike_rewrite_node(context, *statement.Cast<SelectStatement>().node, {}, changed);
+        break;
+    case StatementType::EXPLAIN_STATEMENT:
+        sv_spike_rewrite_statement(context, *statement.Cast<ExplainStatement>().stmt, changed);
+        break;
+    case StatementType::INSERT_STATEMENT:
+        sv_spike_rewrite_node(context, *statement.Cast<InsertStatement>().node, {}, changed);
+        break;
+    case StatementType::COPY_STATEMENT: {
+        auto &info = *statement.Cast<CopyStatement>().info;
+        if (info.select_statement) {
+            sv_spike_rewrite_node(context, *info.select_statement, {}, changed);
+        }
+        break;
+    }
+    case StatementType::CREATE_STATEMENT: {
+        auto &info = *statement.Cast<CreateStatement>().info;
+        if (info.type == CatalogType::VIEW_ENTRY && info.Cast<CreateViewInfo>().query) {
+            sv_spike_rewrite_node(context, *info.Cast<CreateViewInfo>().query->node, {}, changed);
+        } else if (info.type == CatalogType::TABLE_ENTRY && info.Cast<CreateTableInfo>().query) {
+            sv_spike_rewrite_node(context, *info.Cast<CreateTableInfo>().query->node, {}, changed);
+        }
+        break;
+    }
+    default:
+        break;
+    }
+}
+
+// The rebind hook: DuckDB binds a copy first, and on a planning error hands the
+// untouched statement here. Rewriting it in place and asking for a rebind
+// plans the rewritten statement from scratch, with a fresh binder.
+class SvSpikeRebind final : public ClientContextState {
+public:
+    bool CanRequestRebind() override {
+        return true;
+    }
+    RebindQueryInfo OnPlanningError(ClientContext &context, SQLStatement &statement, ErrorData &) override {
+        bool changed = false;
+        sv_spike_rewrite_statement(context, statement, changed);
+        if (changed && getenv("SV_SPIKE_DEBUG")) {
+            fprintf(stderr, "[sv-spike] %s\n", statement.ToString().c_str());
+        }
+        return changed ? RebindQueryInfo::ATTEMPT_TO_REBIND : RebindQueryInfo::DO_NOT_REBIND;
+    }
+};
+
+class SvSpikeRebindCallback final : public ExtensionCallback {
+public:
+    void OnConnectionOpened(ClientContext &context) override {
+        if (getenv("SV_SPIKE_NOREBIND")) {
+            return;
+        }
+        context.registered_state->GetOrCreate<SvSpikeRebind>("semantic_views_spike_rebind");
+    }
+};
+
+bool sv_spike_plan_reads_placeholder(LogicalOperator &op) {
+    if (op.type == LogicalOperatorType::LOGICAL_GET) {
+        auto &get = op.Cast<LogicalGet>();
+        if (StringUtil::CIEquals(get.function.GetName().GetIdentifierName(), "__sv_placeholder")) {
+            return true;
+        }
+    }
+    for (auto &child : op.children) {
+        if (sv_spike_plan_reads_placeholder(*child)) {
+            return true;
+        }
+    }
+    return false;
+}
+
+void sv_spike_post_bind(PlannerExtensionInput &, BoundStatement &statement) {
+    if (statement.plan && sv_spike_plan_reads_placeholder(*statement.plan)) {
+        throw BinderException("semantic view placeholder read directly");
+    }
+}
+
+unique_ptr<FunctionData> sv_spike_placeholder_bind(ClientContext &, TableFunctionBindInput &,
+                                                   vector<LogicalType> &types, sv_compat::bind_names_t &names) {
+    names.emplace_back(Identifier("region"));
+    names.emplace_back(Identifier("revenue"));
+    types = {LogicalType::VARCHAR, LogicalType::DOUBLE};
+    return make_uniq<TableFunctionData>();
+}
+
+void sv_spike_placeholder_fn(ClientContext &, TableFunctionInput &, DataChunk &out) {
+    out.SetCardinality(0);
+}
+
+void sv_spike_register(DatabaseInstance &db) {
+    auto &config = DBConfig::GetConfig(db);
+    ExtensionCallback::Register(config, make_shared_ptr<SvSpikeRebindCallback>());
+    for (auto &context : db.GetConnectionManager().GetConnectionList()) {
+        if (getenv("SV_SPIKE_NOREBIND")) {
+            break;
+        }
+        context->registered_state->GetOrCreate<SvSpikeRebind>("semantic_views_spike_rebind");
+    }
+    PlannerExtension planner;
+    planner.post_bind_function = sv_spike_post_bind;
+    PlannerExtension::Register(config, planner);
+    TableFunction tf(sv_compat::function_name("__sv_placeholder"), {LogicalType::VARCHAR}, sv_spike_placeholder_fn,
+                     sv_spike_placeholder_bind);
+    CreateTableFunctionInfo info(tf);
+    info.on_conflict = OnCreateConflict::ALTER_ON_CONFLICT;
+    auto &system_catalog = Catalog::GetSystemCatalog(db);
+    auto txn = CatalogTransaction::GetSystemTransaction(db);
+    system_catalog.CreateTableFunction(txn, info);
+}
+
+} // namespace
+
 // Register the grammar once per database, and activate it on every connection:
 // those opened later through the ExtensionCallback, and those open now through
 // SemanticViewsGrammarPending. The registry each connection keeps its states in
@@ -3759,6 +4092,7 @@ static void sv_register_grammar(DatabaseInstance &db) {
     if (!config.GetCallbackManager().FindGrammarExtension(SV_GRAMMAR_NAME)) {
         GrammarExtension::Register(db, make_shared_ptr<SemanticViewsGrammar>(sv_grammar_changes()));
         ExtensionCallback::Register(config, make_shared_ptr<SemanticViewsGrammarActivation>());
+        sv_spike_register(db);
     }
     for (auto &context : db.GetConnectionManager().GetConnectionList()) {
         context->registered_state->GetOrCreate<SemanticViewsGrammarPending>(SV_GRAMMAR_PENDING_KEY);
