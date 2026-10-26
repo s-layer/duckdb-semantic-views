@@ -9,6 +9,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+_No unreleased changes yet._
+
+## [0.16.0] - 2026-10-26
+
 ### Added
 
 - **`SHOW` and `DESCRIBE` statements work as subqueries.** `DESCRIBE SEMANTIC VIEW`,
@@ -1059,7 +1063,8 @@ Connection-lifecycle and ADBC fixes. Two downstream regressions reported against
 - `list_semantic_views()` and `describe_semantic_view()` introspection functions
 - Fuzz targets for FFI boundary testing
 
-[Unreleased]: https://github.com/s-layer/duckdb-semantic-views/compare/v0.15.0...HEAD
+[Unreleased]: https://github.com/s-layer/duckdb-semantic-views/compare/v0.16.0...HEAD
+[0.16.0]: https://github.com/s-layer/duckdb-semantic-views/compare/v0.15.0...v0.16.0
 [0.15.0]: https://github.com/s-layer/duckdb-semantic-views/compare/v0.14.1...v0.15.0
 [0.14.2]: https://github.com/s-layer/duckdb-semantic-views/compare/v0.14.1...v0.14.2
 [0.14.1]: https://github.com/s-layer/duckdb-semantic-views/compare/v0.14.0...v0.14.1
