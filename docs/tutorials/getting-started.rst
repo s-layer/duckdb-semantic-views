@@ -248,6 +248,33 @@ covers both filters in depth.
    result. The function form is handy when application code builds the lists.
 
 
+.. _tutorial-gs-standard-sql:
+
+Query It with Standard SQL
+==========================
+
+You can also query the view by name with an ordinary ``SELECT``, as you would a table, the way Snowflake allows. Put the dimensions in ``GROUP BY`` and wrap each metric in ``AGG()``:
+
+.. code-block:: sql
+
+   SELECT region, AGG(revenue) AS revenue, AGG(order_count) AS order_count
+   FROM order_metrics
+   WHERE category = 'Hardware'
+   GROUP BY region
+   ORDER BY region;
+
+.. code-block:: text
+
+   ┌────────┬─────────┬─────────────┐
+   │ region │ revenue │ order_count │
+   ├────────┼─────────┼─────────────┤
+   │ East   │   75.00 │           2 │
+   │ West   │   25.00 │           1 │
+   └────────┴─────────┴─────────────┘
+
+This is the last query of the previous section in another spelling, and it returns the same rows. ``GROUP BY`` lists the dimensions, ``AGG()`` names the metrics, and ``WHERE`` filters the rows the metrics aggregate, like the ``WHERE`` inside ``SEMANTIC_VIEW(...)``. A metric already holds its aggregation, so you pass it to ``AGG()`` rather than writing ``SUM()`` around it. :ref:`howto-standard-sql` covers the rest of this form.
+
+
 .. _tutorial-gs-inspect:
 
 Inspect the Generated SQL
@@ -290,6 +317,7 @@ You now know how to:
 - Query any combination of dimensions and metrics with :ref:`SEMANTIC_VIEW(...) <ref-sv-construct>`
 - Use the three query modes: dimensions + metrics, dimensions only, metrics only
 - Filter the result with an outer ``WHERE``, or the rows the metrics aggregate with ``WHERE`` inside the construct
+- Query the view by name with standard SQL, passing each metric to ``AGG()`` (see :ref:`howto-standard-sql`)
 - Inspect generated SQL with :ref:`explain_semantic_view() <ref-explain-semantic-view>`
 - Drop a semantic view with :ref:`DROP SEMANTIC VIEW <ref-drop-semantic-view>`
 

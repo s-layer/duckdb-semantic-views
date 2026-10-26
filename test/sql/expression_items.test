@@ -205,7 +205,7 @@ which belong to different tables
 statement error
 SELECT * FROM SEMANTIC_VIEW(exi METRICS count(*) + 1);
 ----
-refers to no dimension or fact
+'count(*) + 1' refers to no dimension or fact; an ad-hoc aggregate must use at least one. To count rows, declare a metric on a table, such as '<alias>.order_count AS COUNT(*)', and query that metric
 
 statement error
 SELECT * FROM SEMANTIC_VIEW(exi DIMENSIONS upper(o.nope) METRICS revenue);

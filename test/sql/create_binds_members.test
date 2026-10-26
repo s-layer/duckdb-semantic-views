@@ -18,6 +18,30 @@ INSERT INTO cbm_orders VALUES (1, 1, 10, DATE '2024-01-01');
 statement ok
 INSERT INTO cbm_customers VALUES (1, 'East');
 
+# --- every table is bound -----------------------------------------------------------
+
+# A table no member reads is still resolved, as Snowflake resolves every logical
+# table: a missing one refuses the CREATE.
+
+statement error
+CREATE SEMANTIC VIEW cbm_v AS
+  TABLES (o AS cbm_orders PRIMARY KEY (id), x AS cbm_no_such_table PRIMARY KEY (id))
+  RELATIONSHIPS (ox AS o(customer_id) REFERENCES x)
+  METRICS (o.m AS SUM(o.amount));
+----
+semantic view 'cbm_v': table 'x' does not bind: Catalog Error: Table with name cbm_no_such_table does not exist
+
+# The same view over tables that exist creates.
+
+statement ok
+CREATE SEMANTIC VIEW cbm_unread AS
+  TABLES (o AS cbm_orders PRIMARY KEY (id), x AS cbm_customers PRIMARY KEY (id))
+  RELATIONSHIPS (ox AS o(customer_id) REFERENCES x)
+  METRICS (o.m AS SUM(o.amount));
+
+statement ok
+DROP SEMANTIC VIEW cbm_unread;
+
 # --- each member kind is bound ------------------------------------------------------
 
 # DuckDB rejects an invalid date part when it binds date_trunc, so CREATE does.

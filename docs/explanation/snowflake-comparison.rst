@@ -33,6 +33,9 @@ Concept Mapping
    * - Define a semantic view
      - ``CREATE SEMANTIC VIEW``
      - ``CREATE SEMANTIC VIEW``
+   * - Expression checking
+     - Each expression is compiled at ``CREATE``
+     - Each dimension, fact and metric is bound at ``CREATE``, and one that does not bind refuses the statement (see :ref:`ref-err-member-bind`)
    * - Table declarations
      - ``TABLES`` clause with aliases
      - ``TABLES`` clause with aliases and optional ``PRIMARY KEY``
@@ -68,7 +71,7 @@ Concept Mapping
      - ``MATERIALIZATIONS`` clause for routing to pre-aggregated tables (see :ref:`howto-materializations`)
    * - Query interface
      - ``SEMANTIC_VIEW(...)`` construct, and direct SQL with semantic resolution
-     - The same :ref:`SEMANTIC_VIEW(...) <ref-sv-construct>` construct, :ref:`direct SQL <howto-standard-sql>` with ``AGG``, and the :ref:`semantic_view() <ref-semantic-view-function>` table function
+     - The same :ref:`SEMANTIC_VIEW(...) <ref-sv-construct>` construct, :ref:`standard SQL <howto-standard-sql>` with ``AGG``, and the :ref:`semantic_view() <ref-semantic-view-function>` table function
    * - Wildcard selection
      - ``alias.*`` in query parameters
      - ``alias.*`` in ``DIMENSIONS``, ``METRICS``, ``FACTS`` (see :ref:`howto-wildcard-selection`)
@@ -264,7 +267,7 @@ Both systems query a semantic view in three ways: by name with standard SQL, pas
        metrics := ['orders.revenue']
    );
 
-The standard-SQL form follows Snowflake's rules: ``GROUP BY`` expressions are the dimensions, a metric is passed to ``AGG`` (``MIN``, ``MAX`` and ``ANY_VALUE`` of a metric mean the same), other aggregates are ad-hoc metrics, ``WHERE`` refers to dimensions and facts, ``HAVING`` to aggregated metrics, and the block that reads the view has no joins, window functions, ``QUALIFY``, ``PIVOT`` or correlated references. See :ref:`howto-standard-sql`. Two differences come from DuckDB rather than from semantic views: a name that is also a table, a view or a CTE in scope reads that, not the semantic view; and ``SELECT *`` is refused, where the construct's ``SELECT * FROM SEMANTIC_VIEW(...)`` is not.
+The standard-SQL form follows Snowflake's rules: ``GROUP BY`` expressions are the dimensions, a metric is passed to ``AGG`` (``MIN``, ``MAX`` and ``ANY_VALUE`` of a metric mean the same), other aggregates are ad-hoc metrics, ``WHERE`` refers to dimensions and facts, ``HAVING`` to aggregated metrics, and the block that reads the view has no joins, window functions, ``QUALIFY``, ``PIVOT`` or qualified correlated references. See :ref:`howto-standard-sql`. Two differences come from DuckDB rather than from semantic views: a name that is also a table, a view or a CTE in scope reads that, not the semantic view; and ``SELECT *`` is refused, where the construct's ``SELECT * FROM SEMANTIC_VIEW(...)`` is not.
 
 
 Cardinality Inference
@@ -557,8 +560,8 @@ Snowflake ``CREATE SEMANTIC VIEW`` features that are commonly asked about, and w
 
    * - Snowflake Feature
      - Status
-   * - Direct SQL query interface
-     - Not planned; query with the :ref:`SEMANTIC_VIEW(...) construct <ref-sv-construct>` or the :ref:`semantic_view() <ref-semantic-view-function>` table function
+   * - Standard SQL over the view by name -- ``SELECT region, AGG(revenue) FROM v GROUP BY region``, with each metric passed to ``AGG``
+     - **Supported**, with Snowflake's rules: ``GROUP BY`` expressions are the dimensions, ``MIN`` / ``MAX`` / ``ANY_VALUE`` of a metric mean ``AGG``, other aggregates are ad-hoc metrics, ``WHERE`` filters before aggregation and ``HAVING`` after it, and ``SELECT *``, joins, window functions, ``QUALIFY`` and qualified correlated references in the block that reads the view are refused. The query turns into the ``SEMANTIC_VIEW(...)`` construct, so its results and checks are the construct's. A name that is also a table, a view or a CTE in scope reads that, following DuckDB's name resolution. See :ref:`howto-standard-sql`.
    * - Pre-aggregation ``WHERE`` -- ``SEMANTIC_VIEW( v METRICS ... DIMENSIONS ... WHERE <predicate> )``, where the predicate `may refer only to dimensions, facts, and expressions over them <https://docs.snowflake.com/en/sql-reference/constructs/semantic_view>`_ and "is applied before the metrics are computed"
      - **Supported**, written the same way in the :ref:`SEMANTIC_VIEW(...) construct <ref-sv-construct>`, and as the :ref:`where_clause <ref-sv-pre-agg-filtering>` named parameter of ``semantic_view()`` (``where`` is a reserved word in DuckDB's named-parameter position, so the parameter cannot be spelled ``where :=``). A prepared-statement parameter in the construct's ``WHERE`` is one of the statement's parameters. The predicate names declared dimensions and facts, is substituted to their expressions, and is applied before aggregation on every emission path -- before the ``GROUP BY`` when the query is a single ``SELECT`` (one grain, dimensions only, or facts), inside *each* per-grain aggregate for multi-grain queries, inside the snapshot selection before the ``RANK`` for semi-additive metrics, and inside the inner aggregation before the window function. So "revenue for orders shipped after X" recomputes each group over the matching rows. Referencing a metric is rejected, matching Snowflake, and members the predicate names participate in the same reachability and fan-out checks as queried dimensions.
    * - Query-time scalar expressions -- ``SEMANTIC_VIEW( v DIMENSIONS DATE_PART('year', orders.order_date) AS year )``, where a ``DIMENSIONS`` / ``FACTS`` item `may be a scalar expression over dimensions or facts of the same logical table <https://docs.snowflake.com/en/sql-reference/constructs/semantic_view>`_, a ``METRICS`` item may be an expression over metrics, and any item may take ``AS <alias>``

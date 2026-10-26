@@ -66,6 +66,16 @@ A semantic view stores a *model*, a set of dimensions, metrics, relationships, a
 
 One semantic view definition serves many different queries. The extension generates the appropriate SQL (SELECT, GROUP BY, and JOIN) based on which dimensions and metrics are requested.
 
+The same request can be written as an ordinary query over the view by name, which reads much like a query over a table:
+
+.. code-block:: sql
+
+   SELECT category, AGG(revenue)
+   FROM order_metrics
+   GROUP BY category;
+
+It only looks like a table query. ``order_metrics`` has no rows of its own and ``revenue`` is not a column: ``GROUP BY`` chooses the grain, ``AGG()`` asks for a metric already defined in the view, and the extension writes the aggregation. ``SUM(revenue)`` is refused, because ``revenue`` is already an aggregate. See :ref:`howto-standard-sql`.
+
 
 .. _explanation-sv-key-differences:
 
@@ -94,9 +104,12 @@ Key Differences
    * - Metric consistency
      - Each view defines its own aggregation
      - Defined once, reused across all queries
+   * - Checked at ``CREATE``
+     - The stored query is bound
+     - Each dimension, fact and metric is bound
    * - Query interface
      - ``SELECT * FROM view``
-     - :ref:`SELECT * FROM SEMANTIC_VIEW(name DIMENSIONS ... METRICS ...) <ref-semantic-view-function>`
+     - :ref:`SELECT * FROM SEMANTIC_VIEW(name DIMENSIONS ... METRICS ...) <ref-semantic-view-function>`, or :ref:`SELECT dim, AGG(metric) FROM name GROUP BY dim <howto-standard-sql>`
 
 
 .. _explanation-sv-why:

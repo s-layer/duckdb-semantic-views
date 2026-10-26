@@ -1,47 +1,97 @@
 # Editor Report
 
-**Generated:** 2026-10-16 (v0.15.0 content refresh, DuckDB 2.0)
-**Files reviewed:** 7 changed pages; terminology pass over all docs/ pages
-**Changes made:** 3
+**Generated:** 2026-10-26 (v0.17.0 content refresh: standard-SQL queries, CREATE binds every member, member tags)
+**Files reviewed:** 15 changed pages (14 from the Author pass, plus `reference/create-semantic-view.rst` from the persona PARTIAL fixes); terminology pass over all docs/ pages
+**Changes made:** 9
   - BLOCKING: 0
-  - SUGGESTION: 2
-  - NITPICK: 1
+  - SUGGESTION: 6
+  - NITPICK: 3
 
 ## Summary
 
-Seven pages were refreshed for the move to DuckDB 2.0. Every new factual claim was checked
-against the source (`src/load_guard.rs`, `cpp/include/parser_extension_compat.hpp`,
-`test/sql/peg_compat.test`, `test/sql/*quoted*`) and by running the built v2.0.0-alpha47600
-extension in the matching DuckDB 2.0 Python package (error texts, `extension_name` being NULL,
-`allow_parser_override_extension` behaviour) and in DuckDB 1.5.6 (load-guard message).
-`just docs-check` (`sphinx-build -W`) passes.
+Fourteen pages were refreshed for v0.17.0. Every changed or added SQL example, and every
+error text quoted in new prose, was run against the debug build of this code in scratch
+sqllogictest files (`standard_sql.test`, `getting_started.test`, `multi_table.test`,
+`misc.test`: 103 statements, all passing, including the persona-pass fixes); the Python example on the standard-SQL page was run
+in the DuckDB 2.0.0 Python package with the same build. `sphinx-build -W` passes. No
+accuracy mismatch was left in place.
 
 ---
 
-## docs/reference/error-messages.rst
+## docs/how-to/standard-sql.rst
 
 ### SUGGESTION
 
 | Section | Description | Fix |
 |---------|-------------|-----|
-| Query time limit exceeded | Draft listed `explain_semantic_view()` as subject to the time limit; it only expands SQL and runs no query, so the claim was unverified. | Removed; the entry names `semantic_view()` and the type-reporting SHOW / DESCRIBE commands. |
-| Extension built for a different DuckDB | Draft said `FORCE INSTALL` on DuckDB 1.5 "installs v0.14.0"; builds are per exact DuckDB release, so that only holds for the release v0.14.0 was built for. | Reworded to "works once a build for your DuckDB release has been published; DuckDB 1.5 gets no release newer than v0.14.0", matching the load-guard hint's own hedge. |
-
-## docs/tutorials/getting-started.rst
+| Aggregate Ad Hoc and Return Fact Rows | Heading ("Aggregate Facts and Dimensions Ad Hoc") did not cover the section's second half, a row-level fact query. | Renamed. |
+| Troubleshooting | Draft listed "must be passed to an aggregate or appear in GROUP BY" as the error for a stray `SELECT` item; the build gives that only when an aggregate and a bare fact share one expression. A bare item next to `AGG` gives "cannot combine facts and metrics". | Entry rewritten around the message the build actually gives, including the misspelled-name case. |
 
 ### NITPICK
 
 | Section | Description | Fix |
 |---------|-------------|-----|
-| Install the Extension | Contraction ("don't") in a warm-businesslike page. | "do not". |
+| Related | Heading was "See Also"; every other how-to ends in "Related" (project rule: how-to layout). | Renamed, with the `howto-standard-sql-related` label. |
 
-## docs/explanation/transactional-ddl-and-limitations.rst, docs/explanation/index.rst, docs/reference/functions.rst, docs/reference/semantic-view-function.rst, README.md
+## docs/explanation/snowflake-comparison.rst
 
-No findings. Diataxis types unchanged (tutorial admonition is a prerequisite note, the
-explanation section explains why the setting matters, reference additions are syntax + example).
-No em dashes, AI vocabulary, or hedging in new prose. All new `:ref:` targets resolve
-(`ref-err-load-version`, `ref-err-quoted-identifier`, `ref-err-time-limit`, `ref-sv-time-limits`,
-plus existing SHOW / DESCRIBE labels).
+### SUGGESTION
+
+| Section | Description | Fix |
+|---------|-------------|-----|
+| Concept Mapping, Query interface | DuckDB column said "direct SQL"; the how-to, CHANGELOG and other pages say "standard SQL". "Direct SQL" stays in the Snowflake column, which quotes Snowflake's term. | Normalized to "standard SQL". |
+| Feature Parity Notes | Draft row linked a Snowflake docs URL that could not be verified offline. | Link removed; the row describes the behavior and links the how-to. |
+
+## docs/explanation/semantic-views-vs-regular-views.rst
+
+### SUGGESTION
+
+| Section | Description | Fix |
+|---------|-------------|-----|
+| What a Semantic View Does | "The resemblance stops at the surface." is a stock phrase. | "It only looks like a table query." |
+
+## docs/how-to/data-sources.rst
+
+### SUGGESTION
+
+| Section | Description | Fix |
+|---------|-------------|-----|
+| Troubleshooting, Catalog Error | "the plain error appears" was vague about which error. | Says the query raises this error when a table goes missing after CREATE. |
+
+### NITPICK
+
+| Section | Description | Fix |
+|---------|-------------|-----|
+| Troubleshooting | Kept the page's existing `--` dash style rather than introducing em dashes. | None needed. |
+
+## docs/how-to/facts.rst
+
+### NITPICK
+
+| Section | Description | Fix |
+|---------|-------------|-----|
+| Troubleshooting | The second entry's bold heading now quotes the error the reader sees (`fact '...' does not bind: ...`), matching how the page's other entries lead with the symptom. | Heading changed. |
+
+---
+
+## Diataxis Type Integrity
+
+- `tutorials/getting-started.rst`, `tutorials/multi-table.rst`: new steps are do-then-observe with
+  expected output; explanation kept to one sentence each and linked out to the how-to and the
+  error reference.
+- `how-to/standard-sql.rst`: the clause-mapping table is reference-like but scoped to the task;
+  the full message list moved to the error reference (`ref-err-standard-sql`) and is linked rather
+  than repeated.
+- `explanation/semantic-views-vs-regular-views.rst`: the new example is illustrative, not a step.
+
+## Cross-References
+
+All new `:ref:` targets resolve (strict build). New anchors: `ref-err-standard-sql`,
+`ref-err-facts-metrics`, `howto-standard-sql-setup`, `howto-standard-sql-adhoc`, `howto-standard-sql-verify`,
+`howto-standard-sql-app`, `howto-standard-sql-troubleshooting`, `howto-standard-sql-related`,
+`tutorial-gs-standard-sql`. Pages that mention the standard-SQL form now link
+`howto-standard-sql`: index, getting-started, the query reference, error reference, filtering,
+both comparisons, semantic-vs-regular views.
 
 ---
 
@@ -49,5 +99,6 @@ plus existing SHOW / DESCRIBE labels).
 
 | Term | Before | After | Authority |
 |------|--------|-------|-----------|
-| PEG parser caveat | "DuckDB's Experimental PEG Parser" / "the PEG parser" | "The Parser Override Setting" / "the parser override setting" | DuckDB 2.0 has no PEG toggle; the caveat is now the `allow_parser_override_extension` setting (label `explanation-txn-ddl-peg` kept so links survive) |
-| DuckDB version | unstated / "DuckDB 1.5" | "DuckDB 2.0" (never the alpha build id) | CHANGELOG [Unreleased], `.duckdb-version` |
+| standard SQL | "direct SQL" (DuckDB column of the Snowflake concept table) | "standard SQL" | CHANGELOG `[Unreleased]`, `how-to/standard-sql.rst` title |
+| does not bind | n/a (new term) | added to `terminology.yaml` with the rule that CREATE no longer accepts an unbindable member | `ref-err-member-bind` |
+| define-time inference pass | note said the bind probe runs only on the query path | note updated: CREATE binds every member (a check, not type inference) | #315 |

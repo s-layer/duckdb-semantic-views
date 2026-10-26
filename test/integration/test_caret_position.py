@@ -404,6 +404,58 @@ def test_caret_drop_missing_name():
 
 
 # ---------------------------------------------------------------------------
+# A member that does not bind at CREATE: no caret into generated SQL
+# ---------------------------------------------------------------------------
+
+# CREATE lowers to generated SQL that carries the stored definition as JSON.
+# A position DuckDB attaches to an error raised while binding that SQL is an
+# offset into the generated text, so the caret it would draw points into the
+# JSON, which the user never wrote. Such errors carry no caret.
+_NESTED_WINDOW_BASE = (
+    "CREATE SEMANTIC VIEW cbe_v AS TABLES (o AS cbe_orders PRIMARY KEY (id)) "
+    "DIMENSIONS (o.d AS o.d) "
+    "METRICS (o.revenue AS SUM(o.amount), "
+)
+
+
+def _assert_bind_error_without_internal_caret(metrics):
+    conn = make_connection()
+    try:
+        conn.execute("CREATE TABLE cbe_orders (id INTEGER, amount INTEGER, d DATE)")
+        query = _NESTED_WINDOW_BASE + metrics + ")"
+        try:
+            conn.execute(query)
+            assert False, "Expected exception"
+        except Exception as e:
+            error_text = str(e)
+            print(f"  Error captured: {error_text.splitlines()[0]}")
+            assert "metric 'sm2' does not bind" in error_text, f"error={error_text!r}"
+            assert "LINE " not in error_text, (
+                f"a caret into the generated CREATE SQL; error={error_text!r}"
+            )
+            assert '"expr"' not in error_text, (
+                f"the stored JSON leaked into the error; error={error_text!r}"
+            )
+    finally:
+        conn.close()
+
+
+def test_create_bind_error_binder_no_internal_caret():
+    """A binder error from a window metric over another window metric."""
+    _assert_bind_error_without_internal_caret(
+        "o.sm AS AVG(revenue) OVER (ORDER BY d), o.sm2 AS AVG(sm) OVER (ORDER BY d)"
+    )
+
+
+def test_create_bind_error_parser_no_internal_caret():
+    """A parser error from a window metric over another window metric."""
+    _assert_bind_error_without_internal_caret(
+        "o.sm AS AVG(revenue) OVER (PARTITION BY EXCLUDING d ORDER BY d), "
+        "o.sm2 AS AVG(sm) OVER (ORDER BY d)"
+    )
+
+
+# ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
 
@@ -416,6 +468,10 @@ ALL_TESTS = [
     ("test_caret_unicode_prefix", test_caret_unicode_prefix),
     ("test_caret_alter_typo", test_caret_alter_typo),
     ("test_caret_drop_missing_name", test_caret_drop_missing_name),
+    ("test_create_bind_error_binder_no_internal_caret",
+     test_create_bind_error_binder_no_internal_caret),
+    ("test_create_bind_error_parser_no_internal_caret",
+     test_create_bind_error_parser_no_internal_caret),
 ]
 
 

@@ -174,9 +174,10 @@ Troubleshooting
       Available metrics: [revenue, cost, profit]
 
    To use a column, aggregate it in a base metric first (``li.cost AS SUM(li.unit_cost)``)
-   and reference that metric. A table-qualified column such as ``li.unit_cost`` is not
-   caught at define time: the query fails instead, with DuckDB's ``column "unit_cost" must
-   appear in the GROUP BY clause`` binder error. The fix is the same.
+   and reference that metric. A table-qualified column such as ``li.unit_cost`` passes
+   the name check, and ``CREATE`` then refuses it when it binds the metric:
+   ``metric 'profit' does not bind: Binder Error: column "unit_cost" must appear in the
+   GROUP BY clause or must be part of an aggregate function``. The fix is the same.
 
 
 .. _howto-derived-related:

@@ -42,6 +42,11 @@ use crate::model::{AccessModifier, Dimension, Fact, Metric, SemanticViewDefiniti
 
 use super::items::{Group, Item, RequestItems};
 
+/// How errors name an aggregate written in a request rather than declared in
+/// the view: a `METRICS` item of the construct, or an aggregate other than
+/// `AGG` in a standard-SQL query.
+const AD_HOC_AGGREGATE: &str = "an ad-hoc aggregate";
+
 /// A request with its expression items lowered to members.
 #[derive(Debug)]
 pub struct LoweredItems {
@@ -416,7 +421,7 @@ impl<'d> Lowering<'d, '_> {
         }
         let mut bases: Vec<String> = Vec::with_capacity(aggregates.len());
         for span in &aggregates {
-            let (expr, table) = self.row_level(text, "an aggregate in METRICS", span.clone())?;
+            let (expr, table) = self.row_level(text, AD_HOC_AGGREGATE, span.clone())?;
             let name = self.fresh_name();
             self.added.metrics.push(Metric {
                 name: name.clone(),
@@ -554,8 +559,20 @@ impl<'d> Lowering<'d, '_> {
             out.replace(r.start..r.end, &(replacement + &r.raw[field_at..]));
         }
         let Some((table, _)) = table else {
+            // `COUNT(*)` is the usual one: which table's rows it counts is what
+            // a declared metric's table says, and an ad-hoc one has none.
+            let counts = part
+                .trim_start()
+                .get(..5)
+                .is_some_and(|head| head.eq_ignore_ascii_case("count"));
+            let hint = if what == AD_HOC_AGGREGATE && counts {
+                ". To count rows, declare a metric on a table, such as \
+                 '<alias>.order_count AS COUNT(*)', and query that metric"
+            } else {
+                ""
+            };
             return Err(invalid(format!(
-                "'{text}' refers to no dimension or fact; {what} must use at least one"
+                "'{text}' refers to no dimension or fact; {what} must use at least one{hint}"
             )));
         };
         Ok((out.finish(), table))
@@ -1623,6 +1640,36 @@ mod tests {
         assert!(msg.contains("refers to no dimension or fact"), "{msg}");
         let msg = refused(&[], &["1 + 2"], &[]);
         assert!(msg.contains("refers to no metric"), "{msg}");
+    }
+
+    #[test]
+    fn count_star_alone_names_no_clause_and_says_how_to_count_rows() {
+        let msg = refused(&[], &["count(*)"], &[]);
+        assert!(!msg.contains("METRICS"), "{msg}");
+        assert!(
+            msg.contains("an ad-hoc aggregate must use at least one"),
+            "{msg}"
+        );
+        assert!(
+            msg.contains("declare a metric on a table, such as '<alias>.order_count AS COUNT(*)'"),
+            "{msg}"
+        );
+    }
+
+    #[test]
+    fn an_aggregate_of_a_constant_gets_no_count_hint() {
+        let msg = refused(&[], &["max(42)"], &[]);
+        assert!(
+            msg.contains("an ad-hoc aggregate must use at least one"),
+            "{msg}"
+        );
+        assert!(!msg.contains("To count rows"), "{msg}");
+    }
+
+    #[test]
+    fn a_row_level_expression_naming_no_member_gets_no_count_hint() {
+        let msg = refused(&["1 + 1"], &[], &[]);
+        assert!(!msg.contains("To count rows"), "{msg}");
     }
 
     #[test]

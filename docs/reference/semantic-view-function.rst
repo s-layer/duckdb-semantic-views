@@ -21,6 +21,8 @@ Query a semantic view by naming the dimensions, metrics or facts you want. The e
 
 Both are supported and return the same result. The examples on this page use the construct, and the ``shop`` view defined under :ref:`ref-sv-examples`.
 
+A third spelling names the view in ``FROM`` like a table, with the dimensions in ``GROUP BY`` and each metric passed to ``AGG``: ``SELECT region, AGG(revenue) FROM shop GROUP BY region``. It turns into the construct, so everything on this page applies to it as well. Its clause mapping and rules are in :ref:`howto-standard-sql`, and its errors under :ref:`ref-err-standard-sql`.
+
 
 .. _ref-sv-syntax:
 

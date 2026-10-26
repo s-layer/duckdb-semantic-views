@@ -306,7 +306,7 @@ Members that do not bind
 
    semantic view '<view>': <kind> '<name>' does not bind: <DuckDB error>
 
-**Cause:** ``CREATE`` binds each dimension, fact and metric in a query of its own against the view's tables, as Snowflake compiles each expression at ``CREATE``. DuckDB cannot bind the member the message names: its expression refers to a column, table or function that does not exist, has a syntax error, or passes an argument DuckDB rejects. The rest of the message is DuckDB's own error. ``PRIVATE`` members are bound too, and every ``CREATE`` form is checked: ``OR REPLACE``, ``IF NOT EXISTS``, ``FROM YAML`` and ``FROM YAML FILE``.
+**Cause:** ``CREATE`` binds each dimension, fact and metric in a query of its own against the view's tables, as Snowflake compiles each expression at ``CREATE``. DuckDB cannot bind the member the message names: its expression refers to a column, table or function that does not exist, has a syntax error, or passes an argument DuckDB rejects. The rest of the message is DuckDB's own error. ``PRIVATE`` members are bound too, and every ``CREATE`` form is checked: ``OR REPLACE``, ``IF NOT EXISTS``, ``FROM YAML`` and ``FROM YAML FILE``. When every member binds, each table in ``TABLES`` is resolved as well; ``<kind>`` is then ``table`` and ``<name>`` the table's alias, for a table that does not exist even if no member reads it.
 
 **Fix:** Correct the expression, or create the missing table, column or function before the view.
 
@@ -748,7 +748,7 @@ For example, a definition without a ``metrics`` key fails with:
 Query Errors
 ============
 
-These errors occur at query time, when querying with the :ref:`SEMANTIC_VIEW(...) <ref-sv-construct>` construct, :ref:`semantic_view() <ref-semantic-view-function>` or :ref:`explain_semantic_view() <ref-explain-semantic-view>`.
+These errors occur at query time, when querying with the :ref:`SEMANTIC_VIEW(...) <ref-sv-construct>` construct, :ref:`semantic_view() <ref-semantic-view-function>`, :ref:`explain_semantic_view() <ref-explain-semantic-view>`, or :ref:`standard SQL <howto-standard-sql>` over the view by name. A standard-SQL query turns into the construct, so after the checks under :ref:`ref-err-standard-sql` it can raise any error in this section; those messages name the construct's clauses (``METRICS``, ``FACTS``) or the matching function parameter (``where_clause`` for the query's ``WHERE``).
 
 
 .. _ref-err-construct:
@@ -818,9 +818,9 @@ An :ref:`expression item <ref-sv-expression-items>` is checked against the rules
 
    '<name>' in '<expression>' is a fact; in METRICS a dimension or fact can only be used inside an aggregate
 
-   '<name>' in '<expression>' is a metric; an aggregate in METRICS can only use dimensions and facts
+   '<name>' in '<expression>' is a metric; an ad-hoc aggregate can only use dimensions and facts
 
-   '<expression>' refers to no dimension or fact; an aggregate in METRICS must use at least one
+   '<expression>' refers to no dimension or fact; an ad-hoc aggregate must use at least one. To count rows, declare a metric on a table, such as '<alias>.order_count AS COUNT(*)', and query that metric
 
    '<expression>' holds a window function; a query item cannot, so declare a window metric in the semantic view
 
@@ -836,6 +836,61 @@ An :ref:`expression item <ref-sv-expression-items>` is checked against the rules
 - An aggregate that names no member, such as ``count(*)``, has no table to be computed over. Declare it as a metric in the view (``o.order_count AS COUNT(*)``) and query that.
 - A window function. Declare a :ref:`window metric <howto-window-metrics>`.
 - A subquery. Filter with a subquery in ``WHERE`` instead, or declare a member over it.
+
+
+.. _ref-err-standard-sql:
+
+Standard-SQL query refused
+--------------------------
+
+.. versionadded:: 0.17.0
+
+A :ref:`standard-SQL query <howto-standard-sql>` over a semantic view follows Snowflake's rules for that form. A query that breaks one is refused before it becomes a ``SEMANTIC_VIEW(...)`` query, with an error naming the view:
+
+.. code-block:: text
+
+   semantic view '<view>': metric '<name>' must be passed to AGG, e.g. AGG(<name>)
+
+   semantic view '<view>': dimension '<name>' must appear in GROUP BY
+
+   semantic view '<view>': '<name>' must be passed to an aggregate or appear in GROUP BY
+
+   semantic view '<view>': HAVING may refer only to metrics passed to AGG or another aggregate, not '<expression>'; filter dimensions in WHERE
+
+   semantic view '<view>': AGG takes one metric, e.g. AGG(revenue)
+
+   semantic view '<view>': GROUP BY position <n> is not in the SELECT list
+
+   semantic view '<view>': SELECT * is not supported in a query over a semantic view; name the dimensions, metrics and facts to return
+
+   semantic view '<view>' cannot be joined, pivoted or read alongside other tables; query it on its own (in a subquery or CTE) and join the result
+
+   semantic view '<view>': window functions are not supported in a query over a semantic view; query it in a subquery and apply the window to the result
+
+   semantic view '<view>': QUALIFY is not supported in a query over a semantic view; query it in a subquery and filter the result
+
+   semantic view '<view>': GROUPING SETS, ROLLUP and CUBE are not supported in a query over a semantic view
+
+   semantic view '<view>': sampling is not supported in a query over a semantic view; query it in a subquery and sample the result
+
+   semantic view '<view>': a column alias list is not supported on a semantic view; alias the SELECT items instead
+
+   semantic view '<view>': '<expression>' refers to '<table>' of an enclosing query; correlated references are not supported in a query over a semantic view (if '<table>' is meant as the view's own table, give the enclosing one another alias)
+
+**Cause and fix**, in the same order:
+
+- A metric named bare in ``SELECT``, ``ORDER BY`` or ``HAVING``. A metric is already aggregated: pass it to ``AGG``. In ``HAVING`` a ``SELECT`` alias that repeats a metric's name still names the metric, so write ``HAVING AGG(revenue) > 400``.
+- A dimension in ``SELECT`` or ``ORDER BY`` that is not grouped. Add it to ``GROUP BY``, or write ``GROUP BY ALL``.
+- An expression mixes an aggregate with a fact or name that is neither grouped nor aggregated, as in ``AGG(revenue) + amount``. Aggregate the fact too, or group by it.
+- ``HAVING`` over a dimension or fact. Filter those in ``WHERE``, which runs before the metrics are computed.
+- ``AGG`` with more than one argument, or with ``DISTINCT``, ``FILTER`` or ``ORDER BY`` inside it. Pass one metric.
+- ``GROUP BY`` a position past the end of the ``SELECT`` list. Correct the number.
+- ``SELECT *``. Name the dimensions and metrics, or use ``SELECT * FROM SEMANTIC_VIEW(...)``.
+- The rest are refused in the query block that reads the view: a join or ``FROM`` list with other tables, ``PIVOT``, a window function, ``QUALIFY``, grouping sets, sampling, a column alias list (``FROM v AS s(a, b)``), or a qualified reference to a table of an enclosing query. Query the view in a subquery or CTE, then join, window, filter or sample its result.
+
+A ``SELECT`` item that is neither grouped nor aggregated is a fact. Alongside an ``AGG`` it raises :ref:`Cannot combine facts and metrics <ref-err-facts-metrics>`, which is also what a misspelled member name next to an ``AGG`` gives.
+
+A name in ``FROM`` that is a table, a view, a CTE in scope, or a Python DataFrame or relation is read as that, not as a semantic view, and a name that is none of these gets DuckDB's own ``Catalog Error: Table with name ... does not exist!``.
 
 
 View not found
@@ -1060,6 +1115,8 @@ Private fact
 
 **Fix:** Remove the ``PRIVATE`` keyword from the fact to make it queryable, or reference the fact only from metric expressions.
 
+
+.. _ref-err-facts-metrics:
 
 Cannot combine facts and metrics
 ----------------------------------
