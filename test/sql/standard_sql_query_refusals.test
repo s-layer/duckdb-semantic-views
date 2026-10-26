@@ -132,6 +132,42 @@ SELECT * FROM ssr PIVOT (sum(amount) FOR channel IN ('web'));
 ----
 semantic view 'ssr' cannot be joined, pivoted or read alongside other tables
 
+# DuckDB's PIVOT statement without an IN list first reads the pivoted column's
+# values in a generated CREATE TYPE ... AS ENUM; over the view itself that
+# read is the pivot, and is refused as one.
+
+statement error
+PIVOT ssr ON channel USING AGG(revenue) GROUP BY region;
+----
+semantic view 'ssr' cannot be joined, pivoted or read alongside other tables
+
+statement error
+SELECT * FROM (PIVOT ssr ON channel USING AGG(revenue) GROUP BY region);
+----
+semantic view 'ssr' cannot be joined, pivoted or read alongside other tables
+
+# Pivoting the view's result, queried in a subquery, works, with or without an
+# IN list. Without IN the PIVOT runs as several statements, whose result the
+# runner cannot compare, so it lands in a table that is queried instead.
+
+statement ok
+CREATE TABLE ssr_pivoted AS PIVOT (SELECT region, channel, AGG(revenue) AS r FROM ssr GROUP BY ALL) ON channel USING sum(r) GROUP BY region;
+
+query TRR
+SELECT region, "retail", "web" FROM ssr_pivoted ORDER BY region;
+----
+East	NULL	100.00
+West	80.00	NULL
+
+statement ok
+DROP TABLE ssr_pivoted;
+
+query TR
+PIVOT (SELECT region, channel, AGG(revenue) AS r FROM ssr GROUP BY ALL) ON channel IN ('web') USING sum(r) GROUP BY region ORDER BY region;
+----
+East	100.00
+West	NULL
+
 # A reference to an enclosing query is correlated, which Snowflake refuses.
 # Inside the construct, `c` would otherwise resolve to the view's own table
 # `c`, silently ignoring the outer row.

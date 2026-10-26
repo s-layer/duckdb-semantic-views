@@ -1,0 +1,9 @@
+tables:
+  - alias: o
+    table: cbm_orders
+    pk_columns: [id]
+dimensions:
+  - name: d
+    expr: o.nosuch
+    source_table: o
+metrics: []

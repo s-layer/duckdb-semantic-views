@@ -263,18 +263,19 @@ pub fn infer_member_types(
 /// A member of a definition that `DuckDB` cannot bind, with the bind's error.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct UnboundMember {
-    /// `dimension`, `fact` or `metric`.
+    /// `dimension`, `fact`, `metric` or `table`.
     pub kind: &'static str,
-    /// The member's name as declared.
+    /// The member's name as declared, or the table's alias.
     pub name: String,
     /// `DuckDB`'s error for the member's own probe.
     pub error: String,
 }
 
 /// The first member of `def` (dimensions, then facts, then metrics, each in
-/// declaration order) that does not bind, or `None` when every member does.
-/// CREATE refuses a view with such a member, as Snowflake compiles each member
-/// expression at CREATE.
+/// declaration order) that does not bind, else the first table that does not
+/// resolve, or `None` when every member binds and every table resolves.
+/// CREATE refuses such a view, as Snowflake compiles each member expression
+/// and resolves each logical table at CREATE.
 ///
 /// Members are probed as [`infer_member_types`] types them, so a member binds
 /// when it can be typed. One that cannot is probed again on its own, on the
@@ -340,6 +341,28 @@ pub fn first_unbound_member(
                 name: name.to_string(),
                 error,
             }));
+        }
+    }
+    // Every table is resolved, as Snowflake resolves each logical table, also
+    // one that no member reads and that no query would join.
+    for table in &def.tables {
+        if (prober.cancelled)() {
+            return Err(Interrupted);
+        }
+        let sql = format!(
+            "SELECT * FROM {} LIMIT 0",
+            crate::expand::qualify_and_quote_table_ref(&table.table, &def)
+        );
+        match (prober.probe)(&sql) {
+            Ok(_) => {}
+            Err(ProbeError::Interrupted) => return Err(Interrupted),
+            Err(ProbeError::Failed(error)) => {
+                return Ok(Some(UnboundMember {
+                    kind: "table",
+                    name: table.alias.clone(),
+                    error,
+                }));
+            }
         }
     }
     Ok(None)
@@ -1104,6 +1127,20 @@ mod tests {
         let u = unbound_on(&db, &def_from(body)).unwrap_or_else(|| panic!("{name} must not bind"));
         assert_eq!((u.kind, u.name.as_str()), (kind, name));
         assert!(u.error.contains(error), "{}", u.error);
+    }
+
+    /// A table no member reads is still bound: a missing one refuses the
+    /// CREATE, as Snowflake resolves every logical table.
+    #[test]
+    fn a_table_no_member_reads_must_exist() {
+        assert_unbound(
+            "AS TABLES (o AS orders PRIMARY KEY (id), x AS no_such_table PRIMARY KEY (id))
+             RELATIONSHIPS (ox AS o(cust_id) REFERENCES x)
+             METRICS (o.n AS COUNT(*))",
+            "table",
+            "x",
+            "no_such_table",
+        );
     }
 
     #[test]

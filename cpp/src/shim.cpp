@@ -21,6 +21,7 @@
 #include "shim.hpp"
 #include "duckdb/parser/expression/columnref_expression.hpp"
 #include "duckdb/parser/parsed_data/create_table_info.hpp"
+#include "duckdb/parser/parsed_data/create_type_info.hpp"
 #include "duckdb/parser/parsed_data/create_view_info.hpp"
 #include "duckdb/parser/query_node/delete_query_node.hpp"
 #include "duckdb/parser/query_node/insert_query_node.hpp"
@@ -4578,6 +4579,8 @@ public:
                 Node(*info.Cast<CreateViewInfo>().query->node, Scope());
             } else if (info.type == CatalogType::TABLE_ENTRY && info.Cast<CreateTableInfo>().query) {
                 Node(*info.Cast<CreateTableInfo>().query->node, Scope());
+            } else if (info.type == CatalogType::TYPE_ENTRY && info.Cast<CreateTypeInfo>().query) {
+                PivotEnum(info.Cast<CreateTypeInfo>());
             }
             break;
         }
@@ -4587,6 +4590,35 @@ public:
     }
 
 private:
+    [[noreturn]] static void RefuseCombined(const BaseTableRef &view) {
+        throw BinderException("semantic view '%s' cannot be joined, pivoted or read alongside other "
+                              "tables; query it on its own (in a subquery or CTE) and join the result",
+                              view.GetQualifiedName().Name().GetIdentifierName());
+    }
+
+    // A PIVOT without an IN list reads its column's values first, in a
+    // generated `CREATE TYPE __pivot_enum_<uuid> AS ENUM (SELECT DISTINCT
+    // <column> FROM <source> ...)`. Over the view itself that read is the
+    // pivot, refused as the PIVOT is; over a subquery it is an ordinary query.
+    void PivotEnum(CreateTypeInfo &info) {
+        if (info.query->type != StatementType::SELECT_STATEMENT) {
+            Statement(*info.query);
+            return;
+        }
+        auto &node = *info.query->Cast<SelectStatement>().node;
+        const bool generated =
+            StringUtil::StartsWith(info.GetQualifiedName().Name().GetIdentifierName(), "__pivot_enum_");
+        if (generated && node.type == QueryNodeType::SELECT_NODE) {
+            auto &from = node.Cast<SelectNode>().from_table;
+            vector<SvStdMember> members;
+            if (from && from->type == TableReferenceType::BASE_TABLE &&
+                sv_std_lookup_view(context_, from->Cast<BaseTableRef>(), {}, members)) {
+                RefuseCombined(from->Cast<BaseTableRef>());
+            }
+        }
+        Node(node, Scope());
+    }
+
     // What a query block sees from the blocks around it: the CTEs in scope,
     // and the names (aliases, else table names) their FROM clauses bind,
     // which a reference from inside it would be correlated through.
@@ -4817,9 +4849,7 @@ private:
         case TableReferenceType::BASE_TABLE: {
             vector<SvStdMember> members;
             if (!lone && sv_std_lookup_view(context_, ref->Cast<BaseTableRef>(), scope.ctes, members)) {
-                throw BinderException("semantic view '%s' cannot be joined, pivoted or read alongside other "
-                                      "tables; query it on its own (in a subquery or CTE) and join the result",
-                                      ref->Cast<BaseTableRef>().GetQualifiedName().Name().GetIdentifierName());
+                RefuseCombined(ref->Cast<BaseTableRef>());
             }
             Replace(ref, scope);
             break;

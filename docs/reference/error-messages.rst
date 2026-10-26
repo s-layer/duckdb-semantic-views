@@ -306,7 +306,7 @@ Members that do not bind
 
    semantic view '<view>': <kind> '<name>' does not bind: <DuckDB error>
 
-**Cause:** ``CREATE`` binds each dimension, fact and metric in a query of its own against the view's tables, as Snowflake compiles each expression at ``CREATE``. DuckDB cannot bind the member the message names: its expression refers to a column, table or function that does not exist, has a syntax error, or passes an argument DuckDB rejects. The rest of the message is DuckDB's own error. ``PRIVATE`` members are bound too, and every ``CREATE`` form is checked: ``OR REPLACE``, ``IF NOT EXISTS``, ``FROM YAML`` and ``FROM YAML FILE``.
+**Cause:** ``CREATE`` binds each dimension, fact and metric in a query of its own against the view's tables, as Snowflake compiles each expression at ``CREATE``. DuckDB cannot bind the member the message names: its expression refers to a column, table or function that does not exist, has a syntax error, or passes an argument DuckDB rejects. The rest of the message is DuckDB's own error. ``PRIVATE`` members are bound too, and every ``CREATE`` form is checked: ``OR REPLACE``, ``IF NOT EXISTS``, ``FROM YAML`` and ``FROM YAML FILE``. When every member binds, each table in ``TABLES`` is resolved as well; ``<kind>`` is then ``table`` and ``<name>`` the table's alias, for a table that does not exist even if no member reads it.
 
 **Fix:** Correct the expression, or create the missing table, column or function before the view.
 
