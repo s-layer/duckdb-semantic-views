@@ -234,6 +234,48 @@ SELECT * FROM semantic_view('exi', dimensions := ['region'], facts := ['amt + cu
 ----
 'customer_id' in 'amt + customer_id' is not a dimension, fact or metric of semantic view 'exi'
 
+# ... nor through a method call, a positional reference, COLUMNS(...) or the
+# JSON operator.
+
+statement error
+SELECT * FROM SEMANTIC_VIEW(exi DIMENSIONS region METRICS sum(amt * 0 + customer_id.abs()) AS leak);
+----
+'customer_id.abs(...)' in 'sum(amt * 0 + customer_id.abs())' calls a function by a qualified name
+
+statement error
+SELECT * FROM SEMANTIC_VIEW(exi DIMENSIONS region METRICS sum(amt * 0 + #2) AS leak);
+----
+'#2' in 'sum(amt * 0 + #2)' is not a dimension, fact or metric of semantic view 'exi'
+
+statement error
+SELECT * FROM SEMANTIC_VIEW(exi DIMENSIONS region || COLUMNS('^ordered_at$') METRICS revenue);
+----
+which selects columns by name
+
+statement error
+SELECT * FROM SEMANTIC_VIEW(exi DIMENSIONS region || (customer_id -> ('$')) METRICS revenue);
+----
+'customer_id' in 'region || (customer_id -> ('$'))' is not a dimension, fact or metric of semantic view 'exi'
+
+# A bare current_date reads a column of that name when the query joins one, so
+# an expression item calls the function instead.
+
+statement ok
+CREATE TABLE exi_stamps (id INTEGER, "current_date" INTEGER);
+
+statement ok
+INSERT INTO exi_stamps VALUES (1, 7);
+
+statement ok
+CREATE SEMANTIC VIEW exi_stamp AS
+  TABLES (s AS exi_stamps PRIMARY KEY (id))
+  DIMENSIONS (s.id AS s.id);
+
+query T
+SELECT * FROM SEMANTIC_VIEW(exi_stamp DIMENSIONS typeof(current_date) || typeof(id) AS types);
+----
+DATEINTEGER
+
 # Keywords, numbers and a lambda's parameter are not columns.
 
 query TI
@@ -251,6 +293,15 @@ SELECT * FROM SEMANTIC_VIEW(exi FACTS list_transform([o.amt], lambda x: x * 2)[1
 100.00
 140.00
 200.00
+
+query R
+SELECT * FROM SEMANTIC_VIEW(exi
+    FACTS list_transform([struct_pack(v := o.amt)], lambda "s": "s".v)[1] AS v
+) ORDER BY v;
+----
+50.00
+70.00
+100.00
 
 query R
 SELECT * FROM SEMANTIC_VIEW(exi
