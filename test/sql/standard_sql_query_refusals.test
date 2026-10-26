@@ -152,9 +152,9 @@ SELECT id FROM ssr_customers c WHERE EXISTS (SELECT region FROM ssr GROUP BY reg
 semantic view 'ssr': 'c.id' refers to 'c' of an enclosing query; correlated references are not supported
 
 # A bare name that is no member of the view is passed to DuckDB as written, as
-# a raw column in the construct's where_clause is (TECH-DEBT #57), so when no
-# table of the view has a column of that name it binds to the enclosing
-# query's, and the subquery is correlated on it.
+# a raw column in the construct's where_clause is (TECH-DEBT #57, "Residual in
+# the same class"), so when no table of the view has a column of that name it
+# binds to the enclosing query's, and the subquery is correlated on it.
 
 query TR rowsort
 SELECT x.nm, (SELECT AGG(revenue) FROM ssr WHERE region = nm) FROM (VALUES ('East'), ('West'), ('North')) x(nm);
@@ -178,12 +178,12 @@ Nowhere	180.00
 statement error
 SELECT region, count(*) FROM ssr GROUP BY region;
 ----
-semantic view 'ssr': 'COUNT(*)' refers to no dimension or fact; an ad-hoc aggregate must use at least one. To count rows, declare a metric such as 'order_count AS COUNT(*)' in the view and query that metric
+semantic view 'ssr': 'COUNT(*)' refers to no dimension or fact; an ad-hoc aggregate must use at least one. To count rows, declare a metric on a table, such as '<alias>.order_count AS COUNT(*)', and query that metric
 
 statement error
 SELECT count(*) FROM ssr;
 ----
-To count rows, declare a metric such as 'order_count AS COUNT(*)' in the view and query that metric
+To count rows, declare a metric on a table, such as '<alias>.order_count AS COUNT(*)', and query that metric
 
 query TI rowsort
 SELECT region, AGG(order_count) FROM ssr GROUP BY region;

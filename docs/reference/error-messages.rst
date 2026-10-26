@@ -820,7 +820,7 @@ An :ref:`expression item <ref-sv-expression-items>` is checked against the rules
 
    '<name>' in '<expression>' is a metric; an ad-hoc aggregate can only use dimensions and facts
 
-   '<expression>' refers to no dimension or fact; an ad-hoc aggregate must use at least one. To count rows, declare a metric such as 'order_count AS COUNT(*)' in the view and query that metric
+   '<expression>' refers to no dimension or fact; an ad-hoc aggregate must use at least one. To count rows, declare a metric on a table, such as '<alias>.order_count AS COUNT(*)', and query that metric
 
    '<expression>' holds a window function; a query item cannot, so declare a window metric in the semantic view
 

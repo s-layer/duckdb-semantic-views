@@ -561,9 +561,13 @@ impl<'d> Lowering<'d, '_> {
         let Some((table, _)) = table else {
             // `COUNT(*)` is the usual one: which table's rows it counts is what
             // a declared metric's table says, and an ad-hoc one has none.
-            let hint = if what == AD_HOC_AGGREGATE {
-                ". To count rows, declare a metric such as 'order_count AS COUNT(*)' in the \
-                 view and query that metric"
+            let counts = part
+                .trim_start()
+                .get(..5)
+                .is_some_and(|head| head.eq_ignore_ascii_case("count"));
+            let hint = if what == AD_HOC_AGGREGATE && counts {
+                ". To count rows, declare a metric on a table, such as \
+                 '<alias>.order_count AS COUNT(*)', and query that metric"
             } else {
                 ""
             };
@@ -1647,9 +1651,19 @@ mod tests {
             "{msg}"
         );
         assert!(
-            msg.contains("declare a metric such as 'order_count AS COUNT(*)'"),
+            msg.contains("declare a metric on a table, such as '<alias>.order_count AS COUNT(*)'"),
             "{msg}"
         );
+    }
+
+    #[test]
+    fn an_aggregate_of_a_constant_gets_no_count_hint() {
+        let msg = refused(&[], &["max(42)"], &[]);
+        assert!(
+            msg.contains("an ad-hoc aggregate must use at least one"),
+            "{msg}"
+        );
+        assert!(!msg.contains("To count rows"), "{msg}");
     }
 
     #[test]
