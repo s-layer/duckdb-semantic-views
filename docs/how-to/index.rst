@@ -1,5 +1,5 @@
 .. meta::
-   :description: Goal-oriented guides for FACTS, derived metrics, role-playing dimensions, fan trap and multi-grain resolution, data source connectivity, query filtering, metadata annotations, semi-additive metrics, window metrics, wildcard selection, fact queries, materializations, and YAML definitions
+   :description: Goal-oriented guides for standard-SQL queries, FACTS, derived metrics, role-playing dimensions, fan trap and multi-grain resolution, data source connectivity, query filtering, metadata annotations, semi-additive metrics, window metrics, wildcard selection, fact queries, materializations, and YAML definitions
 
 .. _how-to-guides:
 
@@ -25,6 +25,7 @@ Goal-oriented guides for specific tasks with DuckDB Semantic Views.
 
 - :ref:`howto-data-sources` -- Connect semantic views to CSV, Parquet, Iceberg, and database tables.
 - :ref:`howto-filtering` -- Filter a query before aggregation with a ``WHERE`` inside ``SEMANTIC_VIEW(...)`` or after it with an outer ``WHERE``, tell which one a filter needs, and pass request values from application code safely.
+- :ref:`howto-standard-sql` -- Query a semantic view by name with an ordinary ``SELECT ... GROUP BY``, passing each metric to ``AGG``.
 - :ref:`howto-query-facts` -- Query facts directly as row-level columns without aggregation.
 - :ref:`howto-wildcard-selection` -- Select all dimensions, metrics, or facts for a table alias using wildcard patterns in queries.
 
@@ -43,6 +44,7 @@ Goal-oriented guides for specific tasks with DuckDB Semantic Views.
    fan-traps
    data-sources
    filtering
+   standard-sql
    metadata-annotations
    semi-additive-metrics
    window-metrics

@@ -9,7 +9,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-_No unreleased changes yet._
+### Added
+
+- Query a semantic view by name with standard SQL, as in Snowflake: `SELECT region, AGG(revenue) FROM analytics WHERE channel = 'web' GROUP BY region`. `GROUP BY` expressions (by name, position, `SELECT` alias or `GROUP BY ALL`) are the dimensions (a grouped fact gives one row per value), each metric is passed to `AGG` (`MIN`, `MAX` and `ANY_VALUE` of a metric mean the same), any other aggregate is an ad-hoc metric, and a `SELECT` item that is neither grouped nor aggregated is a fact. `WHERE` filters before aggregation and `HAVING` after it. The query turns into the `SEMANTIC_VIEW(...)` construct, so results, checks and errors are the construct's. It works anywhere a query does (subqueries, CTEs, `UNION`, `CREATE TABLE AS`, `INSERT`, `UPDATE`, `DELETE`, `SET VARIABLE`, `COPY`, `EXPLAIN`, `DESCRIBE`, prepared statements, `CREATE VIEW`), in any clause that holds a subquery, and from Python through `duckdb.sql()`, `con.sql()` and `con.execute()`, including a relation read by its variable name in a later query. Following Snowflake's rules, a metric outside `AGG`, a dimension missing from `GROUP BY`, `HAVING` over anything but aggregated metrics, correlated references, and `SELECT *`, joins, `PIVOT`, window functions, `QUALIFY` and `GROUPING SETS` in the query block that reads the view are refused with an error naming the view. A name that is a table, a view, a CTE in scope or a Python DataFrame or relation keeps its usual meaning.
+
+### Fixed
+
+- A fact query whose dimensions are on two tables that the fact's table references, such as a fact on `orders` with a dimension on `customers` and one on `products`, runs. It was refused with "incompatible table paths", though each order joins one customer and one product. A query that reaches those two tables only through a table it does not read is still refused, as its rows would repeat.
 
 ## [0.16.0] - 2026-10-26
 

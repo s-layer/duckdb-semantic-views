@@ -25,3 +25,7 @@ pub mod raw_sql;
 
 // Read-side member type probing for SHOW / DESCRIBE `data_type` (TECH-DEBT #51).
 pub mod member_types;
+
+// Standard-SQL queries over a semantic view by name (Phase 5): the members the
+// shim's rewrite classifies names by.
+pub mod standard;

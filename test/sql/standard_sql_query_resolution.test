@@ -1,0 +1,224 @@
+# Standard-SQL queries over a semantic view by name: how the rewrite resolves
+# names and where it finds query blocks. A SELECT alias in ORDER BY, the
+# scope a subquery and a CTE see, members declared with quoted names, GROUP BY
+# keys written differently, a fact as a GROUP BY key, the left side of an IN
+# subquery, and query blocks in every statement and clause that holds one. Each case is a query the rewrite
+# used to refuse or leave unrewritten.
+
+require semantic_views
+
+statement ok
+CREATE TABLE sqr_customers (id INTEGER, name VARCHAR, region VARCHAR, tier VARCHAR);
+
+statement ok
+INSERT INTO sqr_customers VALUES (1, 'Acme', 'East', 'gold'), (2, 'Globex', 'East', 'silver'), (3, 'Initech', 'West', 'gold');
+
+statement ok
+CREATE TABLE sqr_orders (id INTEGER, customer_id INTEGER, amount DECIMAL(10,2), channel VARCHAR, ordered_at DATE);
+
+statement ok
+INSERT INTO sqr_orders VALUES
+  (1, 1, 100.00, 'web',    DATE '2023-12-15'),
+  (2, 1, 250.00, 'web',    DATE '2024-01-10'),
+  (3, 2,  80.00, 'retail', DATE '2024-02-03'),
+  (4, 3, 300.00, 'retail', DATE '2024-03-21'),
+  (5, 3, 150.00, 'web',    DATE '2024-04-02');
+
+statement ok
+CREATE SEMANTIC VIEW sqr AS
+  TABLES (o AS sqr_orders PRIMARY KEY (id), c AS sqr_customers PRIMARY KEY (id))
+  RELATIONSHIPS (order_customer AS o(customer_id) REFERENCES c)
+  FACTS (o.band AS CASE WHEN o.amount >= 150 THEN 'big' ELSE 'small' END)
+  DIMENSIONS (c.region AS c.region, c.tier AS c.tier, o.channel AS o.channel,
+              o.ordered_at AS o.ordered_at)
+  METRICS (o.revenue AS SUM(o.amount), o.order_count AS COUNT(*));
+
+# --- ORDER BY a SELECT alias ------------------------------------------------------
+
+# A bare name in ORDER BY that a SELECT item is aliased to is that item, as in
+# DuckDB and Snowflake, even when a member has the same name.
+
+query TT
+SELECT region, AGG(revenue) AS revenue FROM sqr GROUP BY region ORDER BY revenue DESC;
+----
+West	450.00
+East	430.00
+
+query TT
+SELECT tier AS region, AGG(revenue) FROM sqr GROUP BY tier ORDER BY region;
+----
+gold	800.00
+silver	80.00
+
+# --- a fact as a GROUP BY key ------------------------------------------------------
+
+# A grouped fact is a key like any expression over facts: one row per value
+# (`web, big` twice in the table, once here), as SQL groups a column. Spelled
+# out, by GROUP BY ALL, and with a metric computed per value.
+
+query TT
+SELECT channel, band FROM sqr GROUP BY channel, band ORDER BY 1, 2;
+----
+retail	big
+retail	small
+web	big
+web	small
+
+query TT
+SELECT channel, band FROM sqr GROUP BY ALL ORDER BY 1, 2;
+----
+retail	big
+retail	small
+web	big
+web	small
+
+query TT
+SELECT band, AGG(revenue) FROM sqr GROUP BY band ORDER BY 1;
+----
+big	700.00
+small	180.00
+
+# --- what a subquery in FROM sees -------------------------------------------------
+
+# A derived table's own alias is not visible inside it, so `c.region` there is
+# the view's table `c`, not a correlated reference.
+
+query TT
+SELECT * FROM (SELECT c.region, AGG(revenue) AS rev FROM sqr GROUP BY c.region) c ORDER BY 1;
+----
+East	430.00
+West	450.00
+
+# Nor is a table joined after it.
+
+query TTI
+SELECT r.region, r.rev, c.flag FROM (SELECT c.region, AGG(revenue) AS rev FROM sqr GROUP BY c.region) r
+  JOIN (SELECT 'East' AS region, 1 AS flag) c USING (region);
+----
+East	430.00	1
+
+# --- CTE scope ----------------------------------------------------------------------
+
+# A CTE is in scope from the next one on, so a CTE named after the view reads
+# the view in its own body...
+
+query TT
+WITH sqr AS (SELECT region, AGG(revenue) AS rev FROM sqr GROUP BY region) SELECT * FROM sqr ORDER BY 1;
+----
+East	430.00
+West	450.00
+
+# ...and an earlier CTE does not see a later one.
+
+query TT
+WITH a AS (SELECT region, AGG(revenue) AS rev FROM sqr GROUP BY region), sqr AS (SELECT 1 AS x)
+SELECT * FROM a ORDER BY 1;
+----
+East	430.00
+West	450.00
+
+# --- members declared with quoted names ---------------------------------------------
+
+statement ok
+CREATE SEMANTIC VIEW sqr_quoted AS
+  TABLES (o AS sqr_orders PRIMARY KEY (id))
+  DIMENSIONS (o."Chan" AS o.channel)
+  METRICS (o."Total" AS SUM(o.amount));
+
+query TT
+SELECT chan, AGG(total) FROM sqr_quoted GROUP BY chan ORDER BY 1;
+----
+retail	380.00
+web	500.00
+
+query TT
+SELECT "Chan", MAX("Total") FROM sqr_quoted GROUP BY "Chan" ORDER BY 1;
+----
+retail	380.00
+web	500.00
+
+# --- GROUP BY keys are matched as DuckDB matches identifiers ---------------------------
+
+query IT
+SELECT year(Ordered_At) AS y, AGG(revenue) FROM sqr GROUP BY year(ordered_at) ORDER BY 1;
+----
+2023	100.00
+2024	780.00
+
+query IT
+SELECT year(o.ordered_at) AS y, AGG(revenue) FROM sqr GROUP BY year(ordered_at) ORDER BY 1;
+----
+2023	100.00
+2024	780.00
+
+# --- the left side of an IN subquery ----------------------------------------------------
+
+query T
+SELECT region FROM sqr GROUP BY region HAVING AGG(order_count) IN (SELECT 3);
+----
+East
+
+query TT
+SELECT region, region IN (SELECT 'East') AS e FROM sqr GROUP BY region ORDER BY 1;
+----
+East	true
+West	false
+
+# --- query blocks in other clauses ---------------------------------------------------------
+
+query T
+SELECT name FROM sqr_customers ORDER BY id LIMIT (SELECT AGG(order_count) FROM sqr WHERE region = 'West');
+----
+Acme
+Globex
+
+query T
+SELECT name FROM sqr_customers ORDER BY (SELECT AGG(revenue) FROM sqr), id;
+----
+Acme
+Globex
+Initech
+
+query I
+SELECT count(*) FROM sqr_customers GROUP BY tier, (SELECT AGG(order_count) FROM sqr) ORDER BY 1;
+----
+1
+2
+
+# --- query blocks in other statements --------------------------------------------------------
+
+statement ok
+CREATE TABLE sqr_regions AS SELECT DISTINCT region FROM sqr_customers;
+
+statement ok
+DELETE FROM sqr_regions WHERE region IN (SELECT region FROM sqr GROUP BY region HAVING AGG(revenue) > 440);
+
+query T
+SELECT * FROM sqr_regions;
+----
+East
+
+statement ok
+CREATE TABLE sqr_totals (k VARCHAR, v DECIMAL(10,2));
+
+statement ok
+INSERT INTO sqr_totals VALUES ('all', 0);
+
+statement ok
+UPDATE sqr_totals SET v = (SELECT AGG(revenue) FROM sqr);
+
+statement ok
+UPDATE sqr_totals SET k = 'big' WHERE v > (SELECT AGG(revenue) FROM sqr WHERE region = 'East');
+
+query TT
+SELECT * FROM sqr_totals;
+----
+big	880.00
+
+statement ok
+SET VARIABLE sqr_total = (SELECT AGG(revenue) FROM sqr);
+
+query T
+SELECT getvariable('sqr_total');
+----
+880.00

@@ -1084,6 +1084,11 @@ Incompatible table paths for facts
    fanning out -- a fact on a table that references the base table, with a
    dimension on a table the base table references -- are now accepted.
 
+.. versionchanged:: 0.17.0
+   Two tables that neither reaches are accepted when a third table the query
+   reads reaches both: a fact on ``orders`` with a dimension on ``customers``
+   and one on ``products``, which ``orders`` both references.
+
 .. code-block:: text
 
    semantic view '<view>': fact query references objects from incompatible
@@ -1093,7 +1098,7 @@ Incompatible table paths for facts
 
 **Cause:** A fact query does not aggregate, so it returns rows as they are. Reaching one of these two tables from the other means traversing a one-to-many relationship *against* its direction -- every row on one side matching many on the other -- and that holds whichever of the two you start from. The rows returned would silently be duplicates. The usual shape is two tables that both reference a third (``line_items`` and ``shipments`` both referencing ``orders``): joining both multiplies each one's rows by the other's.
 
-**Fix:** Query the two tables separately. Facts and dimensions can be combined freely as long as one side is reachable from the other without fanning out -- a chain of many-to-one relationships in either direction is fine, however long.
+**Fix:** Query the two tables separately. Facts and dimensions can be combined freely as long as one table of the query reaches every other without fanning out -- a chain of many-to-one relationships is fine, however long, and so are two tables that one the query reads both references.
 
 
 Window and aggregate metric mixing
