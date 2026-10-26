@@ -52,7 +52,7 @@ revenue_view
 
 # Verify query works under new name
 query IR rowsort
-SELECT * FROM semantic_view('revenue_view', dimensions := ['order_id'], metrics := ['total_amount']);
+SELECT * FROM SEMANTIC_VIEW(revenue_view DIMENSIONS order_id METRICS total_amount);
 ----
 1	100.00
 2	200.00

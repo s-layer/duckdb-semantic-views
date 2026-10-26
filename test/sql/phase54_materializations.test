@@ -52,7 +52,7 @@ MATERIALIZATIONS (
 
 # Verify the view is queryable (materializations don't affect query behavior yet -- Phase 55)
 query I
-SELECT count(*) FROM semantic_view('p54_basic_mat', dimensions := ['region'], metrics := ['revenue'])
+SELECT count(*) FROM SEMANTIC_VIEW(p54_basic_mat DIMENSIONS region METRICS revenue)
 ----
 2
 

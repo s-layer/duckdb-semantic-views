@@ -41,7 +41,7 @@ METRICS (
 
 # Verify the view works end-to-end
 query TR rowsort
-SELECT * FROM semantic_view('p43_revenue', dimensions := ['region'], metrics := ['total_revenue']);
+SELECT * FROM SEMANTIC_VIEW(p43_revenue DIMENSIONS region METRICS total_revenue);
 ----
 EU	200.00
 US	250.00
@@ -67,7 +67,7 @@ METRICS (
 
 # Verify query still works with annotated entries
 query TR rowsort
-SELECT * FROM semantic_view('p43_revenue', dimensions := ['region'], metrics := ['total_revenue']);
+SELECT * FROM SEMANTIC_VIEW(p43_revenue DIMENSIONS region METRICS total_revenue);
 ----
 EU	200.00
 US	250.00
@@ -93,7 +93,7 @@ METRICS (
 
 # Verify query still works
 query TR rowsort
-SELECT * FROM semantic_view('p43_revenue', dimensions := ['region'], metrics := ['total_revenue']);
+SELECT * FROM SEMANTIC_VIEW(p43_revenue DIMENSIONS region METRICS total_revenue);
 ----
 EU	200.00
 US	250.00
@@ -129,7 +129,7 @@ METRICS (
 # ============================================================
 
 statement error
-SELECT * FROM semantic_view('p43_revenue', metrics := ['total_cost']);
+SELECT * FROM SEMANTIC_VIEW(p43_revenue METRICS total_cost);
 ----
 private
 
@@ -139,7 +139,7 @@ private
 # ============================================================
 
 query R
-SELECT * FROM semantic_view('p43_revenue', metrics := ['profit']);
+SELECT * FROM SEMANTIC_VIEW(p43_revenue METRICS profit);
 ----
 180.00
 
@@ -149,7 +149,7 @@ SELECT * FROM semantic_view('p43_revenue', metrics := ['profit']);
 # ============================================================
 
 query TR rowsort
-SELECT * FROM semantic_view('p43_revenue', dimensions := ['region'], metrics := ['profit']);
+SELECT * FROM SEMANTIC_VIEW(p43_revenue DIMENSIONS region METRICS profit);
 ----
 EU	80.00
 US	100.00
@@ -159,7 +159,7 @@ US	100.00
 # ============================================================
 
 query TR rowsort
-SELECT * FROM semantic_view('p43_revenue', dimensions := ['region'], metrics := ['total_revenue']);
+SELECT * FROM SEMANTIC_VIEW(p43_revenue DIMENSIONS region METRICS total_revenue);
 ----
 EU	200.00
 US	250.00
@@ -203,7 +203,7 @@ METRICS (
 
 # Verify query still works
 query TR rowsort
-SELECT * FROM semantic_view('p43_revenue', dimensions := ['region'], metrics := ['total_revenue']);
+SELECT * FROM SEMANTIC_VIEW(p43_revenue DIMENSIONS region METRICS total_revenue);
 ----
 EU	200.00
 US	250.00
@@ -229,7 +229,7 @@ METRICS (
 
 # Verify query still works with reversed order
 query TR rowsort
-SELECT * FROM semantic_view('p43_revenue', dimensions := ['region'], metrics := ['total_revenue']);
+SELECT * FROM SEMANTIC_VIEW(p43_revenue DIMENSIONS region METRICS total_revenue);
 ----
 EU	200.00
 US	250.00
@@ -251,7 +251,7 @@ METRICS (
 )
 
 query R
-SELECT * FROM semantic_view('p43_revenue', metrics := ['total_revenue']);
+SELECT * FROM SEMANTIC_VIEW(p43_revenue METRICS total_revenue);
 ----
 450.00
 

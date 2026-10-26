@@ -65,7 +65,7 @@ CREATE SEMANTIC VIEW crd_arr AS
 
 query TI
 SELECT carrier, CAST(latest_bal AS BIGINT)
-FROM semantic_view('crd_arr', dimensions := ['carrier'], metrics := ['latest_bal']);
+FROM SEMANTIC_VIEW(crd_arr DIMENSIONS carrier METRICS latest_bal);
 ----
 AA	200
 
@@ -107,7 +107,7 @@ CREATE SEMANTIC VIEW crd_dep AS
 
 query TI
 SELECT carrier, CAST(latest_bal AS BIGINT)
-FROM semantic_view('crd_dep', dimensions := ['carrier'], metrics := ['latest_bal']);
+FROM SEMANTIC_VIEW(crd_dep DIMENSIONS carrier METRICS latest_bal);
 ----
 AA	100
 
@@ -137,7 +137,7 @@ CREATE SEMANTIC VIEW crd_amb AS
 
 statement error
 SELECT carrier, latest_bal
-FROM semantic_view('crd_amb', dimensions := ['carrier'], metrics := ['latest_bal']);
+FROM SEMANTIC_VIEW(crd_amb DIMENSIONS carrier METRICS latest_bal);
 ----
 ambiguous
 

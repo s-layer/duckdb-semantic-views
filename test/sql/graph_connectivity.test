@@ -176,7 +176,7 @@ CREATE SEMANTIC VIEW gc_connected AS
   );
 
 query TI rowsort
-SELECT * FROM semantic_view('gc_connected', dimensions := ['region'], metrics := ['total']);
+SELECT * FROM SEMANTIC_VIEW(gc_connected DIMENSIONS region METRICS total);
 ----
 east	12
 west	100
@@ -189,7 +189,7 @@ CREATE SEMANTIC VIEW gc_single AS
   METRICS (o.total AS SUM(o.amount));
 
 query I
-SELECT * FROM semantic_view('gc_single', metrics := ['total']);
+SELECT * FROM SEMANTIC_VIEW(gc_single METRICS total);
 ----
 112
 
@@ -210,7 +210,7 @@ metrics:
 $$
 
 query I
-SELECT * FROM semantic_view('gc_single_yaml', metrics := ['total']);
+SELECT * FROM SEMANTIC_VIEW(gc_single_yaml METRICS total);
 ----
 112
 
@@ -231,6 +231,6 @@ SELECT name FROM list_semantic_views() WHERE name = 'gc_stored_disconnected';
 gc_stored_disconnected
 
 query I
-SELECT * FROM semantic_view('gc_stored_disconnected', metrics := ['total']);
+SELECT * FROM SEMANTIC_VIEW(gc_stored_disconnected METRICS total);
 ----
 112

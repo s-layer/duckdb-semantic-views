@@ -25,8 +25,10 @@ DIMENSIONS (t16_orders.region AS t16_orders.region)
 METRICS (t16_orders.total AS SUM(t16_orders.qty))
 
 query TI rowsort
-SELECT region, total FROM semantic_view('t16_f7',
-    dimensions := ['region'], metrics := ['total'])
+SELECT region, total FROM SEMANTIC_VIEW(t16_f7
+    DIMENSIONS region
+    METRICS total
+)
 ----
 EU	7
 US	15

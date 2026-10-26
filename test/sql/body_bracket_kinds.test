@@ -53,8 +53,9 @@ CREATE SEMANTIC VIEW bbk_ok AS
   METRICS (s.total AS SUM(s.amount) + {'k': (0)}.k);
 
 query ITI
-SELECT first_tag, label, total FROM semantic_view(
-  'bbk_ok', dimensions := ['first_tag', 'label'], metrics := ['total']
+SELECT first_tag, label, total FROM SEMANTIC_VIEW(bbk_ok
+    DIMENSIONS first_tag, label
+    METRICS total
 ) ORDER BY first_tag;
 ----
 1	EU]}	10

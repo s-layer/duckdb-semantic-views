@@ -37,7 +37,7 @@ CREATE SEMANTIC VIEW idf_v AS
 # ============================================================
 
 query T
-SELECT column_name FROM (DESCRIBE SELECT * FROM semantic_view('idf_v', facts := ['unit_price']));
+SELECT column_name FROM (DESCRIBE SELECT * FROM SEMANTIC_VIEW(idf_v FACTS unit_price));
 ----
 unit_price
 
@@ -46,7 +46,7 @@ unit_price
 # ============================================================
 
 query I
-FROM semantic_view('idf_v', facts := ['unit_price'])
+FROM SEMANTIC_VIEW(idf_v FACTS unit_price)
 ORDER BY 1;
 ----
 100
@@ -59,7 +59,7 @@ ORDER BY 1;
 # ============================================================
 
 query TI rowsort
-SELECT * FROM semantic_view('idf_v', dimensions := ['region'], metrics := ['total_price']);
+SELECT * FROM SEMANTIC_VIEW(idf_v DIMENSIONS region METRICS total_price);
 ----
 East	300
 West	150
@@ -84,7 +84,7 @@ CREATE SEMANTIC VIEW idf_v2 AS
   );
 
 query I
-FROM semantic_view('idf_v2', facts := ['unit_price'])
+FROM SEMANTIC_VIEW(idf_v2 FACTS unit_price)
 ORDER BY 1;
 ----
 100

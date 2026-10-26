@@ -66,7 +66,7 @@ CREATE SEMANTIC VIEW mrs_dims AS
 # DuckDB verbatim and the query failed on the unknown column.
 query TT
 SELECT size_band, order_count
-FROM semantic_view('mrs_dims', metrics := ['order_count'], dimensions := ['size_band'])
+FROM SEMANTIC_VIEW(mrs_dims DIMENSIONS size_band METRICS order_count)
 ORDER BY size_band;
 ----
 big	1
@@ -77,7 +77,7 @@ small	2
 # grouping key is the inlined `c.tier`.
 query TT
 SELECT tier_label, order_count
-FROM semantic_view('mrs_dims', metrics := ['order_count'], dimensions := ['tier_label'])
+FROM SEMANTIC_VIEW(mrs_dims DIMENSIONS tier_label METRICS order_count)
 ORDER BY tier_label;
 ----
 bronze	1
@@ -89,7 +89,7 @@ gold	2
 #   bronze(order 12):                        27.00
 query TT
 SELECT tier_label, net_total
-FROM semantic_view('mrs_dims', metrics := ['net_total'], dimensions := ['tier_label'])
+FROM SEMANTIC_VIEW(mrs_dims DIMENSIONS tier_label METRICS net_total)
 ORDER BY tier_label;
 ----
 bronze	27.00
@@ -100,11 +100,10 @@ gold	147.00
 # so the count is 1 and the total is its own net line.
 query TT
 SELECT tier_label, net_total
-FROM semantic_view(
-  'mrs_dims',
-  metrics := ['net_total'],
-  dimensions := ['tier_label'],
-  where_clause := 'size_band = ''big'''
+FROM SEMANTIC_VIEW(mrs_dims
+    DIMENSIONS tier_label
+    METRICS net_total
+    WHERE size_band = 'big'
 )
 ORDER BY tier_label;
 ----
@@ -173,7 +172,7 @@ CREATE SEMANTIC VIEW mrs_good AS
 
 # ... and answers: (100-5) + (50-5) + (30-2) = 168.00
 query T
-SELECT mixed_margin FROM semantic_view('mrs_good', metrics := ['mixed_margin']);
+SELECT mixed_margin FROM SEMANTIC_VIEW(mrs_good METRICS mixed_margin);
 ----
 168.00
 
@@ -199,6 +198,6 @@ CREATE SEMANTIC VIEW mrs_derived AS
 
 # 180.00 - 7.00 = 173.00, each aggregate at its own grain.
 query T
-SELECT ratio FROM semantic_view('mrs_derived', metrics := ['ratio']);
+SELECT ratio FROM SEMANTIC_VIEW(mrs_derived METRICS ratio);
 ----
 173.00

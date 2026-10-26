@@ -64,45 +64,45 @@ CREATE SEMANTIC VIEW bcs_v AS
 
 # Metric, home-anchored (FROM li LEFT JOIN o LEFT JOIN c): ambiguous.
 statement error
-SELECT * FROM semantic_view('bcs_v', dimensions := ['region'], metrics := ['sum_li_oid']);
+SELECT * FROM SEMANTIC_VIEW(bcs_v DIMENSIONS region METRICS sum_li_oid);
 ----
 Ambiguous reference to column name "o_id"
 
 # Dimension on `o` spliced into `li`'s home-anchored query: ambiguous.
 statement error
-SELECT * FROM semantic_view('bcs_v', dimensions := ['order_id'], metrics := ['total_qty']);
+SELECT * FROM SEMANTIC_VIEW(bcs_v DIMENSIONS order_id METRICS total_qty);
 ----
 Ambiguous reference to column name "o_id"
 
 # Multi-grain plan: ambiguous.
 statement error
-SELECT * FROM semantic_view('bcs_v', dimensions := ['order_id'], metrics := ['sum_o_oid', 'total_qty']);
+SELECT * FROM SEMANTIC_VIEW(bcs_v DIMENSIONS order_id METRICS sum_o_oid, total_qty);
 ----
 Ambiguous reference to column name "o_id"
 
 # Dimensions-only (base-anchored FROM c LEFT JOIN o LEFT JOIN li): ambiguous.
 statement error
-SELECT * FROM semantic_view('bcs_v', dimensions := ['order_id', 'item_qty']);
+SELECT * FROM SEMANTIC_VIEW(bcs_v DIMENSIONS order_id, item_qty);
 ----
 Ambiguous reference to column name "o_id"
 
 # FACTS (base-anchored): ambiguous.
 statement error
-SELECT * FROM semantic_view('bcs_v', facts := ['li_order'], dimensions := ['region']);
+SELECT * FROM SEMANTIC_VIEW(bcs_v DIMENSIONS region FACTS li_order);
 ----
 Ambiguous reference to column name "o_id"
 
 # The home table alone suffices: binds to li.o_id, 10 + 10 + 11 = 31.
 # Before #71 (FROM c LEFT JOIN o LEFT JOIN li) this was ambiguous.
 query I
-SELECT * FROM semantic_view('bcs_v', metrics := ['sum_li_oid']);
+SELECT * FROM SEMANTIC_VIEW(bcs_v METRICS sum_li_oid);
 ----
 31
 
 # No collision on the joined tables: binds to o.o_id. The orphan order 13 is
 # the NULL-region row (home-anchored, #71).
 query TI
-SELECT * FROM semantic_view('bcs_v', dimensions := ['region'], metrics := ['sum_o_oid'])
+SELECT * FROM SEMANTIC_VIEW(bcs_v DIMENSIONS region METRICS sum_o_oid)
 ORDER BY region NULLS LAST;
 ----
 EU	21
@@ -113,7 +113,7 @@ NULL	13
 # `o`. Grouped by region, `o` is joined, so it sums each order's amount once per
 # line item: EU 250 (order 10 counted twice). Snowflake rejects the definition.
 query TI
-SELECT * FROM semantic_view('bcs_v', dimensions := ['region'], metrics := ['li_amount'])
+SELECT * FROM SEMANTIC_VIEW(bcs_v DIMENSIONS region METRICS li_amount)
 ORDER BY region NULLS LAST;
 ----
 EU	250
@@ -122,7 +122,7 @@ NULL	NULL
 # ...and with no dimension `li` is scanned alone, so `amount` does not bind.
 # Before #71 this returned the same silent 250.
 statement error
-SELECT * FROM semantic_view('bcs_v', metrics := ['li_amount']);
+SELECT * FROM SEMANTIC_VIEW(bcs_v METRICS li_amount);
 ----
 "amount" not found
 

@@ -26,9 +26,9 @@ SELECT name FROM list_semantic_views();
 ----
 wéird name
 
-# Query through the quoted lookup argument.
+# Query through the quoted view name.
 query II
-FROM semantic_view('"wéird name"', dimensions := ['city'], metrics := ['total'])
+FROM SEMANTIC_VIEW("wéird name" DIMENSIONS city METRICS total)
 ORDER BY 1;
 ----
 São Paulo	100.00
@@ -87,8 +87,16 @@ SELECT name FROM list_semantic_views();
 ----
 it's_ok
 
-# Query lookup with the quoted-identifier argument (single quote doubled in the
-# SQL string literal argument).
+# Query lookup by the quoted view name, which holds a single quote.
+query II
+FROM SEMANTIC_VIEW("it's_ok" DIMENSIONS city METRICS total)
+ORDER BY 1;
+----
+São Paulo	100.00
+Tōkyō	50.00
+
+# The same lookup through semantic_view()'s string argument, where the single
+# quote is doubled inside the SQL literal.
 query II
 FROM semantic_view('"it''s_ok"', dimensions := ['city'], metrics := ['total'])
 ORDER BY 1;

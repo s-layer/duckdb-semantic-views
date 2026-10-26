@@ -56,26 +56,26 @@ CREATE SEMANTIC VIEW p0a_elev AS
 
 # Departures: 13 + 13 + 5434.
 query I
-SELECT * FROM semantic_view('p0a_elev', metrics := ['dep_elev']);
+SELECT * FROM SEMANTIC_VIEW(p0a_elev METRICS dep_elev);
 ----
 5460
 
 # Arrivals: 5434 + 5434 + 13 — the other instance of the same table.
 query I
-SELECT * FROM semantic_view('p0a_elev', metrics := ['arr_elev']);
+SELECT * FROM SEMANTIC_VIEW(p0a_elev METRICS arr_elev);
 ----
 10881
 
 # A derived metric composing both roles keeps them distinct.
 query I
-SELECT * FROM semantic_view('p0a_elev', metrics := ['elev_climb']);
+SELECT * FROM SEMANTIC_VIEW(p0a_elev METRICS elev_climb);
 ----
 5421
 
 # Grouped by the role-played dimension: the dimension and the inlined fact
 # share the scoped alias, so each departure city sums its own elevation.
 query TI rowsort
-SELECT * FROM semantic_view('p0a_elev', dimensions := ['city'], metrics := ['dep_elev']);
+SELECT * FROM SEMANTIC_VIEW(p0a_elev DIMENSIONS city METRICS dep_elev);
 ----
 Denver	5434
 San Francisco	26
@@ -104,14 +104,14 @@ CREATE SEMANTIC VIEW p0a_quoted AS
 
 # A space in the relationship name.
 query TI rowsort
-SELECT * FROM semantic_view('p0a_quoted', dimensions := ['city'], metrics := ['departures']);
+SELECT * FROM SEMANTIC_VIEW(p0a_quoted DIMENSIONS city METRICS departures);
 ----
 Denver	1
 San Francisco	2
 
 # An embedded doubled quote in the relationship name.
 query TI rowsort
-SELECT * FROM semantic_view('p0a_quoted', dimensions := ['city'], metrics := ['arrivals']);
+SELECT * FROM SEMANTIC_VIEW(p0a_quoted DIMENSIONS city METRICS arrivals);
 ----
 Denver	2
 San Francisco	1
@@ -140,7 +140,7 @@ CREATE SEMANTIC VIEW p0a_unscoped AS
   );
 
 statement error
-SELECT * FROM semantic_view('p0a_unscoped', metrics := ['any_elev']);
+SELECT * FROM SEMANTIC_VIEW(p0a_unscoped METRICS any_elev);
 ----
 'any_elev' is ambiguous -- it references fact
 
@@ -177,20 +177,20 @@ CREATE SEMANTIC VIEW p0a_mixed_quoting AS
 
 # Each spelling binds its own role: the numbers differ between the two roles.
 query TI rowsort
-SELECT * FROM semantic_view('p0a_mixed_quoting', dimensions := ['city'], metrics := ['departures']);
+SELECT * FROM SEMANTIC_VIEW(p0a_mixed_quoting DIMENSIONS city METRICS departures);
 ----
 Denver	1
 San Francisco	2
 
 query TI rowsort
-SELECT * FROM semantic_view('p0a_mixed_quoting', dimensions := ['city'], metrics := ['arrivals']);
+SELECT * FROM SEMANTIC_VIEW(p0a_mixed_quoting DIMENSIONS city METRICS arrivals);
 ----
 Denver	2
 San Francisco	1
 
 # The role-played fact moves onto the departure role's alias: 13 + 13 + 5434.
 query I
-SELECT * FROM semantic_view('p0a_mixed_quoting', metrics := ['dep_elev']);
+SELECT * FROM SEMANTIC_VIEW(p0a_mixed_quoting METRICS dep_elev);
 ----
 5460
 

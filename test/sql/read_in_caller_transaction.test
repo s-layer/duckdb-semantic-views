@@ -27,7 +27,7 @@ CREATE SEMANTIC VIEW rt_new AS
   METRICS (o.total AS sum(o.amount));
 
 query TI rowsort
-SELECT * FROM semantic_view('rt_new', dimensions := ['region'], metrics := ['total']);
+SELECT * FROM SEMANTIC_VIEW(rt_new DIMENSIONS region METRICS total);
 ----
 EU	15
 US	20
@@ -169,7 +169,7 @@ CREATE SEMANTIC VIEW rt_new AS
   METRICS (o.total AS sum(o.amount));
 
 statement error con2
-SELECT * FROM semantic_view('rt_new', metrics := ['total']);
+SELECT * FROM SEMANTIC_VIEW(rt_new METRICS total);
 ----
 not found
 
@@ -177,7 +177,7 @@ statement ok
 ROLLBACK;
 
 statement error
-SELECT * FROM semantic_view('rt_new', metrics := ['total']);
+SELECT * FROM SEMANTIC_VIEW(rt_new METRICS total);
 ----
 not found
 
@@ -331,14 +331,14 @@ statement ok
 DROP SEMANTIC VIEW rt_kept;
 
 statement error
-SELECT * FROM semantic_view('rt_kept', metrics := ['total']);
+SELECT * FROM SEMANTIC_VIEW(rt_kept METRICS total);
 ----
 not found
 
 # The other session still sees the committed view.
 
 query I con2
-SELECT * FROM semantic_view('rt_kept', metrics := ['total']);
+SELECT * FROM SEMANTIC_VIEW(rt_kept METRICS total);
 ----
 35
 
@@ -352,7 +352,7 @@ statement ok
 ALTER SEMANTIC VIEW rt_kept RENAME TO rt_renamed;
 
 query I
-SELECT * FROM semantic_view('rt_renamed', metrics := ['total']);
+SELECT * FROM SEMANTIC_VIEW(rt_renamed METRICS total);
 ----
 35
 
@@ -366,7 +366,7 @@ statement ok
 ALTER SEMANTIC VIEW rt_kept RENAME TO rt_renamed;
 
 statement error
-SELECT * FROM semantic_view('rt_kept', metrics := ['total']);
+SELECT * FROM SEMANTIC_VIEW(rt_kept METRICS total);
 ----
 not found
 
@@ -405,7 +405,7 @@ CREATE OR REPLACE SEMANTIC VIEW rt_kept AS
   METRICS (o.total AS max(o.amount));
 
 query I
-SELECT * FROM semantic_view('rt_kept', metrics := ['total']);
+SELECT * FROM SEMANTIC_VIEW(rt_kept METRICS total);
 ----
 20
 
@@ -413,7 +413,7 @@ statement ok
 ROLLBACK;
 
 query I
-SELECT * FROM semantic_view('rt_kept', metrics := ['total']);
+SELECT * FROM SEMANTIC_VIEW(rt_kept METRICS total);
 ----
 35
 
@@ -431,7 +431,7 @@ SELECT name, data_type FROM (SHOW SEMANTIC METRICS IN rt_kept);
 total	DOUBLE
 
 query I
-SELECT typeof(total) FROM semantic_view('rt_kept', metrics := ['total']);
+SELECT typeof(total) FROM SEMANTIC_VIEW(rt_kept METRICS total);
 ----
 DOUBLE
 

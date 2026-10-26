@@ -35,7 +35,7 @@ CREATE SEMANTIC VIEW p27_sales AS
 
 # Query with qualified column refs: c.name and sum(o.amount) should resolve correctly
 query TR rowsort
-SELECT * FROM semantic_view('p27_sales', dimensions := ['customer_name'], metrics := ['total_amount']);
+SELECT * FROM SEMANTIC_VIEW(p27_sales DIMENSIONS customer_name METRICS total_amount);
 ----
 Alice	300.00
 Bob	50.00
@@ -61,7 +61,7 @@ CREATE SEMANTIC VIEW p27_sales_multi AS
 
 # Query with both dims from different tables
 query TTR rowsort
-SELECT * FROM semantic_view('p27_sales_multi', dimensions := ['customer_name', 'order_region'], metrics := ['total_amount']);
+SELECT * FROM SEMANTIC_VIEW(p27_sales_multi DIMENSIONS customer_name, order_region METRICS total_amount);
 ----
 Alice	East	100.00
 Alice	West	200.00

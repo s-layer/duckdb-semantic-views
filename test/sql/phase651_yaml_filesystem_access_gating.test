@@ -64,7 +64,7 @@ statement ok
 CREATE SEMANTIC VIEW v_ok FROM YAML FILE '__TEST_DIR__/p651_ok.yaml'
 
 query R
-SELECT row_count FROM semantic_view('v_ok', metrics := ['row_count'])
+SELECT row_count FROM SEMANTIC_VIEW(v_ok METRICS row_count)
 ----
 2
 

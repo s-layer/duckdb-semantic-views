@@ -300,7 +300,7 @@ true
 
 # Verify the re-created view still works for queries
 query TR rowsort
-SELECT * FROM semantic_view('p45g_roundtrip', dimensions := ['region'], metrics := ['total']);
+SELECT * FROM SEMANTIC_VIEW(p45g_roundtrip DIMENSIONS region METRICS total);
 ----
 EU	200.00
 US	250.00

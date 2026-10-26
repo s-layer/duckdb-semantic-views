@@ -74,7 +74,7 @@ CREATE SEMANTIC VIEW rp_sv AS
 # ============================================================
 
 query TII rowsort
-SELECT * FROM semantic_view('rp_sv', metrics := ['flight_count', 'fleet_size'], dimensions := ['carrier_name']);
+SELECT * FROM SEMANTIC_VIEW(rp_sv DIMENSIONS carrier_name METRICS flight_count, fleet_size);
 ----
 AA	3	100
 BB	1	50
@@ -85,13 +85,13 @@ BB	1	50
 # ============================================================
 
 query TI rowsort
-SELECT * FROM semantic_view('rp_sv', metrics := ['fleet_size'], dimensions := ['carrier_name']);
+SELECT * FROM SEMANTIC_VIEW(rp_sv DIMENSIONS carrier_name METRICS fleet_size);
 ----
 AA	100
 BB	50
 
 query TI rowsort
-SELECT * FROM semantic_view('rp_sv', metrics := ['flight_count'], dimensions := ['carrier_name']);
+SELECT * FROM SEMANTIC_VIEW(rp_sv DIMENSIONS carrier_name METRICS flight_count);
 ----
 AA	3
 BB	1
@@ -105,7 +105,7 @@ BB	1
 # ============================================================
 
 statement error
-SELECT * FROM semantic_view('rp_sv', metrics := ['flight_count', 'fleet_size'], dimensions := ['dep_city']);
+SELECT * FROM SEMANTIC_VIEW(rp_sv DIMENSIONS dep_city METRICS flight_count, fleet_size);
 ----
 fan trap detected
 

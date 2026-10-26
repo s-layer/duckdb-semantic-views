@@ -73,7 +73,7 @@ METRICS (
 # ========================================
 
 query TTIR rowsort
-SELECT * FROM semantic_view('p48_sales_view', dimensions := ['store', 'date', 'year'], metrics := ['avg_qty']);
+SELECT * FROM SEMANTIC_VIEW(p48_sales_view DIMENSIONS store, date, year METRICS avg_qty);
 ----
 LA	2024-01-01	2024	5.0
 LA	2024-01-02	2024	6.5
@@ -113,7 +113,7 @@ true
 # ========================================
 
 query TTII rowsort
-SELECT * FROM semantic_view('p48_sales_view', dimensions := ['store', 'date', 'year'], metrics := ['qty_lag']);
+SELECT * FROM SEMANTIC_VIEW(p48_sales_view DIMENSIONS store, date, year METRICS qty_lag);
 ----
 LA	2024-01-01	2024	NULL
 LA	2024-01-02	2024	5
@@ -131,7 +131,7 @@ NYC	2024-01-05	2024	25
 # ========================================
 
 statement error
-SELECT * FROM semantic_view('p48_sales_view', dimensions := ['store', 'date'], metrics := ['total_qty', 'avg_qty']);
+SELECT * FROM SEMANTIC_VIEW(p48_sales_view DIMENSIONS store, date METRICS total_qty, avg_qty);
 ----
 metric 'total_qty' is private
 
@@ -149,7 +149,7 @@ METRICS (
 )
 
 statement error
-SELECT * FROM semantic_view('p48_mix_view', dimensions := ['store', 'date'], metrics := ['total_qty', 'avg_qty']);
+SELECT * FROM SEMANTIC_VIEW(p48_mix_view DIMENSIONS store, date METRICS total_qty, avg_qty);
 ----
 cannot mix window function metrics
 
@@ -159,7 +159,7 @@ cannot mix window function metrics
 # ========================================
 
 statement error
-SELECT * FROM semantic_view('p48_sales_view', dimensions := ['store'], metrics := ['avg_qty']);
+SELECT * FROM SEMANTIC_VIEW(p48_sales_view DIMENSIONS store METRICS avg_qty);
 ----
 requires dimension 'date'
 
@@ -256,7 +256,7 @@ METRICS (
 
 # Metric grain on o (child), dims on c (parent) and o: safe direction, no error.
 query TTR rowsort
-SELECT * FROM semantic_view('p48_fan_view', dimensions := ['customer_name', 'order_date'], metrics := ['running_avg']);
+SELECT * FROM SEMANTIC_VIEW(p48_fan_view DIMENSIONS customer_name, order_date METRICS running_avg);
 ----
 Alice	2024-01-01	100.0
 Alice	2024-01-02	150.0

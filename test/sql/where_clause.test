@@ -50,7 +50,7 @@ CREATE SEMANTIC VIEW wc_sv AS
 # ============================================================
 
 query TT rowsort
-SELECT * FROM semantic_view('wc_sv', metrics := ['revenue'], dimensions := ['region']);
+SELECT * FROM SEMANTIC_VIEW(wc_sv DIMENSIONS region METRICS revenue);
 ----
 EU	150.00
 US	70.00
@@ -63,7 +63,7 @@ US	70.00
 # ============================================================
 
 query TT rowsort
-SELECT * FROM semantic_view('wc_sv', metrics := ['revenue'], dimensions := ['region'], where_clause := 'odate >= DATE ''2024-01-01''');
+SELECT * FROM SEMANTIC_VIEW(wc_sv DIMENSIONS region METRICS revenue WHERE odate >= DATE '2024-01-01');
 ----
 EU	100.00
 US	70.00
@@ -87,7 +87,7 @@ WHERE (o.ordered_at) >= DATE '2024-01-01'
 # ============================================================
 
 query TT rowsort
-SELECT * FROM semantic_view('wc_sv', metrics := ['revenue'], dimensions := ['region'], where_clause := 'region = ''EU''');
+SELECT * FROM SEMANTIC_VIEW(wc_sv DIMENSIONS region METRICS revenue WHERE region = 'EU');
 ----
 EU	150.00
 
@@ -97,7 +97,7 @@ EU	150.00
 # ============================================================
 
 statement error
-SELECT * FROM semantic_view('wc_sv', metrics := ['revenue'], where_clause := 'revenue > 5');
+SELECT * FROM SEMANTIC_VIEW(wc_sv METRICS revenue WHERE revenue > 5);
 ----
 where_clause cannot reference the metric 'revenue'
 
@@ -107,7 +107,7 @@ where_clause cannot reference the metric 'revenue'
 # ============================================================
 
 query TT rowsort
-SELECT * FROM semantic_view('wc_sv', facts := ['amt'], dimensions := ['region'], where_clause := 'amt > 60');
+SELECT * FROM SEMANTIC_VIEW(wc_sv DIMENSIONS region FACTS amt WHERE amt > 60);
 ----
 EU	100.00
 US	70.00
@@ -129,7 +129,7 @@ US	70.00
 # ============================================================
 
 query TT rowsort
-SELECT * FROM semantic_view('wc_sv', metrics := ['revenue'], dimensions := ['region'], where_clause := 'region = ''region''');
+SELECT * FROM SEMANTIC_VIEW(wc_sv DIMENSIONS region METRICS revenue WHERE region = 'region');
 ----
 
 # ============================================================
@@ -171,13 +171,13 @@ CREATE SEMANTIC VIEW wc_mg AS
   );
 
 query TTT rowsort
-SELECT * FROM semantic_view('wc_mg', metrics := ['revenue', 'item_count'], dimensions := ['region']);
+SELECT * FROM SEMANTIC_VIEW(wc_mg DIMENSIONS region METRICS revenue, item_count);
 ----
 EU	150.00	3
 US	70.00	1
 
 query TTT rowsort
-SELECT * FROM semantic_view('wc_mg', metrics := ['revenue', 'item_count'], dimensions := ['region'], where_clause := 'odate >= DATE ''2024-01-01''');
+SELECT * FROM SEMANTIC_VIEW(wc_mg DIMENSIONS region METRICS revenue, item_count WHERE odate >= DATE '2024-01-01');
 ----
 EU	100.00	2
 US	70.00	1
@@ -213,7 +213,7 @@ statement ok
 INSERT INTO wc_targets VALUES (100.00), (70.00);
 
 query TT rowsort
-SELECT * FROM semantic_view('wc_sv', metrics := ['revenue'], dimensions := ['region'], where_clause := 'amt IN (SELECT amt FROM wc_targets)');
+SELECT * FROM SEMANTIC_VIEW(wc_sv DIMENSIONS region METRICS revenue WHERE amt IN (SELECT amt FROM wc_targets));
 ----
 EU	100.00
 US	70.00
@@ -240,36 +240,36 @@ CREATE SEMANTIC VIEW wc_lower AS
   METRICS (o.revenue AS sum(o.amount));
 
 statement error
-SELECT * FROM semantic_view('wc_lower', metrics := ['revenue'], dimensions := ['region'], where_clause := 'EXISTS (SELECT 1 FROM wc_codes k WHERE k.code = region)');
+SELECT * FROM SEMANTIC_VIEW(wc_lower DIMENSIONS region METRICS revenue WHERE EXISTS (SELECT 1 FROM wc_codes k WHERE k.code = region));
 ----
 Referenced column "region" not found
 
 # Nor does a table alias of the view's.
 statement error
-SELECT * FROM semantic_view('wc_lower', metrics := ['revenue'], dimensions := ['region'], where_clause := 'EXISTS (SELECT 1 FROM wc_codes k WHERE k.code = c.region)');
+SELECT * FROM SEMANTIC_VIEW(wc_lower DIMENSIONS region METRICS revenue WHERE EXISTS (SELECT 1 FROM wc_codes k WHERE k.code = c.region));
 ----
 Referenced table "c" not found
 
 # The same inside a subquery nested in another.
 statement error
-SELECT * FROM semantic_view('wc_lower', metrics := ['revenue'], dimensions := ['region'], where_clause := 'region IN (SELECT code FROM wc_codes k WHERE EXISTS (SELECT 1 FROM wc_codes j WHERE j.code = c.region))');
+SELECT * FROM SEMANTIC_VIEW(wc_lower DIMENSIONS region METRICS revenue WHERE region IN (SELECT code FROM wc_codes k WHERE EXISTS (SELECT 1 FROM wc_codes j WHERE j.code = c.region)));
 ----
 Referenced table "c" not found
 
 # Controls: uncorrelated subqueries of each kind still filter.
 query TT rowsort
-SELECT * FROM semantic_view('wc_lower', metrics := ['revenue'], dimensions := ['region'], where_clause := 'region IN (SELECT code FROM wc_codes)');
+SELECT * FROM SEMANTIC_VIEW(wc_lower DIMENSIONS region METRICS revenue WHERE region IN (SELECT code FROM wc_codes));
 ----
 eu	150.00
 
 query TT rowsort
-SELECT * FROM semantic_view('wc_lower', metrics := ['revenue'], dimensions := ['region'], where_clause := 'region = (SELECT max(code) FROM wc_codes) OR NOT EXISTS (SELECT 1 FROM wc_codes WHERE code = ''us'')');
+SELECT * FROM SEMANTIC_VIEW(wc_lower DIMENSIONS region METRICS revenue WHERE region = (SELECT max(code) FROM wc_codes) OR NOT EXISTS (SELECT 1 FROM wc_codes WHERE code = 'us'));
 ----
 eu	150.00
 us	70.00
 
 query TT rowsort
-SELECT * FROM semantic_view('wc_lower', metrics := ['revenue'], dimensions := ['region'], where_clause := 'region = ANY (SELECT code FROM wc_codes k WHERE k.code IN (SELECT ''eu''))');
+SELECT * FROM SEMANTIC_VIEW(wc_lower DIMENSIONS region METRICS revenue WHERE region = ANY (SELECT code FROM wc_codes k WHERE k.code IN (SELECT 'eu')));
 ----
 eu	150.00
 

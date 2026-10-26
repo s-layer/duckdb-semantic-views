@@ -38,21 +38,21 @@ CREATE SEMANTIC VIEW cri_sales AS
 
 # East: 300 - 130 = 170 ; West: 150 - 60 = 90
 query TR rowsort
-SELECT * FROM semantic_view('cri_sales', dimensions := ['region'], metrics := ['profit']);
+SELECT * FROM SEMANTIC_VIEW(cri_sales DIMENSIONS region METRICS profit);
 ----
 East	170.00
 West	90.00
 
 # The quoted-reference derived metric yields the identical result.
 query TR rowsort
-SELECT * FROM semantic_view('cri_sales', dimensions := ['region'], metrics := ['margin']);
+SELECT * FROM SEMANTIC_VIEW(cri_sales DIMENSIONS region METRICS margin);
 ----
 East	170.00
 West	90.00
 
 # Base metrics and both derived metrics together stay consistent.
 query TRRRR rowsort
-SELECT * FROM semantic_view('cri_sales', dimensions := ['region'], metrics := ['revenue', 'cost', 'profit', 'margin']);
+SELECT * FROM SEMANTIC_VIEW(cri_sales DIMENSIONS region METRICS revenue, cost, profit, margin);
 ----
 East	300.00	130.00	170.00	170.00
 West	150.00	60.00	90.00	90.00

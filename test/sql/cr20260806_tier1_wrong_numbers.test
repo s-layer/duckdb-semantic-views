@@ -56,9 +56,8 @@ CREATE SEMANTIC VIEW cr0806_sales AS
 # n_one, s_one and n_str each returned 4; n_paren -- the redundantly
 # parenthesized literal raised by review on #203 -- returned 4 after it.
 query IIIII
-SELECT * FROM semantic_view(
-  'cr0806_sales',
-  metrics := ['n_star', 'n_one', 's_one', 'n_str', 'n_paren']
+SELECT * FROM SEMANTIC_VIEW(cr0806_sales
+    METRICS n_star, n_one, s_one, n_str, n_paren
 );
 ----
 3	3	3	3	3
@@ -66,10 +65,9 @@ SELECT * FROM semantic_view(
 # Grouped: East = order 1 (2 items) + order 3 (childless, contributes none).
 # The childless order previously added one to every constant-argument metric.
 query TIIIII rowsort
-SELECT * FROM semantic_view(
-  'cr0806_sales',
-  dimensions := ['region'],
-  metrics := ['n_star', 'n_one', 's_one', 'n_str', 'n_paren']
+SELECT * FROM SEMANTIC_VIEW(cr0806_sales
+    DIMENSIONS region
+    METRICS n_star, n_one, s_one, n_str, n_paren
 );
 ----
 East	2	2	2	2	2
@@ -87,17 +85,16 @@ statement ok
 INSERT INTO cr0806_orders VALUES (4, 'North');
 
 query TII
-SELECT * FROM semantic_view(
-  'cr0806_sales',
-  dimensions := ['region'],
-  metrics := ['n_one', 's_one']
+SELECT * FROM SEMANTIC_VIEW(cr0806_sales
+    DIMENSIONS region
+    METRICS n_one, s_one
 ) WHERE region = 'North';
 ----
 
 # Control: a column argument was never affected -- it is already NULL on the
 # phantom row, so the aggregate skipped it unaided.
 query I
-SELECT * FROM semantic_view('cr0806_sales', metrics := ['n_star']);
+SELECT * FROM SEMANTIC_VIEW(cr0806_sales METRICS n_star);
 ----
 3
 
@@ -130,10 +127,9 @@ CREATE SEMANTIC VIEW cr0806_bal AS
 
 # The snapshot itself is unchanged: the latest report_date per customer.
 query II rowsort
-SELECT * FROM semantic_view(
-  'cr0806_bal',
-  dimensions := ['customer_id'],
-  metrics := ['balance']
+SELECT * FROM SEMANTIC_VIEW(cr0806_bal
+    DIMENSIONS customer_id
+    METRICS balance
 );
 ----
 1	150
@@ -143,10 +139,9 @@ SELECT * FROM semantic_view(
 # and doubled, which is not twice the snapshot above. Composing a snapshot with
 # an outer expression is not yet supported (TECH-DEBT #55), so it errors.
 statement error
-SELECT * FROM semantic_view(
-  'cr0806_bal',
-  dimensions := ['customer_id'],
-  metrics := ['double_balance']
+SELECT * FROM SEMANTIC_VIEW(cr0806_bal
+    DIMENSIONS customer_id
+    METRICS double_balance
 );
 ----
 depends on semi-additive metric
@@ -154,10 +149,9 @@ depends on semi-additive metric
 # Control: with the NON ADDITIVE BY dimension queried, the base metric is
 # effectively regular (Snowflake semantics) and the derived metric expands.
 query TII rowsort
-SELECT report_date, customer_id, double_balance FROM semantic_view(
-  'cr0806_bal',
-  dimensions := ['customer_id', 'report_date'],
-  metrics := ['double_balance']
+SELECT report_date, customer_id, double_balance FROM SEMANTIC_VIEW(cr0806_bal
+    DIMENSIONS customer_id, report_date
+    METRICS double_balance
 );
 ----
 2026-01-31	1	200
@@ -185,10 +179,9 @@ CREATE SEMANTIC VIEW cr0806_win AS
   );
 
 statement error
-SELECT * FROM semantic_view(
-  'cr0806_win',
-  dimensions := ['customer_id'],
-  metrics := ['rolling']
+SELECT * FROM SEMANTIC_VIEW(cr0806_win
+    DIMENSIONS customer_id
+    METRICS rolling
 );
 ----
 depends on semi-additive metric
@@ -240,11 +233,10 @@ CREATE SEMANTIC VIEW cr0806_unqual AS
 # the balance of the 'active' CUSTOMER -- for a predicate the user wrote
 # against orders.
 statement error
-SELECT * FROM semantic_view(
-  'cr0806_unqual',
-  dimensions := ['region'],
-  metrics := ['total_balance'],
-  where_clause := 'status = ''active'''
+SELECT * FROM SEMANTIC_VIEW(cr0806_unqual
+    DIMENSIONS region
+    METRICS total_balance
+    WHERE status = 'active'
 );
 ----
 status
@@ -253,11 +245,10 @@ status
 # normally, so the guard keys on the missing source table, not on the presence
 # of a predicate.
 query TI rowsort
-SELECT * FROM semantic_view(
-  'cr0806_unqual',
-  dimensions := ['region'],
-  metrics := ['total_balance'],
-  where_clause := 'region <> ''Nowhere'''
+SELECT * FROM SEMANTIC_VIEW(cr0806_unqual
+    DIMENSIONS region
+    METRICS total_balance
+    WHERE region <> 'Nowhere'
 );
 ----
 East	50

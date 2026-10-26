@@ -51,10 +51,9 @@ METRICS (
 # The base aggregate, on its own (window and aggregate metrics cannot be
 # mixed in one query).
 query TI rowsort
-SELECT * FROM semantic_view(
-  'cr0806p8_window',
-  dimensions := ['region'],
-  metrics := ['total']
+SELECT * FROM SEMANTIC_VIEW(cr0806p8_window
+    DIMENSIONS region
+    METRICS total
 );
 ----
 east	30
@@ -63,10 +62,9 @@ west	30
 # Both window metrics compute. `excl` excludes the region dimension from the
 # partition, so it totals everything (60); `part` partitions BY region (30/30).
 query TII rowsort
-SELECT * FROM semantic_view(
-  'cr0806p8_window',
-  dimensions := ['region'],
-  metrics := ['excl', 'part']
+SELECT * FROM SEMANTIC_VIEW(cr0806p8_window
+    DIMENSIONS region
+    METRICS excl, part
 );
 ----
 east	60	30
@@ -88,7 +86,7 @@ METRICS (
 
 # The snapshot picks the latest snap_date (2024-01-02): 20 + 30 = 50.
 query I
-SELECT latest FROM semantic_view('cr0806p8_na', metrics := ['latest']);
+SELECT latest FROM SEMANTIC_VIEW(cr0806p8_na METRICS latest);
 ----
 50
 
@@ -105,7 +103,7 @@ METRICS (
 );
 
 query I
-SELECT latest FROM semantic_view('cr0806p8_na_dotted', metrics := ['latest']);
+SELECT latest FROM SEMANTIC_VIEW(cr0806p8_na_dotted METRICS latest);
 ----
 50
 
@@ -131,10 +129,9 @@ MATERIALIZATIONS (
 );
 
 query TI rowsort
-SELECT * FROM semantic_view(
-  'cr0806p8_mat',
-  dimensions := ['region'],
-  metrics := ['revenue']
+SELECT * FROM SEMANTIC_VIEW(cr0806p8_mat
+    DIMENSIONS region
+    METRICS revenue
 );
 ----
 east	30

@@ -55,7 +55,7 @@ CREATE SEMANTIC VIEW d1p_sv AS
 # Derived metric over two child metrics: EU 6 / 3, orphan 40 / 1.
 # Before #71: APAC / US rows of NULL, and no orphan row.
 query TR
-SELECT * FROM semantic_view('d1p_sv', dimensions := ['cust_region'], metrics := ['avg_qty'])
+SELECT * FROM SEMANTIC_VIEW(d1p_sv DIMENSIONS cust_region METRICS avg_qty)
 ORDER BY cust_region NULLS LAST;
 ----
 EU	2.0
@@ -64,7 +64,7 @@ NULL	40.0
 # Grouped by a CHILD dimension: one group per item. Before #71: the childless
 # parents manufactured a `NULL 0` group and the orphan item (qty 40) vanished.
 query II
-SELECT * FROM semantic_view('d1p_sv', dimensions := ['item_qty'], metrics := ['n_items'])
+SELECT * FROM SEMANTIC_VIEW(d1p_sv DIMENSIONS item_qty METRICS n_items)
 ORDER BY item_qty NULLS LAST;
 ----
 1	1
@@ -76,14 +76,14 @@ ORDER BY item_qty NULLS LAST;
 # `IS NULL` selects exactly it. Before #71: 0 (US / APAC phantom rows matched,
 # and counted nothing; the orphan was never in the FROM).
 query I
-SELECT * FROM semantic_view('d1p_sv', metrics := ['n_items'], where_clause := 'cust_region IS NULL');
+SELECT * FROM SEMANTIC_VIEW(d1p_sv METRICS n_items WHERE cust_region IS NULL);
 ----
 1
 
 # where_clause on a CHILD member: the orphan is the only item above 10.
 # Before #71: 0 / NULL.
 query II
-SELECT * FROM semantic_view('d1p_sv', metrics := ['n_items', 'total_qty'], where_clause := 'item_qty > 10');
+SELECT * FROM SEMANTIC_VIEW(d1p_sv METRICS n_items, total_qty WHERE item_qty > 10);
 ----
 1	40
 
@@ -91,7 +91,7 @@ SELECT * FROM semantic_view('d1p_sv', metrics := ['n_items', 'total_qty'], where
 # region -- EU's is item 102 (qty 3); the orphan item is the NULL-region row.
 # Before #71: US / APAC NULL rows, no orphan row.
 query TI
-SELECT * FROM semantic_view('d1p_sv', dimensions := ['cust_region'], metrics := ['last_qty'])
+SELECT * FROM SEMANTIC_VIEW(d1p_sv DIMENSIONS cust_region METRICS last_qty)
 ORDER BY cust_region NULLS LAST;
 ----
 EU	3
@@ -102,7 +102,7 @@ NULL	40
 # orphan row.
 query TI
 SELECT cust_region, CAST(qty_overall AS BIGINT)
-FROM semantic_view('d1p_sv', dimensions := ['cust_region'], metrics := ['qty_overall'])
+FROM SEMANTIC_VIEW(d1p_sv DIMENSIONS cust_region METRICS qty_overall)
 ORDER BY cust_region NULLS LAST;
 ----
 EU	46

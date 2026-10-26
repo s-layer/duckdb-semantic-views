@@ -57,7 +57,7 @@ CREATE SEMANTIC VIEW p32_flights_view AS
 # Departure cities: SFO=1 departure, JFK=1 departure, LHR=1 departure
 
 query TI rowsort
-SELECT * FROM semantic_view('p32_flights_view', dimensions := ['city'], metrics := ['departure_count']);
+SELECT * FROM SEMANTIC_VIEW(p32_flights_view DIMENSIONS city METRICS departure_count);
 ----
 London	1
 New York	1
@@ -73,7 +73,7 @@ San Francisco	1
 # AA: 2 flights, BA: 1 flight. Both metrics count the same rows.
 
 query TII rowsort
-SELECT * FROM semantic_view('p32_flights_view', dimensions := ['carrier'], metrics := ['departure_count', 'arrival_count']);
+SELECT * FROM SEMANTIC_VIEW(p32_flights_view DIMENSIONS carrier METRICS departure_count, arrival_count);
 ----
 AA	2	2
 BA	1	1
@@ -84,7 +84,7 @@ BA	1	1
 # ============================================================
 
 statement error
-SELECT * FROM semantic_view('p32_flights_view', dimensions := ['city'], metrics := ['total_flights']);
+SELECT * FROM SEMANTIC_VIEW(p32_flights_view DIMENSIONS city METRICS total_flights);
 ----
 ambiguous
 
@@ -96,7 +96,7 @@ ambiguous
 # ============================================================
 
 query TI rowsort
-SELECT * FROM semantic_view('p32_flights_view', dimensions := ['carrier'], metrics := ['total_flights']);
+SELECT * FROM SEMANTIC_VIEW(p32_flights_view DIMENSIONS carrier METRICS total_flights);
 ----
 AA	4
 BA	2
@@ -131,7 +131,7 @@ unknown relationship
 # ============================================================
 
 query I
-SELECT * FROM semantic_view('p32_flights_view', metrics := ['departure_count']);
+SELECT * FROM SEMANTIC_VIEW(p32_flights_view METRICS departure_count);
 ----
 3
 
@@ -159,7 +159,7 @@ CREATE SEMANTIC VIEW p32_orders_view AS
   );
 
 query TR rowsort
-SELECT * FROM semantic_view('p32_orders_view', dimensions := ['region'], metrics := ['revenue']);
+SELECT * FROM SEMANTIC_VIEW(p32_orders_view DIMENSIONS region METRICS revenue);
 ----
 East	100.0
 West	200.0
@@ -190,7 +190,7 @@ CREATE SEMANTIC VIEW p32_single_rel AS
 # SFO->JFK departure: San Francisco=1, JFK->LHR: New York=1, LHR->SFO: London=1
 
 query TI rowsort
-SELECT * FROM semantic_view('p32_single_rel', dimensions := ['city'], metrics := ['flight_count']);
+SELECT * FROM SEMANTIC_VIEW(p32_single_rel DIMENSIONS city METRICS flight_count);
 ----
 London	1
 New York	1
@@ -202,7 +202,7 @@ San Francisco	1
 # ============================================================
 
 statement error
-SELECT * FROM semantic_view('p32_flights_view', dimensions := ['city']);
+SELECT * FROM SEMANTIC_VIEW(p32_flights_view DIMENSIONS city);
 ----
 ambiguous
 
@@ -212,7 +212,7 @@ ambiguous
 # ============================================================
 
 query TI rowsort
-SELECT * FROM semantic_view('p32_flights_view', dimensions := ['city'], metrics := ['arrival_count']);
+SELECT * FROM SEMANTIC_VIEW(p32_flights_view DIMENSIONS city METRICS arrival_count);
 ----
 London	1
 New York	1

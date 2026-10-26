@@ -84,8 +84,10 @@ CREATE SEMANTIC VIEW d1_sv AS
 # Q1: child metrics alone, by a grandparent dimension. The orphan item is a
 # NULL-region row; US and APAC have no line items and so no row.
 query TIII
-SELECT * FROM semantic_view('d1_sv', dimensions := ['cust_region'],
-                            metrics := ['n_items', 'n_items_all', 'total_qty'])
+SELECT * FROM SEMANTIC_VIEW(d1_sv
+    DIMENSIONS cust_region
+    METRICS n_items, n_items_all, total_qty
+)
 ORDER BY cust_region NULLS LAST;
 ----
 EU	3	3	6
@@ -95,8 +97,10 @@ NULL	1	1	40
 # child values to Q1; US and APAC appear only because n_customers brings them,
 # and their child metrics are NULL (not 0).
 query TIIII
-SELECT * FROM semantic_view('d1_sv', dimensions := ['cust_region'],
-                            metrics := ['n_customers', 'n_items', 'n_items_all', 'total_qty'])
+SELECT * FROM SEMANTIC_VIEW(d1_sv
+    DIMENSIONS cust_region
+    METRICS n_customers, n_items, n_items_all, total_qty
+)
 ORDER BY cust_region NULLS LAST;
 ----
 APAC	1	NULL	NULL	NULL
@@ -106,21 +110,23 @@ NULL	NULL	1	1	40
 
 # Q3: grand totals. 46, not 6: the orphan item is counted.
 query II
-SELECT * FROM semantic_view('d1_sv', metrics := ['n_items', 'total_qty']);
+SELECT * FROM SEMANTIC_VIEW(d1_sv METRICS n_items, total_qty);
 ----
 4	46
 
 # Q4: with an order-grain metric alongside. 225 includes orphan order 13.
 query RII
-SELECT * FROM semantic_view('d1_sv', metrics := ['total_amount', 'n_items', 'total_qty']);
+SELECT * FROM SEMANTIC_VIEW(d1_sv METRICS total_amount, n_items, total_qty);
 ----
 225.00	4	46
 
 # Q5: by the parent dimension. Orders 12 and 13 have no items, so no row; the
 # orphan item is the NULL order_id row.
 query III
-SELECT * FROM semantic_view('d1_sv', dimensions := ['order_id'],
-                            metrics := ['n_items', 'total_qty'])
+SELECT * FROM SEMANTIC_VIEW(d1_sv
+    DIMENSIONS order_id
+    METRICS n_items, total_qty
+)
 ORDER BY order_id NULLS LAST;
 ----
 10	2	3
@@ -129,8 +135,10 @@ NULL	1	40
 
 # Q6: with an order-grain metric alongside. Same child values as Q5.
 query IIII
-SELECT * FROM semantic_view('d1_sv', dimensions := ['order_id'],
-                            metrics := ['n_orders', 'n_items', 'total_qty'])
+SELECT * FROM SEMANTIC_VIEW(d1_sv
+    DIMENSIONS order_id
+    METRICS n_orders, n_items, total_qty
+)
 ORDER BY order_id NULLS LAST;
 ----
 10	1	2	3

@@ -125,35 +125,35 @@ true
 # ============================================================
 
 query TT rowsort
-SELECT * FROM semantic_view('nf_sv', metrics := ['revenue'], dimensions := ['country']);
+SELECT * FROM SEMANTIC_VIEW(nf_sv DIMENSIONS country METRICS revenue);
 ----
 EU	320.00
 US	250.00
 
 # A FILTER *dimension* referenced bare: only US rows feed the metric.
 query TT rowsort
-SELECT * FROM semantic_view('nf_sv', metrics := ['revenue'], dimensions := ['country'], where_clause := 'is_domestic');
+SELECT * FROM SEMANTIC_VIEW(nf_sv DIMENSIONS country METRICS revenue WHERE is_domestic);
 ----
 US	250.00
 
 # A FILTER *fact* referenced bare: amount > 100 keeps one row per country, so
 # BOTH groups are recomputed rather than merely dropped.
 query TT rowsort
-SELECT * FROM semantic_view('nf_sv', metrics := ['revenue'], dimensions := ['country'], where_clause := 'is_large');
+SELECT * FROM SEMANTIC_VIEW(nf_sv DIMENSIONS country METRICS revenue WHERE is_large);
 ----
 EU	300.00
 US	200.00
 
 # Two filters composed with AND.
 query TT rowsort
-SELECT * FROM semantic_view('nf_sv', metrics := ['revenue'], dimensions := ['country'], where_clause := 'is_domestic AND is_large');
+SELECT * FROM SEMANTIC_VIEW(nf_sv DIMENSIONS country METRICS revenue WHERE is_domestic AND is_large);
 ----
 US	200.00
 
 # A filter composes with a non-filter member in the same predicate — the flag
 # gates nothing about resolution.
 query TT rowsort
-SELECT * FROM semantic_view('nf_sv', metrics := ['revenue'], dimensions := ['country'], where_clause := 'is_large AND country = ''EU''');
+SELECT * FROM SEMANTIC_VIEW(nf_sv DIMENSIONS country METRICS revenue WHERE is_large AND country = 'EU');
 ----
 EU	300.00
 
@@ -194,7 +194,7 @@ CREATE SEMANTIC VIEW nf_compound AS
 # The bare-splice bug would have returned US 250.00 as well, by binding the AND
 # to the OR's right operand only.
 query TT rowsort
-SELECT * FROM semantic_view('nf_compound', metrics := ['revenue'], dimensions := ['country'], where_clause := 'us_or_eu AND is_large');
+SELECT * FROM SEMANTIC_VIEW(nf_compound DIMENSIONS country METRICS revenue WHERE us_or_eu AND is_large);
 ----
 EU	300.00
 US	200.00
@@ -211,7 +211,7 @@ WHERE (o.country = 'US' OR o.country = 'EU') AND (o.amount > 100)
 # NOT over a compound member negates the whole expression, not just its first
 # operand: neither US nor EU, so only rows outside both survive — none here.
 query T
-SELECT count(*) FROM semantic_view('nf_compound', metrics := ['revenue'], dimensions := ['country'], where_clause := 'NOT us_or_eu');
+SELECT count(*) FROM SEMANTIC_VIEW(nf_compound DIMENSIONS country METRICS revenue WHERE NOT us_or_eu);
 ----
 0
 
@@ -225,7 +225,7 @@ DROP SEMANTIC VIEW nf_compound;
 # ============================================================
 
 query TT rowsort
-SELECT * FROM semantic_view('nf_sv', metrics := ['revenue'], dimensions := ['is_domestic']);
+SELECT * FROM SEMANTIC_VIEW(nf_sv DIMENSIONS is_domestic METRICS revenue);
 ----
 false	320.00
 true	250.00
@@ -354,7 +354,7 @@ CREATE SEMANTIC VIEW nf_nonbool AS
   METRICS (o.revenue AS sum(o.amount));
 
 statement error
-SELECT * FROM semantic_view('nf_nonbool', metrics := ['revenue'], where_clause := 'not_a_bool');
+SELECT * FROM SEMANTIC_VIEW(nf_nonbool METRICS revenue WHERE not_a_bool);
 ----
 to BOOL
 

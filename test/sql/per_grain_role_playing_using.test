@@ -74,7 +74,7 @@ CREATE SEMANTIC VIEW rpu_sv AS
 # ============================================================
 
 query TII rowsort
-SELECT * FROM semantic_view('rpu_sv', metrics := ['flight_count', 'leg_count'], dimensions := ['dep_city']);
+SELECT * FROM SEMANTIC_VIEW(rpu_sv DIMENSIONS dep_city METRICS flight_count, leg_count);
 ----
 London	2	3
 New York	1	1
@@ -114,7 +114,7 @@ SELECT count(*) FROM (
 # ============================================================
 
 query TI rowsort
-SELECT * FROM semantic_view('rpu_sv', metrics := ['flight_count'], dimensions := ['dep_city']);
+SELECT * FROM SEMANTIC_VIEW(rpu_sv DIMENSIONS dep_city METRICS flight_count);
 ----
 London	2
 New York	1
@@ -165,7 +165,7 @@ CREATE SEMANTIC VIEW rpu_sg AS
 # Carrier 1 hubs at LHR (London) with 50; carrier 2 at JFK (New York) with 30.
 # Binding `arr` instead would swap the two cities.
 query TI rowsort
-SELECT * FROM semantic_view('rpu_sg', metrics := ['fleet_size'], dimensions := ['hub_city']);
+SELECT * FROM SEMANTIC_VIEW(rpu_sg DIMENSIONS hub_city METRICS fleet_size);
 ----
 London	50
 New York	30

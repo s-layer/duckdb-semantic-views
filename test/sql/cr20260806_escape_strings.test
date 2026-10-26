@@ -43,9 +43,8 @@ CREATE SEMANTIC VIEW esc AS
 # One row holds an apostrophe, one holds a backslash, and the totals still add
 # up -- so the entries after the escape strings were not swallowed.
 query III
-SELECT n_quote, n_backslash, total FROM semantic_view(
-  'esc',
-  metrics := ['n_quote', 'n_backslash', 'total']
+SELECT n_quote, n_backslash, total FROM SEMANTIC_VIEW(esc
+    METRICS n_quote, n_backslash, total
 );
 ----
 1	1	60
@@ -65,7 +64,7 @@ CREATE SEMANTIC VIEW esc_comma AS
 # Both metrics survived as separate members, and the literal is the 4-character
 # string `a',b` which no row matches.
 query II
-SELECT lit, total FROM semantic_view('esc_comma', metrics := ['lit', 'total']);
+SELECT lit, total FROM SEMANTIC_VIEW(esc_comma METRICS lit, total);
 ----
 0	60
 
@@ -93,7 +92,7 @@ CREATE SEMANTIC VIEW typed AS
   );
 
 query II
-SELECT old, total FROM semantic_view('typed', metrics := ['old', 'total']);
+SELECT old, total FROM SEMANTIC_VIEW(typed METRICS old, total);
 ----
 1	12
 
@@ -110,7 +109,7 @@ CREATE SEMANTIC VIEW plain_backslash AS
   );
 
 query II
-SELECT n, total FROM semantic_view('plain_backslash', metrics := ['n', 'total']);
+SELECT n, total FROM SEMANTIC_VIEW(plain_backslash METRICS n, total);
 ----
 1	60
 

@@ -59,7 +59,7 @@ METRICS (
 
 # o.* should expand to region, status, order_date (all dims on table o)
 query TTTI
-FROM semantic_view('p46_analytics', dimensions := ['o.*'], metrics := ['o.order_count'])
+FROM SEMANTIC_VIEW(p46_analytics DIMENSIONS o.* METRICS o.order_count)
 ORDER BY region, order_date;
 ----
 EU	pending	2024-01-02	1
@@ -68,7 +68,7 @@ US	shipped	2024-01-03	1
 
 # li.* should expand to product only
 query TI
-FROM semantic_view('p46_analytics', dimensions := ['li.*'], metrics := ['li.total_quantity'])
+FROM SEMANTIC_VIEW(p46_analytics DIMENSIONS li.* METRICS li.total_quantity)
 ORDER BY product;
 ----
 Gadget	12
@@ -80,7 +80,7 @@ Widget	13
 
 # li.* in metrics should expand to total_quantity and net_revenue (raw_revenue is PRIVATE)
 query TIR
-FROM semantic_view('p46_analytics', dimensions := ['o.region'], metrics := ['li.*'])
+FROM SEMANTIC_VIEW(p46_analytics DIMENSIONS o.region METRICS li.*)
 ORDER BY region;
 ----
 EU	3	285.0000
@@ -100,7 +100,7 @@ US	22	1447.5000
 # Explicit name + wildcard that includes same name: deduplication
 # region is explicit, o.* adds status and order_date (region deduped)
 query TTTI
-FROM semantic_view('p46_analytics', dimensions := ['region', 'o.*'], metrics := ['o.order_count'])
+FROM SEMANTIC_VIEW(p46_analytics DIMENSIONS region, o.* METRICS o.order_count)
 ORDER BY region, status, order_date;
 ----
 EU	pending	2024-01-02	1
@@ -113,7 +113,7 @@ US	shipped	2024-01-03	1
 
 # Unknown alias
 statement error
-FROM semantic_view('p46_analytics', dimensions := ['nonexistent.*'], metrics := ['o.order_count']);
+FROM SEMANTIC_VIEW(p46_analytics DIMENSIONS nonexistent.* METRICS o.order_count);
 ----
 unknown table alias 'nonexistent'
 
@@ -127,14 +127,14 @@ unqualified wildcard
 # match errors instead of silently resolving to another table's item
 # ('region' lives on o, not li).
 statement error
-FROM semantic_view('p46_analytics', dimensions := ['li.region'], metrics := ['o.order_count']);
+FROM SEMANTIC_VIEW(p46_analytics DIMENSIONS li.region METRICS o.order_count);
 ----
 unknown dimension 'li.region'
 
 # SG-14: bare + qualified spellings of the SAME dimension are a duplicate
 # request (previously both passed the seen-set and emitted the column twice).
 statement error
-FROM semantic_view('p46_analytics', dimensions := ['region', 'o.region'], metrics := ['o.order_count']);
+FROM SEMANTIC_VIEW(p46_analytics DIMENSIONS region, o.region METRICS o.order_count);
 ----
 duplicate dimension 'o.region'
 
@@ -154,7 +154,7 @@ true
 # ============================================================
 
 statement error
-FROM semantic_view('p46_analytics', dimensions := ['o.region'], metrics := ['o.order_count'], facts := ['f1']);
+FROM SEMANTIC_VIEW(p46_analytics DIMENSIONS o.region METRICS o.order_count FACTS f1);
 ----
 cannot combine facts and metrics
 
