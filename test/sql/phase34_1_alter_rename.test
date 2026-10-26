@@ -98,7 +98,7 @@ CREATE SEMANTIC VIEW products_view AS
     prods AS p34_products PRIMARY KEY (id)
   )
   DIMENSIONS (
-    prods.id AS product_id
+    prods.product_id AS prods.id
   )
   METRICS (
     prods.product_count AS COUNT(id)

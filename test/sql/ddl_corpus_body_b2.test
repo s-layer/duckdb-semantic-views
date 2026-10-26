@@ -1557,10 +1557,11 @@ dimension 'p' holds the prepared statement parameter $1, which has no value
 
 # --- window metric shape: FUNC(args) OVER (...) only (window.rs) ---
 
-# C-186: body_parser/window.rs::qualified_quoted_and_spaced_function_names_still_parse — function part may be qualified (main.avg), quoted ("my func"), spaced before its args (AVG (w)) or take extra args (lead(w, 1)) [text]
-# ("my func" does not exist: CREATE does not bind window functions.)
+# C-186: body_parser/window.rs::qualified_quoted_and_spaced_function_names_still_parse — function part may be qualified (main.avg), quoted ("Max"), spaced before its args (AVG (w)) or take extra args (lead(w, 1)) [text]
+# ("Max" stands for any quoted function name: CREATE binds every member, so the
+# function must exist, and DuckDB resolves a quoted name case-insensitively.)
 statement ok
-CREATE SEMANTIC VIEW dcc_c186 AS TABLES (o AS dcc_orders PRIMARY KEY (id)) DIMENSIONS (o.d AS o.region, o.t AS o.created_at) METRICS (o.w AS SUM(o.qty), o.a AS main.avg(w) OVER (PARTITION BY d), o.b AS "my func"(w) OVER (PARTITION BY d), o.c AS AVG (w) OVER (PARTITION BY d), o.e AS lead(w, 1) OVER (PARTITION BY d ORDER BY t));
+CREATE SEMANTIC VIEW dcc_c186 AS TABLES (o AS dcc_orders PRIMARY KEY (id)) DIMENSIONS (o.d AS o.region, o.t AS o.created_at) METRICS (o.w AS SUM(o.qty), o.a AS main.avg(w) OVER (PARTITION BY d), o.b AS "Max"(w) OVER (PARTITION BY d), o.c AS AVG (w) OVER (PARTITION BY d), o.e AS lead(w, 1) OVER (PARTITION BY d ORDER BY t));
 
 query T nosort
 SELECT * FROM dcc_ddl('dcc_c186');
@@ -1576,7 +1577,7 @@ DIMENSIONS (
 METRICS (
     o.w AS SUM(o.qty),
     o.a AS main.avg(w) OVER (PARTITION BY d),
-    o.b AS "my func"(w) OVER (PARTITION BY d),
+    o.b AS "Max"(w) OVER (PARTITION BY d),
     o.c AS AVG(w) OVER (PARTITION BY d),
     o.e AS lead(w, 1) OVER (PARTITION BY d ORDER BY t NULLS LAST)
 )
@@ -1585,7 +1586,7 @@ query T nosort
 SELECT line FROM dcc_yaml('dcc_c186') WHERE line LIKE '    window_function:%';
 ----
     window_function: main.avg
-    window_function: '"my func"'
+    window_function: '"Max"'
     window_function: AVG
     window_function: lead
 

@@ -1,0 +1,77 @@
+# A semi-additive metric with USING, whose NON ADDITIVE BY dimension lives on a
+# table that several relationships point at, ranks its snapshot by the role
+# its USING names (`a__r_bal`). Queried with no dimension, the snapshot was
+# anchored at the metric's own table and never joined that role, so the query
+# failed with 'Referenced table "a__r_bal" not found'. Found when CREATE began
+# binding every member, which refused such a view.
+
+require semantic_views
+
+statement ok
+CREATE TABLE sus_acct (id INTEGER PRIMARY KEY, snap DATE);
+
+statement ok
+CREATE TABLE sus_bal (id INTEGER PRIMARY KEY, acct_id INTEGER, amt INTEGER);
+
+statement ok
+CREATE TABLE sus_note (id INTEGER PRIMARY KEY, acct_id INTEGER);
+
+statement ok
+INSERT INTO sus_acct VALUES (1, DATE '2024-01-31'), (2, DATE '2024-02-29');
+
+statement ok
+INSERT INTO sus_bal VALUES (1, 1, 10), (2, 1, 20), (3, 2, 5), (4, 2, 7);
+
+statement ok
+INSERT INTO sus_note VALUES (1, 1);
+
+statement ok
+CREATE SEMANTIC VIEW sus AS
+  TABLES (a AS sus_acct PRIMARY KEY (id), b AS sus_bal PRIMARY KEY (id), n AS sus_note PRIMARY KEY (id))
+  RELATIONSHIPS (r_bal AS b(acct_id) REFERENCES a, r_note AS n(acct_id) REFERENCES a)
+  DIMENSIONS (a.snap AS a.snap)
+  METRICS (b.balance USING (r_bal) NON ADDITIVE BY (snap) AS SUM(b.amt));
+
+# The latest snapshot (2024-02-29) holds account 2's balances: 5 + 7.
+
+query I
+SELECT * FROM SEMANTIC_VIEW(sus METRICS balance);
+----
+12
+
+query TI
+SELECT * FROM SEMANTIC_VIEW(sus DIMENSIONS snap METRICS balance) ORDER BY 1;
+----
+2024-01-31	30
+2024-02-29	12
+
+# The snapshot is ranked over the metric's own rows. An account with no
+# balances must not take part: anchored at the accounts table, its row reached
+# the ranking with no snapshot date, and an earliest-first snapshot (DESC,
+# NULLS FIRST) picked that empty row, so the metric came out NULL.
+
+statement ok
+INSERT INTO sus_acct VALUES (3, DATE '2024-03-31');
+
+statement ok
+CREATE SEMANTIC VIEW sus_first AS
+  TABLES (a AS sus_acct PRIMARY KEY (id), b AS sus_bal PRIMARY KEY (id), n AS sus_note PRIMARY KEY (id))
+  RELATIONSHIPS (r_bal AS b(acct_id) REFERENCES a, r_note AS n(acct_id) REFERENCES a)
+  DIMENSIONS (a.snap AS a.snap, b.acct AS b.acct_id)
+  METRICS (b.opening USING (r_bal) NON ADDITIVE BY (snap DESC) AS SUM(b.amt));
+
+# The earliest snapshot (2024-01-31) holds account 1's balances: 10 + 20.
+
+query I
+SELECT * FROM SEMANTIC_VIEW(sus_first METRICS opening);
+----
+30
+
+# Partitioned by a dimension of the metric's own table, each account's own
+# earliest snapshot, and no group for the account with no balances.
+
+query II
+SELECT * FROM SEMANTIC_VIEW(sus_first DIMENSIONS acct METRICS opening) ORDER BY 1;
+----
+1	30
+2	12

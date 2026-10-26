@@ -20,7 +20,7 @@
 use crate::model::SemanticViewDefinition;
 
 use super::join_resolver::{push_join_clauses, ResolvedJoin};
-use super::resolution::{qualify_and_quote_table_ref, quote_ident};
+use super::resolution::{qualify_and_quote_table_ref, quote_stored_ident};
 
 /// One `SELECT`-list item: an expression, an optional `output_type` CAST wrap,
 /// and an output alias.
@@ -101,7 +101,7 @@ pub(super) fn push_from_base(sql: &mut String, def: &SemanticViewDefinition, lea
     sql.push_str(&qualify_and_quote_table_ref(def.base_table(), def));
     if let Some(base_ref) = def.tables.first() {
         sql.push_str(" AS ");
-        sql.push_str(&quote_ident(&base_ref.alias));
+        sql.push_str(&quote_stored_ident(&base_ref.alias));
     }
 }
 
@@ -131,7 +131,7 @@ pub(super) fn push_from_anchor(
     sql.push_str("FROM ");
     sql.push_str(&qualify_and_quote_table_ref(&table_ref.table, def));
     sql.push_str(" AS ");
-    sql.push_str(&quote_ident(&table_ref.alias));
+    sql.push_str(&quote_stored_ident(&table_ref.alias));
 }
 
 /// Append an ordinal `GROUP BY` for `n` grouping columns: `<lead>GROUP BY\n`

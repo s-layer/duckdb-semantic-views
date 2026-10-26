@@ -142,6 +142,21 @@ extern "C" {
         char **out_ptr, size_t *out_len,
         char *error_buf, size_t error_buf_len);
 
+    // Rust FFI behind every CREATE: refuse a definition with a member DuckDB
+    // cannot bind (src/ddl/alter_helpers_ffi.rs). Runs in an SvCallerScope.
+    // Return codes: 0 every member binds; 1 a member does not bind, or the
+    // caller was cancelled (the whole message in out_ptr/out_len); 3 internal
+    // error (error_buf).
+    uint8_t sv_check_create_members_rust(
+        const uint8_t *name_ptr, size_t name_len,
+        const uint8_t *def_ptr, size_t def_len,
+        const uint8_t *database_ptr, size_t database_len,
+        const uint8_t *schema_ptr, size_t schema_len,
+        const uint8_t *target_schema_ptr, size_t target_schema_len,
+        uint8_t skip_if_present,
+        char **out_ptr, size_t *out_len,
+        char *error_buf, size_t error_buf_len);
+
     // Rust dispatcher for `list_semantic_views()`. The C++ bind callback runs
     // it inside an `SvCallerScope`, and it reads the catalog in the caller's
     // transaction through `sv_caller_definitions` (TECH-DEBT #19); no
@@ -490,9 +505,15 @@ static const std::vector<SvFunctionDoc> &sv_function_docs() {
          {"SHOW SEMANTIC MATERIALIZATIONS;"},
          {"semantic_views", "metadata"}},
         // --- Internal ----------------------------------------------------
-        {"__sv_compute_create_from_yaml", {"file_path", "view_name", "comment"},
+        {"__sv_compute_create_from_yaml", {"file_path", "view_name", "comment", "schema", "skip_if_present"},
          "Internal helper behind CREATE SEMANTIC VIEW ... FROM YAML FILE. Use "
          "that statement instead; this function is not for direct use.",
+         {},
+         {"semantic_views", "internal"}},
+        {"__sv_check_create", {"definition", "view_name", "schema", "skip_if_present"},
+         "Internal helper behind CREATE SEMANTIC VIEW: checks that every member "
+         "of the definition binds. Use that statement instead; this function is "
+         "not for direct use.",
          {},
          {"semantic_views", "internal"}},
     };
@@ -993,11 +1014,22 @@ extern "C" {
 // so metadata fields are populated on the caller's connection, preserving
 // the D-21 transactional contract.
 
+// Refuse a CREATE whose definition has a member DuckDB cannot bind (defined
+// after SvCallerScope, below).
+static void sv_check_create_members(ClientContext &context, const std::string &view_name,
+                                    const std::string &definition, const std::string &schema,
+                                    bool skip_if_present);
+
 struct CreateFromYamlBindData : public TableFunctionData {
     std::string file_path;
     std::string view_name;
     std::string comment;
     std::string new_def;
+    // Where the CREATE lands (the qualifier as written, empty for the
+    // caller's current schema), and whether a view already there skips the
+    // member check: true unless the CREATE replaces.
+    std::string schema;
+    bool skip_if_present = false;
 };
 
 struct CreateFromYamlLocalState : public LocalTableFunctionState {
@@ -1023,14 +1055,14 @@ static unique_ptr<FunctionData> sv_create_from_yaml_bind(
     // rather than the `"FROM YAML FILE failed: "` prefix the file-read paths
     // below use (that prefix belongs to the user-facing DDL surface and is
     // pinned by `test/sql/phase53_yaml_file.test`).
-    // Exactly 3, not "at least 3": the message promises a fixed signature, and
-    // a 4-argument call silently ignoring the extra is the kind of quiet
+    // Exactly 5, not "at least 5": the message promises a fixed signature, and
+    // a 6-argument call silently ignoring the extra is the kind of quiet
     // tolerance that makes a helper's contract untrue. DuckDB's own arity check
     // should reject it first, so this is defence in depth either way.
-    if (input.inputs.size() != 3) {
+    if (input.inputs.size() != 5) {
         throw BinderException(
-            "__sv_compute_create_from_yaml: expected 3 arguments "
-            "(file_path, view_name, comment)");
+            "__sv_compute_create_from_yaml: expected 5 arguments "
+            "(file_path, view_name, comment, schema, skip_if_present)");
     }
     if (input.inputs[0].IsNull()) {
         throw BinderException(
@@ -1047,9 +1079,16 @@ static unique_ptr<FunctionData> sv_create_from_yaml_bind(
             "__sv_compute_create_from_yaml: comment is required "
             "(positional arg 2; pass '' for no comment)");
     }
+    if (input.inputs[3].IsNull() || input.inputs[4].IsNull()) {
+        throw BinderException(
+            "__sv_compute_create_from_yaml: schema and skip_if_present are required "
+            "(positional args 3, 4; pass '' for the current schema)");
+    }
     bd->file_path = input.inputs[0].GetValue<string>();
     bd->view_name = input.inputs[1].GetValue<string>();
     bd->comment   = input.inputs[2].GetValue<string>();
+    bd->schema    = input.inputs[3].GetValue<string>();
+    bd->skip_if_present = input.inputs[4].GetValue<bool>();
 
     // Phase 65.1 D-01..D-03 (CR-01): read the YAML file directly via the
     // `FileSystem` API rather than `Connection::Query("SELECT content FROM
@@ -1136,6 +1175,7 @@ static unique_ptr<FunctionData> sv_create_from_yaml_bind(
     // its own allocator-owned storage; for a 1 MiB cap this is bounded.
     bd->new_def.assign(out_ptr, out_len);
     sv_free_buffer(out_ptr, out_len);
+    sv_check_create_members(context, bd->view_name, bd->new_def, bd->schema, bd->skip_if_present);
 
     return_types.push_back(LogicalType::VARCHAR);
     names.emplace_back("new_def");
@@ -1563,6 +1603,69 @@ private:
     ClientContext *prev_;
     const vector<Value> *prev_params_;
 };
+
+// CREATE binds every member, as Snowflake compiles each member expression at
+// CREATE: a member DuckDB cannot bind (an unknown column or function, an
+// invalid date part) refuses the view, naming the member, instead of being
+// stored and failing only when queried. The probes run in the caller's
+// context, against the database and schema the CREATE stamps (the caller's
+// current ones), so they see the caller's transaction and temporary tables.
+//
+// Unless `skip_if_present` is false (OR REPLACE), a view already in the
+// target schema skips the check: IF NOT EXISTS then writes nothing, and a
+// plain CREATE reports "already exists", neither of which reads the body.
+static void sv_check_create_members(ClientContext &context, const std::string &view_name,
+                                    const std::string &definition, const std::string &target_schema,
+                                    bool skip_if_present) {
+    auto database = DatabaseManager::GetDefaultDatabase(context).GetIdentifierName();
+    auto schema = ClientData::Get(context).catalog_search_path->GetDefault().GetSchema().GetIdentifierName();
+    SvCallerScope caller(context);
+    SvOwnedBuffer message;
+    char error_buf[1024];
+    std::memset(error_buf, 0, sizeof(error_buf));
+    uint8_t rc = sv_check_create_members_rust(
+        reinterpret_cast<const uint8_t *>(view_name.data()), view_name.size(),
+        reinterpret_cast<const uint8_t *>(definition.data()), definition.size(),
+        reinterpret_cast<const uint8_t *>(database.data()), database.size(),
+        reinterpret_cast<const uint8_t *>(schema.data()), schema.size(),
+        reinterpret_cast<const uint8_t *>(target_schema.data()), target_schema.size(),
+        skip_if_present ? 1 : 0, &message.ptr, &message.len, error_buf, sizeof(error_buf));
+    caller.ThrowIfCancelled();
+    if (rc == 1) {
+        throw BinderException("%s", message.to_string());
+    }
+    if (rc != 0) {
+        throw InternalException("semantic_views: checking the CREATE's members failed: %s", string(error_buf));
+    }
+}
+
+// __sv_check_create(definition, view_name, schema, skip_if_present): the definition an AS-body or
+// FROM YAML CREATE lowers to (src/parse/native_sql.rs), passed through as one
+// `new_def` row once every member binds. The outer INSERT reads it the way it
+// reads __sv_compute_create_from_yaml's row, so both CREATE forms are checked.
+static unique_ptr<FunctionData> sv_check_create_bind(ClientContext &context, TableFunctionBindInput &input,
+                                                     vector<LogicalType> &return_types,
+                                                     sv_compat::bind_names_t &names) {
+    if (input.inputs.size() != 4) {
+        throw BinderException("__sv_check_create: expected 4 arguments (definition, view_name, schema, "
+                              "skip_if_present)");
+    }
+    for (auto &arg : input.inputs) {
+        if (arg.IsNull()) {
+            throw BinderException("__sv_check_create: definition, view name, schema and skip_if_present are "
+                                  "required (pass '' for the current schema)");
+        }
+    }
+    auto bd = make_uniq<CreateFromYamlBindData>();
+    bd->new_def = input.inputs[0].GetValue<std::string>();
+    bd->view_name = input.inputs[1].GetValue<std::string>();
+    bd->schema = input.inputs[2].GetValue<std::string>();
+    bd->skip_if_present = input.inputs[3].GetValue<bool>();
+    sv_check_create_members(context, bd->view_name, bd->new_def, bd->schema, bd->skip_if_present);
+    return_types.push_back(LogicalType::VARCHAR);
+    names.emplace_back("new_def");
+    return std::move(bd);
+}
 
 // The values of `params`: a row (`params := row('EU', 2024)`, or a struct),
 // whose fields where_clause refers to as $1, $2, ... in order. Absent or NULL
@@ -4832,13 +4935,15 @@ extern "C" {
                     LogicalType::VARCHAR,  // file_path
                     LogicalType::VARCHAR,  // view_name
                     LogicalType::VARCHAR,  // comment (empty = none)
+                    LogicalType::VARCHAR,  // schema (empty = current)
+                    LogicalType::BOOLEAN,  // skip_if_present
                 };
                 char helper_err[1024];
                 std::memset(helper_err, 0, sizeof(helper_err));
                 if (!sv_register_table_function(
                         db_handle,
                         "__sv_compute_create_from_yaml",
-                        arg_types, 3,
+                        arg_types, 5,
                         sv_create_from_yaml_bind,
                         sv_create_from_yaml_function,
                         sv_create_from_yaml_init_local,
@@ -4847,6 +4952,35 @@ extern "C" {
                         snprintf(error_buf, error_buf_len,
                             "sv_register_grammar_hooks: failed to register "
                             "__sv_compute_create_from_yaml helper TF: %s",
+                            helper_err);
+                    }
+                    return false;
+                }
+            }
+
+            // `CREATE SEMANTIC VIEW ... AS` and `... FROM YAML` lower to a
+            // read of this one, which checks every member binds.
+            {
+                LogicalType arg_types[] = {
+                    LogicalType::VARCHAR,  // definition
+                    LogicalType::VARCHAR,  // view_name
+                    LogicalType::VARCHAR,  // schema (empty = current)
+                    LogicalType::BOOLEAN,  // skip_if_present
+                };
+                char helper_err[1024];
+                std::memset(helper_err, 0, sizeof(helper_err));
+                if (!sv_register_table_function(
+                        db_handle,
+                        "__sv_check_create",
+                        arg_types, 4,
+                        sv_check_create_bind,
+                        sv_create_from_yaml_function,
+                        sv_create_from_yaml_init_local,
+                        helper_err, sizeof(helper_err))) {
+                    if (error_buf != nullptr && error_buf_len > 0) {
+                        snprintf(error_buf, error_buf_len,
+                            "sv_register_grammar_hooks: failed to register "
+                            "__sv_check_create helper TF: %s",
                             helper_err);
                     }
                     return false;

@@ -264,7 +264,7 @@ statement ok
 CREATE SEMANTIC VIEW dcb_split_nested_empty AS
 TABLES (o AS dcb_orders PRIMARY KEY (id))
 DIMENSIONS (o.lit AS 'a,,b')
-METRICS (o.m AS concat(o.a,,o.b));
+METRICS (o.m AS concat(o.a, o.b));
 
 query T nosort
 SELECT * FROM dcb_ddl('dcb_split_nested_empty');
@@ -277,8 +277,18 @@ DIMENSIONS (
     o.lit AS 'a,,b'
 )
 METRICS (
-    o.m AS concat(o.a,,o.b)
+    o.m AS concat(o.a, o.b)
 )
+
+# B-009 (parens): the doubled comma inside `concat(...)` stays in metric `m`'s
+# expression rather than splitting the clause, so CREATE reaches the member bind
+# and refuses `m` itself (the expression is not valid SQL).
+statement error
+CREATE SEMANTIC VIEW dcb_split_nested_empty_parens AS
+TABLES (o AS dcb_orders PRIMARY KEY (id))
+METRICS (o.m AS concat(o.a,,o.b));
+----
+semantic view 'dcb_split_nested_empty_parens': metric 'm' does not bind: Parser Error
 
 # B-010: body_parser/mod.rs::split_leading_and_interior_empty_entries_rejected — a leading stray comma is rejected (near miss of B-008) [syntax]
 statement error

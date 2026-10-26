@@ -178,6 +178,118 @@ pub unsafe extern "C" fn sv_compute_create_from_yaml_rust(
     }
 }
 
+/// FFI entry point for the `__sv_check_create` helper table function's bind
+/// (and the FROM YAML FILE helper's): refuse a CREATE whose definition has a
+/// member `DuckDB` cannot bind ([`crate::ddl::read_ffi::check_create_members`]).
+/// The C++ side runs it in an `SvCallerScope`, so the probes bind in the
+/// caller's context.
+///
+/// # Arguments
+///
+/// * `name_ptr`/`name_len` — the view name, for the message.
+/// * `def_ptr`/`def_len` — the definition JSON `enrich_definition_for_create`
+///   produced.
+/// * `database_ptr`/`database_len`, `schema_ptr`/`schema_len` — the caller's
+///   current database and schema, which the CREATE stamps.
+/// * `out_ptr`/`out_len` — on rc=1, the whole message in a heap-owned buffer
+///   the caller releases via `sv_free_buffer` (a long member name or
+///   `DuckDB` error is not cut off).
+///
+/// # Return codes
+///
+/// * `0` — every member binds.
+/// * `1` — a member does not bind, or the caller was cancelled; the message is
+///   in `(out_ptr, out_len)`.
+/// * `3` — internal error (non-UTF-8 input, panic); `error_buf` populated.
+///
+/// # Safety
+///
+/// Each `(ptr, len)` input pair must point to `len` valid bytes; `out_ptr` /
+/// `out_len` must be writable slots; `error_buf` must point to
+/// `error_buf_len` writable bytes.
+#[cfg(feature = "extension")]
+#[no_mangle]
+#[allow(clippy::too_many_arguments)]
+pub unsafe extern "C" fn sv_check_create_members_rust(
+    name_ptr: *const u8,
+    name_len: usize,
+    def_ptr: *const u8,
+    def_len: usize,
+    database_ptr: *const u8,
+    database_len: usize,
+    schema_ptr: *const u8,
+    schema_len: usize,
+    target_schema_ptr: *const u8,
+    target_schema_len: usize,
+    skip_if_present: u8,
+    out_ptr: *mut *mut u8,
+    out_len: *mut usize,
+    error_buf: *mut u8,
+    error_buf_len: usize,
+) -> u8 {
+    let result = std::panic::catch_unwind(AssertUnwindSafe(|| {
+        let text = |ptr: *const u8, len: usize| -> Option<&str> {
+            if len == 0 {
+                return Some("");
+            }
+            if ptr.is_null() {
+                return None;
+            }
+            std::str::from_utf8(std::slice::from_raw_parts(ptr, len)).ok()
+        };
+        let (Some(name), Some(def), Some(database), Some(schema), Some(target_schema)) = (
+            text(name_ptr, name_len),
+            text(def_ptr, def_len),
+            text(database_ptr, database_len),
+            text(schema_ptr, schema_len),
+            text(target_schema_ptr, target_schema_len),
+        ) else {
+            write_error_buf(
+                error_buf,
+                error_buf_len,
+                "internal error: input is not UTF-8",
+            );
+            return 3_u8;
+        };
+        let present = if skip_if_present != 0 {
+            let target = if target_schema.is_empty() {
+                schema
+            } else {
+                target_schema
+            };
+            match crate::ddl::read_ffi::view_present(name, target) {
+                Ok(present) => present,
+                Err(message) => {
+                    publish_owned_string(message, out_ptr, out_len);
+                    return 1_u8;
+                }
+            }
+        } else {
+            false
+        };
+        if present {
+            return 0_u8;
+        }
+        match crate::ddl::read_ffi::check_create_members(name, def, database, schema) {
+            Ok(()) => 0_u8,
+            Err(message) => {
+                publish_owned_string(message, out_ptr, out_len);
+                1_u8
+            }
+        }
+    }));
+    if let Ok(rc) = result {
+        rc
+    } else {
+        write_error_buf(
+            error_buf,
+            error_buf_len,
+            "internal error: panic inside sv_check_create_members_rust",
+        );
+        3
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------

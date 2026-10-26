@@ -39,10 +39,10 @@ statement ok
 INSERT INTO dcf_flights VALUES (1, 1), (2, 1), (3, 2);
 
 statement ok
-CREATE TABLE dcf_airports (id INTEGER PRIMARY KEY, name VARCHAR);
+CREATE TABLE dcf_airports (id INTEGER PRIMARY KEY, name VARCHAR, airport_name VARCHAR);
 
 statement ok
-INSERT INTO dcf_airports VALUES (1, 'AMS'), (2, 'LHR');
+INSERT INTO dcf_airports VALUES (1, 'AMS', 'Schiphol'), (2, 'LHR', 'Heathrow');
 
 statement ok
 CREATE MACRO dcf_ddl(v) AS TABLE SELECT unnest(string_split(rtrim(get_ddl('SEMANTIC_VIEW', v), chr(10)), chr(10))) AS line;

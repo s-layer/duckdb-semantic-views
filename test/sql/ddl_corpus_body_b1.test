@@ -26,10 +26,10 @@ require semantic_views
 # --- fixtures ---
 
 statement ok
-CREATE TABLE dcc_orders (id INTEGER, region VARCHAR, amount INTEGER, cost INTEGER, cust_id INTEGER, created_at DATE, qty INTEGER, price DOUBLE, discount DOUBLE, tax_rate DOUBLE, email VARCHAR, first_name VARCHAR, last_name VARCHAR, comment_count INTEGER, o_id INTEGER, o_seq INTEGER, o_cust_id INTEGER, store INTEGER, sale_date DATE, code INTEGER, c2 INTEGER, labels VARCHAR);
+CREATE TABLE dcc_orders (id INTEGER, region VARCHAR, amount INTEGER, cost INTEGER, cust_id INTEGER, created_at DATE, qty INTEGER, price DOUBLE, discount DOUBLE, tax_rate DOUBLE, email VARCHAR, first_name VARCHAR, last_name VARCHAR, comment_count INTEGER, o_id INTEGER, o_seq INTEGER, o_cust_id INTEGER, store INTEGER, sale_date DATE, code INTEGER, c2 INTEGER, labels VARCHAR, x INTEGER);
 
 statement ok
-CREATE TABLE dcc_customers (id INTEGER, c_id INTEGER, name VARCHAR, code INTEGER, c2 INTEGER);
+CREATE TABLE dcc_customers (id INTEGER, c_id INTEGER, name VARCHAR, code INTEGER, c2 INTEGER, customer_name VARCHAR);
 
 statement ok
 CREATE TABLE dcc_fact (id INTEGER, email VARCHAR, x INTEGER);

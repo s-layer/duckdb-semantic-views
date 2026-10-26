@@ -62,6 +62,18 @@ fn escaped_parts(view: &ViewRef) -> (SqlLit, SchemaTarget) {
     (SqlLit::escape(&view.name), target)
 }
 
+/// The `schema, skip_if_present` arguments of the CREATE helper TFs: the
+/// schema qualifier as written (`''` for none, meaning the caller's current
+/// schema) and whether a view already there skips the member check.
+#[cfg(feature = "extension")]
+fn check_skip_args(target: &SchemaTarget, skip_if_present: bool) -> String {
+    let schema = match target {
+        SchemaTarget::Unqualified => String::new(),
+        SchemaTarget::Named(s) => s.to_string(),
+    };
+    format!("'{schema}', {skip_if_present}")
+}
+
 /// The name as it should be *written back* in an error suggesting a qualified
 /// spelling — identifier-quoted when it needs to be, then SQL-escaped for
 /// embedding. Quoting has to happen before the SQL escape, which is why this
@@ -261,7 +273,7 @@ fn emit_native_create_sql(
     let schema_version = crate::model::CURRENT_SCHEMA_VERSION;
     let metadata_patched_definition = format!(
         "json_merge_patch( \
-            '{enriched_escaped}'::JSON, \
+            new_def::JSON, \
             json_object( \
               'created_on', strftime(now(), '%Y-%m-%dT%H:%M:%SZ'), \
               'database_name', current_database(), \
@@ -271,7 +283,18 @@ fn emit_native_create_sql(
               'schema_version', {schema_version} \
             ) \
          )::VARCHAR",
-        temp_tables = temp_tables_expr(&format!("'{enriched_escaped}'::JSON"))
+        temp_tables = temp_tables_expr("new_def::JSON")
+    );
+    // The definition is read through the `__sv_check_create` helper TF
+    // (`cpp/src/shim.cpp`), whose bind refuses it if a member does not bind in
+    // the caller's context -- as `__sv_compute_create_from_yaml` does for FROM
+    // YAML FILE. Its one `new_def` row is the definition unchanged. Unless the
+    // CREATE replaces, a view already in the target schema skips the check, so
+    // IF NOT EXISTS stays a no-op and plain CREATE reports "already exists".
+    let helper_from = format!(
+        "FROM __sv_check_create('{enriched_escaped}', '{}', {})",
+        SqlLit::escape(name),
+        check_skip_args(&schema_target, !or_replace)
     );
 
     // The generated SQL runs on the caller's connection, so its EXISTS
@@ -301,12 +324,14 @@ fn emit_native_create_sql(
         format!(
             "INSERT OR REPLACE INTO {DEFINITIONS_TABLE} (schema_name, name, definition) \
              SELECT {schema_expr}, '{name_escaped}', {metadata_patched_definition} \
+             {helper_from} \
              RETURNING name AS view_name"
         )
     } else if if_not_exists {
         format!(
             "INSERT OR IGNORE INTO {DEFINITIONS_TABLE} (schema_name, name, definition) \
              SELECT {schema_expr}, '{name_escaped}', {metadata_patched_definition} \
+             {helper_from} \
              RETURNING name AS view_name"
         )
     } else {
@@ -321,6 +346,7 @@ fn emit_native_create_sql(
                     ELSE '{name_escaped}' \
                END, \
                {metadata_patched_definition} \
+             {helper_from} \
              RETURNING name AS view_name"
         )
     };
@@ -397,7 +423,8 @@ fn emit_native_create_from_yaml_file(
     );
     let helper_from = format!(
         "FROM __sv_compute_create_from_yaml('{path_escaped}', \
-            '{name_escaped}', '{comment_escaped}')"
+            '{name_escaped}', '{comment_escaped}', {})",
+        check_skip_args(&schema_target, !or_replace)
     );
 
     // Three INSERT shapes mirror the inline CREATE path

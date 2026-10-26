@@ -292,6 +292,38 @@ Duplicate or colliding names
    The name uniqueness check runs at ``CREATE`` (and ``ALTER``) time, before the view definition is persisted. It is independent of the query-time duplicate checks described in :ref:`the next section <ref-err-query>`, which catch the same dimension or metric being requested twice in a single ``semantic_view()`` call. Semantic views created before this check existed keep working at query time: lookups resolve to the first declaration.
 
 
+.. _ref-err-member-bind:
+
+Members that do not bind
+------------------------
+
+.. versionchanged:: 0.17.0
+
+   ``CREATE`` now binds every member. Before, a member DuckDB could not bind was
+   stored, and its error appeared only when a query reached it.
+
+.. code-block:: text
+
+   semantic view '<view>': <kind> '<name>' does not bind: <DuckDB error>
+
+**Cause:** ``CREATE`` binds each dimension, fact and metric in a query of its own against the view's tables, as Snowflake compiles each expression at ``CREATE``. DuckDB cannot bind the member the message names: its expression refers to a column, table or function that does not exist, has a syntax error, or passes an argument DuckDB rejects. The rest of the message is DuckDB's own error. ``PRIVATE`` members are bound too, and every ``CREATE`` form is checked: ``OR REPLACE``, ``IF NOT EXISTS``, ``FROM YAML`` and ``FROM YAML FILE``.
+
+**Fix:** Correct the expression, or create the missing table, column or function before the view.
+
+.. code-block:: sql
+
+   -- This will fail: "semantic view 'orders_v': dimension 'fn' does not bind:
+   -- Conversion Error: extract specifier "fortnight" not recognized"
+   DIMENSIONS (
+       o.fn AS date_trunc('fortnight', o.ordered_at)
+   )
+
+   -- Fix: use a date part DuckDB knows
+   DIMENSIONS (
+       o.week AS date_trunc('week', o.ordered_at)
+   )
+
+
 Graph validation errors
 -----------------------
 

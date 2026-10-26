@@ -3,15 +3,17 @@
 # Snowflake scopes a member expression to its own logical table. This
 # extension splices the expression verbatim into the query's FROM, so a bare
 # column binds against every table joined there. Pinned here end to end:
-#   * a same-name collision (`o_id` is on both `o` and `li`) is a LOUD
-#     ambiguity error whenever both tables are joined -- on the home-anchored
-#     metric path and on the base-anchored dimensions-only and FACTS paths.
-#     Pre-existing on main, unchanged by #71 except that a metric whose home
-#     table alone suffices now binds (it used to be ambiguous);
-#   * a cross-table bare reference (`amount` exists only on `o`, used in a
-#     metric on `li`) is accepted at CREATE and binds to `o.amount` when `o` is
-#     joined -- a silent cross-grain number Snowflake would reject at CREATE.
-#     The `known gap` query pins today's wrong answer; it flips when #83 is fixed.
+#   * CREATE binds each member on its own, so a member whose bare column does
+#     not bind in its own query is refused at CREATE: a fact whose base-anchored
+#     query joins both tables that have `o_id`, and a cross-table bare reference
+#     (`amount` exists only on `o`, used in a metric on `li`, which is scanned
+#     alone). Snowflake rejects the latter at CREATE too; before CREATE bound
+#     members it was accepted and, grouped by a dimension that joins `o`, gave a
+#     silent cross-grain number;
+#   * a same-name collision (`o_id` is on both `o` and `li`) between members
+#     that bind on their own is a LOUD ambiguity error whenever a query joins
+#     both tables -- on the home-anchored metric path and on the base-anchored
+#     dimensions-only path. A metric whose home table alone suffices binds.
 # The workaround is to qualify every column (create-semantic-view.rst, "Column
 # qualification in expressions"). The unit twins, one per case, are in
 # src/expand/tests_bare_column_scoping.rs.
@@ -36,6 +38,41 @@ INSERT INTO bcs_o VALUES (10, 1, 100), (11, 1, 50), (12, 2, 70), (13, NULL, 5);
 statement ok
 INSERT INTO bcs_li VALUES (100, 10, 1), (101, 10, 2), (102, 11, 3), (103, NULL, 40);
 
+# A fact on `li` is queried base-anchored (FROM c LEFT JOIN o LEFT JOIN li),
+# where `o_id` is on two joined tables.
+statement error
+CREATE SEMANTIC VIEW bcs_v AS
+  TABLES (
+    c  AS bcs_c  PRIMARY KEY (c_id),
+    o  AS bcs_o  PRIMARY KEY (o_id),
+    li AS bcs_li PRIMARY KEY (li_id)
+  )
+  RELATIONSHIPS (
+    o_to_c  AS o(c_id)  REFERENCES c,
+    li_to_o AS li(o_id) REFERENCES o
+  )
+  FACTS (li.li_order AS o_id)
+  DIMENSIONS (c.region AS region);
+----
+fact 'li_order' does not bind: Binder Error: Ambiguous reference to column name "o_id"
+
+# A metric on `li` reading `o`'s `amount`: `li` alone has no such column.
+statement error
+CREATE SEMANTIC VIEW bcs_v AS
+  TABLES (
+    c  AS bcs_c  PRIMARY KEY (c_id),
+    o  AS bcs_o  PRIMARY KEY (o_id),
+    li AS bcs_li PRIMARY KEY (li_id)
+  )
+  RELATIONSHIPS (
+    o_to_c  AS o(c_id)  REFERENCES c,
+    li_to_o AS li(o_id) REFERENCES o
+  )
+  DIMENSIONS (c.region AS region)
+  METRICS (li.li_amount AS SUM(amount));
+----
+metric 'li_amount' does not bind:
+
 statement ok
 CREATE SEMANTIC VIEW bcs_v AS
   TABLES (
@@ -47,9 +84,6 @@ CREATE SEMANTIC VIEW bcs_v AS
     o_to_c  AS o(c_id)  REFERENCES c,
     li_to_o AS li(o_id) REFERENCES o
   )
-  FACTS (
-    li.li_order AS o_id
-  )
   DIMENSIONS (
     c.region   AS region,
     o.order_id AS o_id,
@@ -58,8 +92,7 @@ CREATE SEMANTIC VIEW bcs_v AS
   METRICS (
     o.sum_o_oid  AS SUM(o_id),
     li.sum_li_oid AS SUM(o_id),
-    li.total_qty AS SUM(qty),
-    li.li_amount AS SUM(amount)
+    li.total_qty AS SUM(qty)
   );
 
 # Metric, home-anchored (FROM li LEFT JOIN o LEFT JOIN c): ambiguous.
@@ -86,12 +119,6 @@ SELECT * FROM SEMANTIC_VIEW(bcs_v DIMENSIONS order_id, item_qty);
 ----
 Ambiguous reference to column name "o_id"
 
-# FACTS (base-anchored): ambiguous.
-statement error
-SELECT * FROM SEMANTIC_VIEW(bcs_v DIMENSIONS region FACTS li_order);
-----
-Ambiguous reference to column name "o_id"
-
 # The home table alone suffices: binds to li.o_id, 10 + 10 + 11 = 31.
 # Before #71 (FROM c LEFT JOIN o LEFT JOIN li) this was ambiguous.
 query I
@@ -108,23 +135,6 @@ ORDER BY region NULLS LAST;
 EU	21
 US	12
 NULL	13
-
-# KNOWN GAP (TECH-DEBT #83): `li.li_amount AS SUM(amount)` reads a column of
-# `o`. Grouped by region, `o` is joined, so it sums each order's amount once per
-# line item: EU 250 (order 10 counted twice). Snowflake rejects the definition.
-query TI
-SELECT * FROM SEMANTIC_VIEW(bcs_v DIMENSIONS region METRICS li_amount)
-ORDER BY region NULLS LAST;
-----
-EU	250
-NULL	NULL
-
-# ...and with no dimension `li` is scanned alone, so `amount` does not bind.
-# Before #71 this returned the same silent 250.
-statement error
-SELECT * FROM SEMANTIC_VIEW(bcs_v METRICS li_amount);
-----
-"amount" not found
 
 statement ok
 DROP SEMANTIC VIEW bcs_v;

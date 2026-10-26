@@ -17,10 +17,10 @@
 require semantic_views
 
 statement ok
-CREATE TABLE cr0806y_orders (id INTEGER PRIMARY KEY, amount DOUBLE, region VARCHAR);
+CREATE TABLE cr0806y_orders (id INTEGER PRIMARY KEY, amount DOUBLE, region VARCHAR, "comment" VARCHAR);
 
 statement ok
-INSERT INTO cr0806y_orders VALUES (1, 100.0, 'East'), (2, 200.0, 'West');
+INSERT INTO cr0806y_orders (id, amount, region) VALUES (1, 100.0, 'East'), (2, 200.0, 'West');
 
 statement ok
 CREATE TABLE cr0806y_cust (cust_id INTEGER PRIMARY KEY, name VARCHAR);
@@ -191,6 +191,9 @@ WHERE d LIKE '%a.b AS o(id) REFERENCES c%';
 
 # A physical table name needing quotes still imports: the renderer quotes it,
 # so it round-trips.
+statement ok
+CREATE TABLE "cr0806y orders" (id INTEGER PRIMARY KEY, amount DOUBLE);
+
 statement ok
 CREATE SEMANTIC VIEW cr0806y_quotedtable FROM YAML $$
 tables:

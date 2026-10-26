@@ -225,6 +225,26 @@ fn keyword_names_render_quoted() {
     );
 }
 
+/// `create_front_door_proptest`: a relationship named `as` rendered as
+/// `as AS t1(fk) REFERENCES t0`, and the entry parser split it at that first
+/// `AS`, leaving no name. Only a YAML definition can store the name bare; it
+/// is now rendered quoted, and a dotted name (`a.b`) stays verbatim.
+#[test]
+fn relationship_named_as_renders_quoted() {
+    for rel in ["as", "AS"] {
+        let text = format!(
+            "CREATE SEMANTIC VIEW yv FROM YAML $$\n\
+             tables:\n  - alias: o\n    table: orders\n    pk_columns: [id]\n\
+             \x20 - alias: c\n    table: customers\n    pk_columns: [id]\n\
+             joins:\n  - name: {rel}\n    from_alias: o\n    table: c\n    fk_columns: [cid]\n\
+             dimensions: []\n\
+             metrics:\n  - name: total\n    expr: SUM(o.amount)\n    source_table: o\n\
+             $$\n"
+        );
+        assert_fixpoint(&text);
+    }
+}
+
 /// `fuzz_ddl_parse`, run 40198249801: leading non-breaking spaces, which
 /// `str::trim` strips but the ASCII lead count does not, put the view-name
 /// offset inside a character and the slice panicked. The target's own check

@@ -32,7 +32,7 @@
 
 use std::collections::{HashMap, HashSet};
 
-use crate::expand::{quote_ident, ExpandError};
+use crate::expand::{quote_ident, quote_stored_ident, ExpandError};
 use crate::expr_tokens::{
     call_end, call_is_windowed, find_parameters, has_statement_separator, scan_function_heads,
     scan_references, subquery_spans, IdentRef,
@@ -540,7 +540,7 @@ impl<'d> Lowering<'d, '_> {
                 // so that inlining still sees the fact's name on its own.
                 Member::Fact(f) => {
                     let name = match &f.source_table {
-                        Some(t) => format!("{}.{}", quote_ident(t), quote_ident(&f.name)),
+                        Some(t) => format!("{}.{}", quote_stored_ident(t), quote_ident(&f.name)),
                         None => quote_ident(&f.name),
                     };
                     if field_at < r.raw.len() {
