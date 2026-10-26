@@ -9,6 +9,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+_No unreleased changes yet._
+
+## [0.17.0] - 2026-10-26
+
 ### Added
 
 - **Standard SQL queries.** Query a semantic view by name with standard SQL, as in Snowflake: `SELECT region, AGG(revenue) FROM analytics WHERE channel = 'web' GROUP BY region`. `GROUP BY` expressions (by name, position, `SELECT` alias or `GROUP BY ALL`) are the dimensions (a grouped fact gives one row per value), each metric is passed to `AGG` (`MIN`, `MAX` and `ANY_VALUE` of a metric mean the same), any other aggregate is an ad-hoc metric, and a `SELECT` item that is neither grouped nor aggregated is a fact. `WHERE` filters before aggregation and `HAVING` after it. The query turns into the `SEMANTIC_VIEW(...)` construct, so results, checks and errors are the construct's. It works anywhere a query does (subqueries, CTEs, `UNION`, `CREATE TABLE AS`, `INSERT`, `UPDATE`, `DELETE`, `SET VARIABLE`, `COPY`, `EXPLAIN`, `DESCRIBE`, prepared statements, `CREATE VIEW`), in any clause that holds a subquery, and from Python through `duckdb.sql()`, `con.sql()` and `con.execute()`, including a relation read by its variable name in a later query. Following Snowflake's rules, a metric outside `AGG`, a dimension missing from `GROUP BY`, `HAVING` over anything but aggregated metrics, a qualified reference to an enclosing query, and `SELECT *`, joins, `PIVOT`, window functions, `QUALIFY` and `GROUPING SETS` in the query block that reads the view are refused with an error naming the view. A name that is a table, a view, a CTE in scope or a Python DataFrame or relation keeps its usual meaning. Two rules are this extension's own: `COUNT(*)` alone is refused, since it reads no member to say which table's rows it counts (declare a `COUNT(*)` metric on a table and pass it to `AGG`); and a bare name in `WHERE` that is no member is passed to DuckDB as written, as a raw column in the construct's `WHERE` is, so when no table of the view has a column of that name it binds to the enclosing query.
@@ -1100,7 +1104,8 @@ Connection-lifecycle and ADBC fixes. Two downstream regressions reported against
 - `list_semantic_views()` and `describe_semantic_view()` introspection functions
 - Fuzz targets for FFI boundary testing
 
-[Unreleased]: https://github.com/s-layer/duckdb-semantic-views/compare/v0.16.0...HEAD
+[Unreleased]: https://github.com/s-layer/duckdb-semantic-views/compare/v0.17.0...HEAD
+[0.17.0]: https://github.com/s-layer/duckdb-semantic-views/compare/v0.16.0...v0.17.0
 [0.16.0]: https://github.com/s-layer/duckdb-semantic-views/compare/v0.15.0...v0.16.0
 [0.15.0]: https://github.com/s-layer/duckdb-semantic-views/compare/v0.14.1...v0.15.0
 [0.14.2]: https://github.com/s-layer/duckdb-semantic-views/compare/v0.14.1...v0.14.2
