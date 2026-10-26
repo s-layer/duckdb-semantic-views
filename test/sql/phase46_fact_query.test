@@ -142,6 +142,52 @@ US	42.50
 US	50.00
 US	90.00
 
+# A fact table that references two others: line items reference both their
+# order and their product, so a fact on li with a dimension on each of o and pr
+# joins one row of each per line item -- nothing multiplies, though neither o
+# nor pr can reach the other. The query table li is the one row each.
+statement ok
+CREATE TABLE p46f_products (name VARCHAR PRIMARY KEY, maker VARCHAR);
+
+statement ok
+INSERT INTO p46f_products VALUES ('Widget', 'Acme'), ('Gadget', 'Globex');
+
+statement ok
+CREATE SEMANTIC VIEW p46f_two_parents AS
+TABLES (
+    li AS p46f_line_items PRIMARY KEY (id),
+    o AS p46f_orders PRIMARY KEY (id),
+    pr AS p46f_products PRIMARY KEY (name)
+)
+RELATIONSHIPS (
+    li_to_o AS li(order_id) REFERENCES o,
+    li_to_pr AS li(product) REFERENCES pr
+)
+FACTS (
+    li.qty AS li.quantity,
+    o.order_status AS o.status
+)
+DIMENSIONS (
+    o.region AS o.region,
+    pr.maker AS pr.maker
+);
+
+query TTI
+FROM SEMANTIC_VIEW(p46f_two_parents DIMENSIONS region, maker FACTS qty)
+ORDER BY 1, 2, 3;
+----
+EU	Acme	3
+US	Acme	10
+US	Globex	5
+US	Globex	7
+
+# Without li, the same two tables meet only through it, and each order would
+# come back once per line item: still refused.
+statement error
+FROM SEMANTIC_VIEW(p46f_two_parents DIMENSIONS maker FACTS order_status);
+----
+incompatible table paths
+
 # ============================================================
 # PRIVATE fact exclusion
 # ============================================================

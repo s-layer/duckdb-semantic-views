@@ -76,7 +76,7 @@ Concept Mapping
      - No declared parameters. A prepared statement's parameter in the query's ``WHERE`` supplies a run-time value (see :ref:`ref-sv-construct`)
    * - Query interface
      - Standard SQL against the metric view name, with every measure wrapped in ``MEASURE()``
-     - The :ref:`SEMANTIC_VIEW(...) <ref-sv-construct>` construct, written as in Snowflake, or the :ref:`semantic_view() <ref-semantic-view-function>` table function
+     - Standard SQL against the view name, with every metric wrapped in ``AGG()`` as in Snowflake (see :ref:`howto-standard-sql`); also the :ref:`SEMANTIC_VIEW(...) <ref-sv-construct>` construct and the :ref:`semantic_view() <ref-semantic-view-function>` table function
    * - View inspection
      - ``DESCRIBE TABLE EXTENDED``, or Catalog Explorer
      - :ref:`DESCRIBE SEMANTIC VIEW <ref-describe-semantic-view>`, :ref:`SHOW SEMANTIC VIEWS <ref-show-semantic-views>`
@@ -193,10 +193,6 @@ That difference carries through to fan-out. Databricks' ``rely.at_most_one_match
 Query Interface
 ---------------
 
-.. warning::
-
-   DuckDB Semantic Views queries a semantic view with ``SEMANTIC_VIEW(...)`` or a table function, not direct SQL.
-
 Databricks metric views are queried with standard SQL, as if querying a regular table or view. Every measure must be wrapped in the ``MEASURE()`` aggregate function, and ``SELECT *`` is not available, so fields are listed explicitly:
 
 .. code-block:: sql
@@ -206,7 +202,16 @@ Databricks metric views are queried with standard SQL, as if querying a regular 
    FROM main.analytics.revenue_by_region
    GROUP BY region;
 
-DuckDB Semantic Views names the dimensions and metrics explicitly, with Snowflake's :ref:`SEMANTIC_VIEW(...) construct <ref-sv-construct>` or the :ref:`semantic_view() <ref-semantic-view-function>` table function it turns into. ``SELECT *`` works, and no ``MEASURE()`` wrapper is needed:
+DuckDB Semantic Views takes the same shape, with Snowflake's ``AGG()`` in place of ``MEASURE()`` (see :ref:`howto-standard-sql`); ``SELECT *`` is refused here too:
+
+.. code-block:: sql
+
+   -- DuckDB: standard SQL, with AGG() around each metric
+   SELECT region, AGG(revenue) AS revenue
+   FROM revenue_by_region
+   GROUP BY region;
+
+It can also name the dimensions and metrics explicitly, with Snowflake's :ref:`SEMANTIC_VIEW(...) construct <ref-sv-construct>` or the :ref:`semantic_view() <ref-semantic-view-function>` table function it turns into. There ``SELECT *`` works, and no wrapper is needed:
 
 .. code-block:: sql
 
@@ -271,8 +276,6 @@ Features in Databricks Not in DuckDB Semantic Views
 
    * - Feature
      - Description
-   * - Direct SQL query interface
-     - Query metric views with standard ``SELECT`` SQL, wrapping each measure in ``MEASURE()``. DuckDB names the members in ``SEMANTIC_VIEW(...)`` or a table function.
    * - Unity Catalog integration
      - Metric views are first-class catalog objects with lineage tracking, access control, and governance.
    * - Row-level security / column masking

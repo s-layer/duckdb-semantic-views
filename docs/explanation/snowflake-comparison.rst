@@ -68,7 +68,7 @@ Concept Mapping
      - ``MATERIALIZATIONS`` clause for routing to pre-aggregated tables (see :ref:`howto-materializations`)
    * - Query interface
      - ``SEMANTIC_VIEW(...)`` construct, and direct SQL with semantic resolution
-     - The same :ref:`SEMANTIC_VIEW(...) <ref-sv-construct>` construct, and the :ref:`semantic_view() <ref-semantic-view-function>` table function it turns into; no direct SQL
+     - The same :ref:`SEMANTIC_VIEW(...) <ref-sv-construct>` construct, :ref:`direct SQL <howto-standard-sql>` with ``AGG``, and the :ref:`semantic_view() <ref-semantic-view-function>` table function
    * - Wildcard selection
      - ``alias.*`` in query parameters
      - ``alias.*`` in ``DIMENSIONS``, ``METRICS``, ``FACTS`` (see :ref:`howto-wildcard-selection`)
@@ -240,13 +240,14 @@ This prevents the extension from synthesizing an incorrect JOIN ON clause.
 Query Interface
 ---------------
 
-.. warning::
-
-   DuckDB Semantic Views queries a semantic view with ``SEMANTIC_VIEW(...)`` or a table function, not direct SQL.
-
-In Snowflake, you can write standard SQL against a semantic view and the system resolves dimensions and metrics. In DuckDB, you name the dimensions and metrics, either with the same :ref:`SEMANTIC_VIEW(...) construct <ref-sv-construct>` Snowflake has, or with the :ref:`semantic_view() <ref-semantic-view-function>` table function it turns into.
+Both systems query a semantic view in three ways: by name with standard SQL, passing each metric to ``AGG``; with the ``SEMANTIC_VIEW(...)`` construct; and, in DuckDB only, with the :ref:`semantic_view() <ref-semantic-view-function>` table function the construct turns into.
 
 .. code-block:: sql
+
+   -- Both: standard SQL over the view by name, with AGG around each metric
+   SELECT region, AGG(revenue)
+   FROM analytics
+   GROUP BY region;
 
    -- Both: the SEMANTIC_VIEW construct. The view name and the dimension /
    -- metric references are bare identifiers (not string literals), and there
@@ -263,11 +264,7 @@ In Snowflake, you can write standard SQL against a semantic view and the system 
        metrics := ['orders.revenue']
    );
 
-   -- Snowflake: direct SQL with AGG view-defined aggregate function
-   -- (NOT currently supported in DuckDB Semantic Views)
-   SELECT region, AGG(revenue)
-   FROM analytics
-   GROUP BY region;
+The standard-SQL form follows Snowflake's rules: ``GROUP BY`` expressions are the dimensions, a metric is passed to ``AGG`` (``MIN``, ``MAX`` and ``ANY_VALUE`` of a metric mean the same), other aggregates are ad-hoc metrics, ``WHERE`` refers to dimensions and facts, ``HAVING`` to aggregated metrics, and the block that reads the view has no joins, window functions, ``QUALIFY``, ``PIVOT`` or correlated references. See :ref:`howto-standard-sql`. Two differences come from DuckDB rather than from semantic views: a name that is also a table, a view or a CTE in scope reads that, not the semantic view; and ``SELECT *`` is refused, where the construct's ``SELECT * FROM SEMANTIC_VIEW(...)`` is not.
 
 
 Cardinality Inference
