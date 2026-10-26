@@ -1,0 +1,78 @@
+# Key columns written quoted (`PRIMARY KEY ("Key Col")`, a relationship's
+# `("Parent Ref")`) are stored as written, quotes included. Every site that
+# emits one quotes it again, so it must strip the stored quotes first: the
+# join's ON clause, the COUNT(<pk>) a COUNT(*) on a non-base table becomes, and
+# the phantom-row filter of a row-level query. Each site is reached on its own
+# below. Found when CREATE began binding every member: every member of such a
+# view failed to bind.
+
+require semantic_views
+
+statement ok
+CREATE TABLE qk_parent ("Key Col" INTEGER PRIMARY KEY, region VARCHAR);
+
+statement ok
+CREATE TABLE qk_child ("Child Id" INTEGER PRIMARY KEY, "Parent Ref" INTEGER, amount INTEGER);
+
+statement ok
+INSERT INTO qk_parent VALUES (1, 'East'), (2, 'West'), (3, 'North');
+
+statement ok
+INSERT INTO qk_child VALUES (10, 1, 5), (11, 1, 7), (12, 2, 3);
+
+statement ok
+CREATE SEMANTIC VIEW qk AS
+  TABLES (p AS qk_parent PRIMARY KEY ("Key Col"), c AS qk_child PRIMARY KEY ("Child Id"))
+  RELATIONSHIPS (cp AS c("Parent Ref") REFERENCES p)
+  DIMENSIONS (p.region AS p.region)
+  METRICS (c.total AS SUM(c.amount));
+
+# The ON clause: c."Parent Ref" = p."Key Col".
+
+query TI
+SELECT * FROM SEMANTIC_VIEW(qk DIMENSIONS region METRICS total) ORDER BY 1;
+----
+East	12
+North	NULL
+West	3
+
+# The relationship's own key columns unquoted, so the next two reach only the
+# child's quoted PRIMARY KEY.
+
+statement ok
+CREATE TABLE qk_parent2 (id INTEGER PRIMARY KEY, region VARCHAR);
+
+statement ok
+CREATE TABLE qk_child2 ("Child Id" INTEGER PRIMARY KEY, pid INTEGER, amount INTEGER);
+
+statement ok
+INSERT INTO qk_parent2 VALUES (1, 'East'), (2, 'West'), (3, 'North');
+
+statement ok
+INSERT INTO qk_child2 VALUES (10, 1, 5), (11, 1, 7), (12, 2, 3);
+
+statement ok
+CREATE SEMANTIC VIEW qk2 AS
+  TABLES (p AS qk_parent2 PRIMARY KEY (id), c AS qk_child2 PRIMARY KEY ("Child Id"))
+  RELATIONSHIPS (cp AS c(pid) REFERENCES p)
+  FACTS (c.amt AS c.amount)
+  DIMENSIONS (p.region AS p.region)
+  METRICS (c.n AS COUNT(*));
+
+# COUNT(*) on the child counts its PRIMARY KEY: COUNT(c."Child Id").
+
+query TI
+SELECT * FROM SEMANTIC_VIEW(qk2 DIMENSIONS region METRICS n) ORDER BY 1;
+----
+East	2
+North	0
+West	1
+
+# A fact on the child keeps only rows with a child: c."Child Id" IS NOT NULL.
+
+query I
+SELECT * FROM SEMANTIC_VIEW(qk2 FACTS amt) ORDER BY 1;
+----
+3
+5
+7
