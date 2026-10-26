@@ -48,6 +48,14 @@ Extensions so far:
   - Phase 5 standard-SQL form: every request is also run as
     `SELECT ... FROM diff_sv ... GROUP BY ...` (four spellings of the GROUP
     BY keys, with WHERE and HAVING in rotation) against its own reference.
+  - Phase 5, randomized: 150 standard-SQL queries over `diff_std` built from
+    parts -- dimension expressions as GROUP BY keys spelled differently from
+    their SELECT item, AGG / MIN / MAX / ANY_VALUE of metrics, arithmetic over
+    AGG, ad-hoc aggregates, FACTS items, WHERE on the base table, a joined
+    table or a fact with random literals (alone or AND / OR), and HAVING over
+    metrics and ad-hoc aggregates -- each against reference SQL built from the
+    same parts. A guard fails the run if the generator stops drawing any of
+    them.
 
 Usage:
     uv run test/integration/test_differential.py
@@ -235,6 +243,250 @@ def standard_form_sql(i: int, dims: list[str], mets: list[str], where: str, havi
     if having:
         sql += f" HAVING {having}"
     return sql
+
+
+# Phase 5, randomized: standard-SQL queries over `diff_std` built from parts,
+# each against reference SQL built from the same parts. The fixed rotation
+# above covers the GROUP BY spellings; this one varies what decides the number
+# returned: dimension expressions as keys (matched however they are written),
+# ad-hoc aggregates over facts and dimensions, MIN / MAX / ANY_VALUE of a
+# metric, arithmetic over AGG, FACTS items, WHERE on the base and on joined
+# tables with random literals, and HAVING over metrics and ad-hoc aggregates.
+CREATE_STD_VIEW = """
+CREATE SEMANTIC VIEW diff_std AS
+  TABLES (
+    o AS orders PRIMARY KEY (id),
+    c AS customers PRIMARY KEY (id),
+    p AS products PRIMARY KEY (id)
+  )
+  RELATIONSHIPS (
+    order_customer AS o(customer_id) REFERENCES c,
+    order_product AS o(product_id) REFERENCES p
+  )
+  FACTS (
+    o.amount AS o.amount,
+    o.qty AS o.qty,
+    o.line_value AS o.amount * o.qty
+  )
+  DIMENSIONS (
+    o.region AS o.region,
+    c.tier AS c.tier,
+    p.category AS p.category
+  )
+  METRICS (
+    o.revenue AS SUM(o.amount),
+    o.order_count AS COUNT(*),
+    o.max_qty AS MAX(o.qty),
+    o.aov AS AVG(o.amount)
+  )
+"""
+
+# Each part: (feature, standard-form text, reference text, tables it reads).
+# A key's standard-form text is a list of spellings of the same expression;
+# the SELECT item and its GROUP BY key take different ones.
+STD_KEYS = [
+    ("dim", ["region", "REGION", "s.region"], "o.region", set()),
+    ("dim", ["tier", "Tier"], "c.tier", {"c"}),
+    ("dim", ["category", "s.Category"], "p.category", {"p"}),
+    ("dim_expr", ["upper(region)", "UPPER(Region)", "upper(s.region)"], "upper(o.region)", set()),
+    ("dim_expr", ["left(region, 1)", "LEFT(REGION, 1)"], "left(o.region, 1)", set()),
+    (
+        "dim_expr",
+        ["coalesce(tier, 'none')", "COALESCE(Tier, 'none')"],
+        "coalesce(c.tier, 'none')",
+        {"c"},
+    ),
+    ("dim_expr", ["length(category)", "LENGTH(s.category)"], "length(p.category)", {"p"}),
+]
+STD_AGGS = [
+    ("agg", "AGG(revenue)", "SUM(o.amount)", set()),
+    ("agg", "AGG(order_count)", "COUNT(*)", set()),
+    ("agg", "AGG(aov)", "AVG(o.amount)", set()),
+    ("metric_minmax", "MIN(max_qty)", "MAX(o.qty)", set()),
+    ("metric_minmax", "MAX(revenue)", "SUM(o.amount)", set()),
+    ("metric_minmax", "ANY_VALUE(order_count)", "COUNT(*)", set()),
+    ("agg_arith", "AGG(revenue) / AGG(order_count)", "SUM(o.amount) / COUNT(*)", set()),
+    ("agg_arith", "AGG(revenue) * 2 + AGG(max_qty)", "SUM(o.amount) * 2 + MAX(o.qty)", set()),
+    ("adhoc", "SUM(amount)", "SUM(o.amount)", set()),
+    ("adhoc", "AVG(qty)", "AVG(o.qty)", set()),
+    ("adhoc", "SUM(line_value)", "SUM(o.amount * o.qty)", set()),
+    ("adhoc", "MAX(qty) - MIN(qty)", "MAX(o.qty) - MIN(o.qty)", set()),
+    ("adhoc", "COUNT(DISTINCT region)", "COUNT(DISTINCT o.region)", set()),
+]
+STD_FACTS = [
+    ("fact", "amount", "o.amount", set()),
+    ("fact", "qty", "o.qty", set()),
+    ("fact", "line_value", "o.amount * o.qty", set()),
+    ("fact", "amount * 2 + qty", "o.amount * 2 + o.qty", set()),
+]
+
+
+def std_where(rng: random.Random) -> tuple[str, str, set[str], str]:
+    """A random WHERE predicate: (standard form, reference, tables, feature)."""
+
+    def atom() -> tuple[str, str, set[str], str]:
+        k = rng.randrange(6)
+        if k == 0:
+            r = rng.choice(["east", "west", "north", "south"])
+            return f"region <> '{r}'", f"o.region <> '{r}'", set(), "where_base"
+        if k == 1:
+            rs = rng.sample(["east", "west", "north", "south"], 2)
+            lst = ", ".join(f"'{r}'" for r in rs)
+            return f"region IN ({lst})", f"o.region IN ({lst})", set(), "where_base"
+        if k == 2:
+            t = rng.choice(["gold", "silver", "bronze"])
+            return f"tier = '{t}'", f"c.tier = '{t}'", {"c"}, "where_joined"
+        if k == 3:
+            cat = rng.choice(["alpha", "beta", "gamma"])
+            return f"category <> '{cat}'", f"p.category <> '{cat}'", {"p"}, "where_joined"
+        if k == 4:
+            q = rng.randrange(1, 20)
+            return f"qty > {q}", f"o.qty > {q}", set(), "where_fact"
+        lo = rng.randrange(1, 400)
+        hi = lo + rng.randrange(20, 200)
+        return (
+            f"amount BETWEEN {lo} AND {hi}",
+            f"o.amount BETWEEN {lo} AND {hi}",
+            set(),
+            "where_fact",
+        )
+
+    sv, ref, tables, feature = atom()
+    if rng.random() < 0.4:
+        sv2, ref2, tables2, _ = atom()
+        op = rng.choice(["AND", "OR"])
+        sv, ref, tables = f"({sv}) {op} ({sv2})", f"({ref}) {op} ({ref2})", tables | tables2
+        feature = "where_compound"
+    return sv, ref, tables, feature
+
+
+def std_having(rng: random.Random) -> tuple[str, str, str]:
+    """A random HAVING predicate: (standard form, reference, feature)."""
+    k = rng.randrange(4)
+    if k == 0:
+        n = rng.randrange(20, 400)
+        return f"AGG(order_count) > {n}", f"COUNT(*) > {n}", "having_metric"
+    if k == 1:
+        n = rng.randrange(2000, 60000)
+        return f"AGG(revenue) < {n}", f"SUM(o.amount) < {n}", "having_metric"
+    if k == 2:
+        n = rng.randrange(2000, 60000)
+        return f"SUM(amount) > {n}", f"SUM(o.amount) > {n}", "having_adhoc"
+    n = rng.randrange(5, 15)
+    return f"AVG(qty) >= {n}", f"AVG(o.qty) >= {n}", "having_adhoc"
+
+
+def std_reference(
+    items: list[str], tables: set[str], where: str, groups: int, having: str, distinct: bool = False
+) -> str:
+    joins = []
+    if "c" in tables:
+        joins.append("LEFT JOIN customers c ON o.customer_id = c.id")
+    if "p" in tables:
+        joins.append("LEFT JOIN products p ON o.product_id = p.id")
+    sql = f"SELECT {'DISTINCT ' if distinct else ''}{', '.join(items)} FROM orders o"
+    if joins:
+        sql += " " + " ".join(joins)
+    if where:
+        sql += f" WHERE {where}"
+    if groups:
+        sql += " GROUP BY " + ", ".join(str(k + 1) for k in range(groups))
+    if having:
+        sql += f" HAVING {having}"
+    return sql
+
+
+def std_random_query(rng: random.Random) -> tuple[str, str, set[str]]:
+    """One random standard-form query and its reference: (sql, reference, features)."""
+    features: set[str] = set()
+    tables: set[str] = set()
+    keys = rng.sample(STD_KEYS, rng.randrange(0, 3))
+    facts_query = rng.random() < 0.15
+    sv_items, ref_items, group_keys = [], [], []
+    spelling = rng.randrange(4)  # 0 expression, 1 ordinal, 2 alias, 3 ALL
+    for n, (feature, spellings, ref, needs) in enumerate(keys):
+        features.add(feature)
+        tables |= needs
+        item, key = rng.choice(spellings), rng.choice(spellings)
+        sv_items.append(f"{item} AS g{n}" if spelling == 2 else item)
+        group_keys.append({0: key, 1: str(n + 1), 2: f"g{n}", 3: "ALL"}[spelling])
+        ref_items.append(ref)
+    if facts_query:
+        for feature, sv, ref, needs in rng.sample(STD_FACTS, rng.randrange(1, 3)):
+            features.add(feature)
+            tables |= needs
+            sv_items.append(sv)
+            ref_items.append(ref)
+    else:
+        n_aggs = rng.randrange(1 if not keys else 0, 4)
+        for feature, sv, ref, needs in rng.sample(STD_AGGS, n_aggs):
+            features.add(feature)
+            tables |= needs
+            sv_items.append(sv)
+            ref_items.append(ref)
+    where_sv = where_ref = ""
+    if rng.random() < 0.5:
+        where_sv, where_ref, needs, feature = std_where(rng)
+        features.add(feature)
+        tables |= needs
+    having_sv = having_ref = ""
+    aggregated = not facts_query and len(sv_items) > len(keys)
+    if aggregated and rng.random() < 0.4:
+        having_sv, having_ref, feature = std_having(rng)
+        features.add(feature)
+    sql = f"SELECT {', '.join(sv_items)} FROM diff_std s"
+    if where_sv:
+        sql += f" WHERE {where_sv}"
+    if keys:
+        sql += " GROUP BY " + ("ALL" if spelling == 3 else ", ".join(group_keys))
+    if having_sv:
+        sql += f" HAVING {having_sv}"
+    groups = len(keys) if aggregated else 0
+    # Grouped and not aggregated, the keys are the rows, once each. GROUP BY ALL
+    # groups the facts too; GROUP BY the keys alone leaves them row-level.
+    distinct = bool(keys) and not aggregated and (not facts_query or spelling == 3)
+    ref = std_reference(ref_items, tables, where_ref, groups, having_ref, distinct)
+    return sql, ref, features
+
+
+STD_RANDOM_QUERIES = 150
+# Every feature the generator draws, so a narrowed generator fails loudly
+# instead of leaving a path with no randomized coverage.
+STD_FEATURES = {
+    "dim",
+    "dim_expr",
+    "agg",
+    "metric_minmax",
+    "agg_arith",
+    "adhoc",
+    "fact",
+    "where_base",
+    "where_joined",
+    "where_fact",
+    "where_compound",
+    "having_metric",
+    "having_adhoc",
+}
+
+
+def run_standard_form_random_section(conn) -> tuple[int, int]:
+    conn.execute(CREATE_STD_VIEW)
+    rng = random.Random(SEED + 5)
+    total, failures = 0, 0
+    seen: set[str] = set()
+    for i in range(STD_RANDOM_QUERIES):
+        sql, ref, features = std_random_query(rng)
+        seen |= features
+        total += 1
+        failures += _check(conn, f"standard form random #{i}: {sql}", sql, ref)
+    missing = STD_FEATURES - seen
+    total += 1
+    if missing:
+        failures += 1
+        print(f"FAIL standard form random: generator never drew {sorted(missing)}")
+    else:
+        print("  PASS: standard form random generator drew every feature")
+    return total, failures
 
 
 def _is_num(v) -> bool:
@@ -827,6 +1079,9 @@ def run_harness() -> int:
     total += t
     failures += f
     t, f = run_window_section(conn)
+    total += t
+    failures += f
+    t, f = run_standard_form_random_section(conn)
     total += t
     failures += f
     t, f = run_wildcard_section(conn)

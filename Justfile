@@ -344,11 +344,18 @@ test-sqllogictest-guards: build _ensure-test-deps
 test-multi-statement-error: build
     uv run test/integration/test_multi_statement_ddl_error.py
 
+# The standard-SQL query form from Python: con.execute(), con.sql(),
+# duckdb.sql(), a relation read by its variable name, a DataFrame or relation
+# named like the view keeping its meaning, and multi-statement strings.
+# Check the standard-SQL query form from Python
+test-standard-sql-python: build
+    uv run test/integration/test_standard_sql_python.py
+
 # All Python integration suites against the built extension. This is the
 # exact set the `python-integration` CI job runs (IntegrationChecks.yml) —
 # keep the two in sync by editing THIS recipe, not the workflow.
 # (test-ducklake-ci is excluded: it has its own dedicated CI job.)
-test-integration: test-engine-pins test-legacy-schema-spelling test-vtab-crash test-caret test-adbc test-adbc-queries test-large-view test-multi-db test-readonly test-concurrent test-load-idempotent test-load-version-guard test-yaml-file-create test-attach-migration test-readonly-fresh-drop test-chunk-boundary test-differential test-show-scope-case test-show-scope-qualified test-get-ddl-qualified test-interrupt test-examples test-sqllogictest-guards test-multi-statement-error
+test-integration: test-engine-pins test-legacy-schema-spelling test-vtab-crash test-caret test-adbc test-adbc-queries test-large-view test-multi-db test-readonly test-concurrent test-load-idempotent test-load-version-guard test-yaml-file-create test-attach-migration test-readonly-fresh-drop test-chunk-boundary test-differential test-show-scope-case test-show-scope-qualified test-get-ddl-qualified test-interrupt test-examples test-sqllogictest-guards test-multi-statement-error test-standard-sql-python
 
 # Run all tests: Rust unit tests + SQL logic tests + DuckLake integration + all Python integration suites
 # Note: test-iceberg requires `just setup-ducklake` first. test-ducklake-ci uses synthetic data.

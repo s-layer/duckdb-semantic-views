@@ -143,3 +143,4 @@ test/sql/grammar_write_statements.test
 test/sql/grammar_create.test
 test/sql/standard_sql_query.test
 test/sql/standard_sql_query_refusals.test
+test/sql/standard_sql_query_resolution.test

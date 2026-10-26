@@ -16,8 +16,10 @@
 use crate::model::SemanticViewDefinition;
 
 /// One member, as the rewrite sees it: its kind, the logical table it is
-/// defined on (empty for a derived metric) and its name, each lower-cased, as
-/// `DuckDB` matches identifiers case-insensitively.
+/// defined on (empty for a derived metric) and its name. Both are stored as
+/// written, quotes included, so each is listed as its match key
+/// ([`crate::ident::normalize_ident_part`]: unquoted, ASCII lower-cased), as
+/// `DuckDB` matches identifiers case-insensitively, quoted or not.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Member {
     pub kind: MemberKind,
@@ -167,6 +169,27 @@ mod tests {
         assert_eq!(
             member_listing(&members(&def())),
             "D\tc\tregion\nM\to\trevenue\nM\t\taov\nF\to\tamount\n"
+        );
+    }
+
+    #[test]
+    fn quoted_names_are_listed_unquoted() {
+        let def = SemanticViewDefinition::from_json(
+            "shop",
+            r#"{
+                "tables": [{"alias": "\"Ord Lines\"", "table": "orders"}],
+                "dimensions": [
+                    {"name": "\"Region\"", "expr": "o.region", "source_table": "\"Ord Lines\""}
+                ],
+                "metrics": [
+                    {"name": "\"Total\"", "expr": "SUM(o.amount)", "source_table": "\"Ord Lines\""}
+                ]
+            }"#,
+        )
+        .unwrap();
+        assert_eq!(
+            member_listing(&members(&def)),
+            "D\tord lines\tregion\nM\tord lines\ttotal\n"
         );
     }
 }

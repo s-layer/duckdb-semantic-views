@@ -1733,6 +1733,68 @@ mod tests {
         }
     }
 
+    /// orders references both customers and products, so customers and
+    /// products can each be reached from orders without fanning out, though
+    /// not from each other.
+    fn two_parents_view() -> SemanticViewDefinition {
+        orders_view()
+            .with_table("orders", "orders", &["id"])
+            .with_table("customers", "customers", &["id"])
+            .with_table("products", "products", &["id"])
+            .with_pkfk_join(
+                "orders_customers",
+                "orders",
+                "customers",
+                &["customer_id"],
+                &["id"],
+            )
+            .with_pkfk_join(
+                "orders_products",
+                "orders",
+                "products",
+                &["product_id"],
+                &["id"],
+            )
+    }
+
+    #[test]
+    fn test_validate_fact_table_path_two_parents_through_their_child_ok() {
+        // A fact on orders with a dimension on each parent: one row per order,
+        // each joined to one customer and one product. The pair
+        // (customers, products) is not reachable either way, but orders
+        // reaches both, so nothing multiplies.
+        let fact_tables = vec!["orders".to_string()];
+        let dim_tables = vec!["customers".to_string(), "products".to_string()];
+        let result =
+            validate_fact_table_path("test", &two_parents_view(), &fact_tables, &dim_tables);
+        assert!(
+            result.is_ok(),
+            "orders reaches customers and products without fanning out: {result:?}"
+        );
+        // The order of the tables does not decide it.
+        let dim_tables = vec![
+            "products".to_string(),
+            "customers".to_string(),
+            "orders".to_string(),
+        ];
+        let result = validate_fact_table_path("test", &two_parents_view(), &[], &dim_tables);
+        assert!(result.is_ok(), "same set, other order: {result:?}");
+    }
+
+    #[test]
+    fn test_validate_fact_table_path_two_parents_without_their_child_err() {
+        // The over-widening guard: without orders, customers and products meet
+        // only through it, and each customer row would come back once per order.
+        let fact_tables = vec!["customers".to_string()];
+        let dim_tables = vec!["products".to_string()];
+        let result =
+            validate_fact_table_path("test", &two_parents_view(), &fact_tables, &dim_tables);
+        assert!(
+            matches!(result, Err(ExpandError::FactPathViolation { .. })),
+            "customers and products alone multiply rows: {result:?}"
+        );
+    }
+
     #[test]
     fn test_validate_fact_table_path_no_joins_ok() {
         let def = orders_view();
