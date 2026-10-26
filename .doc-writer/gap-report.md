@@ -1,45 +1,53 @@
-# Gap Detection Report
+# Gap Report
 
-**Source root:** src/
+**Generated:** 2026-10-26, worktree on `c9a767b` (v0.17.0 release prep) against `v0.16.0`
+**Source root:** src/ (plus cpp/src/shim.cpp, which holds the standard-SQL rewrite and its refusals)
 **Language:** rust
-**Generated:** 2026-10-16, worktree on `59589d4` (v0.15.0 release candidate, DuckDB 2.0 build) against `origin/main`
-**Total exported symbols:** Rust `pub` items (internal; see previous report) + 18 registered SQL functions
-**Undocumented symbols:** 0 user-facing (the internal `__sv_compute_create_from_yaml` remains correctly undocumented)
-**Potentially stale pages:** 7 (scoped to this release's changes; see below)
+**Total undocumented symbols:** 0 user-facing
+**Potentially stale pages:** 14 (scoped to this release's changes; see below)
+
+Previous run (v0.16.0): 0 undocumented symbols. Nothing persists from it.
 
 ## Undocumented Symbols
 
-None new. The registered SQL functions were listed from `duckdb_functions()` after `LOAD`ing
-the v2.0.0-alpha47600 build into the matching DuckDB 2.0 Python package: the same 18 functions
-as v0.14.0 (17 documented, 1 internal). No DDL statement or `semantic_view()` parameter was added.
+None. The registered SQL functions, listed from `duckdb_functions()` after `LOAD`ing the
+debug build into the DuckDB 2.0.0 Python package, are the v0.16.0 set plus one internal
+helper, `__sv_check_create` (used by `CREATE` to bind each member). `docs/reference/functions.rst`
+already lists it as internal and not part of the supported interface.
 
-The release changes behaviour, not surface:
+The release changes behaviour and syntax, not the function surface:
 
-- built for, and loadable only in, DuckDB 2.0 (DuckDB 1.5 users stay on v0.14.0)
-- `SET max_execution_time` now stops `semantic_view()` and the SHOW / DESCRIBE commands that
-  probe member types (`INTERRUPT Error: Query exceeded maximum execution time`)
-- unterminated / zero-length quoted identifiers in semantic-view DDL are rejected by DuckDB 2.0's
-  tokenizer (`unterminated quoted identifier`, `zero-length delimited identifier`)
-- the load-time version check's message: `semantic_views was built for DuckDB X and cannot run in DuckDB Y ...`
-
-Side effects of the DuckDB 2.0 move that the docs also describe:
-
-- `enable_peg_parser()` / `disable_peg_parser()` no longer exist (2.0's parser is the PEG parser)
-- `duckdb_functions()` now has an `extension_name` column, but it is NULL for this extension's functions
-- arrow lambdas (`x -> ...`) are deprecated in favour of `lambda x: ...` (no doc page uses one)
+- #314: a semantic view can be queried by name with standard SQL
+  (`SELECT region, AGG(revenue) FROM sv WHERE ... GROUP BY ... HAVING ...`). Documented in
+  `docs/how-to/standard-sql.rst`; refusal messages (`must be passed to AGG`, `must appear in
+  GROUP BY`, `SELECT * is not supported ...`, `cannot be joined, pivoted or read alongside other
+  tables`, window / QUALIFY / sampling / grouping sets / correlated references) are not in the
+  error reference.
+- #315: `CREATE SEMANTIC VIEW` binds every member and refuses one DuckDB cannot bind
+  (`semantic view '<view>': <kind> '<name>' does not bind: <DuckDB error>`). Documented in the
+  CREATE reference and the error reference; several troubleshooting entries elsewhere still
+  describe the old accept-then-fail-at-query behaviour.
+- #316: member-level `[WITH] TAG (...)`. Documented in the CREATE / DESCRIBE / YAML references,
+  the metadata-annotations how-to and both comparison pages.
 
 ## Potentially Stale Pages
 
-The timestamp heuristic flags every page (src/ changed after all of them). Narrowed to pages whose
-content touches the release's changes, by grepping docs/ and README.md for DuckDB versions,
-the PEG parser, quoted-identifier errors, loading, and time limits:
+The timestamp heuristic flags every page (src/ changed after all of them). Narrowed by grepping
+docs/ for the query forms, `direct SQL`, `Not planned`, and claims about when a member's error
+appears (`query time`, `when queried`, `CREATE succeeds`, `does not check`, `binder error`),
+then checking each claim against the debug build:
 
-- `docs/tutorials/getting-started.rst` (install step states no DuckDB version requirement)
-- `docs/reference/functions.rst` ("In DuckDB 1.5, duckdb_functions() has no column ...")
-- `docs/explanation/transactional-ddl-and-limitations.rst` (PEG-parser section built on `disable_peg_parser()`)
-- `docs/explanation/index.rst` (abstract mentions "the PEG parser" caveat)
-- `docs/reference/error-messages.rst` (no load-version or time-limit entries; quoted-identifier errors now DuckDB's)
-- `docs/reference/semantic-view-function.rst` (no mention of query time limits)
-- `README.md` (quick start states no DuckDB version; Building omits CMake)
-
-No other page states a DuckDB 1.x version, pins `duckdb==1.5…`, or contains a version matrix.
+- `docs/explanation/snowflake-comparison.rst` (Feature Parity row "Direct SQL query interface: Not planned")
+- `docs/explanation/semantic-views-vs-regular-views.rst` (query interface row shows only the construct)
+- `docs/index.rst` (intro and meta description name only the construct)
+- `docs/tutorials/getting-started.rst` (teaches only the construct and the function)
+- `docs/tutorials/multi-table.rst` (CREATE OR REPLACE step says nothing of the bind check)
+- `docs/reference/semantic-view-function.rst` (intro lists two spellings, not the standard-SQL form)
+- `docs/reference/error-messages.rst` (no standard-SQL refusal entries; Query Errors intro)
+- `docs/how-to/standard-sql.rst` (no example data: none of its examples run as written)
+- `docs/how-to/filtering.rst` (no pointer to WHERE / HAVING in the standard-SQL form)
+- `docs/how-to/facts.rst` (two troubleshooting entries say CREATE succeeds and the query fails)
+- `docs/how-to/derived-metrics.rst` ("a table-qualified column ... is not caught at define time")
+- `docs/how-to/window-metrics.rst` ("CREATE does not catch this" for a window metric over a window metric)
+- `docs/how-to/data-sources.rst` ("CREATE SEMANTIC VIEW does not check that the tables in TABLES exist")
+- `docs/how-to/metadata-annotations.rst` (BOOLEAN note reasons that typing needs a binder CREATE lacks)

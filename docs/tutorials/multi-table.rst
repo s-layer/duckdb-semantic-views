@@ -232,6 +232,26 @@ To change a semantic view, use :ref:`CREATE OR REPLACE <ref-create-variants>`:
 
 The new ``year`` dimension and ``avg_order`` metric are immediately available for queries.
 
+``CREATE`` and ``CREATE OR REPLACE`` check a definition before they store it: each dimension, fact and metric is bound against its tables. Try replacing the view with a misspelled column:
+
+.. code-block:: sql
+
+   CREATE OR REPLACE SEMANTIC VIEW shop AS
+   TABLES (
+       o AS orders PRIMARY KEY (id)
+   )
+   METRICS (
+       o.revenue AS SUM(o.amout)
+   );
+
+The statement stops with an error that names the metric and quotes DuckDB's own message:
+
+.. code-block:: text
+
+   Binder Error: semantic view 'shop': metric 'revenue' does not bind: Binder Error: Table "o" does not have a column named "amout"
+
+Nothing is replaced, so ``shop`` keeps the definition from the previous step, ``year`` and ``avg_order`` included.
+
 .. tip::
 
    ``CREATE OR REPLACE`` replaces the full view definition. To rename a view without changing its definition, use :ref:`ALTER SEMANTIC VIEW … RENAME TO <ref-alter-semantic-view>` instead:
@@ -262,7 +282,7 @@ You now know how to:
 - Define PK/FK relationships in the ``RELATIONSHIPS`` clause
 - Query dimensions from different tables, with the extension joining only what is needed
 - Use SQL expressions (like ``date_trunc()``) as dimension definitions
-- Update a semantic view with ``CREATE OR REPLACE SEMANTIC VIEW``
+- Update a semantic view with ``CREATE OR REPLACE SEMANTIC VIEW``, which checks every member before it replaces the view
 
 Next, learn how to build a complete model with facts and derived metrics in the :ref:`tutorial-building-model` tutorial. Or explore specific features in the how-to guides:
 

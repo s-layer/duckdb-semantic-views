@@ -3739,6 +3739,33 @@ static arena_ptr<TransformResultValue> sv_grammar_finalize_statement(PEGTransfor
     if (statements.empty()) {
         throw InternalException("semantic_views grammar: rule %s lowered to no statement", pr.Name());
     }
+    // The positions the parser gave the lowered statements are offsets into the
+    // generated SQL, which carries the definition as JSON. DuckDB attaches the
+    // position of the call an error came from (`__sv_check_create`'s, when a
+    // member does not bind) and draws its caret into that text, so the user
+    // would see the stored JSON. No position is the honest one.
+    for (auto &statement : statements) {
+        QueryNode *node = nullptr;
+        switch (statement->type) {
+        case StatementType::SELECT_STATEMENT:
+            node = statement->Cast<SelectStatement>().node.get();
+            break;
+        case StatementType::INSERT_STATEMENT:
+            node = statement->Cast<InsertStatement>().node.get();
+            break;
+        case StatementType::UPDATE_STATEMENT:
+            node = statement->Cast<UpdateStatement>().node.get();
+            break;
+        case StatementType::DELETE_STATEMENT:
+            node = statement->Cast<DeleteStatement>().node.get();
+            break;
+        default:
+            break;
+        }
+        if (node) {
+            sv_relocate(*node, QueryLocation());
+        }
+    }
     if (statements.size() == 1) {
         return transformer.MakeResult<unique_ptr<SQLStatement>>(std::move(statements[0]));
     }

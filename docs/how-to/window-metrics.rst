@@ -252,7 +252,7 @@ Troubleshooting
    Window metrics must use a qualified name (``alias.metric_name``). Derived metrics (those without a table alias) cannot have an ``OVER`` clause. The error message is: ``OVER clause not allowed on derived metric 'X'. Only qualified metrics (alias.name) can use OVER.``
 
 **Window metrics cannot be used as inner metrics**
-   A window metric cannot be the inner metric of another window metric; reference a base or derived metric instead. ``CREATE`` does not catch this. The view is created, and a query of the outer metric fails with a binder error such as ``Referenced column "total_qty" not found in FROM clause!``.
+   A window metric cannot be the inner metric of another window metric; reference a base or derived metric instead. ``CREATE`` refuses the outer metric when it binds it, with ``metric '<name>' does not bind:`` followed by DuckDB's error, which may be a syntax error rather than a message about windows.
 
 
 .. _howto-window-related:

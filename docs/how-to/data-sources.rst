@@ -151,7 +151,7 @@ Schema Evolution
 If columns are added or removed from the Iceberg table, update the semantic view to match:
 
 - **New column:** Add a dimension or metric referencing the new column, then ``CREATE OR REPLACE SEMANTIC VIEW`` to update the definition.
-- **Removed column:** Any dimension or metric referencing the dropped column will cause a query-time SQL error. Update the semantic view definition to remove those references.
+- **Removed column:** Any dimension or metric referencing the dropped column will cause a query-time SQL error. Update the semantic view definition to remove those references. ``CREATE OR REPLACE`` binds every member of the new definition, so a reference you missed is reported then, and the old definition stays in place until the replacement binds.
 
 .. tip::
 
@@ -281,11 +281,14 @@ Troubleshooting
 ===============
 
 **Catalog Error: Table with name ... does not exist**
-   ``CREATE SEMANTIC VIEW`` does not check that the tables in ``TABLES``
-   exist; they are looked up when you query the view. This error means a source
-   table is missing from the current session -- a ``CREATE TABLE ... AS`` copy
-   was dropped, or an attached database such as ``pg`` has not been attached
-   again after reconnecting. Recreate the table or re-run the ``ATTACH``.
+   A source table is missing from the current session -- a ``CREATE TABLE ...
+   AS`` copy was dropped, or an attached database such as ``pg`` has not been
+   attached again after reconnecting. Recreate the table or re-run the
+   ``ATTACH``. ``CREATE SEMANTIC VIEW`` binds every dimension, fact and metric,
+   so it reports a missing table its members read as ``semantic view '<view>':
+   <kind> '<name>' does not bind: Catalog Error: ...``. Tables are looked up
+   again on every query, so a table that goes missing after the view was
+   created gives this error when you query the view.
 
 **Binder Error: Table "o" does not have a column named ...**
    A column that a dimension, metric or fact reads was removed from the source,

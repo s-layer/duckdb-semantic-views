@@ -4,7 +4,7 @@ user_personas:
     skill_level: "intermediate"
     generated_at: "2026-08-09"
     updated_at: "2026-10-01"
-    update_note: "S1-S5 reused unchanged (page set grew by two pages, explanation/metric-grain.rst and how-to/filtering.rst, well under the regeneration threshold). S6 appended for the v0.13.0 duckdb_functions() metadata feature. 2026-10-01: docs/reference/functions.rst added to doc_pages (created by the audit-fix PR to satisfy S6)."
+    update_note: "2026-10-26 (v0.17.0): S1-S6 reused; docs/how-to/standard-sql.rst added to doc_pages (one new page, under the regeneration threshold); S7 and S8 appended for the standard-SQL query form and CREATE binding every member. Earlier: S1-S5 reused unchanged (page set grew by two pages, explanation/metric-grain.rst and how-to/filtering.rst, well under the regeneration threshold). S6 appended for the v0.13.0 duckdb_functions() metadata feature. 2026-10-01: docs/reference/functions.rst added to doc_pages (created by the audit-fix PR to satisfy S6)."
     doc_pages:
       - "docs/index.rst"
       - "docs/changelog.md"
@@ -19,6 +19,7 @@ user_personas:
       - "docs/how-to/fan-traps.rst"
       - "docs/how-to/data-sources.rst"
       - "docs/how-to/filtering.rst"
+      - "docs/how-to/standard-sql.rst"
       - "docs/how-to/metadata-annotations.rst"
       - "docs/how-to/semi-additive-metrics.rst"
       - "docs/how-to/window-metrics.rst"
@@ -82,3 +83,13 @@ user_personas:
         starting_point: "docs/index.rst"
         persona_relevance: "The DuckDB + analytics-app stack increasingly includes an LLM agent or a BI/SQL tool that introspects the engine rather than reading a website. v0.13.0 advertises that every function the extension registers now carries a description, real parameter names and a runnable example in duckdb_functions(); I need to know how to use that."
         done_when: "I know the SQL query that returns the extension's function metadata and how to scope it to this extension's functions; I know which metadata columns carry the description, parameter names/types and example; I have an inventory of every function the extension registers, with which are meant to be called directly and which are internal (the table functions behind SHOW/DESCRIBE, the reserved search_path parameter); and each directly-callable function has a documented signature with an example."
+      - id: S7
+        goal: "I want to query my semantic view with the plain SELECT ... AGG(metric) ... GROUP BY form I use in Snowflake, filter it before and after aggregation, and call it from my Python app with a bound parameter"
+        starting_point: "docs/index.rst"
+        persona_relevance: "Coming from Snowflake, the standard-SQL form is how my analysts and BI tools already query semantic views. If it works here the same way, porting queries is copy-paste; if it differs, I need to know where before a query silently changes meaning."
+        done_when: "I have a runnable example with output, know how GROUP BY / AGG / WHERE / HAVING map onto dimensions, metrics and the two filters, know what is refused and how to work around it (joins, windows, SELECT *), can pass a request value as a parameter from Python, and can see the SQL the extension generates."
+      - id: S8
+        goal: "I want to know when a mistake in my view definition (a misspelled column, a missing table) is reported, and what the error looks like, so I can catch it in CI rather than from a dashboard"
+        starting_point: "docs/index.rst"
+        persona_relevance: "I keep view definitions in version control and deploy them with a script. A definition that is accepted and then fails on first query breaks a dashboard in production; one that fails at CREATE breaks my deploy, which is where I want it."
+        done_when: "I know that CREATE (and CREATE OR REPLACE, IF NOT EXISTS, FROM YAML) binds every member and what it does not check, I know the error message format, I know a refused CREATE OR REPLACE leaves the old view in place, and I know which failures can still surface only at query time."

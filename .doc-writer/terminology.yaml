@@ -167,9 +167,27 @@ project_terms:
   - canonical: "define-time inference pass"
     variants: ["CREATE-time typeof pass", "define-time type inference pass"]
     note: >-
-      The v0.10.0 removal. Do not describe it as still running, and do not
-      reintroduce the CREATE-time LIMIT 0 probe: that probe now exists only
-      on the query bind path (see reference/semantic-view-function.rst).
+      The v0.10.0 removal. Do not describe it as still running. Since v0.17.0
+      CREATE binds every member (a check, not type inference): it records no
+      output type, and the data_type that SHOW / DESCRIBE report is still
+      worked out when those commands run.
+  - canonical: "standard SQL"
+    variants: ["direct SQL", "plain SQL", "the query form"]
+    source: "cpp/src/shim.cpp SvStandardQuery; docs/how-to/standard-sql.rst (howto-standard-sql)"
+    note: >-
+      v0.17.0: SELECT ... AGG(metric) ... FROM <view> ... GROUP BY ..., by
+      name, as in Snowflake. Call it "standard SQL" or "a standard-SQL query
+      over the view by name" in prose; Snowflake's own docs say "direct SQL",
+      which may appear only in the Snowflake column of a comparison. "the
+      query form" is fine once introduced on the same page.
+  - canonical: "does not bind"
+    variants: ["fails to bind at CREATE", "rejected at bind"]
+    source: "semantic view '<view>': <kind> '<name>' does not bind: <DuckDB error> (reference anchor ref-err-member-bind)"
+    note: >-
+      v0.17.0: CREATE binds every dimension, fact and metric. Do not write
+      that CREATE accepts a member DuckDB cannot bind and the query fails
+      later; that is only true of a source changed after CREATE, of a
+      filter's BOOLEAN type, and of materialization tables.
   - canonical: "semantic view '<name>' does not exist"
     variants: []
     source: "catalog::view_not_found_msg in src/catalog/mod.rs:105"

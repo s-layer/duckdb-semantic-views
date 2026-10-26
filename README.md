@@ -14,7 +14,7 @@ You define a semantic view over one or more tables, declaring:
 - **Metrics** -- aggregates (`sum(amount)`, `count(*)`, etc.)
 - **Relationships** -- PK/FK join paths between tables, included only when the query needs them
 
-Then you query by picking which dimensions and metrics you want, with the same `SEMANTIC_VIEW(...)` construct Snowflake uses. The extension generates the SQL -- SELECT, FROM, JOIN, GROUP BY -- and DuckDB executes it.
+Then you query by picking which dimensions and metrics you want, with the same `SEMANTIC_VIEW(...)` construct Snowflake uses, or with ordinary SQL against the view by name (`SELECT region, AGG(revenue) FROM order_metrics GROUP BY region`). The extension generates the SQL -- SELECT, FROM, JOIN, GROUP BY -- and DuckDB executes it.
 
 ## Quick start
 
@@ -57,6 +57,9 @@ SELECT * FROM SEMANTIC_VIEW(order_metrics
 SELECT * FROM SEMANTIC_VIEW(order_metrics
     METRICS revenue
 );
+
+-- Or standard SQL: GROUP BY picks the dimensions, AGG() the metrics
+SELECT region, AGG(revenue) FROM order_metrics GROUP BY region;
 
 -- WHERE works on the result
 SELECT * FROM SEMANTIC_VIEW(order_metrics
@@ -297,6 +300,7 @@ SELECT read_yaml_from_semantic_view('name');      -- YAML export
 
 Documented in full on the [docs site](https://s-layer.github.io/duckdb-semantic-views/):
 
+- **[Standard SQL queries](https://s-layer.github.io/duckdb-semantic-views/how-to/standard-sql.html)** -- `SELECT region, AGG(revenue) FROM sales WHERE ... GROUP BY region HAVING ...`, as in Snowflake; it works in subqueries, CTEs, `CREATE TABLE AS` and from Python.
 - **[Pre-aggregation filtering](https://s-layer.github.io/duckdb-semantic-views/how-to/filtering.html)** -- a `WHERE` inside `SEMANTIC_VIEW(...)` (`where_clause :=` in `semantic_view()`) filters rows *before* metrics are aggregated, which an outer `WHERE` cannot express. Prepared-statement parameters work there.
 - **[Multi-grain queries](https://s-layer.github.io/duckdb-semantic-views/explanation/metric-grain.html)** -- metrics at different grains are each aggregated over their own table and joined on the queried dimensions.
 - **[Semi-additive metrics](https://s-layer.github.io/duckdb-semantic-views/how-to/semi-additive-metrics.html)** -- `NON ADDITIVE BY` picks one snapshot row per group before aggregating (balances, inventory levels).

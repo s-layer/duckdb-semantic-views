@@ -310,20 +310,21 @@ Troubleshooting
 
 **Fact name not found**
    If a metric references a fact name that does not exist, the extension treats it as a
-   regular column reference. If the column also does not exist, the query fails with a
-   DuckDB column-not-found error. Double-check fact names match exactly.
+   regular column reference. If the column also does not exist, ``CREATE`` refuses the
+   view with an error naming the metric, such as ``semantic view 'sales': metric
+   'revenue' does not bind: Binder Error: Table "li" does not have a column named
+   "net_totl"``. Double-check that fact names match exactly.
 
 **Private fact cannot be queried**
    Facts marked ``PRIVATE`` cannot be queried in ``FACTS``. They return an
    error: ``fact '<name>' is private and cannot be queried directly``. Remove the
    ``PRIVATE`` keyword to make a fact queryable.
 
-**A fact fails with a syntax error at or near "AS" when queried**
+**fact '...' does not bind: Parser Error: syntax error at or near "AS"**
    ``PRIVATE`` or ``PUBLIC`` was written after the expression
    (``li.net_price AS li.extended_price PRIVATE``). There the keyword is taken as
-   part of the expression, so ``CREATE`` succeeds and the first query that uses the
-   fact fails. Move the modifier before the name:
-   ``PRIVATE li.net_price AS li.extended_price``.
+   part of the expression, and ``CREATE`` refuses the fact when it binds it. Move
+   the modifier before the name: ``PRIVATE li.net_price AS li.extended_price``.
 
 
 .. _howto-facts-related:

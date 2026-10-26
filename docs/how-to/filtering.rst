@@ -19,6 +19,14 @@ on a dimension you are already grouping by, they return different numbers:
 - An ordinary ``WHERE`` **outside**, on the query around it, filters the rows
   the query returns.
 
+.. tip::
+
+   In a :ref:`standard-SQL query <howto-standard-sql>` over the view by name,
+   ``WHERE`` is the filter inside the construct and ``HAVING`` is the filter on
+   the result: ``SELECT region, AGG(revenue) FROM order_metrics WHERE ordered_at
+   >= DATE '2024-01-01' GROUP BY region HAVING AGG(revenue) > 200``. Everything
+   below about choosing between them applies to that form too.
+
 **Prerequisites:**
 
 - A working semantic view you can query (see :ref:`tutorial-getting-started`)
@@ -529,3 +537,5 @@ Related
   and ``where_clause``, including where the predicate is injected on each
   emission path
 - :ref:`howto-fan-traps` -- Resolve the fan trap errors a predicate can trigger
+- :ref:`howto-standard-sql` -- ``WHERE`` and ``HAVING`` in a standard-SQL query
+  over the view

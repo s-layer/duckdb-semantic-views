@@ -183,7 +183,7 @@ The label is **declarative metadata**, not an access restriction or a resolution
 
 .. note::
 
-   The ``BOOLEAN`` requirement is checked by DuckDB's binder at **query** time, not at ``CREATE``. Typing an arbitrary SQL expression requires a binder, so a filter over a non-boolean expression is created successfully and raises DuckDB's own type error the first time it is used in a predicate.
+   The ``BOOLEAN`` requirement is checked by DuckDB's binder at **query** time, not at ``CREATE``. ``CREATE`` binds the filter like any other member, which catches an unknown column or function, but does not check its type, so a filter over a non-boolean expression is created successfully and raises DuckDB's own type error the first time it is used in a predicate.
 
 ``FILTER`` is the only supported label. Any other value is rejected at ``CREATE`` rather than silently dropped, so a definition cannot round-trip having quietly lost a label you wrote.
 
