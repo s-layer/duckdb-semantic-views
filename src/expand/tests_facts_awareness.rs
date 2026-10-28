@@ -75,6 +75,31 @@ fn a_dimension_in_facts_is_read_row_by_row() {
     );
 }
 
+/// An unknown name in FACTS is suggested among the dimensions too, since
+/// FACTS takes them.
+#[test]
+fn an_unknown_name_in_facts_suggests_a_dimension() {
+    let def = orders_view().with_fact("line_total", "quantity * price", "orders");
+    let req = QueryRequest {
+        where_clause: None,
+        facts: vec![FactName::new("regoin"), FactName::new("line_total")],
+        dimensions: vec![],
+        metrics: vec![],
+    };
+    let err = expand("test_view", &def, &req).unwrap_err();
+    let ExpandError::UnknownFact {
+        available,
+        suggestion,
+        ..
+    } = &err
+    else {
+        panic!("expected UnknownFact, got: {err}");
+    };
+    assert_eq!(suggestion.as_deref(), Some("region"), "{err}");
+    assert!(available.iter().any(|n| n == "region"), "{err}");
+    assert!(available.iter().any(|n| n == "line_total"), "{err}");
+}
+
 /// A fact is named by its table too, as a dimension is (`orders.line_total`),
 /// and only by its own table.
 #[test]

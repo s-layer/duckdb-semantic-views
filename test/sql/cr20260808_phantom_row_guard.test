@@ -173,6 +173,22 @@ SELECT orate FROM SEMANTIC_VIEW(cr0808_sales FACTS orate) ORDER BY 1;
 5
 10
 
+# A FACTS list of dimensions only takes its grain from them: a child dimension
+# gives no row for the childless order, as a child fact does.
+query I
+SELECT item_qty FROM SEMANTIC_VIEW(cr0808_sales FACTS item_qty) ORDER BY 1;
+----
+2
+3
+
+# A base and a child dimension span two tables, so the childless order stays.
+query TI rowsort
+SELECT region, item_qty FROM SEMANTIC_VIEW(cr0808_sales FACTS region, item_qty);
+----
+East	2
+East	3
+North	NULL
+
 # ============================================================
 # EXP-29: dimensions-only DISTINCT on a child dimension.
 #

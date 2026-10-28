@@ -4474,6 +4474,7 @@ private:
                 Fail("'" + Text(*left[0]) + "' must be passed to an aggregate or appear in GROUP BY");
             }
             auto text = Text(*item);
+            fact_columns_.push_back(Text(*left[0]));
             item = Column("__svf", Add(facts_, text));
         }
         item->SetAlias(name);
@@ -4493,9 +4494,9 @@ private:
     void Graft() {
         // A grouped query reads no row-level item, as in any SQL: the construct
         // refuses FACTS with DIMENSIONS (Snowflake's 2026_07 rule), so name the
-        // item the way SQL would.
+        // column the way SQL would.
         if (!facts_.empty() && !dimensions_.empty()) {
-            Fail("'" + facts_[0] + "' must be passed to an aggregate or appear in GROUP BY");
+            Fail("'" + fact_columns_[0] + "' must be passed to an aggregate or appear in GROUP BY");
         }
         string sql = "SELECT * FROM SEMANTIC_VIEW(" + base_.GetQualifiedName().ToString();
         auto clause = [&](const char *keyword, const vector<string> &items, const char *prefix) {
@@ -4534,6 +4535,8 @@ private:
     vector<string> dimensions_;
     vector<string> metrics_;
     vector<string> facts_;
+    // The first column each FACTS item reads, which names it in an error.
+    vector<string> fact_columns_;
 };
 
 // Walks a statement for the query blocks that read a semantic view, and

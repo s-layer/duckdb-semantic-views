@@ -163,6 +163,12 @@ SELECT channel, amuont, AGG(revenue) FROM ssq GROUP BY channel;
 ----
 'amuont' must be passed to an aggregate or appear in GROUP BY
 
+# The error names the column, not the whole item, as DuckDB does.
+statement error
+SELECT channel, amount * 2 AS dbl FROM ssq GROUP BY channel;
+----
+'amount' must be passed to an aggregate or appear in GROUP BY
+
 # Grouped on, the fact gives one row per value.
 query TT
 SELECT channel, amount FROM ssq GROUP BY channel, amount ORDER BY 1, 2;

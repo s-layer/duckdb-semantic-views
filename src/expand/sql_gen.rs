@@ -318,7 +318,28 @@ fn resolve_facts_list<'a, N: AsRef<str>>(
     for (name, &d) in names.iter().zip(&is_dim) {
         if d { &mut dim_names } else { &mut fact_names }.push(name.as_ref());
     }
-    let mut facts = resolve_names::<Fact, _>(&fact_names, view_name, def)?.into_iter();
+    // A name that is no member is reported as an unknown fact, with the
+    // dimensions among the names it may have meant: FACTS takes those too.
+    let mut facts = resolve_names::<Fact, _>(&fact_names, view_name, def)
+        .map_err(|e| match e {
+            ExpandError::UnknownFact {
+                view_name,
+                name,
+                mut available,
+                ..
+            } => {
+                available.extend(def.dimensions.iter().map(|d| d.name.clone()));
+                let suggestion = suggest_closest(&name, &available);
+                ExpandError::UnknownFact {
+                    view_name,
+                    name,
+                    available,
+                    suggestion,
+                }
+            }
+            other => other,
+        })?
+        .into_iter();
     let mut dims = resolve_names::<Dimension, _>(&dim_names, view_name, def)?.into_iter();
     Ok(is_dim
         .into_iter()
@@ -485,10 +506,20 @@ fn expand_facts(
     //    nothing is aggregated, so there is no "before" to be careful about.
     //    EXP-28: when every queried fact lives on one LEFT-JOINed table, that
     //    table is the query's grain and its phantom rows are filtered out.
-    let fact_member_tables: Vec<Option<String>> = resolved_facts
-        .iter()
-        .map(|f| f.source_table.clone())
-        .collect();
+    //    A list of dimensions only is at the grain of its dimensions, as the
+    //    dimensions-only path is (EXP-29). With facts, the facts set the grain:
+    //    a base dimension beside a child fact rides along on its rows.
+    let fact_member_tables: Vec<Option<String>> = if resolved_facts.is_empty() {
+        resolved_dims
+            .iter()
+            .map(|d| d.source_table.clone())
+            .collect()
+    } else {
+        resolved_facts
+            .iter()
+            .map(|f| f.source_table.clone())
+            .collect()
+    };
     let phantom_guard = phantom_row_filter(def, &fact_member_tables);
     Ok(SelectSpec {
         where_clause: and_phantom_filter(resolved_where.map(|rw| rw.sql), phantom_guard),

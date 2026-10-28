@@ -294,6 +294,16 @@ SELECT * FROM semantic_view('svc_sv', dimensions := ['region'], metrics := ['rev
 70.00	US
 
 query TT rowsort
+SELECT * FROM semantic_view('svc_sv', dimensions := ['region'], metrics := ['revenue'], column_order := ['METRICS', 'Dimensions']);
+----
+150.00	EU
+70.00	US
+
+# A facts query is one list (FACTS combines with neither DIMENSIONS nor
+# METRICS), so column_order has nothing to reorder there; it is still checked
+# and accepted.
+
+query TT rowsort
 SELECT * FROM semantic_view('svc_sv', facts := ['amt', 'region'], column_order := ['FACTS', 'dimensions']);
 ----
 100.00	EU
