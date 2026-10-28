@@ -1,0 +1,395 @@
+# Snowflake DDL that pastes as is (Phase 6): CREATE with no AS before TABLES,
+# LABELS between a member's name and its AS, GET_DDL('SEMANTIC VIEW', ...),
+# SHOW SEMANTIC VIEWS ... LIMIT n FROM '<name>', the labels / synonyms /
+# comment columns of Snowflake's SHOW output, and ALTER ... SET / UNSET TAG.
+
+require semantic_views
+
+statement ok
+CREATE TABLE sp_orders (id INTEGER PRIMARY KEY, region VARCHAR, amount INTEGER);
+
+statement ok
+INSERT INTO sp_orders VALUES (1, 'East', 10), (2, 'East', 200), (3, 'West', 5);
+
+# --- CREATE: Snowflake writes no AS before TABLES ---
+
+statement ok
+CREATE SEMANTIC VIEW sp_no_as
+  TABLES (o AS sp_orders PRIMARY KEY (id))
+  DIMENSIONS (o.region AS o.region)
+  METRICS (o.revenue AS SUM(o.amount));
+
+query TI rowsort
+SELECT * FROM SEMANTIC_VIEW(sp_no_as DIMENSIONS region METRICS revenue)
+----
+East	210
+West	5
+
+# The other CREATE forms take it too, and so does a COMMENT before TABLES.
+statement ok
+CREATE OR REPLACE SEMANTIC VIEW sp_no_as COMMENT = 'pasted' tables (o AS sp_orders PRIMARY KEY (id)) DIMENSIONS (o.region AS o.region);
+
+statement ok
+CREATE SEMANTIC VIEW IF NOT EXISTS sp_no_as TABLES(o AS sp_orders PRIMARY KEY (id)) DIMENSIONS (o.region AS o.region);
+
+query TTTTT
+SELECT * FROM describe_semantic_view('sp_no_as') WHERE property = 'COMMENT'
+----
+(empty)	(empty)	(empty)	COMMENT	pasted
+
+# TABLES must be a whole word: TABLESX is no body.
+statement error
+CREATE SEMANTIC VIEW sp_bad TABLESX (o AS sp_orders PRIMARY KEY (id)) DIMENSIONS (o.region AS o.region);
+----
+Expected 'AS', 'TABLES' or 'FROM YAML' after view name
+
+# --- LABELS between the name and AS, where Snowflake puts it ---
+
+statement ok
+CREATE SEMANTIC VIEW sp_labels
+  TABLES (o AS sp_orders PRIMARY KEY (id))
+  FACTS (o.is_large LABELS = (FILTER) AS o.amount > 100)
+  DIMENSIONS (
+    o.region AS o.region WITH SYNONYMS = ('area') COMMENT = 'where',
+    PUBLIC o.is_east LABELS (FILTER) AS o.region = 'East'
+  )
+  METRICS (o.revenue AS SUM(o.amount));
+
+query TTTTT rowsort
+SELECT * FROM describe_semantic_view('sp_labels') WHERE property IN ('LABELS', 'EXPRESSION') AND object_kind IN ('FACT', 'DIMENSION')
+----
+DIMENSION	is_east	sp_orders	EXPRESSION	o.region = 'East'
+DIMENSION	is_east	sp_orders	LABELS	["FILTER"]
+DIMENSION	region	sp_orders	EXPRESSION	o.region
+FACT	is_large	sp_orders	EXPRESSION	o.amount > 100
+FACT	is_large	sp_orders	LABELS	["FILTER"]
+
+# A filter declared that way filters like any other.
+query TI rowsort
+SELECT * FROM SEMANTIC_VIEW(sp_labels DIMENSIONS region METRICS revenue WHERE is_large)
+----
+East	200
+
+# GET_DDL writes LABELS in Snowflake's place.
+query II
+SELECT contains(ddl, 'o.is_large LABELS = (FILTER) AS o.amount > 100'),
+       contains(ddl, 'o.is_east LABELS = (FILTER) AS o.region = ''East''')
+FROM (SELECT GET_DDL('SEMANTIC_VIEW', 'sp_labels') AS ddl)
+----
+true	true
+
+statement ok
+DROP SEMANTIC VIEW sp_labels;
+
+# Its output re-creates the view, also where a table alias and a member are
+# named `labels`: the DDL below is GET_DDL's, pinned, and replaying it gives
+# back the same DESCRIBE.
+statement ok
+CREATE SEMANTIC VIEW sp_rt
+  TABLES (labels AS sp_orders PRIMARY KEY (id))
+  FACTS (labels.labels LABELS = (FILTER) AS labels.amount > 100)
+  DIMENSIONS (labels.region AS labels.region COMMENT = 'where', labels.is_east LABELS = (FILTER) AS labels.region = 'East')
+  METRICS (labels.revenue AS SUM(labels.amount));
+
+statement ok
+CREATE TABLE sp_rt_before AS SELECT * FROM describe_semantic_view('sp_rt');
+
+query I
+SELECT replace(GET_DDL('SEMANTIC_VIEW', 'sp_rt'), chr(10), ' ') = 'CREATE OR REPLACE SEMANTIC VIEW sp_rt AS TABLES (     labels AS sp_orders PRIMARY KEY (id) ) FACTS (     labels.labels LABELS = (FILTER) AS labels.amount > 100 ) DIMENSIONS (     labels.region AS labels.region COMMENT = ''where'',     labels.is_east LABELS = (FILTER) AS labels.region = ''East'' ) METRICS (     labels.revenue AS SUM(labels.amount) ) '
+----
+true
+
+statement ok
+DROP SEMANTIC VIEW sp_rt;
+
+statement ok
+CREATE OR REPLACE SEMANTIC VIEW sp_rt AS
+TABLES (
+    labels AS sp_orders PRIMARY KEY (id)
+)
+FACTS (
+    labels.labels LABELS = (FILTER) AS labels.amount > 100
+)
+DIMENSIONS (
+    labels.region AS labels.region COMMENT = 'where',
+    labels.is_east LABELS = (FILTER) AS labels.region = 'East'
+)
+METRICS (
+    labels.revenue AS SUM(labels.amount)
+)
+
+query I
+SELECT count(*) FROM (
+  (SELECT * FROM describe_semantic_view('sp_rt') EXCEPT ALL SELECT * FROM sp_rt_before)
+  UNION ALL
+  (SELECT * FROM sp_rt_before EXCEPT ALL SELECT * FROM describe_semantic_view('sp_rt')))
+----
+0
+
+query I
+SELECT count(*) FROM sp_rt_before WHERE property = 'LABELS'
+----
+2
+
+statement ok
+DROP SEMANTIC VIEW sp_rt;
+
+# LABELS once per entry: before AS or after the expression, not both.
+statement error
+CREATE SEMANTIC VIEW sp_bad TABLES (o AS sp_orders PRIMARY KEY (id)) DIMENSIONS (o.f LABELS = (FILTER) AS o.amount > 1 LABELS = (FILTER));
+----
+Duplicate LABELS annotation in dimensions entry
+
+# Only LABELS goes before AS; the other annotations follow the expression.
+statement error
+CREATE SEMANTIC VIEW sp_bad TABLES (o AS sp_orders PRIMARY KEY (id)) DIMENSIONS (o.f LABELS = (FILTER) COMMENT = 'c' AS o.amount > 1);
+----
+Only LABELS may come between the name and 'AS' in dimensions entry
+
+# A metric takes no LABELS in either place, and says so.
+statement error
+CREATE SEMANTIC VIEW sp_bad TABLES (o AS sp_orders PRIMARY KEY (id)) METRICS (o.m LABELS = (FILTER) AS SUM(o.amount));
+----
+LABELS is not valid on a metric
+
+statement error
+CREATE SEMANTIC VIEW sp_bad TABLES (o AS sp_orders PRIMARY KEY (id)) METRICS (o.m USING (r) LABELS = (FILTER) AS SUM(o.amount));
+----
+LABELS is not valid on a metric
+
+# --- GET_DDL takes both of Snowflake's spellings of the object type ---
+
+query I
+SELECT GET_DDL('SEMANTIC VIEW', 'sp_no_as') = GET_DDL('SEMANTIC_VIEW', 'sp_no_as')
+----
+true
+
+query I
+SELECT GET_DDL('semantic view', 'sp_no_as', true) = GET_DDL('SEMANTIC_VIEW', 'sp_no_as', true)
+----
+true
+
+statement error
+SELECT GET_DDL('SEMANTIC  VIEWS', 'sp_no_as')
+----
+Only 'SEMANTIC_VIEW' or 'SEMANTIC VIEW' is supported.
+
+# --- SHOW SEMANTIC VIEWS ... LIMIT n FROM '<name>' ---
+
+statement ok
+CREATE SEMANTIC VIEW sp_lf_1 TABLES (o AS sp_orders PRIMARY KEY (id)) DIMENSIONS (o.region AS o.region);
+
+statement ok
+CREATE SEMANTIC VIEW sp_lf_2 TABLES (o AS sp_orders PRIMARY KEY (id)) DIMENSIONS (o.region AS o.region);
+
+statement ok
+CREATE SEMANTIC VIEW sp_lf_3 TABLES (o AS sp_orders PRIMARY KEY (id)) DIMENSIONS (o.region AS o.region);
+
+statement ok
+CREATE SEMANTIC VIEW sp_lf_4 TABLES (o AS sp_orders PRIMARY KEY (id)) DIMENSIONS (o.region AS o.region);
+
+# The rows after the first whose name matches: Snowflake's example.
+query T
+SELECT name FROM (SHOW SEMANTIC VIEWS STARTS WITH 'sp_lf' LIMIT 2 FROM 'sp_lf_1') ORDER BY name
+----
+sp_lf_2
+sp_lf_3
+
+# A partial name works as a cursor too, and TERSE takes FROM.
+query T
+SELECT name FROM (SHOW TERSE SEMANTIC VIEWS STARTS WITH 'sp_lf' LIMIT 10 FROM 'sp_lf_2x') ORDER BY name
+----
+sp_lf_3
+sp_lf_4
+
+# Like STARTS WITH, FROM is case-sensitive: every lower-case name sorts after 'SP'.
+query I
+SELECT count(*) FROM (SHOW SEMANTIC VIEWS STARTS WITH 'sp_lf' LIMIT 10 FROM 'SP_LF_9')
+----
+4
+
+# Both conditions apply, so they can cancel each other out.
+query I
+SELECT count(*) FROM (SHOW SEMANTIC VIEWS STARTS WITH 'sp_lf' LIMIT 10 FROM 'sp_m')
+----
+0
+
+# FROM belongs to SHOW SEMANTIC VIEWS only, as in Snowflake.
+statement error
+SHOW SEMANTIC FACTS IN sp_no_as LIMIT 1 FROM 'a'
+----
+LIMIT ... FROM is only valid for SHOW SEMANTIC VIEWS, not SHOW SEMANTIC FACTS
+
+# --- SHOW columns: labels on facts and dimensions, synonyms and comment FOR METRIC ---
+
+statement ok
+CREATE SEMANTIC VIEW sp_show
+  TABLES (o AS sp_orders PRIMARY KEY (id))
+  FACTS (o.is_large LABELS = (FILTER) AS o.amount > 100, o.amt AS o.amount)
+  DIMENSIONS (o.region AS o.region WITH SYNONYMS = ('area') COMMENT = 'where')
+  METRICS (o.revenue AS SUM(o.amount));
+
+query TTTTTTTTT rowsort
+SHOW SEMANTIC FACTS IN sp_show
+----
+memory	main	sp_show	sp_orders	amt	INTEGER	[]	(empty)	[]
+memory	main	sp_show	sp_orders	is_large	BOOLEAN	[]	(empty)	["FILTER"]
+
+query TTTTTTTTT
+SHOW SEMANTIC DIMENSIONS IN sp_show
+----
+memory	main	sp_show	sp_orders	region	VARCHAR	["area"]	where	[]
+
+# The cross-view listing has the column too.
+query TT rowsort
+SELECT name, labels FROM (SHOW SEMANTIC FACTS LIKE 'is_large')
+----
+is_large	["FILTER"]
+
+# Metrics have no labels column, as in Snowflake.
+query TTTTTTTT
+SHOW SEMANTIC METRICS IN sp_show
+----
+memory	main	sp_show	sp_orders	revenue	HUGEINT	[]	(empty)
+
+query TTTTTT
+SHOW SEMANTIC DIMENSIONS IN sp_show FOR METRIC revenue
+----
+sp_orders	region	VARCHAR	false	["area"]	where
+
+query T
+SELECT column_name FROM (DESCRIBE SELECT * FROM (SHOW SEMANTIC DIMENSIONS IN sp_show FOR METRIC revenue))
+----
+table_name
+name
+data_type
+required
+synonyms
+comment
+
+# --- ALTER SEMANTIC VIEW ... SET TAG / UNSET TAG, at view level as in Snowflake ---
+
+statement ok
+ALTER SEMANTIC VIEW sp_show SET TAG gov.owner = 'data', S_LAYER_KIND = 'view'
+
+query TTTTT
+SELECT * FROM describe_semantic_view('sp_show') WHERE property = 'TAGS'
+----
+(empty)	(empty)	(empty)	TAGS	{"gov.owner":"data","S_LAYER_KIND":"view"}
+
+# Setting a tag again replaces its value; names compare case-insensitively.
+statement ok
+ALTER SEMANTIC VIEW sp_show SET TAG GOV.OWNER = 'finance'
+
+query TTTTT
+SELECT * FROM describe_semantic_view('sp_show') WHERE property = 'TAGS'
+----
+(empty)	(empty)	(empty)	TAGS	{"S_LAYER_KIND":"view","GOV.OWNER":"finance"}
+
+# The tags reach GET_DDL, after the view's other annotations.
+query I
+SELECT GET_DDL('SEMANTIC_VIEW', 'sp_show') LIKE '%WITH TAG (S_LAYER_KIND = ''view'', GOV.OWNER = ''finance'')%'
+----
+true
+
+# UNSET of a tag the view does not carry changes nothing.
+statement ok
+ALTER SEMANTIC VIEW sp_show UNSET TAG no_such_tag, gov.owner
+
+query TTTTT
+SELECT * FROM describe_semantic_view('sp_show') WHERE property = 'TAGS'
+----
+(empty)	(empty)	(empty)	TAGS	{"S_LAYER_KIND":"view"}
+
+# Unsetting the last tag leaves the view as one created without tags.
+statement ok
+ALTER SEMANTIC VIEW sp_show UNSET TAG s_layer_kind
+
+query I
+SELECT count(*) FROM describe_semantic_view('sp_show') WHERE property = 'TAGS'
+----
+0
+
+query I
+SELECT GET_DDL('SEMANTIC_VIEW', 'sp_show') LIKE '%TAG%'
+----
+false
+
+# Member tags are left alone: ALTER changes only the view's own.
+statement ok
+CREATE SEMANTIC VIEW sp_mt TABLES (o AS sp_orders PRIMARY KEY (id)) DIMENSIONS (o.region AS o.region WITH TAG (k = 'member')) WITH TAG (k = 'view');
+
+statement ok
+ALTER SEMANTIC VIEW sp_mt UNSET TAG k
+
+query TTTTT
+SELECT * FROM describe_semantic_view('sp_mt') WHERE property = 'TAGS'
+----
+DIMENSION	region	sp_orders	TAGS	{"k":"member"}
+
+# Names fold ASCII letters only, as everywhere else a tag name is compared, so
+# "Ä" and "ä" are two tags. A quoted name is shown as written.
+statement ok
+ALTER SEMANTIC VIEW sp_mt SET TAG "Ä" = 'upper'
+
+statement ok
+ALTER SEMANTIC VIEW sp_mt SET TAG "ä" = 'lower'
+
+query TTTTT
+SELECT * FROM describe_semantic_view('sp_mt') WHERE property = 'TAGS' AND object_kind = ''
+----
+(empty)	(empty)	(empty)	TAGS	{"\"Ä\"":"upper","\"ä\"":"lower"}
+
+# A quoted name and a value holding a quote or a backslash are stored as
+# written, and SET replaces them and UNSET removes them by name.
+statement ok
+ALTER SEMANTIC VIEW sp_mt UNSET TAG "Ä", "ä"
+
+statement ok
+ALTER SEMANTIC VIEW sp_mt SET TAG "my tag" = 'it''s', b = 'a\b'
+
+query TTTTT
+SELECT * FROM describe_semantic_view('sp_mt') WHERE property = 'TAGS' AND object_kind = ''
+----
+(empty)	(empty)	(empty)	TAGS	{"\"my tag\"":"it's","b":"a\\b"}
+
+statement ok
+ALTER SEMANTIC VIEW sp_mt SET TAG "MY TAG" = 'x'
+
+statement ok
+ALTER SEMANTIC VIEW sp_mt UNSET TAG B
+
+query TTTTT
+SELECT * FROM describe_semantic_view('sp_mt') WHERE property = 'TAGS' AND object_kind = ''
+----
+(empty)	(empty)	(empty)	TAGS	{"\"MY TAG\"":"x"}
+
+# A missing view is an error, unless IF EXISTS.
+statement error
+ALTER SEMANTIC VIEW sp_missing SET TAG k = 'v'
+----
+does not exist
+
+statement ok
+ALTER SEMANTIC VIEW IF EXISTS sp_missing SET TAG k = 'v'
+
+# The list follows the TAG clause's rules.
+statement error
+ALTER SEMANTIC VIEW sp_show SET TAG k = 'a', K = 'b'
+----
+Invalid TAG
+
+statement error
+ALTER SEMANTIC VIEW sp_show SET TAG k = 1
+----
+Expected a single-quoted string as the value of tag 'k'
+
+statement error
+ALTER SEMANTIC VIEW sp_show UNSET TAG k = 'v'
+----
+Invalid tag name
+
+statement error
+ALTER SEMANTIC VIEW sp_show UNSET TAG k,
+----
+Empty entry in the tag name list

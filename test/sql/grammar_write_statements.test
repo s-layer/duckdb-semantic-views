@@ -153,7 +153,7 @@ Unexpected tokens after view name: '.gw_c'
 statement error
 ALTER SEMANTIC VIEW gw_s . gw_c RENAME TO gw_d;
 ----
-Unsupported ALTER operation. Supported: RENAME TO, SET COMMENT, UNSET COMMENT.
+Unsupported ALTER operation. Supported: RENAME TO, SET COMMENT, UNSET COMMENT, SET TAG, UNSET TAG.
 
 statement error
 ALTER SEMANTIC VIEW gw_s.gw_c RENAME TO gw_s . gw_d;
@@ -262,10 +262,10 @@ gw_x
 statement ok
 PREPARE gw_p4 AS SHOW SEMANTIC DIMENSIONS IN gw_x;
 
-query TTTTTTTT
+query TTTTTTTTT
 EXECUTE gw_p4;
 ----
-memory	main	gw_x	gw_t	region	VARCHAR	[]	(empty)
+memory	main	gw_x	gw_t	region	VARCHAR	[]	(empty)	[]
 
 statement ok
 EXPLAIN DESCRIBE SEMANTIC VIEW gw_x;

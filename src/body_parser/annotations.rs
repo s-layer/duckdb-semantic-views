@@ -32,6 +32,19 @@ fn annotation_boundary_before(bytes: &[u8], i: usize) -> bool {
     j == 0 || bytes[j - 1] != b'.'
 }
 
+/// Whether an annotation keyword ending at `end` ends a word that is not a
+/// qualifier: `labels.country` and `comment . x` name a table, not the keyword.
+fn annotation_boundary_after(bytes: &[u8], end: usize) -> bool {
+    if end < bytes.len() && is_ident_continuation(bytes[end]) {
+        return false;
+    }
+    let mut j = end;
+    while j < bytes.len() && bytes[j].is_ascii_whitespace() {
+        j += 1;
+    }
+    j == bytes.len() || bytes[j] != b'.'
+}
+
 /// Trailing metadata annotations parsed from a DDL entry.
 /// Used internally to collect COMMENT, SYNONYMS, LABELS and TAG from entry text.
 #[derive(Debug, Default)]
@@ -179,6 +192,60 @@ fn parse_tag_list(content: &str, base_offset: usize) -> Result<Vec<Tag>, ParseEr
     Ok(tags)
 }
 
+/// The tag list of `ALTER SEMANTIC VIEW ... SET TAG name = 'value', ...`: the
+/// same entries as a `TAG (...)` clause, without the parentheses.
+#[cfg_attr(not(feature = "extension"), allow(dead_code))]
+pub(crate) fn parse_tag_assignments(
+    text: &str,
+    base_offset: usize,
+) -> Result<Vec<Tag>, ParseError> {
+    parse_tag_list(text, base_offset)
+}
+
+/// The names of `ALTER SEMANTIC VIEW ... UNSET TAG name, ...`. A name may be
+/// listed once.
+#[cfg_attr(not(feature = "extension"), allow(dead_code))]
+pub(crate) fn parse_tag_names(text: &str, base_offset: usize) -> Result<Vec<TagName>, ParseError> {
+    let as_tags = |names: &[TagName]| -> Vec<Tag> {
+        names
+            .iter()
+            .map(|name| Tag {
+                name: name.clone(),
+                value: String::new(),
+            })
+            .collect()
+    };
+    let mut names = Vec::new();
+    let mut offsets = Vec::new();
+    if text.trim_end().ends_with(',') {
+        return Err(ParseError {
+            message: "Empty entry in the tag name list.".to_string(),
+            position: Some(base_offset + text.trim_end().len() - 1),
+        });
+    }
+    for (_, entry) in split_at_depth0_commas(text)? {
+        let trimmed = entry.trim();
+        let entry_offset = base_offset + crate::util::byte_offset_within(text, trimmed);
+        let name = parse_tag_name(trimmed).map_err(|e| ParseError {
+            message: if trimmed.is_empty() {
+                "Empty entry in the tag name list.".to_string()
+            } else {
+                format!("Invalid tag name '{trimmed}': {e}.")
+            },
+            position: Some(entry_offset),
+        })?;
+        names.push(name);
+        offsets.push(entry_offset);
+    }
+    if let Some((i, message)) = crate::model::tag_error(&as_tags(&names)) {
+        return Err(ParseError {
+            message: format!("Invalid TAG: {message}."),
+            position: Some(offsets[i]),
+        });
+    }
+    Ok(names)
+}
+
 /// One `name = 'value'` entry of a TAG list (already trimmed).
 fn parse_tag_entry(entry: &str, base_offset: usize) -> Result<Tag, ParseError> {
     // The `=` that ends the name: the first one outside a quoted part.
@@ -291,7 +358,7 @@ pub(crate) fn find_annotation_start(text: &str) -> Option<usize> {
                 // Check for COMMENT keyword with word boundaries
                 if i + 7 <= bytes.len() && &upper_bytes[i..i + 7] == b"COMMENT" {
                     let before_ok = annotation_boundary_before(bytes, i);
-                    let after_ok = i + 7 == bytes.len() || !is_ident_continuation(bytes[i + 7]);
+                    let after_ok = annotation_boundary_after(bytes, i + 7);
                     if before_ok && after_ok && annotation_start.is_none() {
                         annotation_start = Some(i);
                     }
@@ -299,7 +366,7 @@ pub(crate) fn find_annotation_start(text: &str) -> Option<usize> {
                 // Check for LABELS keyword (LABELS = (FILTER))
                 if i + 6 <= bytes.len() && &upper_bytes[i..i + 6] == b"LABELS" {
                     let before_ok = annotation_boundary_before(bytes, i);
-                    let after_ok = i + 6 == bytes.len() || !is_ident_continuation(bytes[i + 6]);
+                    let after_ok = annotation_boundary_after(bytes, i + 6);
                     if before_ok && after_ok && annotation_start.is_none() {
                         annotation_start = Some(i);
                     }

@@ -7,7 +7,7 @@
 SHOW SEMANTIC DIMENSIONS
 ==========================
 
-Lists dimensions registered in one or all semantic views. Each row describes a single dimension with its name, source table, data type, synonyms, and comment.
+Lists dimensions registered in one or all semantic views. Each row describes a single dimension with its name, source table, data type, synonyms, comment, and labels.
 
 
 .. _ref-show-dims-syntax:
@@ -92,7 +92,7 @@ When ``LIKE`` and ``STARTS WITH`` are both present, a dimension must satisfy bot
 Output Columns
 ==============
 
-Returns one row per dimension with 8 columns:
+Returns one row per dimension with 9 columns:
 
 .. list-table::
    :header-rows: 1
@@ -125,6 +125,9 @@ Returns one row per dimension with 8 columns:
    * - ``comment``
      - VARCHAR
      - The dimension comment text. Empty string if no comment is set.
+   * - ``labels``
+     - VARCHAR
+     - JSON array of the dimension's labels: ``["FILTER"]`` for a :ref:`named filter <howto-annotations-filters>`, ``[]`` otherwise.
 
 
 .. versionchanged:: 0.14.0
@@ -132,6 +135,10 @@ Returns one row per dimension with 8 columns:
    ``data_type`` is populated again. It had been empty for every view created
    since v0.10.0. The type is now worked out when the command runs, so views
    created in that window report it too, with no need to re-create them.
+
+.. versionchanged:: 0.18.0
+
+   Added the ``labels`` column, after ``comment``, as in Snowflake's output.
 
 
 .. _ref-show-dims-examples:
@@ -149,13 +156,13 @@ Given a semantic view ``orders_sv`` with three dimensions:
 
 .. code-block:: text
 
-   ┌───────────────┬─────────────┬────────────────────┬────────────┬───────────────┬───────────┬──────────┬─────────┐
-   │ database_name │ schema_name │ semantic_view_name │ table_name │ name          │ data_type │ synonyms │ comment │
-   ├───────────────┼─────────────┼────────────────────┼────────────┼───────────────┼───────────┼──────────┼─────────┤
-   │ memory        │ main        │ orders_sv          │ customers  │ customer_name │ VARCHAR   │ []       │         │
-   │ memory        │ main        │ orders_sv          │ orders     │ order_date    │ DATE      │ []       │         │
-   │ memory        │ main        │ orders_sv          │ customers  │ region        │ VARCHAR   │ []       │         │
-   └───────────────┴─────────────┴────────────────────┴────────────┴───────────────┴───────────┴──────────┴─────────┘
+   ┌───────────────┬─────────────┬────────────────────┬────────────┬───────────────┬───────────┬──────────┬─────────┬────────┐
+   │ database_name │ schema_name │ semantic_view_name │ table_name │ name          │ data_type │ synonyms │ comment │ labels │
+   ├───────────────┼─────────────┼────────────────────┼────────────┼───────────────┼───────────┼──────────┼─────────┼────────┤
+   │ memory        │ main        │ orders_sv          │ customers  │ customer_name │ VARCHAR   │ []       │         │ []     │
+   │ memory        │ main        │ orders_sv          │ orders     │ order_date    │ DATE      │ []       │         │ []     │
+   │ memory        │ main        │ orders_sv          │ customers  │ region        │ VARCHAR   │ []       │         │ []     │
+   └───────────────┴─────────────┴────────────────────┴────────────┴───────────────┴───────────┴──────────┴─────────┴────────┘
 
 The ``table_name`` column shows the actual physical table name, not the alias used in the DDL.
 

@@ -43,10 +43,10 @@ CREATE SEMANTIC VIEW sns_plain AS
 # `weird view"` was reported as unexpected trailing tokens.
 # ============================================================
 
-query TTTTTTTT rowsort
+query TTTTTTTTT rowsort
 SHOW SEMANTIC DIMENSIONS IN "sns weird view"
 ----
-memory	main	sns weird view	sns_sales	region	VARCHAR	[]	(empty)
+memory	main	sns weird view	sns_sales	region	VARCHAR	[]	(empty)	[]
 
 # ...and the same slot on a different SHOW entity.
 query TTTTTTTT rowsort
@@ -61,10 +61,10 @@ memory	main	sns weird view	sns_sales	"total amount"	HUGEINT	[]	(empty)
 # rather than one eating the other's text.
 # ============================================================
 
-query TTTT rowsort
+query TTTTTT rowsort
 SHOW SEMANTIC DIMENSIONS IN "sns weird view" FOR METRIC "total amount"
 ----
-sns_sales	region	VARCHAR	false
+sns_sales	region	VARCHAR	false	[]	(empty)
 
 # ============================================================
 # Test 3: the CONSUMER half — a quoted reference to an UNQUOTED declaration.
@@ -80,16 +80,16 @@ sns_sales	region	VARCHAR	false
 # takes raw pointers, so this file is its only coverage.
 # ============================================================
 
-query TTTT rowsort
+query TTTTTT rowsort
 SHOW SEMANTIC DIMENSIONS IN sns_plain FOR METRIC "plain_total"
 ----
-sns_sales	region	VARCHAR	false
+sns_sales	region	VARCHAR	false	[]	(empty)
 
 # ...and the reverse spelling, to pin that the normalisation is symmetric.
-query TTTT rowsort
+query TTTTTT rowsort
 SHOW SEMANTIC DIMENSIONS IN "sns weird view" FOR METRIC "TOTAL AMOUNT"
 ----
-sns_sales	region	VARCHAR	false
+sns_sales	region	VARCHAR	false	[]	(empty)
 
 # ============================================================
 # Test 4: `IN SCHEMA` with a quoted, whitespace-bearing name.
@@ -142,10 +142,10 @@ SHOW SEMANTIC VIEWS LIKE 'sns%' IN SCHEMA "main" LIMIT 5
 # example and doc shows, and they must be untouched by the new scan.
 # ============================================================
 
-query TTTT rowsort
+query TTTTTT rowsort
 SHOW SEMANTIC DIMENSIONS IN sns_plain FOR METRIC plain_total
 ----
-sns_sales	region	VARCHAR	false
+sns_sales	region	VARCHAR	false	[]	(empty)
 
 statement ok
 SHOW SEMANTIC VIEWS IN SCHEMA main
@@ -193,18 +193,18 @@ CREATE SEMANTIC VIEW sns_b AS
   DIMENSIONS (t.id AS t.id)
   METRICS (t.total AS sum(t.amt));
 
-query TTTTTTTT rowsort
+query TTTTTTTTT rowsort
 SHOW SEMANTIC DIMENSIONS IN "sns_a.sns_b"
 ----
-memory	main	sns_a.sns_b	sns_sales	region	VARCHAR	[]	(empty)
+memory	main	sns_a.sns_b	sns_sales	region	VARCHAR	[]	(empty)	[]
 
 # The control: the tail-named view is reachable on its own spelling, so the
 # case above is proved to have resolved the quoted name rather than merely
 # having found the only view in the catalog.
-query TTTTTTTT rowsort
+query TTTTTTTTT rowsort
 SHOW SEMANTIC DIMENSIONS IN sns_b
 ----
-memory	main	sns_b	sns_sales	id	INTEGER	[]	(empty)
+memory	main	sns_b	sns_sales	id	INTEGER	[]	(empty)	[]
 
 # Cleanup
 statement ok

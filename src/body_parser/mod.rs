@@ -25,6 +25,8 @@ use crate::model::{
 use clause_bounds::find_clause_bounds;
 
 pub(crate) use annotations::find_annotation_start;
+#[cfg_attr(not(feature = "extension"), allow(unused_imports))]
+pub(crate) use annotations::{parse_tag_assignments, parse_tag_names};
 pub(crate) use entries::parse_qualified_entries;
 pub(crate) use materializations::parse_materializations_clause;
 pub(crate) use metrics::{misplaced_metric_clause, parse_metrics_clause};
@@ -122,37 +124,35 @@ impl KeywordBody {
     }
 }
 
-/// Parse the keyword body after "AS" into structured clause data.
+/// Parse the keyword body into structured clause data.
 ///
-/// `text` is the full text starting with "AS", trimmed.
+/// `text` is the body, trimmed: either `AS` and the clauses, or the clauses
+/// alone, starting at `TABLES` (Snowflake writes no `AS` there).
 /// `base_offset` is the byte offset of `text[0]` in the original query string.
 #[allow(clippy::too_many_lines)]
 pub fn parse_keyword_body(text: &str, base_offset: usize) -> Result<KeywordBody, ParseError> {
-    // Strip leading "AS" (case-insensitive). F-16 (code-review 2026-07-16):
+    // Strip a leading "AS" (case-insensitive). F-16 (code-review 2026-07-16):
     // require a word boundary after "AS" so `ASTABLES(...)` is not silently
     // read as `AS TABLES(...)`. The front door (`create_body.rs`) already
     // whitespace-delimits this, but `parse_keyword_body` is `pub` and
     // fuzz-facing, so it must self-guard against a following identifier byte.
+    let lead = text.len() - text.trim_start().len();
     let trimmed = text.trim();
-    let after_as = if trimmed
-        .get(..2)
-        .is_some_and(|s| s.eq_ignore_ascii_case("AS"))
-        && trimmed
-            .as_bytes()
-            .get(2)
-            .is_none_or(|&b| !crate::util::is_ident_byte(b))
-    {
-        trimmed[2..].trim_start()
+    let keyword_len = if starts_with_word(trimmed, "AS") {
+        2
+    } else if starts_with_word(trimmed, "TABLES") {
+        0
     } else {
         return Err(ParseError {
-            message: "Expected 'AS' keyword at start of semantic view body.".to_string(),
+            message: "Expected 'AS' or 'TABLES' at start of semantic view body.".to_string(),
             position: Some(base_offset),
         });
     };
+    let after_as = trimmed[keyword_len..].trim_start();
 
     // Offset of after_as within the original query
-    let as_offset = base_offset + (text.len() - text.trim_start().len()) + 2;
-    let after_as_offset = as_offset + (text.trim_start()[2..].len() - after_as.len());
+    let after_as_offset =
+        base_offset + lead + keyword_len + (trimmed[keyword_len..].len() - after_as.len());
 
     // F-6 (code-review 2026-07-16): peel an optional trailing view-level
     // `COMMENT = '...'` (Snowflake places it after the last clause) before the
@@ -297,6 +297,18 @@ pub fn parse_keyword_body(text: &str, base_offset: usize) -> Result<KeywordBody,
         view_comment,
         view_tags,
     })
+}
+
+/// Whether `text` starts with the keyword `word` (ASCII case-insensitive),
+/// followed by the end of the text or a byte that cannot continue an
+/// identifier.
+pub(crate) fn starts_with_word(text: &str, word: &str) -> bool {
+    text.get(..word.len())
+        .is_some_and(|s| s.eq_ignore_ascii_case(word))
+        && text
+            .as_bytes()
+            .get(word.len())
+            .is_none_or(|&b| !crate::util::is_ident_byte(b))
 }
 
 /// Peel the optional trailing view-level annotations off the clause region:
@@ -738,6 +750,38 @@ mod tests {
     }
 
     #[test]
+    fn labels_before_as_is_rejected_on_a_metric() {
+        let body = "TABLES (o AS orders PRIMARY KEY (id)) \
+                    METRICS (o.revenue LABELS = (FILTER) AS sum(o.amount))";
+        let err = parse_keyword_body(body, 0).unwrap_err();
+        assert!(
+            err.message.contains("LABELS is not valid on a metric"),
+            "got: {}",
+            err.message
+        );
+    }
+
+    #[test]
+    fn labels_before_as_after_using_is_rejected_on_a_metric() {
+        let body = "TABLES (o AS orders PRIMARY KEY (id)) \
+                    METRICS (o.revenue USING (r) LABELS = (FILTER) AS sum(o.amount))";
+        let err = parse_keyword_body(body, 0).unwrap_err();
+        assert!(
+            err.message.contains("LABELS is not valid on a metric"),
+            "got: {}",
+            err.message
+        );
+    }
+
+    #[test]
+    fn a_metric_named_labels_is_still_a_metric() {
+        let body = "TABLES (o AS orders PRIMARY KEY (id)) \
+                    METRICS (o.labels AS sum(o.amount), labels2 AS o.labels * 2, labels AS o.labels)";
+        let res = parse_keyword_body(body, 0);
+        assert!(res.is_ok(), "got: {:?}", res.err());
+    }
+
+    #[test]
     fn labels_is_rejected_on_a_table() {
         let body = "AS TABLES (o AS orders PRIMARY KEY (id) LABELS = (FILTER)) \
                     METRICS (o.revenue AS sum(o.amount))";
@@ -844,6 +888,51 @@ mod tests {
         let parsed = parse_keyword_body(body, 0).expect("should parse");
         assert!(parsed.facts[0].is_filter, "fact filter flag lost");
         assert!(parsed.dimensions[0].is_filter, "dimension filter flag lost");
+    }
+
+    // A member or a table alias named `labels` is a name, not the keyword: the
+    // leading `LABELS = (...)` is the first one after the name. GET_DDL writes
+    // this form, so it must read back.
+    #[test]
+    fn leading_labels_after_a_member_named_labels() {
+        let body = "AS TABLES (o AS orders PRIMARY KEY (id)) \
+                    FACTS (o.labels LABELS = (FILTER) AS o.amount > 100) \
+                    DIMENSIONS (o.labels2 AS o.country) \
+                    METRICS (o.revenue AS sum(o.amount))";
+        let parsed = parse_keyword_body(body, 0).expect("member named labels");
+        assert_eq!(parsed.facts[0].name, "labels");
+        assert!(parsed.facts[0].is_filter, "filter flag lost");
+    }
+
+    #[test]
+    fn leading_labels_after_an_alias_named_labels() {
+        let body = "AS TABLES (labels AS orders PRIMARY KEY (id)) \
+                    DIMENSIONS (labels.is_us LABELS = (FILTER) AS labels.country = 'US') \
+                    METRICS (labels.revenue AS sum(labels.amount))";
+        let parsed = parse_keyword_body(body, 0).expect("alias named labels");
+        assert_eq!(parsed.dimensions[0].name, "is_us");
+        assert!(parsed.dimensions[0].is_filter, "filter flag lost");
+    }
+
+    #[test]
+    fn leading_labels_after_an_alias_and_member_named_labels() {
+        let body = "AS TABLES (labels AS orders PRIMARY KEY (id)) \
+                    DIMENSIONS (labels.labels LABELS = (FILTER) AS labels.country = 'US') \
+                    METRICS (labels.revenue AS sum(labels.amount))";
+        let parsed = parse_keyword_body(body, 0).expect("both named labels");
+        assert_eq!(parsed.dimensions[0].name, "labels");
+        assert!(parsed.dimensions[0].is_filter, "filter flag lost");
+    }
+
+    /// An expression that reads a table aliased `comment` is not a COMMENT.
+    #[test]
+    fn an_alias_named_comment_in_an_expression() {
+        let body = "AS TABLES (comment AS orders PRIMARY KEY (id)) \
+                    DIMENSIONS (comment.region AS comment.region COMMENT = 'r') \
+                    METRICS (comment.revenue AS sum(comment.amount))";
+        let parsed = parse_keyword_body(body, 0).expect("alias named comment");
+        assert_eq!(parsed.dimensions[0].expr, "comment.region");
+        assert_eq!(parsed.dimensions[0].comment.as_deref(), Some("r"));
     }
 
     #[test]

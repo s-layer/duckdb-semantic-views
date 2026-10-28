@@ -168,10 +168,10 @@ CREATE SEMANTIC VIEW annotated AS
   DIMENSIONS (n.lbl AS n.labels COMMENT = 'the label column')
   METRICS (n.cnt AS COUNT(*));
 
-query TTTTTTTT
+query TTTTTTTTT
 SHOW SEMANTIC DIMENSIONS IN annotated
 ----
-memory	main	annotated	notes	lbl	VARCHAR	[]	the label column
+memory	main	annotated	notes	lbl	VARCHAR	[]	the label column	[]
 
 statement ok
 DROP SEMANTIC VIEW annotated

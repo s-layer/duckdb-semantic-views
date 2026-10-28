@@ -103,19 +103,19 @@ SELECT * FROM SEMANTIC_VIEW(p39_sv DIMENSIONS order_id METRICS total_amount)
 # test/sql/member_data_type.test covers the probe itself.
 # ============================================================
 
-query TTTTTTTT
+query TTTTTTTTT
 SHOW SEMANTIC FACTS IN p39_sv;
 ----
-memory	main	p39_sv	p39_orders	unit_price	DOUBLE	[]	(empty)
+memory	main	p39_sv	p39_orders	unit_price	DOUBLE	[]	(empty)	[]
 
 # ============================================================
 # Test 5: SHOW SEMANTIC DIMENSIONS resolves alias to table name
 # ============================================================
 
-query TTTTTTTT
+query TTTTTTTTT
 SHOW SEMANTIC DIMENSIONS IN p39_sv;
 ----
-memory	main	p39_sv	p39_orders	order_id	INTEGER	[]	(empty)
+memory	main	p39_sv	p39_orders	order_id	INTEGER	[]	(empty)	[]
 
 # ============================================================
 # Test 6: SHOW SEMANTIC METRICS resolves alias to table name

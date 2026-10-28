@@ -182,7 +182,7 @@ proptest! {
 // ---------------------------------------------------------------------------
 
 proptest! {
-    /// Non-AS-body syntax returns "Expected 'AS' or 'FROM YAML'" error with position.
+    /// A body that is neither AS, TABLES nor FROM YAML is refused with a position.
     #[test]
     fn position_invariant_paren_body_rejected(
         spaces in "[ ]{0,20}",
@@ -190,8 +190,8 @@ proptest! {
         let query = format!("{spaces}CREATE SEMANTIC VIEW x (tbles := [])");
         let err = plan_create(&query).unwrap_err();
         prop_assert!(
-            err.message.contains("Expected 'AS' or 'FROM YAML'"),
-            "Expected 'Expected AS or FROM YAML' error, got: {}",
+            err.message.contains("Expected 'AS', 'TABLES' or 'FROM YAML'"),
+            "Expected 'Expected AS, TABLES or FROM YAML' error, got: {}",
             err.message
         );
         prop_assert!(err.position.is_some());

@@ -66,17 +66,17 @@ statement ok
 CREATE SEMANTIC VIEW dcs_sch.sch_sv AS TABLES (o AS dcs_orders PRIMARY KEY (id)) DIMENSIONS (o.region AS o.region) METRICS (o.total AS SUM(o.amount));
 
 # S-200: rewrite.rs::phase34_1_1_show_filter_tests::test_rewrite_show_dims_like_cross_view, test_build_filter_suffix_like_only — LIKE with no IN filters dimensions across every view
-query TTTTTTTT rowsort
+query TTTTTTTTT rowsort
 SHOW SEMANTIC DIMENSIONS LIKE '%rev%'
 ----
-memory	main	w	dcs_orders	rev_bucket	INTEGER	[]	(empty)
+memory	main	w	dcs_orders	rev_bucket	INTEGER	[]	(empty)	[]
 
 # S-201: rewrite.rs::phase34_1_1_show_filter_tests::test_rewrite_show_dims_like_in_starts_with_limit — LIKE, IN <view>, STARTS WITH and LIMIT compose (LIMIT cuts 3 matches to 2)
-query TTTTTTTT nosort
+query TTTTTTTTT nosort
 SHOW SEMANTIC DIMENSIONS LIKE '%c%' IN v STARTS WITH 'cust' LIMIT 2
 ----
-memory	main	v	dcs_orders	cust_initial	VARCHAR	[]	(empty)
-memory	main	v	dcs_orders	cust_tier	VARCHAR	[]	(empty)
+memory	main	v	dcs_orders	cust_initial	VARCHAR	[]	(empty)	[]
+memory	main	v	dcs_orders	cust_tier	VARCHAR	[]	(empty)	[]
 
 # S-202: rewrite.rs::phase34_1_1_show_filter_tests::test_rewrite_show_metrics_starts_with_limit, test_build_filter_suffix_starts_with_only — STARTS WITH then LIMIT 1 across views
 query TTTTTTTT nosort
@@ -96,40 +96,40 @@ memory	main	v	dcs_orders	total_orders	BIGINT	[]	(empty)
 memory	main	w	dcs_orders	total_units	HUGEINT	[]	(empty)
 
 # S-203: rewrite.rs::phase34_1_1_show_filter_tests::test_rewrite_show_facts_limit, test_build_filter_suffix_limit_only — LIMIT alone; LIMIT 1 below the two facts shows it takes effect
-query TTTTTTTT rowsort
+query TTTTTTTTT rowsort
 SHOW SEMANTIC FACTS LIMIT 10
 ----
-memory	main	v	dcs_orders	raw_amount	INTEGER	[]	(empty)
-memory	main	w	dcs_orders	unit	INTEGER	[]	(empty)
+memory	main	v	dcs_orders	raw_amount	INTEGER	[]	(empty)	[]
+memory	main	w	dcs_orders	unit	INTEGER	[]	(empty)	[]
 
-query TTTTTTTT nosort
+query TTTTTTTTT nosort
 SHOW SEMANTIC FACTS LIMIT 1
 ----
-memory	main	v	dcs_orders	raw_amount	INTEGER	[]	(empty)
+memory	main	v	dcs_orders	raw_amount	INTEGER	[]	(empty)	[]
 
 # S-204: rewrite.rs::phase34_1_1_show_filter_tests::test_rewrite_show_dims_for_metric_with_all_clauses — LIKE, IN, FOR METRIC, STARTS WITH, LIMIT all together
 # LIKE drops cust_initial, which would sort first, and LIMIT 1 drops customer.
-query TTTT nosort
+query TTTTTT nosort
 SHOW SEMANTIC DIMENSIONS LIKE '%r%' IN v FOR METRIC revenue STARTS WITH 'c' LIMIT 1
 ----
-dcs_orders	cust_tier	VARCHAR	false
+dcs_orders	cust_tier	VARCHAR	false	[]	(empty)
 
 # S-205: rewrite.rs::phase34_1_1_show_filter_tests::test_rewrite_show_case_insensitive — lower-case SHOW keywords and clauses
-query TTTTTTTT rowsort
+query TTTTTTTTT rowsort
 show semantic dimensions like '%r%' in v
 ----
-memory	main	v	dcs_orders	cust_tier	VARCHAR	[]	(empty)
-memory	main	v	dcs_orders	customer	VARCHAR	[]	(empty)
-memory	main	v	dcs_orders	region	VARCHAR	[]	(empty)
+memory	main	v	dcs_orders	cust_tier	VARCHAR	[]	(empty)	[]
+memory	main	v	dcs_orders	customer	VARCHAR	[]	(empty)	[]
+memory	main	v	dcs_orders	region	VARCHAR	[]	(empty)	[]
 
 # S-206: rewrite.rs::test_for_metric_requires_boundaries, show_scope_other_commands_tests::for_metric_still_composes_with_a_view_name, show_name_slot_quoted_ident_tests::an_unquoted_view_and_metric_are_unchanged — IN <view> FOR METRIC <metric>
-query TTTT rowsort
+query TTTTTT rowsort
 SHOW SEMANTIC DIMENSIONS IN v FOR METRIC revenue
 ----
-dcs_orders	cust_initial	VARCHAR	false
-dcs_orders	cust_tier	VARCHAR	false
-dcs_orders	customer	VARCHAR	false
-dcs_orders	region	VARCHAR	false
+dcs_orders	cust_initial	VARCHAR	false	[]	(empty)
+dcs_orders	cust_tier	VARCHAR	false	[]	(empty)
+dcs_orders	customer	VARCHAR	false	[]	(empty)
+dcs_orders	region	VARCHAR	false	[]	(empty)
 
 # S-207: rewrite.rs::phase34_1_1_show_filter_tests::test_rewrite_show_views_like — SHOW SEMANTIC VIEWS LIKE
 query TTTTTT nosort
@@ -369,24 +369,24 @@ SHOW SEMANTIC VIEWS IN DATABASE "my db"
 ----
 
 # S-232: rewrite.rs::show_name_slot_quoted_ident_tests::in_view_accepts_a_quoted_name_containing_whitespace — IN "<view with space>"
-query TTTTTTTT rowsort
+query TTTTTTTTT rowsort
 SHOW SEMANTIC DIMENSIONS IN "my view"
 ----
-memory	main	my view	dcs_orders	region	VARCHAR	[]	(empty)
+memory	main	my view	dcs_orders	region	VARCHAR	[]	(empty)	[]
 
 # S-233: rewrite.rs::show_name_slot_quoted_ident_tests::for_metric_accepts_a_quoted_name_containing_whitespace — FOR METRIC "<metric with space>"
-query TTTT rowsort
+query TTTTTT rowsort
 SHOW SEMANTIC DIMENSIONS IN v FOR METRIC "revenue"
 ----
-dcs_orders	cust_initial	VARCHAR	false
-dcs_orders	cust_tier	VARCHAR	false
-dcs_orders	customer	VARCHAR	false
-dcs_orders	region	VARCHAR	false
+dcs_orders	cust_initial	VARCHAR	false	[]	(empty)
+dcs_orders	cust_tier	VARCHAR	false	[]	(empty)
+dcs_orders	customer	VARCHAR	false	[]	(empty)
+dcs_orders	region	VARCHAR	false	[]	(empty)
 
-query TTTT rowsort
+query TTTTTT rowsort
 SHOW SEMANTIC DIMENSIONS IN "my view" FOR METRIC "my metric"
 ----
-dcs_orders	region	VARCHAR	false
+dcs_orders	region	VARCHAR	false	[]	(empty)
 
 # S-234: rewrite.rs::show_name_slot_quoted_ident_tests::a_quoted_view_name_containing_a_dot_keeps_its_quotes — IN "a.b" names the view literally called `a.b`, not view `b` [text]
 statement ok
@@ -395,16 +395,16 @@ CREATE SEMANTIC VIEW "dcs_a.dcs_b" AS TABLES (o AS dcs_orders PRIMARY KEY (id)) 
 statement ok
 CREATE SEMANTIC VIEW dcs_b AS TABLES (o AS dcs_orders PRIMARY KEY (id)) DIMENSIONS (o.cust AS o.cust) METRICS (o.total AS SUM(o.amount));
 
-query TTTTTTTT rowsort
+query TTTTTTTTT rowsort
 SHOW SEMANTIC DIMENSIONS IN "dcs_a.dcs_b"
 ----
-memory	main	dcs_a.dcs_b	dcs_orders	region	VARCHAR	[]	(empty)
+memory	main	dcs_a.dcs_b	dcs_orders	region	VARCHAR	[]	(empty)	[]
 
 # S-235: rewrite.rs::show_name_slot_quoted_ident_tests::an_unquoted_dot_is_a_qualifier_but_a_quoted_one_is_not — an unquoted dot in IN <view> is a schema qualifier
-query TTTTTTTT rowsort
+query TTTTTTTTT rowsort
 SHOW SEMANTIC DIMENSIONS IN main.dcs_b
 ----
-memory	main	dcs_b	dcs_orders	cust	VARCHAR	[]	(empty)
+memory	main	dcs_b	dcs_orders	cust	VARCHAR	[]	(empty)	[]
 
 # S-236: rewrite.rs::show_name_slot_quoted_ident_tests::in_schema_strips_quotes_before_emitting_the_literal — a quoted IN SCHEMA name ("dcs_sch") matches the bare schema name
 query TTTTTT nosort
@@ -613,10 +613,10 @@ SHOW SEMANTIC VIEWS IN SCHEMA STARTS WITH 'sales'
 <REGEX>:\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z	sales_b	SEMANTIC_VIEW	memory	main	(empty)
 
 # S-272: rewrite.rs::show_scope_other_commands_tests::in_schema_scopes_show_dimensions — SHOW SEMANTIC DIMENSIONS IN SCHEMA
-query TTTTTTTT rowsort
+query TTTTTTTTT rowsort
 SHOW SEMANTIC DIMENSIONS IN SCHEMA dcs_sch
 ----
-memory	dcs_sch	sch_sv	dcs_orders	region	VARCHAR	[]	(empty)
+memory	dcs_sch	sch_sv	dcs_orders	region	VARCHAR	[]	(empty)	[]
 
 # S-273: rewrite.rs::show_scope_other_commands_tests::in_schema_scopes_show_metrics — SHOW SEMANTIC METRICS IN SCHEMA
 query TTTTTTTT rowsort
@@ -625,27 +625,27 @@ SHOW SEMANTIC METRICS IN SCHEMA dcs_sch
 memory	dcs_sch	sch_sv	dcs_orders	total	HUGEINT	[]	(empty)
 
 # S-274: rewrite.rs::show_scope_other_commands_tests::in_schema_scopes_show_facts — SHOW SEMANTIC FACTS IN SCHEMA
-query TTTTTTTT rowsort
+query TTTTTTTTT rowsort
 SHOW SEMANTIC FACTS IN SCHEMA main
 ----
-memory	main	v	dcs_orders	raw_amount	INTEGER	[]	(empty)
-memory	main	w	dcs_orders	unit	INTEGER	[]	(empty)
+memory	main	v	dcs_orders	raw_amount	INTEGER	[]	(empty)	[]
+memory	main	w	dcs_orders	unit	INTEGER	[]	(empty)	[]
 
-query TTTTTTTT rowsort
+query TTTTTTTTT rowsort
 SHOW SEMANTIC FACTS IN SCHEMA dcs_sch
 ----
 
 # S-275: rewrite.rs::show_scope_other_commands_tests::in_database_scopes_show_dimensions — SHOW SEMANTIC DIMENSIONS IN DATABASE
-query TTTTTTTT rowsort
+query TTTTTTTTT rowsort
 SHOW SEMANTIC DIMENSIONS LIKE 'rev%' IN DATABASE memory
 ----
-memory	main	w	dcs_orders	rev_bucket	INTEGER	[]	(empty)
+memory	main	w	dcs_orders	rev_bucket	INTEGER	[]	(empty)	[]
 
 # S-276: rewrite.rs::show_scope_other_commands_tests::a_qualified_schema_scopes_show_dimensions — SHOW SEMANTIC DIMENSIONS IN SCHEMA <db>.<schema>
-query TTTTTTTT rowsort
+query TTTTTTTTT rowsort
 SHOW SEMANTIC DIMENSIONS IN SCHEMA memory.dcs_sch
 ----
-memory	dcs_sch	sch_sv	dcs_orders	region	VARCHAR	[]	(empty)
+memory	dcs_sch	sch_sv	dcs_orders	region	VARCHAR	[]	(empty)	[]
 
 # S-277: rewrite.rs::show_scope_other_commands_tests::in_account_emits_no_scope_predicate — IN ACCOUNT lists everything
 query TTTTTT nosort
@@ -655,10 +655,10 @@ SHOW SEMANTIC VIEWS LIKE 'sales%' IN ACCOUNT
 <REGEX>:\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z	sales_b	SEMANTIC_VIEW	memory	main	(empty)
 
 # S-278: rewrite.rs::show_scope_other_commands_tests::in_account_scopes_show_dimensions_too — SHOW SEMANTIC DIMENSIONS IN ACCOUNT
-query TTTTTTTT rowsort
+query TTTTTTTTT rowsort
 SHOW SEMANTIC DIMENSIONS LIKE 'rev%' IN ACCOUNT
 ----
-memory	main	w	dcs_orders	rev_bucket	INTEGER	[]	(empty)
+memory	main	w	dcs_orders	rev_bucket	INTEGER	[]	(empty)	[]
 
 # S-279: rewrite.rs::show_scope_other_commands_tests::a_bare_in_schema_scopes_to_the_current_schema — bare IN SCHEMA is the current schema
 statement ok
@@ -673,19 +673,19 @@ SHOW SEMANTIC VIEWS IN SCHEMA
 statement ok
 CREATE SEMANTIC VIEW memory.main."schema" AS TABLES (o AS dcs_orders PRIMARY KEY (id)) DIMENSIONS (o.schema_dim AS o.region) METRICS (o.total AS SUM(o.amount));
 
-query TTTTTTTT rowsort
+query TTTTTTTTT rowsort
 SHOW SEMANTIC DIMENSIONS IN SCHEMA
 ----
-memory	dcs_sch	sch_sv	dcs_orders	region	VARCHAR	[]	(empty)
+memory	dcs_sch	sch_sv	dcs_orders	region	VARCHAR	[]	(empty)	[]
 
 statement ok
 USE memory.main;
 
 # S-281: rewrite.rs::show_scope_other_commands_tests::a_quoted_view_named_schema_is_still_reachable — quoting forces the view-name reading
-query TTTTTTTT rowsort
+query TTTTTTTTT rowsort
 SHOW SEMANTIC DIMENSIONS IN "schema"
 ----
-memory	main	schema	dcs_orders	schema_dim	VARCHAR	[]	(empty)
+memory	main	schema	dcs_orders	schema_dim	VARCHAR	[]	(empty)	[]
 
 # S-282: rewrite.rs::show_scope_other_commands_tests::a_bare_in_database_scopes_to_the_current_database — bare IN DATABASE is the current database
 query TTTTTT nosort
@@ -698,7 +698,7 @@ SHOW SEMANTIC VIEWS LIKE 'sch%' IN DATABASE
 statement ok
 CREATE SEMANTIC VIEW orders_sv AS TABLES (o AS dcs_orders PRIMARY KEY (id)) DIMENSIONS (o.ordinary AS o.region) METRICS (o.total AS SUM(o.amount));
 
-query TTTTTTTT rowsort
+query TTTTTTTTT rowsort
 SHOW SEMANTIC DIMENSIONS IN orders_sv
 ----
-memory	main	orders_sv	dcs_orders	ordinary	VARCHAR	[]	(empty)
+memory	main	orders_sv	dcs_orders	ordinary	VARCHAR	[]	(empty)	[]

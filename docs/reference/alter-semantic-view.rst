@@ -1,5 +1,5 @@
 .. meta::
-   :description: Syntax reference for ALTER SEMANTIC VIEW, covering RENAME TO, SET COMMENT, and UNSET COMMENT operations
+   :description: Syntax reference for ALTER SEMANTIC VIEW, covering RENAME TO, SET COMMENT, UNSET COMMENT, SET TAG, and UNSET TAG operations
 
 .. _ref-alter-semantic-view:
 
@@ -7,7 +7,7 @@
 ALTER SEMANTIC VIEW
 ======================
 
-Modifies an existing semantic view. Supports renaming and setting or removing the view-level comment. The view definition (tables, relationships, dimensions, metrics, facts) is preserved.
+Modifies an existing semantic view. Supports renaming, setting or removing the view-level comment, and setting or removing view-level tags. The view definition (tables, relationships, dimensions, metrics, facts) is preserved.
 
 
 .. _ref-alter-syntax:
@@ -22,6 +22,10 @@ Syntax
    ALTER SEMANTIC VIEW [ IF EXISTS ] <name> SET COMMENT = '<text>'
 
    ALTER SEMANTIC VIEW [ IF EXISTS ] <name> UNSET COMMENT
+
+   ALTER SEMANTIC VIEW [ IF EXISTS ] <name> SET TAG <tag_name> = '<tag_value>' [ , ... ]
+
+   ALTER SEMANTIC VIEW [ IF EXISTS ] <name> UNSET TAG <tag_name> [ , ... ]
 
 
 .. _ref-alter-variants:
@@ -47,13 +51,31 @@ Statement Variants
 ``ALTER SEMANTIC VIEW IF EXISTS <name> UNSET COMMENT``
    Removes the view-level comment if the view exists. If the view does not exist, the statement succeeds silently.
 
+.. _ref-alter-tags:
+
+``ALTER SEMANTIC VIEW <name> SET TAG <tag_name> = '<tag_value>' [ , ... ]``
+   Sets one or more view-level :ref:`tags <ref-create-tags>`. A tag the view does not have is added. A tag it already has gets the new value and moves to the end of the list, spelled as in this statement. Returns an error if the view does not exist.
+
+``ALTER SEMANTIC VIEW <name> UNSET TAG <tag_name> [ , ... ]``
+   Removes the named view-level tags. A name the view does not carry is ignored. Removing the last tag leaves the view as if it had been created without ``WITH TAG``. Returns an error if the view does not exist.
+
+With ``IF EXISTS``, ``SET TAG`` and ``UNSET TAG`` succeed silently when the view does not exist.
+
+.. versionadded:: 0.18.0
+
+   ``SET TAG`` and ``UNSET TAG``.
+
+.. note::
+
+   As in Snowflake, ``ALTER`` changes the tags of the view itself, never those of its tables or members, and the tag list takes no parentheses. To change a member's tags, re-create the view. Tag names match case-insensitively, so ``SET TAG OWNER = 'x'`` replaces a tag written ``owner``. ``SET TAG`` follows the rules of the ``WITH TAG`` clause: a qualified name (``governance.pii``) is allowed, values are single-quoted strings, and naming the same tag twice in one list is an error. The change shows in the ``TAGS`` row of :ref:`DESCRIBE SEMANTIC VIEW <ref-describe-semantic-view>` and in :ref:`GET_DDL <ref-get-ddl>`.
+
 .. note::
 
    **Schema qualifiers.** ``<name>`` may carry a ``<schema>.`` qualifier and it decides which view is altered; an unqualified name resolves through the session's ``search_path``, and the first schema on the path holding a view of that name wins (see :ref:`ref-create-semantic-view`). When several schemas hold a view of the same name, qualify ``<name>`` so the statement alters the view you mean. A qualifier on ``<new_name>`` **moves** the view: ``ALTER SEMANTIC VIEW analytics.sales RENAME TO staging.sales`` relocates it to ``staging``. An unqualified ``<new_name>`` leaves the view in its current schema, so the ordinary rename never moves anything. The "already exists" check applies to the destination schema.
 
 .. note::
 
-   ``ALTER`` participates in your surrounding transaction (``BEGIN ... ROLLBACK`` restores the previous name and comment). The non-``IF EXISTS`` forms raise ``semantic view '<name>' does not exist`` when the view is absent at check time (and ``RENAME`` raises ``semantic view '<new_name>' already exists`` if the target name is taken); ``IF EXISTS`` keeps its silent no-op behavior. The existence/collision check and the update are atomic only inside an explicit transaction -- under autocommit a concurrent commit in the window between them is not detected (a concurrent drop leaves the update affecting 0 rows; a concurrently taken rename target surfaces a raw key-constraint error). See :ref:`explanation-transactional-ddl` for the guard window and how to close it.
+   ``ALTER`` participates in your surrounding transaction (``BEGIN ... ROLLBACK`` restores the previous name, comment and tags). The non-``IF EXISTS`` forms raise ``semantic view '<name>' does not exist`` when the view is absent at check time (and ``RENAME`` raises ``semantic view '<new_name>' already exists`` if the target name is taken); ``IF EXISTS`` keeps its silent no-op behavior. The existence/collision check and the update are atomic only inside an explicit transaction -- under autocommit a concurrent commit in the window between them is not detected (a concurrent drop leaves the update affecting 0 rows; a concurrently taken rename target surfaces a raw key-constraint error). See :ref:`explanation-transactional-ddl` for the guard window and how to close it.
 
 .. note::
 
@@ -73,6 +95,12 @@ Parameters
 
 ``<text>``
    The comment text (SET COMMENT only). Must be enclosed in single quotes. Use ``''`` to escape single quotes within the text.
+
+``<tag_name>``
+   A tag name (SET TAG and UNSET TAG), optionally qualified (``governance.pii``). Matched case-insensitively against the view's tags.
+
+``<tag_value>``
+   The tag value (SET TAG only). A single-quoted string of up to 256 characters.
 
 
 .. _ref-alter-output:
@@ -111,6 +139,8 @@ Output Columns
    * - ``status``
      - VARCHAR
      - The operation result: ``comment set`` or ``comment unset``.
+
+**SET TAG and UNSET TAG** return the same two columns, with ``status`` set to ``tags set`` or ``tags unset``.
 
 
 .. _ref-alter-examples:
@@ -177,6 +207,38 @@ The comment appears in :ref:`SHOW SEMANTIC VIEWS <ref-show-semantic-views>` and 
    ├───────┼───────────────┤
    │ sales │ comment unset │
    └───────┴───────────────┘
+
+**Set and remove view-level tags:**
+
+Given a view created with ``WITH TAG (owner = 'analytics')``:
+
+.. code-block:: sql
+
+   ALTER SEMANTIC VIEW sales SET TAG owner = 'finance', governance.tier = 'gold';
+
+.. code-block:: text
+
+   ┌───────┬──────────┐
+   │ name  │ status   │
+   ├───────┼──────────┤
+   │ sales │ tags set │
+   └───────┴──────────┘
+
+The view's ``TAGS`` row in ``DESCRIBE`` now reads ``{"owner":"finance","governance.tier":"gold"}``. Remove one tag:
+
+.. code-block:: sql
+
+   ALTER SEMANTIC VIEW sales UNSET TAG governance.tier;
+
+.. code-block:: text
+
+   ┌───────┬────────────┐
+   │ name  │ status     │
+   ├───────┼────────────┤
+   │ sales │ tags unset │
+   └───────┴────────────┘
+
+``GET_DDL`` now ends with ``WITH TAG (owner = 'finance')``.
 
 **Error: target name already exists:**
 

@@ -73,7 +73,7 @@ When ``LIKE`` and ``STARTS WITH`` are both present, a dimension must satisfy bot
 Output Columns
 ==============
 
-Returns one row per reachable dimension with 4 columns:
+Returns one row per reachable dimension with 6 columns:
 
 .. list-table::
    :header-rows: 1
@@ -94,6 +94,12 @@ Returns one row per reachable dimension with 4 columns:
    * - ``required``
      - BOOLEAN
      - ``TRUE`` if the dimension is referenced in a window metric's ``PARTITION BY EXCLUDING``, ``PARTITION BY``, or ``ORDER BY`` clause (meaning it must be included in the query for that metric). ``FALSE`` for all other dimensions and for non-window metrics.
+   * - ``synonyms``
+     - VARCHAR
+     - JSON array of the dimension's synonyms (e.g., ``["territory"]``). ``[]`` when no synonyms are set.
+   * - ``comment``
+     - VARCHAR
+     - The dimension comment text. Empty string if no comment is set.
 
 
 .. versionchanged:: 0.14.0
@@ -101,6 +107,10 @@ Returns one row per reachable dimension with 4 columns:
    ``data_type`` is populated again. It had been empty for every view created
    since v0.10.0. The type is now worked out when the command runs, so views
    created in that window report it too, with no need to re-create them.
+
+.. versionchanged:: 0.18.0
+
+   Added the ``synonyms`` and ``comment`` columns, after ``required``, as in Snowflake's output.
 
 
 .. _ref-show-dims-for-metric-filtering:
@@ -147,12 +157,12 @@ Examples
 
 .. code-block:: text
 
-   ┌────────────┬─────────┬───────────┬──────────┐
-   │ table_name │ name    │ data_type │ required │
-   ├────────────┼─────────┼───────────┼──────────┤
-   │ sales      │ product │ VARCHAR   │ false    │
-   │ sales      │ region  │ VARCHAR   │ false    │
-   └────────────┴─────────┴───────────┴──────────┘
+   ┌────────────┬─────────┬───────────┬──────────┬──────────┬─────────┐
+   │ table_name │ name    │ data_type │ required │ synonyms │ comment │
+   ├────────────┼─────────┼───────────┼──────────┼──────────┼─────────┤
+   │ sales      │ product │ VARCHAR   │ false    │ []       │         │
+   │ sales      │ region  │ VARCHAR   │ false    │ []       │         │
+   └────────────┴─────────┴───────────┴──────────┴──────────┴─────────┘
 
 With a single table, there are no joins, so every dimension is safe for every metric.
 
@@ -192,12 +202,12 @@ For ``order_total`` (source table: ``orders``), the path to ``customers`` is man
 
 .. code-block:: text
 
-   ┌────────────┬──────────────────┬───────────┬──────────┐
-   │ table_name │ name             │ data_type │ required │
-   ├────────────┼──────────────────┼───────────┼──────────┤
-   │ customers  │ customer_country │ VARCHAR   │ false    │
-   │ customers  │ customer_name    │ VARCHAR   │ false    │
-   └────────────┴──────────────────┴───────────┴──────────┘
+   ┌────────────┬──────────────────┬───────────┬──────────┬──────────┬─────────┐
+   │ table_name │ name             │ data_type │ required │ synonyms │ comment │
+   ├────────────┼──────────────────┼───────────┼──────────┼──────────┼─────────┤
+   │ customers  │ customer_country │ VARCHAR   │ false    │ []       │         │
+   │ customers  │ customer_name    │ VARCHAR   │ false    │ []       │         │
+   └────────────┴──────────────────┴───────────┴──────────┴──────────┴─────────┘
 
 For ``line_item_sum`` (source table: ``line_items``), the path from ``line_items`` to ``orders`` to ``customers`` is all many-to-one (safe), and ``item_qty`` is on the same table. All three dimensions are included:
 
@@ -207,13 +217,13 @@ For ``line_item_sum`` (source table: ``line_items``), the path from ``line_items
 
 .. code-block:: text
 
-   ┌────────────┬──────────────────┬───────────┬──────────┐
-   │ table_name │ name             │ data_type │ required │
-   ├────────────┼──────────────────┼───────────┼──────────┤
-   │ customers  │ customer_country │ VARCHAR   │ false    │
-   │ customers  │ customer_name    │ VARCHAR   │ false    │
-   │ line_items │ item_qty         │ INTEGER   │ false    │
-   └────────────┴──────────────────┴───────────┴──────────┘
+   ┌────────────┬──────────────────┬───────────┬──────────┬──────────┬─────────┐
+   │ table_name │ name             │ data_type │ required │ synonyms │ comment │
+   ├────────────┼──────────────────┼───────────┼──────────┼──────────┼─────────┤
+   │ customers  │ customer_country │ VARCHAR   │ false    │ []       │         │
+   │ customers  │ customer_name    │ VARCHAR   │ false    │ []       │         │
+   │ line_items │ item_qty         │ INTEGER   │ false    │ []       │         │
+   └────────────┴──────────────────┴───────────┴──────────┴──────────┴─────────┘
 
 **Window metric with required dimensions:**
 
@@ -245,13 +255,13 @@ When querying dimensions for a window function metric, the ``required`` column i
 
 .. code-block:: text
 
-   ┌────────────┬────────┬───────────┬──────────┐
-   │ table_name │ name   │ data_type │ required │
-   ├────────────┼────────┼───────────┼──────────┤
-   │ orders     │ month  │ DATE      │ true     │
-   │ orders     │ region │ VARCHAR   │ true     │
-   │ orders     │ status │ VARCHAR   │ false    │
-   └────────────┴────────┴───────────┴──────────┘
+   ┌────────────┬────────┬───────────┬──────────┬──────────┬─────────┐
+   │ table_name │ name   │ data_type │ required │ synonyms │ comment │
+   ├────────────┼────────┼───────────┼──────────┼──────────┼─────────┤
+   │ orders     │ month  │ DATE      │ true     │ []       │         │
+   │ orders     │ region │ VARCHAR   │ true     │ []       │         │
+   │ orders     │ status │ VARCHAR   │ false    │ []       │         │
+   └────────────┴────────┴───────────┴──────────┴──────────┴─────────┘
 
 In this example, ``region`` is required because it appears in ``EXCLUDING`` (it defines the partition boundary), and ``month`` is required because it appears in ``ORDER BY`` (it defines the window ordering). The ``status`` dimension is optional -- it can be included in the query but is not referenced by the window specification.
 
@@ -291,11 +301,11 @@ After fan trap filtering, narrow results further by name pattern. ``LIKE`` is ca
 
 .. code-block:: text
 
-   ┌────────────┬────────┬───────────┬──────────┐
-   │ table_name │ name   │ data_type │ required │
-   ├────────────┼────────┼───────────┼──────────┤
-   │ customers  │ region │ VARCHAR   │ false    │
-   └────────────┴────────┴───────────┴──────────┘
+   ┌────────────┬────────┬───────────┬──────────┬──────────┬─────────┐
+   │ table_name │ name   │ data_type │ required │ synonyms │ comment │
+   ├────────────┼────────┼───────────┼──────────┼──────────┼─────────┤
+   │ customers  │ region │ VARCHAR   │ false    │ []       │         │
+   └────────────┴────────┴───────────┴──────────┴──────────┴─────────┘
 
 ``STARTS WITH`` is case-sensitive:
 
@@ -305,11 +315,11 @@ After fan trap filtering, narrow results further by name pattern. ``LIKE`` is ca
 
 .. code-block:: text
 
-   ┌────────────┬───────────────┬───────────┬──────────┐
-   │ table_name │ name          │ data_type │ required │
-   ├────────────┼───────────────┼───────────┼──────────┤
-   │ customers  │ customer_name │ VARCHAR   │ false    │
-   └────────────┴───────────────┴───────────┴──────────┘
+   ┌────────────┬───────────────┬───────────┬──────────┬──────────┬─────────┐
+   │ table_name │ name          │ data_type │ required │ synonyms │ comment │
+   ├────────────┼───────────────┼───────────┼──────────┼──────────┼─────────┤
+   │ customers  │ customer_name │ VARCHAR   │ false    │ []       │         │
+   └────────────┴───────────────┴───────────┴──────────┴──────────┴─────────┘
 
 ``LIMIT`` applies after the rows are sorted by dimension name:
 
@@ -319,13 +329,13 @@ After fan trap filtering, narrow results further by name pattern. ``LIKE`` is ca
 
 .. code-block:: text
 
-   ┌────────────┬───────────────┬───────────┬──────────┐
-   │ table_name │ name          │ data_type │ required │
-   ├────────────┼───────────────┼───────────┼──────────┤
-   │ customers  │ customer_name │ VARCHAR   │ false    │
-   │ orders     │ order_date    │ DATE      │ false    │
-   │ customers  │ region        │ VARCHAR   │ false    │
-   └────────────┴───────────────┴───────────┴──────────┘
+   ┌────────────┬───────────────┬───────────┬──────────┬──────────┬─────────┐
+   │ table_name │ name          │ data_type │ required │ synonyms │ comment │
+   ├────────────┼───────────────┼───────────┼──────────┼──────────┼─────────┤
+   │ customers  │ customer_name │ VARCHAR   │ false    │ []       │         │
+   │ orders     │ order_date    │ DATE      │ false    │ []       │         │
+   │ customers  │ region        │ VARCHAR   │ false    │ []       │         │
+   └────────────┴───────────────┴───────────┴──────────┴──────────┴─────────┘
 
 **Derived metrics inherit source tables:**
 
@@ -351,11 +361,11 @@ After fan trap filtering, narrow results further by name pattern. ``LIKE`` is ca
 
 .. code-block:: text
 
-   ┌────────────┬───────────────┬───────────┬──────────┐
-   │ table_name │ name          │ data_type │ required │
-   ├────────────┼───────────────┼───────────┼──────────┤
-   │ customers  │ customer_name │ VARCHAR   │ false    │
-   └────────────┴───────────────┴───────────┴──────────┘
+   ┌────────────┬───────────────┬───────────┬──────────┬──────────┬─────────┐
+   │ table_name │ name          │ data_type │ required │ synonyms │ comment │
+   ├────────────┼───────────────┼───────────┼──────────┼──────────┼─────────┤
+   │ customers  │ customer_name │ VARCHAR   │ false    │ []       │         │
+   └────────────┴───────────────┴───────────┴──────────┴──────────┴─────────┘
 
 The derived metric ``double_total`` depends on ``order_total`` (source: ``orders``). The extension traces this dependency and applies the same reachability rules as if querying ``order_total`` directly.
 

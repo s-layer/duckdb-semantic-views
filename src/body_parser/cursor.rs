@@ -120,6 +120,21 @@ impl<'a> Cursor<'a> {
             .find(|&t| self.is_kw(t, kw))
     }
 
+    /// The first token starting at or after source offset `from`, without
+    /// consuming anything.
+    pub(super) fn token_at_or_after(&self, from: usize) -> Option<Token> {
+        self.toks.iter().copied().find(|t| t.start >= from)
+    }
+
+    /// The first bare keyword `kw` starting at or after source offset `from`,
+    /// without consuming anything.
+    pub(super) fn find_kw_at_or_after(&self, kw: &str, from: usize) -> Option<Token> {
+        self.toks
+            .iter()
+            .copied()
+            .find(|&t| t.start >= from && self.is_kw(t, kw))
+    }
+
     /// The first `Symbol(b)` token at/after the cursor, without consuming.
     /// Quote-aware by construction — a `b` inside a string/quoted-ident is part
     /// of that one token, never a `Symbol`. Used to locate a structural

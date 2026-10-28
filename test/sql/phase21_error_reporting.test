@@ -18,13 +18,13 @@ require semantic_views
 statement error
 CREATE SEMANTIC VIEW err_test (tables := [{'alias': 't', 'table': 't'}], dimensions := [{'name': 'x', 'expr': 'x', 'source_table': 't'}])
 ----
-Expected 'AS' or 'FROM YAML' after view name
+Expected 'AS', 'TABLES' or 'FROM YAML' after view name
 
 # Empty parens also rejected
 statement error
 CREATE SEMANTIC VIEW err_test ();
 ----
-Expected 'AS' or 'FROM YAML' after view name
+Expected 'AS', 'TABLES' or 'FROM YAML' after view name
 
 # ============================================================
 # Section 2: ERR-02 -- Structural errors (missing name, etc.)

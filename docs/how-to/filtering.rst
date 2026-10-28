@@ -286,7 +286,7 @@ filtered on rather than selected:
    DIMENSIONS (
        o.region     AS o.region,
        o.ordered_at AS o.ordered_at,
-       o.is_2024    AS o.ordered_at >= DATE '2024-01-01' LABELS = (FILTER)
+       o.is_2024 LABELS = (FILTER) AS o.ordered_at >= DATE '2024-01-01'
    )
    METRICS (
        o.revenue     AS SUM(o.amount),

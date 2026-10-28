@@ -150,7 +150,7 @@ In this example:
 Mark a Named Filter
 ===================
 
-A **named filter** is a boolean-valued fact or dimension meant to be reused in a query's pre-aggregation predicate instead of selected as output. Declare one by adding ``LABELS = (FILTER)`` after the expression:
+A **named filter** is a boolean-valued fact or dimension meant to be reused in a query's pre-aggregation predicate instead of selected as output. Declare one by adding ``LABELS = (FILTER)`` between the member's name and its ``AS``, where Snowflake writes it:
 
 .. code-block:: sql
    :emphasize-lines: 7,10
@@ -161,14 +161,20 @@ A **named filter** is a boolean-valued fact or dimension meant to be reused in a
    )
    FACTS (
        o.amount AS o.amount,
-       o.is_large AS o.amount > 100 LABELS = (FILTER)
+       o.is_large LABELS = (FILTER) AS o.amount > 100
    )
    DIMENSIONS (
-       o.is_domestic AS o.country = 'US' LABELS = (FILTER)
+       o.is_domestic LABELS = (FILTER) AS o.country = 'US'
    )
    METRICS (
        o.revenue AS SUM(o.amount)
    );
+
+You can also write ``LABELS = (FILTER)`` after the expression, among the other annotations: ``o.is_large AS o.amount > 100 LABELS = (FILTER)`` declares the same filter. Write it in one place or the other, not both. :ref:`GET_DDL <ref-get-ddl>` writes it before ``AS``.
+
+.. versionadded:: 0.18.0
+
+   ``LABELS`` before ``AS``. Earlier versions accepted it only after the expression.
 
 Reference the filter by name in the query's :ref:`WHERE <ref-sv-pre-agg-filtering>`, which applies it *before* the metrics aggregate:
 
@@ -227,6 +233,15 @@ Read the tags back from the ``TAGS`` row in ``DESCRIBE``, which holds a JSON obj
 
 ``GET_DDL`` and :ref:`READ_YAML_FROM_SEMANTIC_VIEW() <ref-read-yaml>` write the tags back out, so they survive a dump and replay. ``SHOW`` commands don't list them, which matches Snowflake. See :ref:`Tags <ref-create-tags>` for the full rules.
 
+To change the view's own tags without re-creating it, use :ref:`ALTER SEMANTIC VIEW ... SET TAG / UNSET TAG <ref-alter-tags>`:
+
+.. code-block:: sql
+
+   ALTER SEMANTIC VIEW sales SET TAG owner = 'finance', tier = 'gold';
+   ALTER SEMANTIC VIEW sales UNSET TAG tier;
+
+``ALTER`` changes view-level tags only, as in Snowflake. To change a member's tags, re-create the view.
+
 
 .. _howto-annotations-inspect:
 
@@ -255,7 +270,7 @@ Look for these property rows:
 Via SHOW Commands
 -----------------
 
-The :ref:`SHOW SEMANTIC DIMENSIONS <ref-show-semantic-dimensions>`, :ref:`SHOW SEMANTIC METRICS <ref-show-semantic-metrics>`, and :ref:`SHOW SEMANTIC FACTS <ref-show-semantic-facts>` commands include ``synonyms`` and ``comment`` columns in their output:
+The :ref:`SHOW SEMANTIC DIMENSIONS <ref-show-semantic-dimensions>`, :ref:`SHOW SEMANTIC METRICS <ref-show-semantic-metrics>`, and :ref:`SHOW SEMANTIC FACTS <ref-show-semantic-facts>` commands include ``synonyms`` and ``comment`` columns in their output. ``SHOW SEMANTIC DIMENSIONS`` and ``SHOW SEMANTIC FACTS`` also have a ``labels`` column, ``["FILTER"]`` for a named filter and ``[]`` otherwise:
 
 .. code-block:: sql
 
@@ -263,11 +278,11 @@ The :ref:`SHOW SEMANTIC DIMENSIONS <ref-show-semantic-dimensions>`, :ref:`SHOW S
 
 .. code-block:: text
 
-   ┌───────────────┬─────────────┬────────────────────┬────────────┬────────┬───────────┬──────────────────────────────┬─────────┐
-   │ database_name │ schema_name │ semantic_view_name │ table_name │ name   │ data_type │ synonyms                     │ comment │
-   ├───────────────┼─────────────┼────────────────────┼────────────┼────────┼───────────┼──────────────────────────────┼─────────┤
-   │ memory        │ main        │ sales              │ orders     │ region │ VARCHAR   │ ["sales_region","territory"] │         │
-   └───────────────┴─────────────┴────────────────────┴────────────┴────────┴───────────┴──────────────────────────────┴─────────┘
+   ┌───────────────┬─────────────┬────────────────────┬────────────┬────────┬───────────┬──────────────────────────────┬─────────┬────────┐
+   │ database_name │ schema_name │ semantic_view_name │ table_name │ name   │ data_type │ synonyms                     │ comment │ labels │
+   ├───────────────┼─────────────┼────────────────────┼────────────┼────────┼───────────┼──────────────────────────────┼─────────┼────────┤
+   │ memory        │ main        │ sales              │ orders     │ region │ VARCHAR   │ ["sales_region","territory"] │         │ []     │
+   └───────────────┴─────────────┴────────────────────┴────────────┴────────┴───────────┴──────────────────────────────┴─────────┴────────┘
 
 This output is for the ``sales`` view from :ref:`howto-annotations-synonyms`. Its ``region`` dimension has synonyms but no comment.
 
@@ -292,6 +307,8 @@ Troubleshooting
 
 **COMMENT, WITH SYNONYMS, LABELS and TAG order**
    The annotations on one entry may appear in any order -- ``o.region AS o.region WITH SYNONYMS = ('territory') COMMENT = 'c'`` parses the same as the reverse. What the parser does require is that the annotation region be *tiled* by recognized clauses: once the first annotation keyword is seen, everything after it must be a valid ``COMMENT`` / ``WITH SYNONYMS`` / ``LABELS`` / ``[WITH] TAG`` clause separated by whitespace. Leftover text (``COMMENT = 'a' banana``) or a repeated clause is an error rather than being silently dropped.
+
+   ``LABELS`` alone may also sit between the name and ``AS`` (``o.is_large LABELS = (FILTER) AS ...``). ``COMMENT``, ``WITH SYNONYMS`` and ``TAG`` there raise *Only LABELS may come between the name and 'AS'*. Writing ``LABELS`` both before ``AS`` and after the expression raises *Duplicate LABELS annotation*.
 
 **Unsupported label**
    ``FILTER`` is the only value accepted in ``LABELS = (...)``. Other label values are rejected at ``CREATE`` -- deliberately, so a definition cannot round-trip having quietly lost a label. Remove the unsupported value to create the view.

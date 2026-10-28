@@ -1,5 +1,5 @@
 .. meta::
-   :description: Syntax reference for SHOW SEMANTIC VIEWS, including TERSE variant, IN SCHEMA/IN DATABASE qualifiers, and optional LIKE, STARTS WITH, and LIMIT filtering
+   :description: Syntax reference for SHOW SEMANTIC VIEWS, including TERSE variant, IN SCHEMA/IN DATABASE qualifiers, and optional LIKE, STARTS WITH, and LIMIT ... FROM filtering
 
 .. _ref-show-semantic-views:
 
@@ -21,7 +21,7 @@ Syntax
        [ LIKE '<pattern>' ]
        [ IN SCHEMA [<database_name>.]<schema_name> | IN DATABASE <database_name> ]
        [ STARTS WITH '<prefix>' ]
-       [ LIMIT <rows> ]
+       [ LIMIT <rows> [ FROM '<name_string>' ] ]
 
 All clauses are optional. When multiple clauses appear, they must follow the order shown above.
 
@@ -65,6 +65,13 @@ Optional Filtering Clauses
 
 ``LIMIT <rows>``
    Restricts the output to the first *rows* results. Must be a non-negative integer; ``LIMIT 0`` is accepted and returns no rows.
+
+``LIMIT <rows> FROM '<name_string>'``
+   Pages through the list, as in Snowflake. Only views whose name sorts after ``'<name_string>'`` are kept, and ``LIMIT`` then applies to them. Pass the last name of one page to get the next. A view named exactly ``'<name_string>'`` is not returned. The string need not be a full view name: ``FROM 'sales_b'`` returns the views after ``sales_b`` whether or not one has that name. Like ``STARTS WITH``, the comparison is **case-sensitive**, and the string must be enclosed in single quotes. ``FROM`` needs ``LIMIT``, and only ``SHOW [TERSE] SEMANTIC VIEWS`` takes it; on the other ``SHOW SEMANTIC`` commands it is an error.
+
+   The comparison uses the view name alone. When views in several schemas share a list, add ``IN SCHEMA`` so that the cursor follows the order of the rows.
+
+   .. versionadded:: 0.18.0
 
 When ``LIKE`` and ``STARTS WITH`` are both present, a view must satisfy both conditions (they are combined with ``AND``).
 
@@ -230,6 +237,29 @@ Find views whose name starts with "sales":
 .. code-block:: sql
 
    SHOW SEMANTIC VIEWS LIMIT 1;
+
+**Page through the list with LIMIT ... FROM:**
+
+With views ``inventory``, ``sales_b``, ``sales_c`` and ``sales_d``, ask for two views at a time. The first page has no ``FROM``:
+
+.. code-block:: sql
+
+   SHOW SEMANTIC VIEWS LIMIT 2;
+
+It returns ``inventory`` and ``sales_b``. Pass the last name to get the next page:
+
+.. code-block:: sql
+
+   SHOW SEMANTIC VIEWS LIMIT 2 FROM 'sales_b';
+
+.. code-block:: text
+
+   ┌──────────────────────┬─────────┬───────────────┬───────────────┬─────────────┬─────────┐
+   │ created_on           │ name    │ kind          │ database_name │ schema_name │ comment │
+   ├──────────────────────┼─────────┼───────────────┼───────────────┼─────────────┼─────────┤
+   │ 2026-10-28T13:05:35Z │ sales_c │ SEMANTIC_VIEW │ memory        │ main        │         │
+   │ 2026-10-28T13:05:35Z │ sales_d │ SEMANTIC_VIEW │ memory        │ main        │         │
+   └──────────────────────┴─────────┴───────────────┴───────────────┴─────────────┴─────────┘
 
 **Combine multiple clauses:**
 

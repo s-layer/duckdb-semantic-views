@@ -244,7 +244,7 @@ Annotate Facts with Metadata
 
 .. versionadded:: 0.6.0
 
-Facts accept four annotations: ``COMMENT``, ``WITH SYNONYMS``, the ``PRIVATE`` / ``PUBLIC`` access modifiers, and ``LABELS = (FILTER)``. ``PRIVATE`` or ``PUBLIC`` goes **before** the fact's name, as in ``PRIVATE li.raw_margin AS ...`` below. The other three follow the expression, in any order.
+Facts accept four annotations: ``COMMENT``, ``WITH SYNONYMS``, the ``PRIVATE`` / ``PUBLIC`` access modifiers, and ``LABELS = (FILTER)``. ``PRIVATE`` or ``PUBLIC`` goes **before** the fact's name, as in ``PRIVATE li.raw_margin AS ...`` below. ``COMMENT`` and ``WITH SYNONYMS`` follow the expression, in any order. ``LABELS = (FILTER)`` goes between the fact's name and ``AS``, as in Snowflake, or after the expression with the others.
 
 .. code-block:: sql
    :emphasize-lines: 6,7

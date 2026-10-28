@@ -302,30 +302,30 @@ memory	dcf_b	dcf_sp	region	VARCHAR	DIMENSION	o.region	(empty)
 memory	dcf_b	dcf_sp	amt_b	INTEGER	FACT	o.amount	(empty)
 memory	dcf_b	dcf_sp	total	HUGEINT	METRIC	SUM(o.amount) * 100	(empty)
 
-query TTTTTTTT nosort
+query TTTTTTTTT nosort
 SELECT * FROM show_semantic_dimensions('dcf_sp');
 ----
-memory	dcf_b	dcf_sp	dcf_orders	region	VARCHAR	[]	(empty)
+memory	dcf_b	dcf_sp	dcf_orders	region	VARCHAR	[]	(empty)	[]
 
 query TTTTTTTT nosort
 SHOW SEMANTIC METRICS IN dcf_sp;
 ----
 memory	dcf_b	dcf_sp	dcf_orders	total	HUGEINT	[]	(empty)
 
-query TTTTTTTT nosort
+query TTTTTTTTT nosort
 SHOW SEMANTIC FACTS IN dcf_sp;
 ----
-memory	dcf_b	dcf_sp	dcf_orders	amt_b	INTEGER	[]	(empty)
+memory	dcf_b	dcf_sp	dcf_orders	amt_b	INTEGER	[]	(empty)	[]
 
 query TTTTTTT nosort
 SHOW SEMANTIC MATERIALIZATIONS IN dcf_sp;
 ----
 memory	dcf_b	dcf_sp	dcf_mat_b	dcf_orders	["region"]	[]
 
-query TTTT nosort
+query TTTTTT nosort
 SHOW SEMANTIC DIMENSIONS IN dcf_sp FOR METRIC total;
 ----
-dcf_orders	region	VARCHAR	false
+dcf_orders	region	VARCHAR	false	[]	(empty)
 
 # F-090: search_path.rs::RESOLVING_READ_FUNCTIONS (base-table schema) — PRE-EXISTING (TECH-DEBT #96): DESCRIBE reports BASE_TABLE_SCHEMA_NAME = the VIEW's schema (dcf_b), but the base table resolved at CREATE to memory.main.dcf_orders (as EXPLAIN shows); there is no dcf_b.dcf_orders
 query T
@@ -468,12 +468,12 @@ SHOW SEMANTIC VIEWS LIKE 'dcf_cust%' LIMIT 1;
 ----
 <REGEX>:.+	dcf_cust_1	SEMANTIC_VIEW	memory	main	(empty)
 
-query TTTTTTTT nosort
+query TTTTTTTTT nosort
 SHOW SEMANTIC DIMENSIONS IN dcf_sw;
 ----
-memory	main	dcf_sw	dcf_orders	a_b	VARCHAR	[]	(empty)
-memory	main	dcf_sw	dcf_orders	a_bc	VARCHAR	[]	(empty)
-memory	main	dcf_sw	dcf_orders	axb	VARCHAR	[]	(empty)
+memory	main	dcf_sw	dcf_orders	a_b	VARCHAR	[]	(empty)	[]
+memory	main	dcf_sw	dcf_orders	a_bc	VARCHAR	[]	(empty)	[]
+memory	main	dcf_sw	dcf_orders	axb	VARCHAR	[]	(empty)	[]
 
 # F-100: show_clauses.rs::filter_suffix_escapes_single_quotes (LIKE, STARTS WITH) — a doubled quote in a LIKE pattern or a STARTS WITH prefix is one literal quote that matches, not a break-out of the literal
 query TTTTTT nosort
@@ -494,31 +494,31 @@ SHOW SEMANTIC VIEWS IN SCHEMA "dcf_sch'ema";
 ----
 <REGEX>:.+	dcf_q	SEMANTIC_VIEW	memory	dcf_sch'ema	(empty)
 
-query TTTTTTTT nosort
+query TTTTTTTTT nosort
 SHOW SEMANTIC DIMENSIONS IN SCHEMA memory."dcf_sch'ema";
 ----
-memory	dcf_sch'ema	dcf_q	main.dcf_orders	region	VARCHAR	[]	(empty)
+memory	dcf_sch'ema	dcf_q	main.dcf_orders	region	VARCHAR	[]	(empty)	[]
 
-query TTTTTTTT nosort
+query TTTTTTTTT nosort
 SHOW SEMANTIC DIMENSIONS IN DATABASE "dcf_d'b";
 ----
 
-query TTTTTTTT nosort
+query TTTTTTTTT nosort
 SHOW SEMANTIC DIMENSIONS IN SCHEMA "dcf_d'b"."dcf_sch'ema";
 ----
 
 # F-102: show_clauses.rs::starts_with_prefix_is_literal_not_a_like_pattern, ::starts_with_discriminates_underscore_from_wildcard_in_duckdb (underscore) — STARTS WITH 'a_b' is a literal prefix (a_b, a_bc, not axb); LIKE 'a_b' keeps its pattern meaning (a_b and axb, not a_bc)
-query TTTTTTTT nosort
+query TTTTTTTTT nosort
 SHOW SEMANTIC DIMENSIONS IN dcf_sw STARTS WITH 'a_b';
 ----
-memory	main	dcf_sw	dcf_orders	a_b	VARCHAR	[]	(empty)
-memory	main	dcf_sw	dcf_orders	a_bc	VARCHAR	[]	(empty)
+memory	main	dcf_sw	dcf_orders	a_b	VARCHAR	[]	(empty)	[]
+memory	main	dcf_sw	dcf_orders	a_bc	VARCHAR	[]	(empty)	[]
 
-query TTTTTTTT nosort
+query TTTTTTTTT nosort
 SHOW SEMANTIC DIMENSIONS LIKE 'a_b' IN dcf_sw;
 ----
-memory	main	dcf_sw	dcf_orders	a_b	VARCHAR	[]	(empty)
-memory	main	dcf_sw	dcf_orders	axb	VARCHAR	[]	(empty)
+memory	main	dcf_sw	dcf_orders	a_b	VARCHAR	[]	(empty)	[]
+memory	main	dcf_sw	dcf_orders	axb	VARCHAR	[]	(empty)	[]
 
 # F-103: show_clauses.rs::starts_with_prefix_is_literal_not_a_like_pattern, ::starts_with_discriminates_underscore_from_wildcard_in_duckdb (percent) — STARTS WITH 'dcf_pct_100%' matches only the name with a literal `%`; LIKE 'dcf_pct_100%' matches both
 query TTTTTT nosort

@@ -59,17 +59,17 @@ DDL Errors (CREATE SEMANTIC VIEW)
 These errors occur at define time when creating or replacing a semantic view.
 
 
-Expected AS or FROM YAML
--------------------------
+Expected AS, TABLES or FROM YAML
+--------------------------------
 
 .. code-block:: text
 
-   Expected 'AS' or 'FROM YAML' after view name. Use: CREATE SEMANTIC VIEW
-   name AS TABLES (...) DIMENSIONS (...) METRICS (...) or: ...
+   Expected 'AS', 'TABLES' or 'FROM YAML' after view name. Use: CREATE SEMANTIC
+   VIEW name [AS] TABLES (...) DIMENSIONS (...) METRICS (...) or: ...
 
-**Cause:** The statement has no view name (``CREATE SEMANTIC VIEW AS ...`` reads ``AS`` as the name), or has a view name but is missing the ``AS`` keyword or ``FROM YAML`` keywords before the body.
+**Cause:** The statement has no view name (``CREATE SEMANTIC VIEW AS ...`` reads ``AS`` as the name), or the text after the view name is neither a body starting with ``AS`` or ``TABLES`` nor ``FROM YAML``.
 
-**Fix:** Use either the keyword body (``CREATE SEMANTIC VIEW my_view AS TABLES (...)``) or the YAML body (``CREATE SEMANTIC VIEW my_view FROM YAML $$ ... $$``).
+**Fix:** Use either the keyword body (``CREATE SEMANTIC VIEW my_view TABLES (...)``, with or without ``AS`` before ``TABLES``) or the YAML body (``CREATE SEMANTIC VIEW my_view FROM YAML $$ ... $$``).
 
 
 Missing TABLES clause
@@ -439,6 +439,31 @@ LABELS on a metric
 **Cause:** A ``METRICS`` entry carries ``LABELS = (FILTER)``. Named filters are row-level members, so only facts and dimensions can be labeled.
 
 **Fix:** Remove ``LABELS`` from the metric. To reuse a filter condition, declare it as a fact or dimension with ``LABELS = (FILTER)``. See :ref:`howto-annotations-filters`.
+
+
+Duplicate LABELS
+----------------
+
+.. code-block:: text
+
+   Duplicate LABELS annotation in dimensions entry '<entry>'.
+
+**Cause:** A fact or dimension entry has ``LABELS`` both between its name and ``AS`` and after its expression.
+
+**Fix:** Keep one of them. ``o.is_large LABELS = (FILTER) AS o.amount > 100`` is Snowflake's placement and the one ``GET_DDL`` writes.
+
+
+Annotation before AS
+--------------------
+
+.. code-block:: text
+
+   Only LABELS may come between the name and 'AS' in facts entry '<entry>'.
+   Put COMMENT, WITH SYNONYMS and TAG after the expression.
+
+**Cause:** A fact or dimension entry has ``COMMENT``, ``WITH SYNONYMS`` or ``TAG`` between its name and ``AS``. Only ``LABELS`` may go there.
+
+**Fix:** Move the other annotations after the expression: ``o.is_large LABELS = (FILTER) AS o.amount > 100 COMMENT = 'Large order'``.
 
 
 Aggregate in a dimension or fact

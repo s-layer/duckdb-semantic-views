@@ -408,7 +408,8 @@ static const std::vector<SvFunctionDoc> &sv_function_docs() {
         // --- Definition export -----------------------------------------
         {"get_ddl", {"object_type", "object_name", "use_fully_qualified_names"},
          "Returns the CREATE OR REPLACE SEMANTIC VIEW statement that recreates "
-         "a stored semantic view. object_type must be 'SEMANTIC_VIEW'; pass "
+         "a stored semantic view. object_type must be 'SEMANTIC_VIEW' or "
+         "'SEMANTIC VIEW'; pass "
          "true as the optional third argument (use_fully_qualified_names) to "
          "schema-qualify the view name in the output.",
          {"SELECT GET_DDL('SEMANTIC_VIEW', 'sales');",
@@ -1448,11 +1449,14 @@ static void sv_emit_varchar_rows(
     state.next_row += count;
 }
 
-// VARCHAR-rows-with-trailing-BOOL shape (used by
-// show_semantic_dimensions_for_metric, which returns 3 VARCHAR + 1 BOOLEAN).
+// VARCHAR rows with one BOOL column (used by
+// show_semantic_dimensions_for_metric, which returns 5 VARCHAR + 1 BOOLEAN).
+// On the wire the BOOL comes after every VARCHAR cell; `bool_col` is where it
+// goes in the output, the VARCHAR cells filling the other columns in order.
 struct SvVarcharBoolBindData : public TableFunctionData {
     std::vector<std::pair<std::vector<std::string>, bool>> rows;
     size_t expected_varchar_cols = 0;  // number of VARCHAR cells per row
+    size_t bool_col = 0;               // output column of the BOOL
 };
 
 static void sv_parse_varchar_bool_payload(const char *buf, size_t buf_len,
@@ -1525,10 +1529,9 @@ static void sv_emit_varchar_bool_rows(
     for (idx_t i = 0; i < count; ++i) {
         const auto &strs = bd.rows[state.next_row + i].first;
         for (size_t c = 0; c < strs.size(); ++c) {
-            output.SetValue(c, i, Value(strs[c]));
+            output.SetValue(c < bd.bool_col ? c : c + 1, i, Value(strs[c]));
         }
-        // BOOLEAN trailing column at index strs.size().
-        output.SetValue(strs.size(), i, Value::BOOLEAN(bd.rows[state.next_row + i].second));
+        output.SetValue(bd.bool_col, i, Value::BOOLEAN(bd.rows[state.next_row + i].second));
     }
     output.SetCardinality(count);
     state.next_row += count;
@@ -1989,8 +1992,8 @@ extern "C" {
 // ---------------------------------------------------------------------------
 // show_semantic_dimensions_all — Phase 65 Plan 05 Task 2 (Wave 1)
 // ---------------------------------------------------------------------------
-// 8-column VARCHAR: database_name, schema_name, semantic_view_name,
-// table_name, name, data_type, synonyms, comment.
+// 9-column VARCHAR: database_name, schema_name, semantic_view_name,
+// table_name, name, data_type, synonyms, comment, labels.
 
 static unique_ptr<FunctionData> sv_show_semantic_dimensions_all_bind(
     ClientContext &context,
@@ -2000,14 +2003,14 @@ static unique_ptr<FunctionData> sv_show_semantic_dimensions_all_bind(
     auto bd = make_uniq<SvVarcharBindData>();
     static const char *const COLS[] = {
         "database_name", "schema_name", "semantic_view_name", "table_name",
-        "name", "data_type", "synonyms", "comment",
+        "name", "data_type", "synonyms", "comment", "labels",
     };
     for (auto cn : COLS) {
         return_types.push_back(LogicalType::VARCHAR);
         names.emplace_back(cn);
     }
     sv_run_varchar_bind(
-        context, *bd, /*expected_cols*/ 8, "show_semantic_dimensions_all",
+        context, *bd, /*expected_cols*/ 9, "show_semantic_dimensions_all",
         [](char **out_ptr, size_t *out_len, char *error_buf, size_t error_buf_len) {
             return sv_show_semantic_dimensions_all_bind_rust(
                 out_ptr, out_len, error_buf, error_buf_len);
@@ -2030,7 +2033,8 @@ extern "C" {
 // ---------------------------------------------------------------------------
 // show_semantic_metrics_all — Phase 65 Plan 05 Task 2 (Wave 1)
 // ---------------------------------------------------------------------------
-// 8-column VARCHAR (same schema as show_semantic_dimensions_all).
+// 8-column VARCHAR: show_semantic_dimensions_all's schema without
+// labels, which Snowflake's SHOW SEMANTIC METRICS does not report.
 
 static unique_ptr<FunctionData> sv_show_semantic_metrics_all_bind(
     ClientContext &context,
@@ -2070,7 +2074,7 @@ extern "C" {
 // ---------------------------------------------------------------------------
 // show_semantic_facts_all — Phase 65 Plan 05 Task 2 (Wave 1)
 // ---------------------------------------------------------------------------
-// 8-column VARCHAR (same schema as show_semantic_dimensions_all).
+// 9-column VARCHAR (same schema as show_semantic_dimensions_all).
 
 static unique_ptr<FunctionData> sv_show_semantic_facts_all_bind(
     ClientContext &context,
@@ -2080,14 +2084,14 @@ static unique_ptr<FunctionData> sv_show_semantic_facts_all_bind(
     auto bd = make_uniq<SvVarcharBindData>();
     static const char *const COLS[] = {
         "database_name", "schema_name", "semantic_view_name", "table_name",
-        "name", "data_type", "synonyms", "comment",
+        "name", "data_type", "synonyms", "comment", "labels",
     };
     for (auto cn : COLS) {
         return_types.push_back(LogicalType::VARCHAR);
         names.emplace_back(cn);
     }
     sv_run_varchar_bind(
-        context, *bd, 8, "show_semantic_facts_all",
+        context, *bd, 9, "show_semantic_facts_all",
         [](char **out_ptr, size_t *out_len, char *error_buf, size_t error_buf_len) {
             return sv_show_semantic_facts_all_bind_rust(
                 out_ptr, out_len, error_buf, error_buf_len);
@@ -2215,14 +2219,14 @@ static unique_ptr<FunctionData> sv_show_semantic_dimensions_bind(
     auto bd = make_uniq<SvVarcharBindData>();
     static const char *const COLS[] = {
         "database_name", "schema_name", "semantic_view_name", "table_name",
-        "name", "data_type", "synonyms", "comment",
+        "name", "data_type", "synonyms", "comment", "labels",
     };
     for (auto cn : COLS) {
         return_types.push_back(LogicalType::VARCHAR);
         names.emplace_back(cn);
     }
     sv_run_varchar_bind_with_name(
-        context, input, *bd, 8, "show_semantic_dimensions",
+        context, input, *bd, 9, "show_semantic_dimensions",
         [](const uint8_t *np, size_t nl,
            const uint8_t *sp, size_t spl,
            char **op, size_t *ol, char *eb, size_t ebl) {
@@ -2265,14 +2269,14 @@ static unique_ptr<FunctionData> sv_show_semantic_facts_bind(
     auto bd = make_uniq<SvVarcharBindData>();
     static const char *const COLS[] = {
         "database_name", "schema_name", "semantic_view_name", "table_name",
-        "name", "data_type", "synonyms", "comment",
+        "name", "data_type", "synonyms", "comment", "labels",
     };
     for (auto cn : COLS) {
         return_types.push_back(LogicalType::VARCHAR);
         names.emplace_back(cn);
     }
     sv_run_varchar_bind_with_name(
-        context, input, *bd, 8, "show_semantic_facts",
+        context, input, *bd, 9, "show_semantic_facts",
         [](const uint8_t *np, size_t nl,
            const uint8_t *sp, size_t spl,
            char **op, size_t *ol, char *eb, size_t ebl) {
@@ -2307,7 +2311,8 @@ static unique_ptr<FunctionData> sv_show_semantic_materializations_bind(
     return std::move(bd);
 }
 
-// show_semantic_dimensions_for_metric: 3 VARCHAR + 1 BOOL output, 2 VARCHAR
+// show_semantic_dimensions_for_metric: Snowflake's table_name, name,
+// data_type, required, synonyms, comment (5 VARCHAR + 1 BOOL), 2 VARCHAR
 // input args.
 static unique_ptr<FunctionData> sv_show_semantic_dimensions_for_metric_bind(
     ClientContext &context,
@@ -2323,8 +2328,13 @@ static unique_ptr<FunctionData> sv_show_semantic_dimensions_for_metric_bind(
     names.emplace_back("data_type");
     return_types.push_back(LogicalType::BOOLEAN);
     names.emplace_back("required");
+    return_types.push_back(LogicalType::VARCHAR);
+    names.emplace_back("synonyms");
+    return_types.push_back(LogicalType::VARCHAR);
+    names.emplace_back("comment");
+    bd->bool_col = 3;
     sv_run_varchar_bool_bind_with_two_names(
-        context, input, *bd, /*expected_varchar_cols*/ 3,
+        context, input, *bd, /*expected_varchar_cols*/ 5,
         "show_semantic_dimensions_for_metric",
         [](const uint8_t *vn, size_t vnl,
            const uint8_t *mn, size_t mnl,

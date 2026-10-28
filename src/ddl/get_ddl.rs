@@ -66,6 +66,22 @@ pub unsafe extern "C" fn sv_get_ddl_exec_rust(
     )
 }
 
+/// Whether `obj_type` names a semantic view: `SEMANTIC_VIEW`, as in
+/// Snowflake's semantic-view guides, or `SEMANTIC VIEW`, as in its `GET_DDL`
+/// reference. Case-insensitive; the two words may be separated by any run of
+/// whitespace.
+#[cfg_attr(not(feature = "extension"), allow(dead_code))]
+fn is_semantic_view_type(obj_type: &str) -> bool {
+    if obj_type.eq_ignore_ascii_case("SEMANTIC_VIEW") {
+        return true;
+    }
+    let mut words = obj_type.split_whitespace();
+    matches!(
+        (words.next(), words.next(), words.next()),
+        (Some(a), Some(b), None) if a.eq_ignore_ascii_case("SEMANTIC") && b.eq_ignore_ascii_case("VIEW")
+    )
+}
+
 /// Body for [`sv_get_ddl_exec_rust`]: validate the object type, resolve the
 /// view, and render its `CREATE OR REPLACE SEMANTIC VIEW` DDL.
 ///
@@ -92,9 +108,10 @@ unsafe fn get_ddl(
     let obj_type = read_str_arg(type_ptr, type_len, "object_type")?;
     let raw_name = read_str_arg(name_ptr, name_len, "view name")?;
 
-    if !obj_type.eq_ignore_ascii_case("SEMANTIC_VIEW") {
+    if !is_semantic_view_type(&obj_type) {
         return Err(format!(
-            "GET_DDL: unsupported object type '{obj_type}'. Only 'SEMANTIC_VIEW' is supported."
+            "GET_DDL: unsupported object type '{obj_type}'. Only 'SEMANTIC_VIEW' or \
+             'SEMANTIC VIEW' is supported."
         ));
     }
 
@@ -115,4 +132,38 @@ unsafe fn get_ddl(
     render_create_ddl_qualified(&name, &def, qualify != 0)
         .map(String::into_bytes)
         .map_err(|e| format!("GET_DDL error: {e}"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::is_semantic_view_type;
+
+    #[test]
+    fn both_snowflake_spellings_name_a_semantic_view() {
+        for t in [
+            "SEMANTIC_VIEW",
+            "semantic_view",
+            "SEMANTIC VIEW",
+            "semantic view",
+            "Semantic   View",
+            " SEMANTIC\tVIEW ",
+        ] {
+            assert!(is_semantic_view_type(t), "{t:?}");
+        }
+    }
+
+    #[test]
+    fn other_object_types_are_not_a_semantic_view() {
+        for t in [
+            "TABLE",
+            "VIEW",
+            "SEMANTIC",
+            "SEMANTICVIEW",
+            "SEMANTIC VIEW X",
+            "SEMANTIC_VIEWS",
+            "",
+        ] {
+            assert!(!is_semantic_view_type(t), "{t:?}");
+        }
+    }
 }
