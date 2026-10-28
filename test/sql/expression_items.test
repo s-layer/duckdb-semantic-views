@@ -129,7 +129,7 @@ fan trap detected -- metric 'count(c.region)' (table 'c') would be duplicated wh
 # A fact expression.
 
 query TT
-SELECT * FROM SEMANTIC_VIEW(exi DIMENSIONS region FACTS o.amt * 2 AS twice) ORDER BY 1, 2;
+SELECT * FROM SEMANTIC_VIEW(exi FACTS region, o.amt * 2 AS twice) ORDER BY 1, 2;
 ----
 EU	100.00
 EU	200.00
@@ -230,7 +230,7 @@ SELECT * FROM SEMANTIC_VIEW(exi DIMENSIONS region METRICS sum(amt * 0 + customer
 'customer_id' in 'sum(amt * 0 + customer_id)' is not a dimension, fact or metric of semantic view 'exi'
 
 statement error
-SELECT * FROM semantic_view('exi', dimensions := ['region'], facts := ['amt + customer_id']);
+SELECT * FROM semantic_view('exi', facts := ['region', 'amt + customer_id']);
 ----
 'customer_id' in 'amt + customer_id' is not a dimension, fact or metric of semantic view 'exi'
 

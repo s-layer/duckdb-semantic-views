@@ -36,16 +36,34 @@ Each row in the result contains the computed fact values -- no aggregation is ap
 Combine Facts with Dimensions
 ==============================
 
-Add dimensions alongside facts. The dimensions appear as columns but do not trigger ``GROUP BY`` -- the output remains row-level:
+.. versionchanged:: 0.18.0
+   Facts and dimensions no longer go in separate clauses of one query. List them all in ``FACTS``.
+
+To read dimensions alongside facts, list them in ``FACTS`` too. A dimension listed in ``FACTS`` is read row by row, like a fact, and the columns come back in the order you list them:
 
 .. code-block:: sql
 
    SELECT * FROM SEMANTIC_VIEW(analytics
-       DIMENSIONS region
-       FACTS net_price
+       FACTS region, net_price
    );
 
 This returns one row per source row, with ``region`` and ``net_price`` columns.
+
+A query that lists facts in ``FACTS`` and dimensions in ``DIMENSIONS`` is refused, as it is in Snowflake:
+
+.. code-block:: text
+
+   semantic view 'analytics': querying FACTS with DIMENSIONS is not supported. List the dimensions in FACTS
+   for one row per source row, or the facts in DIMENSIONS for one row per distinct value.
+
+The other way round, a fact listed in ``DIMENSIONS`` is grouped on, like a dimension: the query returns one row per distinct value, and metrics can be computed per value:
+
+.. code-block:: sql
+
+   SELECT * FROM SEMANTIC_VIEW(analytics
+       DIMENSIONS region, net_price
+       METRICS order_count
+   );
 
 
 .. _howto-query-facts-expressions:
@@ -130,6 +148,9 @@ Troubleshooting
 
 **Unknown fact name**
    The fact name must match a fact declared in the ``FACTS`` clause. The error message lists available facts and suggests close matches.
+
+**Querying FACTS with DIMENSIONS is not supported**
+   A query lists facts in ``FACTS`` and dimensions in ``DIMENSIONS``. Move the dimensions into ``FACTS`` for one row per source row, or the facts into ``DIMENSIONS`` for one row per distinct value. See :ref:`howto-query-facts-dims`.
 
 **Private fact cannot be queried**
    Facts marked ``PRIVATE`` cannot be queried directly. They can only be referenced in metric expressions and other facts. Remove the ``PRIVATE`` keyword to make a fact queryable.

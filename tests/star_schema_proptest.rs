@@ -66,7 +66,12 @@ struct Instance {
 /// of one table. Each becomes a dimension of the query's own copy of the
 /// definition, so it has to group, merge across grains and meet the fan-trap
 /// fence exactly as a declared dimension on its table does.
-const DIMS: [&str; 5] = ["td", "ucat", "uwd", "etd", "eucat"];
+///
+/// `uw1` and `tv1` are FACTS named in `DIMENSIONS`, which Snowflake groups on
+/// since its 2026_07 behaviour change: the parent fact `u.w + 1` and the child
+/// fact `t.v + 1`. Each is lowered to a dimension on its fact's table, so it
+/// has to group and merge across grains like `uwd` and `td`.
+const DIMS: [&str; 7] = ["td", "ucat", "uwd", "etd", "eucat", "uw1", "tv1"];
 /// `svf` (PAR-6) is a CHILD-grain metric whose expression reaches a fact
 /// declared on the PARENT: `sum(t.v - u.uw1)` where `uw1 = u.w + 1` lives on
 /// `u`. Before PAR-6 the fact was inlined but `u` was never joined, so this
@@ -111,7 +116,7 @@ fn is_parent_metric(name: &str) -> bool {
 
 /// Whether a dimension lives on the CHILD (`t`), below the parent's grain.
 fn is_child_dim(name: &str) -> bool {
-    matches!(name, "td" | "etd")
+    matches!(name, "td" | "etd" | "tv1")
 }
 
 /// Members a generated `where_clause` may name (PBT-6), and which side of the
@@ -566,6 +571,9 @@ fn child_grain_sql(case: &Case) -> String {
             // TECH-DEBT #76: the expression items, written out independently.
             "etd" => "t.d * 2 + 1 AS etd".to_string(),
             "eucat" => "coalesce(u.ucat, -1) + (u.w + 1) AS eucat".to_string(),
+            // Facts grouped on in DIMENSIONS, written out independently.
+            "uw1" => "u.w + 1 AS uw1".to_string(),
+            "tv1" => "t.v + 1 AS tv1".to_string(),
             other => unreachable!("unexpected dim {other}"),
         })
         .collect();
@@ -672,6 +680,7 @@ fn parent_dim_items(case: &Case) -> Vec<String> {
             "ucat" => Some("u.ucat AS ucat".to_string()),
             "uwd" => Some("u.w + 1 AS uwd".to_string()),
             "eucat" => Some("coalesce(u.ucat, -1) + (u.w + 1) AS eucat".to_string()),
+            "uw1" => Some("u.w + 1 AS uw1".to_string()),
             _ => None,
         })
         .collect()
@@ -683,7 +692,7 @@ fn parent_dim_names(case: &Case) -> Vec<&'static str> {
     case.sel_dims
         .iter()
         .map(|&i| DIMS[i])
-        .filter(|d| matches!(*d, "ucat" | "uwd" | "eucat"))
+        .filter(|d| matches!(*d, "ucat" | "uwd" | "eucat" | "uw1"))
         .collect()
 }
 
@@ -952,8 +961,11 @@ fn generator_reaches_both_where_clause_branches() {
     let mut dsv_selected = 0usize;
     let mut dsv_oracled = 0usize;
     let mut svf_and_dsv_oracled = 0usize;
-    const EXPRESSION_ITEMS: [&str; 6] = ["etd", "eucat", "esv", "esw", "edsv", "esvf"];
-    let mut expression_oracled = [0usize; 6];
+    // `uw1` / `tv1`: facts grouped on in DIMENSIONS, lowered like the
+    // expression items.
+    const EXPRESSION_ITEMS: [&str; 8] =
+        ["etd", "eucat", "esv", "esw", "edsv", "esvf", "uw1", "tv1"];
+    let mut expression_oracled = [0usize; 8];
     let mut expression_fenced = 0usize;
     let mut distinct: HashSet<String> = HashSet::new();
 

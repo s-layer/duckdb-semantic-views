@@ -222,13 +222,12 @@ Facts can be queried as row-level columns with the ``FACTS`` clause of :ref:`SEM
        FACTS net_price, tax_amount
    );
 
-Each row in the result contains the computed fact values. Dimensions can be included alongside facts -- they appear as columns but do not trigger ``GROUP BY``:
+Each row in the result contains the computed fact values. A dimension listed in ``FACTS`` is read row by row alongside them, without a ``GROUP BY``:
 
 .. code-block:: sql
 
    SELECT * FROM SEMANTIC_VIEW(analytics
-       DIMENSIONS region
-       FACTS net_price
+       FACTS region, net_price
    );
 
 .. warning::

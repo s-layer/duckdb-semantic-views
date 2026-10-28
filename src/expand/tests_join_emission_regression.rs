@@ -396,8 +396,11 @@ fn queried_cross_table_fact_pulls_its_join() {
         .with_pkfk_join("o_to_c", "o", "c", &["customer_id"], &["id"]);
     let req = QueryRequest {
         where_clause: None,
-        facts: vec![FactName::new("cust_discount")],
-        dimensions: vec![DimensionName::new("order_status")],
+        facts: vec![
+            FactName::new("order_status"),
+            FactName::new("cust_discount"),
+        ],
+        dimensions: vec![],
         metrics: vec![],
     };
     let sql = expand("test", &def, &req).expect("a queried cross-table fact is supported");
@@ -460,8 +463,8 @@ fn par6_queried_fact_chaining_to_another_table_pulls_its_join() {
         .with_pkfk_join("o_to_p", "o", "p", &["product_id"], &["id"]);
     let req = QueryRequest {
         where_clause: None,
-        facts: vec![FactName::new("net_line")],
-        dimensions: vec![DimensionName::new("order_id")],
+        facts: vec![FactName::new("order_id"), FactName::new("net_line")],
+        dimensions: vec![],
         metrics: vec![],
     };
     let sql = expand("test", &def, &req).expect("a fact chaining across tables is answerable");
@@ -487,8 +490,8 @@ fn td54_dimension_fact_reference_is_inlined_on_the_facts_path() {
         .with_metric("total", "SUM(o.amount)", Some("o"));
     let req = QueryRequest {
         where_clause: None,
-        facts: vec![FactName::new("raw_amount")],
-        dimensions: vec![DimensionName::new("band")],
+        facts: vec![FactName::new("band"), FactName::new("raw_amount")],
+        dimensions: vec![],
         metrics: vec![],
     };
     let sql = expand("test", &def, &req).expect("a fact query with such a dimension is answerable");

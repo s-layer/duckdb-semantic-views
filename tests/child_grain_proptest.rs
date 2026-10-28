@@ -452,6 +452,9 @@ enum Ask {
     Metrics(Vec<usize>),
     /// The child fact — a row-level query at line-item grain.
     ChildFacts,
+    /// A FACTS list of the child dimension alone, with no fact: row-level at
+    /// line-item grain too, the grain taken from the dimension.
+    ChildDims,
 }
 
 #[derive(Debug, Clone)]
@@ -490,7 +493,9 @@ fn arb_case() -> impl Strategy<Value = Case> {
         arb_instance(),
         prop::collection::vec(any::<bool>(), DIMS.len()),
         prop::collection::vec(any::<bool>(), METS.len()),
-        // 1 in 4 requests is a row-level FACTS query.
+        // 1 in 4 requests is a row-level FACTS query, and 1 in 4 of those
+        // lists the child dimension alone.
+        prop::bool::weighted(0.25),
         prop::bool::weighted(0.25),
         prop::option::weighted(0.6, arb_pred()),
         // 1 in 5 child-only metric requests is the window metric. It cannot
@@ -501,7 +506,17 @@ fn arb_case() -> impl Strategy<Value = Case> {
         arb_grains(),
     )
         .prop_map(
-            |(inst, dim_mask, met_mask, want_facts, where_pred, want_window, want_snap, grains)| {
+            |(
+                inst,
+                dim_mask,
+                met_mask,
+                want_facts,
+                want_dims_only,
+                where_pred,
+                want_window,
+                want_snap,
+                grains,
+            )| {
                 let mut sel_dims: Vec<usize> = dim_mask
                     .iter()
                     .enumerate()
@@ -511,6 +526,14 @@ fn arb_case() -> impl Strategy<Value = Case> {
                 // phantom filter applies only when every member sits on ONE table
                 // below the base (TECH-DEBT #67 residual (3)); a base dimension
                 // next to a child dimension and a child fact is outside it.
+                if want_facts && want_dims_only {
+                    return Case {
+                        inst,
+                        sel_dims: vec![D_LAMT],
+                        ask: Ask::ChildDims,
+                        where_pred,
+                    };
+                }
                 if want_facts {
                     sel_dims.retain(|&i| i != D_LAMT && i != D_LDAMT);
                     return Case {
@@ -981,10 +1004,23 @@ fn facts_oracle_sql(case: &Case) -> String {
     )
 }
 
+/// The oracle for [`Ask::ChildDims`]: one row per child row whose parent
+/// exists, as for a child fact (EXP-28), read from the child table directly.
+fn child_dims_oracle_sql(case: &Case) -> String {
+    let and_pred = case.where_pred.as_ref().map_or_else(String::new, |p| {
+        format!(" AND {}", p.to_raw_sql(WMember::raw_from_child))
+    });
+    format!(
+        "SELECT li.amount AS lamt FROM li \
+         WHERE EXISTS (SELECT 1 FROM o oe WHERE oe.id = li.order_id){and_pred}"
+    )
+}
+
 fn oracle_sql(case: &Case) -> String {
     match &case.ask {
         Ask::Metrics(sel) => metrics_oracle_sql(case, sel),
         Ask::ChildFacts => facts_oracle_sql(case),
+        Ask::ChildDims => child_dims_oracle_sql(case),
     }
 }
 
@@ -996,6 +1032,7 @@ fn projection(case: &Case) -> String {
     match &case.ask {
         Ask::Metrics(sel) => cols.extend(sel.iter().map(|&i| METS[i].to_string())),
         Ask::ChildFacts => cols.extend(FACTS.iter().map(ToString::to_string)),
+        Ask::ChildDims => {}
     }
     cols.sort();
     cols.join(", ")
@@ -1009,6 +1046,8 @@ fn build_request(case: &Case) -> QueryRequest {
         ),
         // The facts are the lowered items, which `check_case` fills in.
         Ask::ChildFacts => (vec![], vec![]),
+        // The dimension is listed in FACTS, which `check_case` does.
+        Ask::ChildDims => (vec![], vec![]),
     };
     QueryRequest {
         where_clause: case.where_pred.as_ref().map(Pred::to_member_sql),
@@ -1043,7 +1082,15 @@ fn check_case(case: &Case) -> Result<(), TestCaseError> {
     // `semantic_view()` renames it.
     let mut renamed = Vec::new();
     let def = if matches!(case.ask, Ask::ChildFacts) {
-        let texts: Vec<String> = FACTS.iter().map(|f| fact_item_text(f)).collect();
+        // The queried dimensions are listed in FACTS too, where Snowflake reads
+        // a dimension row by row (its 2026_07 rule refuses FACTS with
+        // DIMENSIONS), so they go through the lowering with the facts.
+        let texts: Vec<String> = req
+            .dimensions
+            .drain(..)
+            .map(|d| d.as_str().to_string())
+            .chain(FACTS.iter().map(|f| fact_item_text(f)))
+            .collect();
         let items = RequestItems::parse(&[], &[], &texts, &[]).expect("the facts parse");
         let lowered = lower_expression_items("child", &stored, items)
             .unwrap_or_else(|e| panic!("the facts lower: {e:?}"));
@@ -1059,6 +1106,13 @@ fn check_case(case: &Case) -> Result<(), TestCaseError> {
             }
         }
         lowered.def.unwrap_or(stored)
+    } else if matches!(case.ask, Ask::ChildDims) {
+        req.facts = req
+            .dimensions
+            .drain(..)
+            .map(|d| FactName::new(d.as_str()))
+            .collect();
+        stored
     } else {
         stored
     };
@@ -1209,8 +1263,16 @@ fn generator_produces_both_metric_and_fact_requests() {
         .iter()
         .filter(|c| matches!(c.ask, Ask::ChildFacts))
         .count();
-    let metrics = cases.len() - facts;
+    let dims_only = cases
+        .iter()
+        .filter(|c| matches!(c.ask, Ask::ChildDims))
+        .count();
+    let metrics = cases.len() - facts - dims_only;
     assert!(facts >= 16, "only {facts}/256 requests asked for facts");
+    assert!(
+        dims_only >= 4,
+        "only {dims_only}/256 requests listed a dimension alone in FACTS"
+    );
     assert!(
         metrics >= 16,
         "only {metrics}/256 requests asked for metrics"
@@ -1372,7 +1434,7 @@ fn generator_groups_by_the_child_dimension() {
 fn metrics_of(case: &Case) -> &[usize] {
     match &case.ask {
         Ask::Metrics(sel) => sel,
-        Ask::ChildFacts => &[],
+        Ask::ChildFacts | Ask::ChildDims => &[],
     }
 }
 

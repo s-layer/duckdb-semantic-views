@@ -51,7 +51,8 @@ Extensions so far:
   - Phase 5, randomized: 150 standard-SQL queries over `diff_std` built from
     parts -- dimension expressions as GROUP BY keys spelled differently from
     their SELECT item, AGG / MIN / MAX / ANY_VALUE of metrics, arithmetic over
-    AGG, ad-hoc aggregates, FACTS items, WHERE on the base table, a joined
+    AGG, ad-hoc aggregates, FACTS items (grouped on under a GROUP BY, or
+    refused when left out of it), WHERE on the base table, a joined
     table or a fact with random literals (alone or AND / OR), and HAVING over
     metrics and ad-hoc aggregates -- each against reference SQL built from the
     same parts. A guard fails the run if the generator stops drawing any of
@@ -396,8 +397,11 @@ def std_reference(
     return sql
 
 
-def std_random_query(rng: random.Random) -> tuple[str, str, set[str]]:
-    """One random standard-form query and its reference: (sql, reference, features)."""
+def std_random_query(rng: random.Random) -> tuple[str, str | None, set[str]]:
+    """One random standard-form query and its reference: (sql, reference, features).
+
+    The reference is None for a query that must be refused.
+    """
     features: set[str] = set()
     tables: set[str] = set()
     keys = rng.sample(STD_KEYS, rng.randrange(0, 3))
@@ -411,12 +415,24 @@ def std_random_query(rng: random.Random) -> tuple[str, str, set[str]]:
         sv_items.append(f"{item} AS g{n}" if spelling == 2 else item)
         group_keys.append({0: key, 1: str(n + 1), 2: f"g{n}", 3: "ALL"}[spelling])
         ref_items.append(ref)
+    # A fact under GROUP BY must be grouped on too (SQL's rule, and Snowflake's
+    # 2026_07 one: a fact in DIMENSIONS is grouped on). Left out of the keys,
+    # the query is refused. GROUP BY ALL groups it with the rest.
+    refused = facts_query and bool(keys) and spelling != 3 and rng.random() < 0.3
     if facts_query:
         for feature, sv, ref, needs in rng.sample(STD_FACTS, rng.randrange(1, 3)):
             features.add(feature)
             tables |= needs
-            sv_items.append(sv)
+            n = len(sv_items)
+            if keys and spelling != 3 and not refused:
+                features.add("fact_grouped")
+                sv_items.append(f"{sv} AS g{n}" if spelling == 2 else sv)
+                group_keys.append({0: sv, 1: str(n + 1), 2: f"g{n}"}[spelling])
+            else:
+                sv_items.append(sv)
             ref_items.append(ref)
+        if refused:
+            features.add("fact_ungrouped_refused")
     else:
         n_aggs = rng.randrange(1 if not keys else 0, 4)
         for feature, sv, ref, needs in rng.sample(STD_AGGS, n_aggs):
@@ -442,14 +458,16 @@ def std_random_query(rng: random.Random) -> tuple[str, str, set[str]]:
     if having_sv:
         sql += f" HAVING {having_sv}"
     groups = len(keys) if aggregated else 0
-    # Grouped and not aggregated, the keys are the rows, once each. GROUP BY ALL
-    # groups the facts too; GROUP BY the keys alone leaves them row-level.
-    distinct = bool(keys) and not aggregated and (not facts_query or spelling == 3)
+    if refused:
+        return sql, None, features
+    # Grouped and not aggregated, the keys (facts included) are the rows, once each.
+    distinct = bool(keys) and not aggregated
     ref = std_reference(ref_items, tables, where_ref, groups, having_ref, distinct)
     return sql, ref, features
 
 
 STD_RANDOM_QUERIES = 150
+STD_UNGROUPED_FACT_ERROR = "must be passed to an aggregate or appear in GROUP BY"
 # Every feature the generator draws, so a narrowed generator fails loudly
 # instead of leaving a path with no randomized coverage.
 STD_FEATURES = {
@@ -460,6 +478,8 @@ STD_FEATURES = {
     "agg_arith",
     "adhoc",
     "fact",
+    "fact_grouped",
+    "fact_ungrouped_refused",
     "where_base",
     "where_joined",
     "where_fact",
@@ -478,7 +498,11 @@ def run_standard_form_random_section(conn) -> tuple[int, int]:
         sql, ref, features = std_random_query(rng)
         seen |= features
         total += 1
-        failures += _check(conn, f"standard form random #{i}: {sql}", sql, ref)
+        label = f"standard form random #{i}: {sql}"
+        if ref is None:
+            failures += _check_refused(conn, label, sql, STD_UNGROUPED_FACT_ERROR)
+        else:
+            failures += _check(conn, label, sql, ref)
     missing = STD_FEATURES - seen
     total += 1
     if missing:
@@ -592,6 +616,20 @@ def semi_reference_sql(dims: list[str]) -> str:
         f"m AS (SELECT {gcols}, MAX(sd) AS md FROM b GROUP BY {gcols}) "
         f"SELECT {outer}, SUM(b.bal) FROM b JOIN m ON {on} GROUP BY {outer}"
     )
+
+
+def _check_refused(conn, label: str, sv_sql: str, expected: str) -> int:
+    """Expect the query to fail with `expected` in its message; 1 on failure."""
+    try:
+        conn.execute(sv_sql).fetchall()
+    except Exception as exc:  # noqa: BLE001 — the refusal under test
+        if expected in str(exc):
+            print(f"  PASS: {label} (refused)")
+            return 0
+        print(f"FAIL {label}: wrong error: {exc}")
+        return 1
+    print(f"FAIL {label}: expected a refusal, got rows")
+    return 1
 
 
 def _check(conn, label: str, sv_sql: str, ref_sql: str) -> int:

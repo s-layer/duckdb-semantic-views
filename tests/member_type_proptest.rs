@@ -506,12 +506,15 @@ fn check(case: &Case) -> Result<usize, TestCaseError> {
     let met_names = pick(def.metrics.iter().map(|m| m.name.clone()).collect(), 5);
     let fact_names = pick((0..case.facts.len()).map(|i| format!("f{i}")).collect(), 11);
     let mut compared = 0usize;
-    for (mets, facts) in [(met_names, vec![]), (vec![], fact_names)] {
+    // A facts request lists the dimensions in FACTS too (Snowflake's `2026_07`
+    // rule refuses FACTS with DIMENSIONS), where they are read row by row.
+    let dims_and_facts: Vec<String> = dim_names.iter().cloned().chain(fact_names).collect();
+    for (dims, mets, facts) in [
+        (dim_names.clone(), met_names, vec![]),
+        (vec![], vec![], dims_and_facts),
+    ] {
         let req = QueryRequest {
-            dimensions: dim_names
-                .iter()
-                .map(|n| DimensionName::new(n.clone()))
-                .collect(),
+            dimensions: dims.iter().map(|n| DimensionName::new(n.clone())).collect(),
             metrics: mets.iter().map(|n| MetricName::new(n.clone())).collect(),
             facts: facts.iter().map(|n| FactName::new(n.clone())).collect(),
             where_clause: None, // PIN: types do not depend on row filtering; the request shape is what varies here

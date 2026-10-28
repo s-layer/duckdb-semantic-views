@@ -1158,12 +1158,17 @@ fn request(
     facts: &[String],
     pred: Option<&Pred>,
 ) -> QueryRequest {
+    let dims = dims.iter().map(|&i| names.dims[i].clone());
+    // A row-level request lists its dimensions in FACTS, where Snowflake reads
+    // a dimension row by row (its 2026_07 rule refuses FACTS with DIMENSIONS).
+    let (dimensions, facts): (Vec<String>, Vec<String>) = if facts.is_empty() {
+        (dims.collect(), Vec::new())
+    } else {
+        (Vec::new(), dims.chain(facts.iter().cloned()).collect())
+    };
     QueryRequest {
         where_clause: pred.map(|p| p.to_member_sql(names)),
-        dimensions: dims
-            .iter()
-            .map(|&i| DimensionName::new(names.dims[i].clone()))
-            .collect(),
+        dimensions: dimensions.iter().map(DimensionName::new).collect(),
         metrics: metrics.iter().map(MetricName::new).collect(),
         facts: facts.iter().map(FactName::new).collect(),
     }

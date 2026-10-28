@@ -107,7 +107,7 @@ where_clause cannot reference the metric 'revenue'
 # ============================================================
 
 query TT rowsort
-SELECT * FROM SEMANTIC_VIEW(wc_sv DIMENSIONS region FACTS amt WHERE amt > 60);
+SELECT * FROM SEMANTIC_VIEW(wc_sv FACTS region, amt WHERE amt > 60);
 ----
 EU	100.00
 US	70.00

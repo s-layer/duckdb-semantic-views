@@ -333,8 +333,8 @@ fn exp28_facts_query_with_a_base_dimension_has_no_phantom_row() {
     let def = child_def().with_fact("liqty", "li.qty", "li");
     let req = QueryRequest {
         where_clause: None,
-        facts: vec![FactName::new("liqty")],
-        dimensions: vec![DimensionName::new("region")],
+        facts: vec![FactName::new("region"), FactName::new("liqty")],
+        dimensions: vec![],
         metrics: vec![],
     };
     let sql = expand("v", &def, &req).unwrap_or_else(|e| panic!("expand failed: {e}"));
@@ -376,6 +376,49 @@ fn base_table_facts_query_keeps_every_base_row() {
         .query_row(&format!("SELECT count(*) FROM ({sql}) q"), [], |r| r.get(0))
         .unwrap_or_else(|e| panic!("query failed: {e}\nSQL:\n{sql}"));
     assert_eq!(n, 2, "SQL:\n{sql}");
+}
+
+/// A FACTS list may hold dimensions only. One on the child table is at the
+/// child's grain like a child fact, so the childless order has no row.
+#[test]
+fn facts_list_of_a_child_dimension_has_no_phantom_row() {
+    let def = child_def().with_dimension("qty", "li.qty", Some("li"));
+    let req = QueryRequest {
+        where_clause: None,
+        facts: vec![FactName::new("qty")],
+        dimensions: vec![],
+        metrics: vec![],
+    };
+    let sql = expand("v", &def, &req).unwrap_or_else(|e| panic!("expand failed: {e}"));
+    let conn = fixture_db();
+    let mut stmt = conn
+        .prepare(&format!("SELECT qty FROM ({sql}) q ORDER BY 1"))
+        .unwrap_or_else(|e| panic!("prepare failed: {e}\nSQL:\n{sql}"));
+    let rows: Vec<Option<i64>> = stmt
+        .query_map([], |r| r.get::<_, Option<i64>>(0))
+        .unwrap()
+        .map(Result::unwrap)
+        .collect();
+    assert_eq!(rows, vec![Some(2), Some(3)], "SQL:\n{sql}");
+}
+
+/// A FACTS list of a base and a child dimension keeps the childless base row,
+/// as the same dimensions do in DIMENSIONS: the members span two tables.
+#[test]
+fn facts_list_mixing_base_and_child_dimensions_keeps_the_base_row() {
+    let def = child_def().with_dimension("qty", "li.qty", Some("li"));
+    let req = QueryRequest {
+        where_clause: None,
+        facts: vec![FactName::new("region"), FactName::new("qty")],
+        dimensions: vec![],
+        metrics: vec![],
+    };
+    let sql = expand("v", &def, &req).unwrap();
+    let conn = fixture_db();
+    let n: i64 = conn
+        .query_row(&format!("SELECT count(*) FROM ({sql}) q"), [], |r| r.get(0))
+        .unwrap_or_else(|e| panic!("query failed: {e}\nSQL:\n{sql}"));
+    assert_eq!(n, 3, "SQL:\n{sql}");
 }
 
 // ---------------------------------------------------------------------------
