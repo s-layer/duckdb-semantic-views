@@ -51,13 +51,13 @@ The result contains multiple rows with 5 VARCHAR columns:
      - Description
    * - ``object_kind``
      - VARCHAR
-     - The type of object: ``TABLE``, ``RELATIONSHIP``, ``FACT``, ``DIMENSION``, ``METRIC``, ``DERIVED_METRIC``, or ``MATERIALIZATION``. Empty string on the view-level rows.
+     - The type of object: ``TABLE``, ``RELATIONSHIP``, ``FACT``, ``DIMENSION``, ``METRIC``, ``DERIVED_METRIC``, ``MATERIALIZATION``, ``CUSTOM_INSTRUCTIONS``, or ``AI_VERIFIED_QUERY``. Empty string on the view-level rows.
    * - ``object_name``
      - VARCHAR
-     - The name of the object (table name, relationship name, fact/dimension/metric name, materialization name). Empty string on the view-level rows.
+     - The name of the object (table name, relationship name, fact/dimension/metric name, materialization name, verified query name). Empty string on the view-level rows and the ``CUSTOM_INSTRUCTIONS`` rows.
    * - ``parent_entity``
      - VARCHAR
-     - The parent table for this object. Empty string for the view-level rows and for ``TABLE``, ``DERIVED_METRIC``, and ``MATERIALIZATION`` objects.
+     - The parent table for this object. Empty string for the view-level rows and for ``TABLE``, ``DERIVED_METRIC``, ``MATERIALIZATION``, ``CUSTOM_INSTRUCTIONS``, and ``AI_VERIFIED_QUERY`` objects.
    * - ``property``
      - VARCHAR
      - The property name being described.
@@ -71,7 +71,7 @@ The result contains multiple rows with 5 VARCHAR columns:
 Object Kinds and Properties
 ===========================
 
-Rows appear in definition order: the view-level comment and tags (when set), then ``TABLE`` objects, then ``RELATIONSHIP``, ``FACT``, ``DIMENSION``, ``METRIC``, ``DERIVED_METRIC``, and ``MATERIALIZATION``.
+Rows appear in definition order: the view-level comment, ``MAX_STALENESS`` and tags (when set), then ``TABLE`` objects, then ``RELATIONSHIP``, ``FACT``, ``DIMENSION``, ``METRIC``, ``DERIVED_METRIC``, ``MATERIALIZATION``, ``CUSTOM_INSTRUCTIONS``, and ``AI_VERIFIED_QUERY``.
 
 .. versionchanged:: 0.14.0
 
@@ -80,8 +80,8 @@ Rows appear in definition order: the view-level comment and tags (when set), the
    the command runs, so views created in that window report it too, with no
    need to re-create them.
 
-**View-level comment and tags**
-   Emitted only when a view-level comment (in ``CREATE`` or via :ref:`ALTER SEMANTIC VIEW SET COMMENT <ref-alter-semantic-view>`) or view-level tags are set. The rows describe the view itself, so ``object_kind``, ``object_name``, and ``parent_entity`` are all empty strings. Produces up to two property rows:
+**View-level comment, MAX_STALENESS and tags**
+   Emitted only when a view-level comment (in ``CREATE`` or via :ref:`ALTER SEMANTIC VIEW SET COMMENT <ref-alter-semantic-view>`), ``MAX_STALENESS`` or view-level tags are set. The rows describe the view itself, so ``object_kind``, ``object_name``, and ``parent_entity`` are all empty strings. Produces up to three property rows:
 
    .. list-table::
       :header-rows: 1
@@ -91,6 +91,10 @@ Rows appear in definition order: the view-level comment and tags (when set), the
         - Description
       * - ``COMMENT``
         - The view-level comment text.
+      * - ``MAX_STALENESS``
+        - The view's :ref:`MAX_STALENESS <ref-create-cortex-metadata>` as written: a number of seconds (``3600``) or an interval (``1 hour``).
+
+          .. versionadded:: 0.18.0
       * - ``TAGS``
         - The view's tags as a JSON object. See ``TAGS`` below.
 
@@ -161,6 +165,10 @@ Rows appear in definition order: the view-level comment and tags (when set), the
         - JSON object of the object's tags, in declaration order (e.g., ``{"S_LAYER_KIND":"dimension","governance.pii":"none"}``). Each key is the tag name as ``GET_DDL`` writes it. Only emitted when tags are set.
 
           .. versionadded:: 0.17.0
+      * - ``SAMPLE_VALUES``
+        - JSON array of the fact's :ref:`sample values <ref-create-cortex-metadata>` (e.g., ``["100","250"]``). Only emitted when set.
+
+          .. versionadded:: 0.18.0
       * - ``LABELS``
         - ``["FILTER"]`` when the fact is declared a :ref:`named filter <howto-annotations-filters>` with ``LABELS = (FILTER)``. Only emitted when labeled.
       * - ``ACCESS_MODIFIER``
@@ -189,6 +197,18 @@ Rows appear in definition order: the view-level comment and tags (when set), the
         - JSON object of the object's tags, in declaration order (e.g., ``{"S_LAYER_KIND":"dimension","governance.pii":"none"}``). Each key is the tag name as ``GET_DDL`` writes it. Only emitted when tags are set.
 
           .. versionadded:: 0.17.0
+      * - ``SAMPLE_VALUES``
+        - JSON array of the dimension's :ref:`sample values <ref-create-cortex-metadata>` (e.g., ``["East","West"]``). Only emitted when set.
+
+          .. versionadded:: 0.18.0
+      * - ``IS_ENUM``
+        - ``true`` when the dimension is declared ``IS_ENUM``. Only emitted when set.
+
+          .. versionadded:: 0.18.0
+      * - ``CORTEX_SEARCH_SERVICE_COLUMN_NAME``, ``CORTEX_SEARCH_SERVICE_DATABASE_NAME``, ``CORTEX_SEARCH_SERVICE_SCHEMA_NAME``, ``CORTEX_SEARCH_SERVICE_NAME``
+        - The parts of the dimension's ``WITH CORTEX SEARCH SERVICE`` clause, as Snowflake names them: the ``USING`` column, the database, the schema and the service. Only the parts written are emitted; ``CORTEX_SEARCH_SERVICE_NAME`` always is when the clause is present.
+
+          .. versionadded:: 0.18.0
       * - ``LABELS``
         - ``["FILTER"]`` when the dimension is declared a :ref:`named filter <howto-annotations-filters>` with ``LABELS = (FILTER)``. Only emitted when labeled.
 
@@ -270,6 +290,44 @@ Rows appear in definition order: the view-level comment and tags (when set), the
         - JSON array of dimension names covered by this materialization (e.g., ``["region"]``). Empty array ``[]`` when no dimensions are declared.
       * - ``METRICS``
         - JSON array of metric names covered by this materialization (e.g., ``["revenue","order_count"]``). Empty array ``[]`` when no metrics are declared.
+
+**CUSTOM_INSTRUCTIONS**
+   .. versionadded:: 0.18.0
+
+   One row per Cortex Analyst instruction the view carries (see :ref:`Cortex Analyst metadata <ref-create-cortex-metadata>`), with empty ``object_name`` and ``parent_entity``, as in Snowflake:
+
+   .. list-table::
+      :header-rows: 1
+      :widths: 30 70
+
+      * - Property
+        - Description
+      * - ``AI_SQL_GENERATION``
+        - The ``AI_SQL_GENERATION`` text.
+      * - ``AI_QUESTION_CATEGORIZATION``
+        - The ``AI_QUESTION_CATEGORIZATION`` text.
+
+**AI_VERIFIED_QUERY**
+   .. versionadded:: 0.18.0
+
+   One block per entry of ``AI_VERIFIED_QUERIES``, named by ``object_name``:
+
+   .. list-table::
+      :header-rows: 1
+      :widths: 25 75
+
+      * - Property
+        - Description
+      * - ``QUESTION``
+        - The question.
+      * - ``VERIFIED_AT``
+        - Seconds since the Unix epoch. Only emitted when set.
+      * - ``ONBOARDING_QUESTION``
+        - ``true`` or ``false``. Always emitted.
+      * - ``VERIFIED_BY``
+        - Who verified the query, as written. Only emitted when set.
+      * - ``SQL``
+        - The SQL text.
 
 
 .. _ref-describe-examples:

@@ -153,7 +153,7 @@ Unexpected tokens after view name: '.gw_c'
 statement error
 ALTER SEMANTIC VIEW gw_s . gw_c RENAME TO gw_d;
 ----
-Unsupported ALTER operation. Supported: RENAME TO, SET COMMENT, UNSET COMMENT, SET TAG, UNSET TAG.
+Unsupported ALTER operation. Supported: RENAME TO, SET COMMENT, SET MAX_STALENESS, UNSET COMMENT, UNSET MAX_STALENESS, SET TAG, UNSET TAG.
 
 statement error
 ALTER SEMANTIC VIEW gw_s.gw_c RENAME TO gw_s . gw_d;

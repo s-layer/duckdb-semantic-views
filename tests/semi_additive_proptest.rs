@@ -342,6 +342,9 @@ fn build_def(order: SortOrder, na: NaKey, unit: &str) -> SemanticViewDefinition 
     }];
     let dimensions = vec![
         Dimension {
+            cortex_search_service: None,
+            is_enum: false,
+            sample_values: Vec::new(),
             name: "ent".to_string(),
             expr: "s.entity".to_string(),
             source_table: Some("s".to_string()),
@@ -352,6 +355,9 @@ fn build_def(order: SortOrder, na: NaKey, unit: &str) -> SemanticViewDefinition 
             tags: Vec::new(),
         },
         Dimension {
+            cortex_search_service: None,
+            is_enum: false,
+            sample_values: Vec::new(),
             name: "ts".to_string(),
             expr: "s.ts".to_string(),
             source_table: Some("s".to_string()),
@@ -362,6 +368,9 @@ fn build_def(order: SortOrder, na: NaKey, unit: &str) -> SemanticViewDefinition 
             tags: Vec::new(),
         },
         Dimension {
+            cortex_search_service: None,
+            is_enum: false,
+            sample_values: Vec::new(),
             name: "tsk".to_string(),
             expr: tsk_expr(unit),
             source_table: Some("s".to_string()),
@@ -375,6 +384,9 @@ fn build_def(order: SortOrder, na: NaKey, unit: &str) -> SemanticViewDefinition 
         // generated `where_clause`. Compound expressions, so a splice that
         // loses its parentheses changes which rows reach the snapshot.
         Dimension {
+            cortex_search_service: None,
+            is_enum: false,
+            sample_values: Vec::new(),
             name: "fent".to_string(),
             expr: "s.entity = 0 OR s.entity = 2".to_string(),
             source_table: Some("s".to_string()),
@@ -385,6 +397,9 @@ fn build_def(order: SortOrder, na: NaKey, unit: &str) -> SemanticViewDefinition 
             tags: Vec::new(),
         },
         Dimension {
+            cortex_search_service: None,
+            is_enum: false,
+            sample_values: Vec::new(),
             name: "fts".to_string(),
             expr: "s.ts = 0 OR s.ts = 2".to_string(),
             source_table: Some("s".to_string()),
@@ -419,6 +434,9 @@ fn build_def(order: SortOrder, na: NaKey, unit: &str) -> SemanticViewDefinition 
         tags: Vec::new(),
     }];
     SemanticViewDefinition {
+        max_staleness: None,
+        module_custom_instructions: Default::default(),
+        verified_queries: Vec::new(),
         tables,
         dimensions,
         metrics,
@@ -1316,6 +1334,9 @@ fn role_def(order: SortOrder) -> SemanticViewDefinition {
         cardinality: Cardinality::ManyToOne,
     };
     let dim = |name: &str, expr: &str, table: &str| Dimension {
+        cortex_search_service: None,
+        is_enum: false,
+        sample_values: Vec::new(),
         name: name.to_string(),
         expr: expr.to_string(),
         source_table: Some(table.to_string()),
@@ -1326,6 +1347,9 @@ fn role_def(order: SortOrder) -> SemanticViewDefinition {
         tags: Vec::new(),
     };
     SemanticViewDefinition {
+        max_staleness: None,
+        module_custom_instructions: Default::default(),
+        verified_queries: Vec::new(),
         tables: vec![table("a"), table("b"), table("n")],
         dimensions: vec![dim("grp", "b.grp", "b"), dim("snap", "a.snap", "a")],
         metrics: vec![Metric {

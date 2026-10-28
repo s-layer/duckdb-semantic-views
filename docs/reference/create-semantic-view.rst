@@ -41,6 +41,7 @@ Syntax
            [ COMMENT = '<text>' ]
            [ WITH SYNONYMS = ( '<synonym>' [, '<synonym>' ...] ) ]
            [ [ WITH ] TAG ( <tag_name> = '<value>' [, ...] ) ]
+           [ SAMPLE_VALUES ( '<value>' [, '<value>' ...] ) ]
        [, ... ]
    ) ]
    [ DIMENSIONS (
@@ -48,6 +49,9 @@ Syntax
            [ COMMENT = '<text>' ]
            [ WITH SYNONYMS = ( '<synonym>' [, '<synonym>' ...] ) ]
            [ [ WITH ] TAG ( <tag_name> = '<value>' [, ...] ) ]
+           [ SAMPLE_VALUES ( '<value>' [, '<value>' ...] ) ]
+           [ IS_ENUM ]
+           [ WITH CORTEX SEARCH SERVICE <service_name> [ USING <column> ] ]
        [, ... ]
    ) ]
    [ METRICS (
@@ -80,7 +84,21 @@ Syntax
        [, ... ]
    ) ]
    [ COMMENT = '<text>' ]
+   [ MAX_STALENESS = { <seconds> | '<interval>' } ]
+   [ AI_SQL_GENERATION '<instructions>' ]
+   [ AI_QUESTION_CATEGORIZATION '<instructions>' ]
+   [ AI_VERIFIED_QUERIES ( <verified_query> [, ...] ) ]
    [ [ WITH ] TAG ( <tag_name> = '<value>' [, ...] ) ]
+   [ COPY GRANTS ]
+
+   -- where <verified_query> is
+   <name> AS (
+       QUESTION '<question>'
+       [ VERIFIED_AT <epoch_seconds> ]
+       [ ONBOARDING_QUESTION { TRUE | FALSE } ]
+       [ VERIFIED_BY '<verifier>' ]
+       SQL '<sql>'
+   )
 
 .. note::
 
@@ -117,8 +135,9 @@ Syntax
 
 .. note::
 
-   **Annotation order.** ``COMMENT``, ``WITH SYNONYMS``, ``LABELS`` and
-   ``[WITH] TAG`` may appear in any order after an entry's expression; the grammar above shows one
+   **Annotation order.** ``COMMENT``, ``WITH SYNONYMS``, ``LABELS``,
+   ``[WITH] TAG`` and the :ref:`Cortex Analyst <ref-create-cortex-metadata>`
+   member clauses may appear in any order after an entry's expression; the grammar above shows one
    canonical spelling, not a required sequence. What *is* required is that the
    annotations be contiguous and complete: once the first annotation keyword is
    seen, the remainder of the entry must consist only of valid annotation
@@ -172,6 +191,76 @@ Syntax
         METRICS (o.revenue AS SUM(o.amount) TAG (S_LAYER_KIND = 'metric'))
         COMMENT = 'Sales by region'
         WITH TAG (owner = 'analytics');
+
+.. _ref-create-cortex-metadata:
+
+.. note::
+
+   **Cortex Analyst metadata.**
+
+   .. versionadded:: 0.18.0
+
+   Snowflake's semantic views carry metadata for Cortex Analyst, its
+   natural-language query service. This extension accepts and stores the same
+   clauses, so Snowflake DDL can be pasted as written and an exported view keeps
+   them. Like tags, they never change what a query returns: nothing here runs a
+   verified query, searches a service or enforces staleness.
+
+   - ``SAMPLE_VALUES ('<value>', ...)`` on a fact or dimension lists example
+     values, each a single-quoted string. The ``=`` is optional.
+   - ``IS_ENUM`` on a dimension marks its sample values as the complete set of
+     values. It is accepted on dimensions only, as in Snowflake.
+   - ``WITH CORTEX SEARCH SERVICE <service_name> [USING <column>]`` on a
+     dimension names a Cortex Search service for the dimension's values. The
+     name has up to three dot-separated parts (``service``,
+     ``schema.service`` or ``database.schema.service``); ``USING`` names the
+     service column that holds the values. Nothing is looked up.
+   - ``MAX_STALENESS`` on the view takes whole seconds (``MAX_STALENESS =
+     3600``) or a single-quoted interval (``MAX_STALENESS = '1 hour'``) in
+     seconds, minutes, hours or days. Either way it must be at least 120
+     seconds. This extension refreshes nothing automatically, so the value is
+     stored for export and shown by ``DESCRIBE``.
+   - ``AI_SQL_GENERATION '<instructions>'`` and ``AI_QUESTION_CATEGORIZATION
+     '<instructions>'`` hold Cortex Analyst's custom instructions for writing
+     SQL and for sorting questions.
+   - ``AI_VERIFIED_QUERIES (...)`` lists questions with the SQL that answers
+     them. Each entry needs ``QUESTION`` and ``SQL``; ``VERIFIED_AT`` (seconds
+     since the Unix epoch), ``ONBOARDING_QUESTION`` and ``VERIFIED_BY`` are
+     optional, and the sub-clauses may come in any order. Entry names follow
+     member-name rules and must be unique, compared case-insensitively. The SQL
+     is stored as text and not checked.
+   - ``COPY GRANTS`` is accepted and ignored: this extension has no grants to
+     copy. It is not stored, so ``GET_DDL`` does not write it.
+
+   The view-level clauses go after the last clause, in any order, each at most
+   once. The member clauses go among a member's other annotations, in any order.
+   A clause written on the wrong kind of object, such as ``IS_ENUM`` on a fact or
+   ``MAX_STALENESS`` on a dimension, is an error. ``GET_DDL`` writes the clauses
+   in Snowflake's order, and :ref:`DESCRIBE SEMANTIC VIEW
+   <ref-describe-semantic-view>` and the YAML export show them all.
+
+   .. code-block:: sql
+
+      CREATE SEMANTIC VIEW sales
+        TABLES (o AS orders PRIMARY KEY (id))
+        FACTS (o.amt AS o.amount SAMPLE_VALUES ('100', '250'))
+        DIMENSIONS (
+          o.region AS o.region COMMENT = 'Sales region'
+            SAMPLE_VALUES ('East', 'West', 'North', 'South') IS_ENUM,
+          o.warehouse AS o.warehouse
+            WITH CORTEX SEARCH SERVICE sales_db.search.warehouses USING warehouse_name
+        )
+        METRICS (o.revenue AS SUM(o.amount))
+        MAX_STALENESS = '1 hour'
+        AI_SQL_GENERATION 'Round all numeric columns to 2 decimal places.'
+        AI_VERIFIED_QUERIES (
+          revenue_by_region AS (
+            QUESTION 'What is the revenue for each region?'
+            ONBOARDING_QUESTION TRUE
+            SQL 'SELECT region, revenue FROM SEMANTIC_VIEW(sales DIMENSIONS region METRICS revenue)'
+          )
+        )
+        COPY GRANTS;
 
 **YAML body (FROM YAML):**
 
@@ -363,6 +452,7 @@ Declares named row-level expressions. Facts are inlined into metric expressions 
 - ``WITH SYNONYMS = ('<synonym>', ...)``, optional. Alternative names for discoverability.
 - ``LABELS = (FILTER)``, optional. Declares the fact a :ref:`named filter <howto-annotations-filters>` -- a boolean-valued member meant for reuse in a query's :ref:`WHERE <ref-sv-pre-agg-filtering>`. Metadata only: it does not restrict querying, and the ``BOOLEAN`` requirement is enforced by DuckDB's binder at query time. ``FILTER`` is the only accepted label. Write it between the fact's name and ``AS``, as Snowflake does, or after the expression.
 - ``[WITH] TAG (<tag_name> = '<value>', ...)``, optional. Name/value metadata tags. See :ref:`Tags <ref-create-tags>`.
+- ``SAMPLE_VALUES ('<value>', ...)``, optional. Example values, metadata only. See :ref:`Cortex Analyst metadata <ref-create-cortex-metadata>`.
 
 **Fact chaining:**
 
@@ -403,6 +493,7 @@ Declares named grouping expressions available for queries.
 - ``WITH SYNONYMS = ('<synonym>', ...)``, optional. Alternative names for discoverability.
 - ``LABELS = (FILTER)``, optional. Declares the dimension a :ref:`named filter <howto-annotations-filters>` -- a boolean-valued member meant for reuse in a query's :ref:`WHERE <ref-sv-pre-agg-filtering>`. Metadata only: it does not hide the dimension from output, and the ``BOOLEAN`` requirement is enforced by DuckDB's binder at query time. ``FILTER`` is the only accepted label. Write it between the dimension's name and ``AS``, as Snowflake does, or after the expression.
 - ``[WITH] TAG (<tag_name> = '<value>', ...)``, optional. Name/value metadata tags. See :ref:`Tags <ref-create-tags>`.
+- ``SAMPLE_VALUES ('<value>', ...)``, ``IS_ENUM`` and ``WITH CORTEX SEARCH SERVICE <service_name> [USING <column>]``, optional. Cortex Analyst metadata. See :ref:`Cortex Analyst metadata <ref-create-cortex-metadata>`.
 
 .. note::
 

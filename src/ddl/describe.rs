@@ -83,6 +83,15 @@ unsafe fn describe_view_rows(
             property_value: comment.clone(),
         });
     }
+    if let Some(ref staleness) = def.max_staleness {
+        internal.push(DescribeRow {
+            object_kind: String::new(),
+            object_name: String::new(),
+            parent_entity: String::new(),
+            property: "MAX_STALENESS".to_string(),
+            property_value: staleness.display(),
+        });
+    }
     push_tags_row(&mut internal, "", "", "", &def.tags);
     collect_table_rows(&def, &mut internal);
     collect_relationship_rows(&def, &alias_map, &mut internal);
@@ -90,6 +99,7 @@ unsafe fn describe_view_rows(
     collect_dimension_rows(&def, &base_table, &alias_map, &types, &mut internal);
     collect_metric_rows(&def, &base_table, &alias_map, &types, &mut internal);
     collect_materialization_rows(&def, &mut internal);
+    collect_cortex_analyst_rows(&def, &mut internal);
 
     let rows: Vec<Vec<String>> = internal
         .into_iter()
@@ -158,6 +168,94 @@ fn push_tags_row(
             property: "TAGS".to_string(),
             property_value: crate::model::tags_json(tags),
         });
+    }
+}
+
+/// Push a member's metadata-only rows: `SAMPLE_VALUES` (a JSON array),
+/// `IS_ENUM` (`true`), and the `CORTEX_SEARCH_SERVICE_*` rows Snowflake shows for
+/// a dimension's Cortex Search Service (a qualifier or column only when
+/// written). Nothing for a clause the member does not carry.
+fn push_member_metadata_rows(
+    rows: &mut Vec<DescribeRow>,
+    object_kind: &str,
+    object_name: &str,
+    parent_entity: &str,
+    sample_values: &[String],
+    is_enum: bool,
+    cortex: Option<&crate::model::CortexSearchService>,
+) {
+    let mut push = |property: &str, property_value: String| {
+        rows.push(DescribeRow {
+            object_kind: object_kind.to_string(),
+            object_name: object_name.to_string(),
+            parent_entity: parent_entity.to_string(),
+            property: property.to_string(),
+            property_value,
+        });
+    };
+    if !sample_values.is_empty() {
+        push("SAMPLE_VALUES", format_json_array(sample_values));
+    }
+    if is_enum {
+        push("IS_ENUM", "true".to_string());
+    }
+    if let Some(c) = cortex {
+        if let Some(ref col) = c.literal_column {
+            push("CORTEX_SEARCH_SERVICE_COLUMN_NAME", col.clone());
+        }
+        if let Some(ref db) = c.database {
+            push("CORTEX_SEARCH_SERVICE_DATABASE_NAME", db.clone());
+        }
+        if let Some(ref schema) = c.schema {
+            push("CORTEX_SEARCH_SERVICE_SCHEMA_NAME", schema.clone());
+        }
+        push("CORTEX_SEARCH_SERVICE_NAME", c.service.clone());
+    }
+}
+
+/// Collect the Cortex Analyst rows, as Snowflake shows them: a
+/// `CUSTOM_INSTRUCTIONS` row per instruction (`AI_SQL_GENERATION`,
+/// `AI_QUESTION_CATEGORIZATION`), then an `AI_VERIFIED_QUERY` group per verified
+/// query (`QUESTION`, `VERIFIED_AT`, `ONBOARDING_QUESTION`, `VERIFIED_BY`, `SQL`;
+/// `VERIFIED_AT` and `VERIFIED_BY` only when set).
+fn collect_cortex_analyst_rows(def: &SemanticViewDefinition, rows: &mut Vec<DescribeRow>) {
+    let ci = &def.module_custom_instructions;
+    for (property, text) in [
+        ("AI_SQL_GENERATION", &ci.sql_generation),
+        ("AI_QUESTION_CATEGORIZATION", &ci.question_categorization),
+    ] {
+        if let Some(text) = text {
+            rows.push(DescribeRow {
+                object_kind: "CUSTOM_INSTRUCTIONS".to_string(),
+                object_name: String::new(),
+                parent_entity: String::new(),
+                property: property.to_string(),
+                property_value: text.clone(),
+            });
+        }
+    }
+    for q in &def.verified_queries {
+        let mut push = |property: &str, property_value: String| {
+            rows.push(DescribeRow {
+                object_kind: "AI_VERIFIED_QUERY".to_string(),
+                object_name: q.name.clone(),
+                parent_entity: String::new(),
+                property: property.to_string(),
+                property_value,
+            });
+        };
+        push("QUESTION", q.question.clone());
+        if let Some(at) = q.verified_at {
+            push("VERIFIED_AT", at.to_string());
+        }
+        push(
+            "ONBOARDING_QUESTION",
+            q.use_as_onboarding_question.to_string(),
+        );
+        if let Some(ref by) = q.verified_by {
+            push("VERIFIED_BY", by.clone());
+        }
+        push("SQL", q.sql.clone());
     }
 }
 
@@ -348,6 +446,15 @@ fn collect_fact_rows(
             });
         }
         push_tags_row(rows, "FACT", &fact.name, &parent, &fact.tags);
+        push_member_metadata_rows(
+            rows,
+            "FACT",
+            &fact.name,
+            &parent,
+            &fact.sample_values,
+            false,
+            None,
+        );
         if fact.is_filter {
             rows.push(DescribeRow {
                 object_kind: "FACT".to_string(),
@@ -428,6 +535,15 @@ fn collect_dimension_rows(
             });
         }
         push_tags_row(rows, "DIMENSION", &dim.name, &parent, &dim.tags);
+        push_member_metadata_rows(
+            rows,
+            "DIMENSION",
+            &dim.name,
+            &parent,
+            &dim.sample_values,
+            dim.is_enum,
+            dim.cortex_search_service.as_ref(),
+        );
         if dim.is_filter {
             rows.push(DescribeRow {
                 object_kind: "DIMENSION".to_string(),

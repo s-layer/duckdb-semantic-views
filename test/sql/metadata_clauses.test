@@ -1,0 +1,391 @@
+# Snowflake's metadata-only clauses (decision D5: accept, store, DESCRIBE,
+# round-trip): SAMPLE_VALUES and IS_ENUM on members, WITH CORTEX SEARCH SERVICE
+# on dimensions, and MAX_STALENESS, AI_SQL_GENERATION,
+# AI_QUESTION_CATEGORIZATION, AI_VERIFIED_QUERIES and COPY GRANTS on the view.
+# None of them changes what a query returns.
+
+require semantic_views
+
+statement ok
+CREATE TABLE mc_orders (id INTEGER PRIMARY KEY, region VARCHAR, warehouse VARCHAR, amount INTEGER);
+
+statement ok
+INSERT INTO mc_orders VALUES (1, 'East', 'SMALL', 100), (2, 'West', 'LARGE', 250), (3, 'East', 'SMALL', 50);
+
+# Snowflake's user-guide examples, with every view-level clause in Snowflake's
+# order after the last clause.
+statement ok
+CREATE SEMANTIC VIEW mc_v
+  TABLES (o AS mc_orders PRIMARY KEY (id))
+  FACTS (
+    o.amt AS o.amount
+      COMMENT = 'Transaction amount'
+      SAMPLE_VALUES ('100', '250', '500', '1000')
+  )
+  DIMENSIONS (
+    o.region AS o.region
+      COMMENT = 'Sales region'
+      SAMPLE_VALUES ('East', 'West', 'North', 'South')
+      IS_ENUM,
+    o.warehouse AS o.warehouse
+      COMMENT = 'Name of the warehouse'
+      SAMPLE_VALUES ('SMALL', 'it''s')
+      WITH CORTEX SEARCH SERVICE sales_db.search."Warehouse Search" USING warehouse_name
+  )
+  METRICS (
+    o.revenue AS SUM(o.amount)
+  )
+  COMMENT = 'Semantic view for revenue analysis'
+  MAX_STALENESS = 3600
+  AI_SQL_GENERATION 'Ensure that all numeric columns are rounded to 2 decimal points.'
+  AI_QUESTION_CATEGORIZATION 'Reject questions about employees.'
+  AI_VERIFIED_QUERIES (
+    revenue_by_region AS (
+      QUESTION 'What is the revenue for each region?'
+      VERIFIED_AT 1772645863
+      ONBOARDING_QUESTION TRUE
+      VERIFIED_BY '(STEWARD = data_stewards)'
+      SQL 'SELECT region, revenue FROM SEMANTIC_VIEW(mc_v DIMENSIONS region METRICS revenue)'
+    ),
+    total AS (
+      QUESTION 'What is the total?'
+      SQL 'SELECT ''all'' AS scope, SUM(amount) FROM mc_orders'
+    )
+  )
+  WITH TAG (S_LAYER_KIND = 'view')
+  COPY GRANTS
+
+# Metadata only: the view queries as before.
+query TI rowsort
+SELECT * FROM semantic_view('mc_v', dimensions := ['region'], metrics := ['revenue'])
+----
+East	150
+West	250
+
+# ------------------------------------------------------------------
+# DESCRIBE
+# ------------------------------------------------------------------
+
+query TTTTT rowsort
+SELECT * FROM describe_semantic_view('mc_v')
+WHERE property IN ('SAMPLE_VALUES', 'IS_ENUM', 'MAX_STALENESS', 'AI_SQL_GENERATION',
+                   'AI_QUESTION_CATEGORIZATION')
+   OR property LIKE 'CORTEX_SEARCH_SERVICE_%'
+   OR object_kind = 'AI_VERIFIED_QUERY'
+----
+(empty)	(empty)	(empty)	MAX_STALENESS	3600
+AI_VERIFIED_QUERY	revenue_by_region	(empty)	ONBOARDING_QUESTION	true
+AI_VERIFIED_QUERY	revenue_by_region	(empty)	QUESTION	What is the revenue for each region?
+AI_VERIFIED_QUERY	revenue_by_region	(empty)	SQL	SELECT region, revenue FROM SEMANTIC_VIEW(mc_v DIMENSIONS region METRICS revenue)
+AI_VERIFIED_QUERY	revenue_by_region	(empty)	VERIFIED_AT	1772645863
+AI_VERIFIED_QUERY	revenue_by_region	(empty)	VERIFIED_BY	(STEWARD = data_stewards)
+AI_VERIFIED_QUERY	total	(empty)	ONBOARDING_QUESTION	false
+AI_VERIFIED_QUERY	total	(empty)	QUESTION	What is the total?
+AI_VERIFIED_QUERY	total	(empty)	SQL	SELECT 'all' AS scope, SUM(amount) FROM mc_orders
+CUSTOM_INSTRUCTIONS	(empty)	(empty)	AI_QUESTION_CATEGORIZATION	Reject questions about employees.
+CUSTOM_INSTRUCTIONS	(empty)	(empty)	AI_SQL_GENERATION	Ensure that all numeric columns are rounded to 2 decimal points.
+DIMENSION	region	mc_orders	IS_ENUM	true
+DIMENSION	region	mc_orders	SAMPLE_VALUES	["East","West","North","South"]
+DIMENSION	warehouse	mc_orders	CORTEX_SEARCH_SERVICE_COLUMN_NAME	warehouse_name
+DIMENSION	warehouse	mc_orders	CORTEX_SEARCH_SERVICE_DATABASE_NAME	sales_db
+DIMENSION	warehouse	mc_orders	CORTEX_SEARCH_SERVICE_NAME	Warehouse Search
+DIMENSION	warehouse	mc_orders	CORTEX_SEARCH_SERVICE_SCHEMA_NAME	search
+DIMENSION	warehouse	mc_orders	SAMPLE_VALUES	["SMALL","it's"]
+FACT	amt	mc_orders	SAMPLE_VALUES	["100","250","500","1000"]
+
+# A dimension that is not an enum and names no service has no such rows.
+query I
+SELECT count(*) FROM describe_semantic_view('mc_v')
+WHERE object_name = 'warehouse' AND property = 'IS_ENUM'
+----
+0
+
+# ------------------------------------------------------------------
+# GET_DDL writes every clause (COPY GRANTS aside: it is a no-op and not
+# stored), and its output replays to the same view
+# ------------------------------------------------------------------
+
+query I
+SELECT GET_DDL('SEMANTIC_VIEW', 'mc_v') LIKE '%o.region AS o.region COMMENT = ''Sales region'' SAMPLE_VALUES (''East'', ''West'', ''North'', ''South'') IS_ENUM,%'
+----
+true
+
+query I
+SELECT GET_DDL('SEMANTIC_VIEW', 'mc_v') LIKE '%SAMPLE_VALUES (''SMALL'', ''it''''s'') WITH CORTEX SEARCH SERVICE sales_db.search."Warehouse Search" USING warehouse_name%'
+----
+true
+
+query I
+SELECT contains(GET_DDL('SEMANTIC_VIEW', 'mc_v'), 'COPY GRANTS')
+----
+false
+
+statement ok
+CREATE TABLE mc_ddl AS SELECT replace(GET_DDL('SEMANTIC_VIEW', 'mc_v'), 'VIEW mc_v ', 'VIEW mc_replay ') AS ddl
+
+# GET_DDL's output for mc_v, under another name. The equality check below
+# pins GET_DDL's text to this statement.
+statement ok
+CREATE OR REPLACE SEMANTIC VIEW mc_replay COMMENT = 'Semantic view for revenue analysis' AS
+TABLES (
+    o AS mc_orders PRIMARY KEY (id)
+)
+FACTS (
+    o.amt AS o.amount COMMENT = 'Transaction amount' SAMPLE_VALUES ('100', '250', '500', '1000')
+)
+DIMENSIONS (
+    o.region AS o.region COMMENT = 'Sales region' SAMPLE_VALUES ('East', 'West', 'North', 'South') IS_ENUM,
+    o.warehouse AS o.warehouse COMMENT = 'Name of the warehouse' SAMPLE_VALUES ('SMALL', 'it''s') WITH CORTEX SEARCH SERVICE sales_db.search."Warehouse Search" USING warehouse_name
+)
+METRICS (
+    o.revenue AS SUM(o.amount)
+)
+MAX_STALENESS = 3600
+AI_SQL_GENERATION 'Ensure that all numeric columns are rounded to 2 decimal points.'
+AI_QUESTION_CATEGORIZATION 'Reject questions about employees.'
+AI_VERIFIED_QUERIES (
+    revenue_by_region AS (
+        QUESTION 'What is the revenue for each region?'
+        VERIFIED_AT 1772645863
+        ONBOARDING_QUESTION TRUE
+        VERIFIED_BY '(STEWARD = data_stewards)'
+        SQL 'SELECT region, revenue FROM SEMANTIC_VIEW(mc_v DIMENSIONS region METRICS revenue)'
+    ),
+    total AS (
+        QUESTION 'What is the total?'
+        SQL 'SELECT ''all'' AS scope, SUM(amount) FROM mc_orders'
+    )
+)
+WITH TAG (S_LAYER_KIND = 'view')
+
+query I
+SELECT (SELECT ddl FROM mc_ddl) = GET_DDL('SEMANTIC_VIEW', 'mc_replay')
+----
+true
+
+query I
+SELECT count(*) FROM (
+  (SELECT * FROM describe_semantic_view('mc_v') EXCEPT ALL SELECT * FROM describe_semantic_view('mc_replay'))
+  UNION ALL
+  (SELECT * FROM describe_semantic_view('mc_replay') EXCEPT ALL SELECT * FROM describe_semantic_view('mc_v')))
+----
+0
+
+# ------------------------------------------------------------------
+# YAML: Snowflake's field names, both ways
+# ------------------------------------------------------------------
+
+query I
+SELECT read_yaml_from_semantic_view('mc_v') LIKE '%sample_values:%- East%is_enum: true%cortex_search_service:%service: Warehouse Search%literal_column: warehouse_name%database: sales_db%schema: search%max_staleness: 3600%module_custom_instructions:%sql_generation: Ensure%question_categorization: Reject%verified_queries:%- name: revenue_by_region%question: What is the revenue for each region?%verified_at: 1772645863%verified_by: (STEWARD = data_stewards)%use_as_onboarding_question: true%sql: SELECT region%'
+----
+true
+
+statement ok
+CREATE TABLE mc_yaml_text AS SELECT read_yaml_from_semantic_view('mc_v') AS y
+
+statement ok
+CREATE SEMANTIC VIEW mc_yaml FROM YAML $$
+tables:
+  - alias: o
+    table: mc_orders
+    pk_columns: [id]
+dimensions:
+  - name: region
+    expr: o.region
+    source_table: o
+    sample_values: [East, West]
+    is_enum: true
+    cortex_search_service:
+      service: regions
+metrics:
+  - name: revenue
+    expr: SUM(o.amount)
+    source_table: o
+max_staleness: 1 day
+module_custom_instructions:
+  sql_generation: Be brief.
+verified_queries:
+  - name: q
+    question: How much?
+    sql: SELECT 1
+$$
+
+query TTTTT rowsort
+SELECT * FROM describe_semantic_view('mc_yaml')
+WHERE property IN ('SAMPLE_VALUES', 'IS_ENUM', 'MAX_STALENESS', 'AI_SQL_GENERATION', 'CORTEX_SEARCH_SERVICE_NAME')
+   OR object_kind = 'AI_VERIFIED_QUERY'
+----
+(empty)	(empty)	(empty)	MAX_STALENESS	1 day
+AI_VERIFIED_QUERY	q	(empty)	ONBOARDING_QUESTION	false
+AI_VERIFIED_QUERY	q	(empty)	QUESTION	How much?
+AI_VERIFIED_QUERY	q	(empty)	SQL	SELECT 1
+CUSTOM_INSTRUCTIONS	(empty)	(empty)	AI_SQL_GENERATION	Be brief.
+DIMENSION	region	mc_orders	CORTEX_SEARCH_SERVICE_NAME	regions
+DIMENSION	region	mc_orders	IS_ENUM	true
+DIMENSION	region	mc_orders	SAMPLE_VALUES	["East","West"]
+
+query I
+SELECT GET_DDL('SEMANTIC_VIEW', 'mc_yaml') LIKE '%SAMPLE_VALUES (''East'', ''West'') IS_ENUM WITH CORTEX SEARCH SERVICE regions%MAX_STALENESS = ''1 day''%'
+----
+true
+
+# YAML refuses what the DDL refuses.
+statement error
+CREATE SEMANTIC VIEW mc_yaml_bad FROM YAML $$
+tables:
+  - alias: o
+    table: mc_orders
+dimensions:
+  - name: region
+    expr: o.region
+    source_table: o
+metrics: []
+max_staleness: 60
+$$
+----
+MAX_STALENESS is 60 seconds; the minimum is 120 seconds
+
+statement error
+CREATE SEMANTIC VIEW mc_yaml_bad FROM YAML $$
+tables:
+  - alias: o
+    table: mc_orders
+dimensions:
+  - name: region
+    expr: o.region
+    source_table: o
+metrics: []
+verified_queries:
+  - {name: q, question: a, sql: b}
+  - {name: Q, question: c, sql: d}
+$$
+----
+duplicate verified query 'Q'
+
+statement error
+CREATE SEMANTIC VIEW mc_yaml_bad FROM YAML $$
+tables:
+  - alias: o
+    table: mc_orders
+dimensions:
+  - name: region
+    expr: o.region
+    source_table: o
+    cortex_search_service: {service: s, database: db}
+metrics: []
+$$
+----
+names a database but no schema
+
+# ------------------------------------------------------------------
+# ALTER SEMANTIC VIEW ... SET / UNSET MAX_STALENESS
+# ------------------------------------------------------------------
+
+statement ok
+ALTER SEMANTIC VIEW mc_v SET MAX_STALENESS = '2 hours'
+
+query T
+SELECT property_value FROM describe_semantic_view('mc_v') WHERE property = 'MAX_STALENESS'
+----
+2 hours
+
+statement ok
+ALTER SEMANTIC VIEW IF EXISTS mc_v SET MAX_STALENESS = 120
+
+query T
+SELECT property_value FROM describe_semantic_view('mc_v') WHERE property = 'MAX_STALENESS'
+----
+120
+
+query I
+SELECT GET_DDL('SEMANTIC_VIEW', 'mc_v') LIKE '%' || chr(10) || 'MAX_STALENESS = 120' || chr(10) || '%'
+----
+true
+
+statement error
+ALTER SEMANTIC VIEW mc_v SET MAX_STALENESS = 119
+----
+MAX_STALENESS is 119 seconds; the minimum is 120 seconds
+
+statement error
+ALTER SEMANTIC VIEW mc_v SET MAX_STALENESS = '5 fortnights'
+----
+is not an interval
+
+statement error
+ALTER SEMANTIC VIEW mc_v SET MAX_STALENESS = 1.5
+----
+Expected a whole number of seconds
+
+# UNSET takes several properties, as in Snowflake.
+statement ok
+ALTER SEMANTIC VIEW mc_v UNSET MAX_STALENESS, COMMENT
+
+query I
+SELECT count(*) FROM describe_semantic_view('mc_v') WHERE property IN ('MAX_STALENESS', 'COMMENT') AND object_kind = ''
+----
+0
+
+# The rest of the metadata is untouched.
+query I
+SELECT count(*) FROM describe_semantic_view('mc_v') WHERE object_kind IN ('AI_VERIFIED_QUERY', 'CUSTOM_INSTRUCTIONS')
+----
+10
+
+# Unsetting what is not set is not an error.
+statement ok
+ALTER SEMANTIC VIEW mc_v UNSET max_staleness
+
+statement error
+ALTER SEMANTIC VIEW mc_v UNSET COMMENT, COMMENT
+----
+COMMENT is listed twice in UNSET
+
+statement error
+ALTER SEMANTIC VIEW mc_no_such_view SET MAX_STALENESS = 300
+----
+does not exist
+
+statement ok
+ALTER SEMANTIC VIEW IF EXISTS mc_no_such_view UNSET MAX_STALENESS
+
+# ------------------------------------------------------------------
+# Refusals at CREATE
+# ------------------------------------------------------------------
+
+statement error
+CREATE SEMANTIC VIEW mc_bad TABLES (o AS mc_orders PRIMARY KEY (id))
+  FACTS (o.amt AS o.amount IS_ENUM)
+  DIMENSIONS (o.region AS o.region)
+----
+IS_ENUM is not valid on a fact; it applies to dimensions.
+
+statement error
+CREATE SEMANTIC VIEW mc_bad TABLES (o AS mc_orders PRIMARY KEY (id))
+  DIMENSIONS (o.region AS o.region)
+  METRICS (o.revenue AS SUM(o.amount) SAMPLE_VALUES ('1'))
+----
+SAMPLE_VALUES is not valid on a metric; it applies to facts and dimensions.
+
+statement error
+CREATE SEMANTIC VIEW mc_bad TABLES (o AS mc_orders PRIMARY KEY (id))
+  DIMENSIONS (o.region AS o.region)
+  MAX_STALENESS = 60
+----
+MAX_STALENESS is 60 seconds; the minimum is 120 seconds
+
+statement error
+CREATE SEMANTIC VIEW mc_bad TABLES (o AS mc_orders PRIMARY KEY (id))
+  DIMENSIONS (o.region AS o.region)
+  AI_VERIFIED_QUERIES (q AS (QUESTION 'a'))
+----
+Verified query 'q' needs SQL '...'.
+
+statement ok
+DROP SEMANTIC VIEW mc_v
+
+statement ok
+DROP SEMANTIC VIEW mc_replay
+
+statement ok
+DROP SEMANTIC VIEW mc_yaml

@@ -1,10 +1,13 @@
-//! Trailing COMMENT / WITH SYNONYMS / LABELS / [WITH] TAG annotations and leading
-//! access modifiers.
+//! Trailing COMMENT / WITH SYNONYMS / LABELS / [WITH] TAG annotations, the
+//! metadata-only clauses read by [`super::metadata`], and leading access
+//! modifiers.
 
 use super::scan::{extract_paren_prefix, is_ident_continuation, QuoteState};
 use super::split_at_depth0_commas;
 use crate::errors::ParseError;
-use crate::model::{AccessModifier, Tag, TagName};
+use crate::model::{
+    AccessModifier, CortexSearchService, MaxStaleness, Tag, TagName, VerifiedQuery,
+};
 
 /// Whether a keyword starting at `i` sits on a boundary that can legitimately
 /// begin a trailing annotation.
@@ -55,6 +58,64 @@ pub(super) struct ParsedAnnotations {
     pub(super) tags: Vec<Tag>,
     /// `LABELS = (FILTER)` was present — the member is a named filter.
     pub(super) is_filter: bool,
+    /// `SAMPLE_VALUES ('a', ...)`, on a fact or dimension.
+    pub(super) sample_values: Vec<String>,
+    /// `IS_ENUM`, on a dimension.
+    pub(super) is_enum: bool,
+    /// `WITH CORTEX SEARCH SERVICE ...`, on a dimension.
+    pub(super) cortex_search_service: Option<CortexSearchService>,
+    /// The view-level clauses, read only after a view's last clause.
+    pub(super) view: ViewClauses,
+}
+
+/// The clauses only a view takes, after its last clause.
+#[derive(Debug, Default)]
+pub(super) struct ViewClauses {
+    pub(super) max_staleness: Option<MaxStaleness>,
+    pub(super) ai_sql_generation: Option<String>,
+    pub(super) ai_question_categorization: Option<String>,
+    pub(super) verified_queries: Vec<VerifiedQuery>,
+}
+
+impl ParsedAnnotations {
+    /// The first member-only clause present, by its keyword: what a table, a
+    /// metric or the view must refuse.
+    pub(super) fn member_metadata_clause(&self) -> Option<&'static str> {
+        if !self.sample_values.is_empty() {
+            Some("SAMPLE_VALUES")
+        } else if self.is_enum {
+            Some("IS_ENUM")
+        } else if self.cortex_search_service.is_some() {
+            Some("WITH CORTEX SEARCH SERVICE")
+        } else {
+            None
+        }
+    }
+
+    /// The first dimension-only clause present, by its keyword: what a fact
+    /// must refuse.
+    pub(super) fn dimension_only_clause(&self) -> Option<&'static str> {
+        if self.is_enum {
+            Some("IS_ENUM")
+        } else if self.cortex_search_service.is_some() {
+            Some("WITH CORTEX SEARCH SERVICE")
+        } else {
+            None
+        }
+    }
+}
+
+/// Where an annotation region sits, which decides the clauses it may hold.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum Scope {
+    /// A table or member entry: `COMMENT`, `WITH SYNONYMS`, `LABELS`, `TAG`,
+    /// `SAMPLE_VALUES`, `IS_ENUM`, `WITH CORTEX SEARCH SERVICE`. The caller
+    /// refuses any its object does not take.
+    Member,
+    /// After a view's last clause: those, plus `MAX_STALENESS`,
+    /// `AI_SQL_GENERATION`, `AI_QUESTION_CATEGORIZATION`, `AI_VERIFIED_QUERIES`
+    /// and `COPY GRANTS`. The caller refuses the member-only ones.
+    View,
 }
 
 /// Extract a single-quoted string value, handling '' escape sequences.
@@ -379,7 +440,8 @@ pub(crate) fn find_annotation_start(text: &str) -> Option<usize> {
                         // Verify it's WITH SYNONYMS or WITH TAG, not just any WITH
                         let after_with = upper[i + 4..].trim_start();
                         if (after_with.starts_with("SYNONYMS")
-                            || starts_with_keyword(after_with, "TAG"))
+                            || starts_with_keyword(after_with, "TAG")
+                            || starts_with_keyword(after_with, "CORTEX"))
                             && annotation_start.is_none()
                         {
                             annotation_start = Some(i);
@@ -397,11 +459,97 @@ pub(crate) fn find_annotation_start(text: &str) -> Option<usize> {
                 {
                     annotation_start = Some(i);
                 }
+                // `SAMPLE_VALUES ('a', ...)` and a bare `IS_ENUM`. Each must
+                // follow an operand that is not a keyword operator, so a call
+                // `sample_values('a')` or a column in `x = is_enum`,
+                // `NOT is_enum` or `WHEN is_enum THEN` is still expression
+                // text. A bare `IS_ENUM` must also end the entry or be followed
+                // by another clause.
+                for (kw, opens) in [
+                    ("SAMPLE_VALUES", opens_sample_values as fn(&str) -> bool),
+                    ("IS_ENUM", ends_or_opens_clause),
+                ] {
+                    let end = i + kw.len();
+                    if end <= bytes.len()
+                        && &upper_bytes[i..end] == kw.as_bytes()
+                        && annotation_boundary_before(bytes, i)
+                        && annotation_boundary_after(bytes, end)
+                        && follows_operand(bytes, i)
+                        && !follows_keyword_operator(&upper, i)
+                        && opens(&text[end..])
+                        && annotation_start.is_none()
+                    {
+                        annotation_start = Some(i);
+                    }
+                }
             }
         }
         i = next;
     }
     annotation_start
+}
+
+/// Whether the text before `i`, past any whitespace, ends an operand: an
+/// identifier, a literal, or a closing bracket. After an operator or at the
+/// start, a keyword-like word is an operand itself.
+fn follows_operand(bytes: &[u8], i: usize) -> bool {
+    let mut j = i;
+    while j > 0 && bytes[j - 1].is_ascii_whitespace() {
+        j -= 1;
+    }
+    j > 0 && (is_ident_continuation(bytes[j - 1]) || b")]}'\"".contains(&bytes[j - 1]))
+}
+
+/// Whether the word before byte `i` of `upper` (the upper-cased entry) is a
+/// keyword that takes an operand after it (`NOT`, `AND`, `WHEN`, ...): the
+/// word at `i` is then that operand, not a clause.
+fn follows_keyword_operator(upper: &str, i: usize) -> bool {
+    const OPERATORS: &[&str] = &[
+        "AND", "OR", "NOT", "IS", "IN", "LIKE", "ILIKE", "GLOB", "SIMILAR", "BETWEEN", "CASE",
+        "WHEN", "THEN", "ELSE", "DISTINCT", "SELECT", "BY", "ON", "WHERE", "HAVING", "EXISTS",
+        "ANY", "ALL", "SOME", "ESCAPE", "COLLATE", "FROM", "RETURN", "INTERVAL",
+    ];
+    let before = upper[..i].trim_end();
+    let word_start = before
+        .bytes()
+        .rposition(|b| !is_ident_continuation(b))
+        .map_or(0, |p| p + 1);
+    // `o.case` is a column, not the keyword.
+    let qualified = before[..word_start].ends_with('.');
+    !qualified && OPERATORS.contains(&&before[word_start..])
+}
+
+/// Whether `rest` (the text after a bare `IS_ENUM`) ends the entry or starts
+/// another clause, as the clause must.
+fn ends_or_opens_clause(rest: &str) -> bool {
+    const CLAUSES: &[&str] = &[
+        "COMMENT",
+        "WITH",
+        "LABELS",
+        "TAG",
+        "SAMPLE_VALUES",
+        "IS_ENUM",
+        "MAX_STALENESS",
+        "AI_SQL_GENERATION",
+        "AI_QUESTION_CATEGORIZATION",
+        "AI_VERIFIED_QUERIES",
+        "COPY",
+    ];
+    let rest = rest.trim_start();
+    rest.is_empty()
+        || CLAUSES
+            .iter()
+            .any(|kw| starts_with_keyword(&rest.to_ascii_uppercase(), kw))
+}
+
+/// Whether `rest` (the text after `SAMPLE_VALUES`) opens its value list:
+/// `[=] (` then a quoted value or `)`.
+fn opens_sample_values(rest: &str) -> bool {
+    let rest = rest.trim_start();
+    let rest = rest.strip_prefix('=').unwrap_or(rest).trim_start();
+    rest.strip_prefix('(')
+        .map(str::trim_start)
+        .is_some_and(|r| r.starts_with('\'') || r.starts_with(')'))
 }
 
 /// Separate the SQL expression from trailing COMMENT / WITH SYNONYMS annotations.
@@ -429,7 +577,7 @@ pub(super) fn parse_trailing_annotations(
     text: &str,
     base_offset: usize,
 ) -> Result<(String, ParsedAnnotations), ParseError> {
-    parse_annotations(text, base_offset, false)
+    parse_annotations(text, base_offset, false, Scope::Member)
 }
 
 /// [`parse_trailing_annotations`] for text known to begin at an annotation
@@ -441,7 +589,17 @@ pub(super) fn parse_leading_annotations(
     text: &str,
     base_offset: usize,
 ) -> Result<(String, ParsedAnnotations), ParseError> {
-    parse_annotations(text, base_offset, true)
+    parse_annotations(text, base_offset, true, Scope::Member)
+}
+
+/// [`parse_leading_annotations`] for the clauses after a view's last clause,
+/// where the view-level clauses ([`ViewClauses`] and `COPY GRANTS`) are read
+/// too.
+pub(super) fn parse_view_annotations(
+    text: &str,
+    base_offset: usize,
+) -> Result<(String, ParsedAnnotations), ParseError> {
+    parse_annotations(text, base_offset, true, Scope::View)
 }
 
 #[allow(clippy::too_many_lines)]
@@ -449,6 +607,7 @@ fn parse_annotations(
     text: &str,
     base_offset: usize,
     at_keyword: bool,
+    scope: Scope,
 ) -> Result<(String, ParsedAnnotations), ParseError> {
     // Re-anchor past any leading whitespace `trim` will drop, so `base_offset`
     // remains the absolute offset of `text[0]` after trimming.
@@ -480,7 +639,17 @@ fn parse_annotations(
     let mut labels_seen = false;
     let mut is_filter = false;
     let mut tags: Option<Vec<Tag>> = None;
+    let mut sample_values: Option<Vec<String>> = None;
+    let mut is_enum = false;
+    let mut cortex_search_service: Option<CortexSearchService> = None;
+    let mut view = ViewClauses::default();
+    let mut verified_seen = false;
+    let mut copy_grants = false;
     let mut rest = annotation_text;
+    let duplicate = |what: &str, at: &str| ParseError {
+        message: format!("Duplicate {what} annotation."),
+        position: Some(pos_of(at)),
+    };
 
     loop {
         rest = rest.trim_start();
@@ -533,9 +702,20 @@ fn parse_annotations(
                 rest = parse_tag_clause(after_with, &mut tags, pos_of(after_with))?;
                 continue;
             }
+            if starts_with_keyword(&after_with.to_ascii_uppercase(), "CORTEX") {
+                if cortex_search_service.is_some() {
+                    return Err(duplicate("WITH CORTEX SEARCH SERVICE", rest));
+                }
+                let (service, after) =
+                    super::metadata::parse_cortex_search_service(after_with, pos_of(after_with))?;
+                cortex_search_service = Some(service);
+                rest = after;
+                continue;
+            }
             if !starts_with_keyword(&after_with.to_ascii_uppercase(), "SYNONYMS") {
                 return Err(ParseError {
-                    message: "Expected SYNONYMS or TAG after WITH keyword.".to_string(),
+                    message: "Expected SYNONYMS, TAG or CORTEX SEARCH SERVICE after WITH keyword."
+                        .to_string(),
                     position: Some(pos_of(after_with)),
                 });
             }
@@ -579,11 +759,82 @@ fn parse_annotations(
             is_filter = parse_label_list(content, pos_of(content))?;
             labels_seen = true;
             rest = &after_eq[consumed..];
+        } else if starts_with_keyword(&rest_upper, "SAMPLE_VALUES") {
+            if sample_values.is_some() {
+                return Err(duplicate("SAMPLE_VALUES", rest));
+            }
+            let after_kw = &rest["SAMPLE_VALUES".len()..];
+            let (values, after) = super::metadata::parse_sample_values(after_kw, pos_of(after_kw))?;
+            sample_values = Some(values);
+            rest = after;
+        } else if starts_with_keyword(&rest_upper, "IS_ENUM") {
+            if is_enum {
+                return Err(duplicate("IS_ENUM", rest));
+            }
+            is_enum = true;
+            rest = &rest["IS_ENUM".len()..];
+        } else if scope == Scope::View && starts_with_keyword(&rest_upper, "MAX_STALENESS") {
+            if view.max_staleness.is_some() {
+                return Err(duplicate("MAX_STALENESS", rest));
+            }
+            let after_kw = &rest["MAX_STALENESS".len()..];
+            let (value, after) = super::metadata::parse_max_staleness(after_kw, pos_of(after_kw))?;
+            view.max_staleness = Some(value);
+            rest = after;
+        } else if scope == Scope::View
+            && (starts_with_keyword(&rest_upper, "AI_SQL_GENERATION")
+                || starts_with_keyword(&rest_upper, "AI_QUESTION_CATEGORIZATION"))
+        {
+            let sql_generation = starts_with_keyword(&rest_upper, "AI_SQL_GENERATION");
+            let (kw, slot) = if sql_generation {
+                ("AI_SQL_GENERATION", &mut view.ai_sql_generation)
+            } else {
+                (
+                    "AI_QUESTION_CATEGORIZATION",
+                    &mut view.ai_question_categorization,
+                )
+            };
+            if slot.is_some() {
+                return Err(duplicate(kw, rest));
+            }
+            let after_kw = &rest[kw.len()..];
+            let (value, after) =
+                super::metadata::parse_instruction(after_kw, pos_of(after_kw), kw)?;
+            *slot = Some(value);
+            rest = after;
+        } else if scope == Scope::View && starts_with_keyword(&rest_upper, "AI_VERIFIED_QUERIES") {
+            if verified_seen {
+                return Err(duplicate("AI_VERIFIED_QUERIES", rest));
+            }
+            let after_kw = &rest["AI_VERIFIED_QUERIES".len()..];
+            let (queries, after) =
+                super::metadata::parse_verified_queries(after_kw, pos_of(after_kw))?;
+            view.verified_queries = queries;
+            verified_seen = true;
+            rest = after;
+        } else if scope == Scope::View && starts_with_keyword(&rest_upper, "COPY") {
+            if copy_grants {
+                return Err(duplicate("COPY GRANTS", rest));
+            }
+            // A no-op: this extension has no grants to copy.
+            let after_kw = &rest["COPY".len()..];
+            rest = super::metadata::parse_copy_grants(after_kw, pos_of(after_kw))?;
+            copy_grants = true;
         } else {
+            let expected = match scope {
+                Scope::Member => {
+                    "COMMENT = '...', WITH SYNONYMS = (...), LABELS = (FILTER), [WITH] TAG \
+                     (name = 'value', ...), SAMPLE_VALUES ('...', ...), IS_ENUM, or WITH CORTEX \
+                     SEARCH SERVICE <name>"
+                }
+                Scope::View => {
+                    "COMMENT = '...', [WITH] TAG (name = 'value', ...), MAX_STALENESS = ..., \
+                     AI_SQL_GENERATION '...', AI_QUESTION_CATEGORIZATION '...', \
+                     AI_VERIFIED_QUERIES (...), or COPY GRANTS"
+                }
+            };
             return Err(ParseError {
-                message: format!(
-                    "Unexpected text in annotations: '{rest}'. Expected COMMENT = '...', WITH SYNONYMS = (...), LABELS = (FILTER), or [WITH] TAG (name = 'value', ...)."
-                ),
+                message: format!("Unexpected text in annotations: '{rest}'. Expected {expected}."),
                 position: Some(pos_of(rest)),
             });
         }
@@ -596,6 +847,10 @@ fn parse_annotations(
             synonyms: synonyms.unwrap_or_default(),
             tags: tags.unwrap_or_default(),
             is_filter,
+            sample_values: sample_values.unwrap_or_default(),
+            is_enum,
+            cortex_search_service,
+            view,
         },
     ))
 }
@@ -679,7 +934,7 @@ fn opens_tag_list(rest: &str) -> bool {
 /// uppercase) at a word boundary — i.e. the byte after the keyword, if any, is
 /// not an identifier-continuation byte. Prevents `COMMENTARY` from matching
 /// `COMMENT` / `WITHDRAW` from matching `WITH`.
-fn starts_with_keyword(upper: &str, keyword: &str) -> bool {
+pub(super) fn starts_with_keyword(upper: &str, keyword: &str) -> bool {
     let ub = upper.as_bytes();
     let kb = keyword.as_bytes();
     ub.len() >= kb.len()
@@ -997,7 +1252,7 @@ mod tag_tests {
             ),
             (
                 "x COMMENT = 'c' WITH TAGS (a = '1')",
-                "Expected SYNONYMS or TAG",
+                "Expected SYNONYMS, TAG or CORTEX SEARCH SERVICE",
             ),
         ] {
             let (message, _) = err_of(text);

@@ -1253,6 +1253,7 @@ mod tests {
             is_filter: false,
             access: AccessModifier::Public,
             tags: Vec::new(),
+            sample_values: Vec::new(),
         }
     }
 
@@ -1500,6 +1501,7 @@ mod tests {
             is_filter: false,
             access: AccessModifier::Public,
             tags: Vec::new(),
+            sample_values: Vec::new(),
         }];
         let topo = toposort_facts(&facts).unwrap();
         let result = inline_facts("SUM(Net_Price)", &facts, &topo);
@@ -1522,6 +1524,7 @@ mod tests {
             is_filter: false,
             access: AccessModifier::Public,
             tags: Vec::new(),
+            sample_values: Vec::new(),
         }];
         let topo = toposort_facts(&facts).unwrap();
         // Bare reference inlined; `x.net_price` (other table's column) intact.
@@ -1553,6 +1556,7 @@ mod tests {
                 is_filter: false,
                 access: AccessModifier::Public,
                 tags: Vec::new(),
+                sample_values: Vec::new(),
             },
             Fact {
                 name: "top".to_string(),
@@ -1565,6 +1569,7 @@ mod tests {
                 is_filter: false,
                 access: AccessModifier::Public,
                 tags: Vec::new(),
+                sample_values: Vec::new(),
             },
         ];
         let topo = toposort_facts(&facts).unwrap();
@@ -1604,6 +1609,7 @@ mod tests {
             is_filter: false,
             access: AccessModifier::Public,
             tags: Vec::new(),
+            sample_values: Vec::new(),
         }];
         let topo = toposort_facts(&facts).unwrap();
         assert_eq!(
@@ -1642,6 +1648,7 @@ mod tests {
             is_filter: false,
             access: AccessModifier::Public,
             tags: Vec::new(),
+            sample_values: Vec::new(),
         }];
         let topo = toposort_facts(&facts).unwrap();
         assert_eq!(
@@ -1884,6 +1891,7 @@ mod tests {
             is_filter: false,
             access: AccessModifier::Public,
             tags: Vec::new(),
+            sample_values: Vec::new(),
         }
     }
 

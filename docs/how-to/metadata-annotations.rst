@@ -1,5 +1,5 @@
 .. meta::
-   :description: Add COMMENT, WITH SYNONYMS, PRIVATE/PUBLIC access modifiers, LABELS = (FILTER) and WITH TAG to semantic view definitions and inspect them via DESCRIBE and SHOW
+   :description: Add COMMENT, WITH SYNONYMS, PRIVATE/PUBLIC access modifiers, LABELS = (FILTER), WITH TAG and Cortex Analyst metadata to semantic view definitions and inspect them via DESCRIBE and SHOW
 
 .. _howto-metadata-annotations:
 
@@ -241,6 +241,32 @@ To change the view's own tags without re-creating it, use :ref:`ALTER SEMANTIC V
    ALTER SEMANTIC VIEW sales UNSET TAG tier;
 
 ``ALTER`` changes view-level tags only, as in Snowflake. To change a member's tags, re-create the view.
+
+
+.. _howto-annotations-cortex:
+
+Keep Cortex Analyst Metadata
+============================
+
+.. versionadded:: 0.18.0
+
+If you port views from Snowflake, their DDL may carry metadata for Cortex Analyst: sample values, enum flags, a Cortex Search service, custom instructions and verified queries. Paste it as it is. The extension stores these clauses and writes them back out, so a view you export to Snowflake keeps them, but they don't change any query here:
+
+.. code-block:: sql
+   :emphasize-lines: 4,5,6,9,10
+
+   CREATE SEMANTIC VIEW sales
+   TABLES (o AS orders PRIMARY KEY (id))
+   DIMENSIONS (
+       o.region AS o.region SAMPLE_VALUES ('East', 'West', 'North', 'South') IS_ENUM,
+       o.warehouse AS o.warehouse
+           WITH CORTEX SEARCH SERVICE search.warehouses USING warehouse_name
+   )
+   METRICS (o.revenue AS SUM(o.amount))
+   AI_SQL_GENERATION 'Round all numeric columns to 2 decimal places.'
+   MAX_STALENESS = '1 hour';
+
+They show in ``DESCRIBE`` (``SAMPLE_VALUES``, ``IS_ENUM`` and ``CORTEX_SEARCH_SERVICE_*`` rows on the dimension, a ``CUSTOM_INSTRUCTIONS`` row and a view-level ``MAX_STALENESS`` row), and ``GET_DDL`` and the YAML export write them back. See :ref:`Cortex Analyst metadata <ref-create-cortex-metadata>` for every clause and its rules.
 
 
 .. _howto-annotations-inspect:

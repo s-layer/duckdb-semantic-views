@@ -161,9 +161,39 @@ pub(crate) fn lower_action(action: RewriteAction) -> Result<String, ParseError> 
             name,
             comment,
             if_exists,
-        } => rewrite_alter_comment(&name, Some(&comment), if_exists)?,
-        RewriteAction::AlterUnsetComment { name, if_exists } => {
-            rewrite_alter_comment(&name, None, if_exists)?
+        } => rewrite_alter_patch(
+            &name,
+            &serde_json::json!({ "comment": comment }),
+            "comment set",
+            if_exists,
+        )?,
+        RewriteAction::AlterSetMaxStaleness {
+            name,
+            value,
+            if_exists,
+        } => rewrite_alter_patch(
+            &name,
+            &serde_json::json!({ "max_staleness": value }),
+            "max_staleness set",
+            if_exists,
+        )?,
+        RewriteAction::AlterUnset {
+            name,
+            properties,
+            if_exists,
+        } => {
+            // RFC-7396: a `null` member deletes the key.
+            let patch: serde_json::Map<String, serde_json::Value> = properties
+                .iter()
+                .map(|p| (p.key().to_string(), serde_json::Value::Null))
+                .collect();
+            let keys: Vec<&str> = properties.iter().map(|p| p.key()).collect();
+            rewrite_alter_patch(
+                &name,
+                &serde_json::Value::Object(patch),
+                &format!("{} unset", keys.join(", ")),
+                if_exists,
+            )?
         }
         RewriteAction::AlterSetTags {
             name,
@@ -641,10 +671,14 @@ fn rewrite_alter_rename(
     ))
 }
 
+/// `ALTER SEMANTIC VIEW ... SET` / `UNSET` of view-level properties: one UPDATE
+/// merging `patch` into the stored definition (RFC-7396, so a `null` member
+/// deletes the key). `status_label` is the statement's status column.
 #[cfg(feature = "extension")]
-fn rewrite_alter_comment(
+fn rewrite_alter_patch(
     view: &ViewRef,
-    new_comment_raw: Option<&str>,
+    patch: &serde_json::Value,
+    status_label: &str,
     if_exists: bool,
 ) -> Result<String, ParseError> {
     let (name_escaped, target) = escaped_parts(view);
@@ -667,32 +701,16 @@ fn rewrite_alter_comment(
     //   SET COMMENT 'new text' -> `'{"comment":"new text"}'::JSON`
     //   UNSET COMMENT          -> `'{"comment":null}'::JSON`  (RFC-7396 null-as-delete)
     //
-    // For SET, we use serde_json::to_string on a one-key object so internal
-    // `"` and `\` characters in the user's comment are JSON-escaped
-    // correctly; then `SqlLit::escape` doubles any embedded single quotes for
-    // the outer single-quoted SQL literal. Belt-and-braces escape: JSON
-    // first (handles `"`/`\`/control chars), SQL second (handles `'`).
-    let (patch_json_for_sql, status_label) =
-        match new_comment_raw {
-            Some(comment) => {
-                // The comment arrives RAW; serde_json handles `"`/`\`/control
-                // chars, then `SqlLit::escape` doubles any `'` for the outer
-                // single-quoted SQL literal (belt-and-braces: JSON then SQL).
-                let patch = serde_json::to_string(&serde_json::json!({"comment": comment}))
-                    .map_err(|e| ParseError {
-                        message: format!("failed to build comment patch: {e}"),
-                        position: None,
-                    })?;
-                (SqlLit::escape(&patch), "comment set")
-            }
-            None => {
-                // UNSET COMMENT: constant patch (no single quotes, so the
-                // escape is a no-op — wrapped in SqlLit for type parity with
-                // the SET arm). The Wave 0 spike empirically confirms DuckDB
-                // v1.5.2 implements RFC-7396 null-as-delete.
-                (SqlLit::escape(r#"{"comment":null}"#), "comment unset")
-            }
-        };
+    // The values arrive RAW: serde_json escapes `"`, `\` and control
+    // characters, then `SqlLit::escape` doubles any embedded single quote for
+    // the outer single-quoted SQL literal. Belt-and-braces escape: JSON first,
+    // SQL second.
+    let patch = serde_json::to_string(patch).map_err(|e| ParseError {
+        message: format!("failed to build the ALTER patch: {e}"),
+        position: None,
+    })?;
+    let patch_json_for_sql = SqlLit::escape(&patch);
+    let status_label = SqlLit::escape(status_label);
 
     if if_exists {
         // IF EXISTS preserves its silent contract on race: pre-check saw the

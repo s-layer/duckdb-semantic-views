@@ -66,6 +66,9 @@ fn child_def() -> SemanticViewDefinition {
                 synonyms: vec![],
                 is_filter: false,
                 tags: Vec::new(),
+                cortex_search_service: None,
+                is_enum: false,
+                sample_values: Vec::new(),
             },
             // The base-anchored fallback's dimension: see the module docs.
             Dimension {
@@ -77,6 +80,9 @@ fn child_def() -> SemanticViewDefinition {
                 synonyms: vec![],
                 is_filter: false,
                 tags: Vec::new(),
+                cortex_search_service: None,
+                is_enum: false,
+                sample_values: Vec::new(),
             },
         ],
         // An order-grain metric, co-queried to bring the childless parent's row in.
@@ -103,6 +109,9 @@ fn child_def() -> SemanticViewDefinition {
         temp_tables: vec![],
         comment: None,
         tags: Vec::new(),
+        max_staleness: None,
+        module_custom_instructions: Default::default(),
+        verified_queries: Vec::new(),
     }
 }
 

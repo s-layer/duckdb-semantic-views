@@ -623,6 +623,9 @@ fn build_def() -> SemanticViewDefinition {
         },
     ];
     let dimension = |name: &str, expr: &str, source: &str, is_filter: bool| Dimension {
+        cortex_search_service: None,
+        is_enum: false,
+        sample_values: Vec::new(),
         name: name.to_string(),
         expr: expr.to_string(),
         source_table: Some(source.to_string()),
@@ -701,6 +704,7 @@ fn build_def() -> SemanticViewDefinition {
     ];
     let facts = vec![
         Fact {
+            sample_values: Vec::new(),
             name: "orate".to_string(),
             expr: "o.rate".to_string(),
             source_table: Some("o".to_string()),
@@ -712,6 +716,7 @@ fn build_def() -> SemanticViewDefinition {
             tags: Vec::new(),
         },
         Fact {
+            sample_values: Vec::new(),
             name: "f_amt".to_string(),
             expr: "li.amount".to_string(),
             source_table: Some("li".to_string()),
@@ -742,6 +747,9 @@ fn build_def() -> SemanticViewDefinition {
         },
     ];
     SemanticViewDefinition {
+        max_staleness: None,
+        module_custom_instructions: Default::default(),
+        verified_queries: Vec::new(),
         tables,
         dimensions,
         metrics,

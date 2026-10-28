@@ -61,6 +61,9 @@ fn pkfk_two_table_def() -> SemanticViewDefinition {
         temp_tables: vec![],
         comment: None,
         tags: Vec::new(),
+        max_staleness: None,
+        module_custom_instructions: Default::default(),
+        verified_queries: Vec::new(),
     }
 }
 
@@ -132,6 +135,9 @@ fn pkfk_three_table_def() -> SemanticViewDefinition {
         temp_tables: vec![],
         comment: None,
         tags: Vec::new(),
+        max_staleness: None,
+        module_custom_instructions: Default::default(),
+        verified_queries: Vec::new(),
     }
 }
 
@@ -197,6 +203,9 @@ fn test_pkfk_on_clause_composite() {
         temp_tables: vec![],
         comment: None,
         tags: Vec::new(),
+        max_staleness: None,
+        module_custom_instructions: Default::default(),
+        verified_queries: Vec::new(),
     };
     let req = QueryRequest {
         where_clause: None,

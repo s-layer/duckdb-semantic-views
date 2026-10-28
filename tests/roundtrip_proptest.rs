@@ -76,5 +76,23 @@ proptest! {
             rendered
         );
         prop_assert_eq!(&reparsed.view_tags, &def.tags, "view tags drift\n{}", rendered);
+        prop_assert_eq!(
+            &reparsed.max_staleness,
+            &def.max_staleness,
+            "max_staleness drift\n{}",
+            rendered
+        );
+        prop_assert_eq!(
+            &reparsed.custom_instructions,
+            &def.module_custom_instructions,
+            "custom instructions drift\n{}",
+            rendered
+        );
+        prop_assert_eq!(
+            &reparsed.verified_queries,
+            &def.verified_queries,
+            "verified queries drift\n{}",
+            rendered
+        );
     }
 }

@@ -153,6 +153,7 @@ mod tests {
             is_filter: false,
             access: AccessModifier::Public,
             tags: Vec::new(),
+            sample_values: Vec::new(),
         }
     }
 
@@ -166,6 +167,9 @@ mod tests {
             synonyms: vec![],
             is_filter: false,
             tags: Vec::new(),
+            cortex_search_service: None,
+            is_enum: false,
+            sample_values: Vec::new(),
         }
     }
 

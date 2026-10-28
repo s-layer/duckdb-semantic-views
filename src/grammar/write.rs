@@ -9,26 +9,30 @@
 //! `DuckDB`'s own syntax error, with a caret at the token where the match
 //! failed.
 
-use super::tree::{Node, Tree};
+use super::tree::{Kind, Node, Tree};
 use super::{internal, name_or, plain_string};
 use crate::errors::ParseError;
 use crate::ident::{parse_view_ref, ViewRef};
+use crate::model::MaxStaleness;
 use crate::parse::messages::{
     unexpected_after_rename_target, unexpected_after_view_name, EXPECTED_COMMENT_STRING,
-    INVALID_RENAME_TARGET, INVALID_VIEW_NAME, UNSUPPORTED_ALTER,
+    EXPECTED_STALENESS, INVALID_RENAME_TARGET, INVALID_VIEW_NAME, UNSUPPORTED_ALTER,
 };
-use crate::parse::RewriteAction;
+use crate::parse::{RewriteAction, ViewProperty};
 
 /// The rules, one per line. `SvViewName` comes from `show::RULES`.
 pub(super) const RULES: &str = r"
 SvDrop <- 'DROP' 'SEMANTIC' 'VIEW' SvIfExists? SvViewName
 SvIfExists <- 'IF' 'EXISTS'
 SvAlter <- 'ALTER' 'SEMANTIC' 'VIEW' SvIfExists? SvViewName SvAlterAction
-SvAlterAction <- SvAlterRename / SvAlterSetComment / SvAlterUnsetComment / SvAlterSetTag / SvAlterUnsetTag
+SvAlterAction <- SvAlterRename / SvAlterSetComment / SvAlterSetMaxStaleness / SvAlterUnset / SvAlterSetTag / SvAlterUnsetTag
 SvAlterRename <- 'RENAME' 'TO' SvNewName
 SvNewName <- SvNamePart ('.' SvNamePart)*
 SvAlterSetComment <- 'SET' 'COMMENT' '=' StringLiteral
-SvAlterUnsetComment <- 'UNSET' 'COMMENT'
+SvAlterSetMaxStaleness <- 'SET' 'MAX_STALENESS' '=' SvStalenessValue
+SvStalenessValue <- NumberLiteral / StringLiteral
+SvAlterUnset <- 'UNSET' SvUnsetProperty (',' SvUnsetProperty)*
+SvUnsetProperty <- 'COMMENT' / 'MAX_STALENESS'
 SvAlterSetTag <- 'SET' 'TAG' SvAlterToken+
 SvAlterUnsetTag <- 'UNSET' 'TAG' SvAlterToken+
 SvAlterToken <- Identifier
@@ -81,8 +85,19 @@ pub(super) fn transform(rule: &str, tree: &Tree) -> Result<RewriteAction, ParseE
             if_exists,
         });
     }
-    if action.find("SvAlterUnsetComment").is_some() {
-        return Ok(RewriteAction::AlterUnsetComment { name, if_exists });
+    if let Some(set) = action.find("SvAlterSetMaxStaleness") {
+        return Ok(RewriteAction::AlterSetMaxStaleness {
+            name,
+            value: staleness_value(tree, set)?,
+            if_exists,
+        });
+    }
+    if let Some(unset) = action.find("SvAlterUnset") {
+        return Ok(RewriteAction::AlterUnset {
+            name,
+            properties: unset_properties(tree, unset)?,
+            if_exists,
+        });
     }
     if let Some(set) = action.find("SvAlterSetTag") {
         let (text, base) = tag_list(tree, set)?;
@@ -101,6 +116,51 @@ pub(super) fn transform(rule: &str, tree: &Tree) -> Result<RewriteAction, ParseE
         });
     }
     Err(internal(action, "unknown ALTER operation"))
+}
+
+/// The value of `SET MAX_STALENESS = ...`: whole seconds, or a quoted interval
+/// such as `'1 hour'`, held to the rules a CREATE's `MAX_STALENESS` is.
+fn staleness_value(tree: &Tree, clause: &Node) -> Result<MaxStaleness, ParseError> {
+    let node = clause
+        .find("SvStalenessValue")
+        .ok_or_else(|| internal(clause, "missing SvStalenessValue"))?;
+    let value = if node.first_leaf(Kind::String).is_some() {
+        MaxStaleness::Interval(plain_string(tree, node, EXPECTED_STALENESS)?)
+    } else {
+        let text: String = tree.tokens_in(node).map(|t| t.text.as_str()).collect();
+        MaxStaleness::Seconds(text.parse().map_err(|_| ParseError {
+            message: format!("{EXPECTED_STALENESS}, got '{text}'"),
+            position: node.offset(),
+        })?)
+    };
+    value.seconds().map_err(|message| ParseError {
+        message,
+        position: node.offset(),
+    })?;
+    Ok(value)
+}
+
+/// The properties `UNSET` lists, each once.
+fn unset_properties(tree: &Tree, clause: &Node) -> Result<Vec<ViewProperty>, ParseError> {
+    let mut out = Vec::new();
+    for node in clause.find_all("SvUnsetProperty") {
+        let text: String = tree.tokens_in(node).map(|t| t.text.as_str()).collect();
+        let property = if text.eq_ignore_ascii_case("COMMENT") {
+            ViewProperty::Comment
+        } else if text.eq_ignore_ascii_case("MAX_STALENESS") {
+            ViewProperty::MaxStaleness
+        } else {
+            return Err(internal(node, "unknown UNSET property"));
+        };
+        if out.contains(&property) {
+            return Err(ParseError {
+                message: format!("{} is listed twice in UNSET", property.keyword()),
+                position: node.offset(),
+            });
+        }
+        out.push(property);
+    }
+    Ok(out)
 }
 
 /// The text after `SET TAG` / `UNSET TAG`, rebuilt from its tokens, and the
@@ -142,7 +202,8 @@ mod tests {
     use crate::grammar::tree::tests::{n, root, tree};
     use crate::grammar::tree::{Kind, Node};
     use crate::ident::ViewRef;
-    use crate::parse::RewriteAction;
+    use crate::model::MaxStaleness;
+    use crate::parse::{RewriteAction, ViewProperty};
 
     const L: Kind = Kind::List;
 
@@ -333,16 +394,176 @@ mod tests {
                     "UNSET COMMENT",
                     L,
                     "",
-                    vec![name(sql, "SvAlterUnsetComment", "UNSET COMMENT")],
+                    vec![n(
+                        sql,
+                        "SvAlterUnset",
+                        "UNSET COMMENT",
+                        L,
+                        "",
+                        vec![name(sql, "SvUnsetProperty", "COMMENT")],
+                    )],
                 ),
             ],
         );
         assert_eq!(
             transform("SvAlter", &tree(sql, r)).unwrap(),
-            RewriteAction::AlterUnsetComment {
+            RewriteAction::AlterUnset {
                 name: view(None, "v"),
+                properties: vec![ViewProperty::Comment],
                 if_exists: false,
             }
         );
+    }
+
+    /// `ALTER SEMANTIC VIEW v SET MAX_STALENESS = <value>`, with `value` the
+    /// literal's node.
+    fn set_staleness(sql: &str, value: Node) -> crate::grammar::tree::Tree {
+        let action = &sql[sql.find("SET").unwrap()..];
+        let r = root(
+            sql,
+            "SvAlter",
+            vec![
+                n(sql, "SvViewName", " v ", L, "", vec![]),
+                n(
+                    sql,
+                    "SvAlterAction",
+                    action,
+                    L,
+                    "",
+                    vec![n(
+                        sql,
+                        "SvAlterSetMaxStaleness",
+                        action,
+                        L,
+                        "",
+                        vec![Node {
+                            rule: "SvStalenessValue".to_string(),
+                            kind: L,
+                            span: value.span,
+                            value: String::new(),
+                            children: vec![value],
+                        }],
+                    )],
+                ),
+            ],
+        );
+        tree(sql, r)
+    }
+
+    #[test]
+    fn alter_set_max_staleness_takes_seconds_or_an_interval() {
+        let sql = "ALTER SEMANTIC VIEW v SET MAX_STALENESS = 300";
+        let t = set_staleness(
+            sql,
+            n(sql, "NumberLiteral", "300", Kind::Number, "300", vec![]),
+        );
+        assert_eq!(
+            transform("SvAlter", &t).unwrap(),
+            RewriteAction::AlterSetMaxStaleness {
+                name: view(None, "v"),
+                value: MaxStaleness::Seconds(300),
+                if_exists: false,
+            }
+        );
+        let sql = "ALTER SEMANTIC VIEW v SET MAX_STALENESS = '1 hour'";
+        let lit = n(
+            sql,
+            "StringLiteral",
+            "'1 hour'",
+            Kind::String,
+            "1 hour",
+            vec![],
+        );
+        assert_eq!(
+            transform("SvAlter", &set_staleness(sql, lit)).unwrap(),
+            RewriteAction::AlterSetMaxStaleness {
+                name: view(None, "v"),
+                value: MaxStaleness::Interval("1 hour".to_string()),
+                if_exists: false,
+            }
+        );
+    }
+
+    #[test]
+    fn alter_set_max_staleness_refuses_what_create_refuses() {
+        for (sql, value, kind, message) in [
+            (
+                "ALTER SEMANTIC VIEW v SET MAX_STALENESS = 60",
+                "60",
+                Kind::Number,
+                "the minimum is 120 seconds",
+            ),
+            (
+                "ALTER SEMANTIC VIEW v SET MAX_STALENESS = 1.5",
+                "1.5",
+                Kind::Number,
+                "Expected a whole number of seconds",
+            ),
+            (
+                "ALTER SEMANTIC VIEW v SET MAX_STALENESS = 'soon'",
+                "'soon'",
+                Kind::String,
+                "is not an interval",
+            ),
+        ] {
+            let decoded = value.trim_matches('\'');
+            let t = set_staleness(sql, n(sql, "Literal", value, kind, decoded, vec![]));
+            let err = transform("SvAlter", &t).unwrap_err();
+            assert!(err.message.contains(message), "{sql}: {}", err.message);
+            assert_eq!(err.position, Some(sql.find(value).unwrap()), "{sql}");
+        }
+    }
+
+    /// `ALTER SEMANTIC VIEW v UNSET <props>`, each property its own node.
+    fn unset(sql: &str, props: &[&str]) -> crate::grammar::tree::Tree {
+        let action = &sql[sql.find("UNSET").unwrap()..];
+        let mut from = sql.find("UNSET").unwrap();
+        let nodes = props
+            .iter()
+            .map(|p| {
+                let at = from + sql[from..].find(p).unwrap();
+                from = at + p.len();
+                Node {
+                    rule: "SvUnsetProperty".to_string(),
+                    kind: L,
+                    span: Some((at, p.len())),
+                    value: String::new(),
+                    children: vec![],
+                }
+            })
+            .collect();
+        let r = root(
+            sql,
+            "SvAlter",
+            vec![
+                n(sql, "SvViewName", " v ", L, "", vec![]),
+                n(
+                    sql,
+                    "SvAlterAction",
+                    action,
+                    L,
+                    "",
+                    vec![n(sql, "SvAlterUnset", action, L, "", nodes)],
+                ),
+            ],
+        );
+        tree(sql, r)
+    }
+
+    #[test]
+    fn alter_unset_takes_several_properties_each_once() {
+        let sql = "ALTER SEMANTIC VIEW v UNSET MAX_STALENESS , comment";
+        assert_eq!(
+            transform("SvAlter", &unset(sql, &["MAX_STALENESS", "comment"])).unwrap(),
+            RewriteAction::AlterUnset {
+                name: view(None, "v"),
+                properties: vec![ViewProperty::MaxStaleness, ViewProperty::Comment],
+                if_exists: false,
+            }
+        );
+        let sql = "ALTER SEMANTIC VIEW v UNSET COMMENT , COMMENT";
+        let err = transform("SvAlter", &unset(sql, &["COMMENT", "COMMENT"])).unwrap_err();
+        assert_eq!(err.message, "COMMENT is listed twice in UNSET");
+        assert_eq!(err.position, Some(sql.rfind("COMMENT").unwrap()));
     }
 }
