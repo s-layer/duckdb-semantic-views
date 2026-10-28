@@ -1,5 +1,5 @@
 .. meta::
-   :description: Syntax reference for ALTER SEMANTIC VIEW, covering RENAME TO, SET COMMENT, UNSET COMMENT, SET TAG, and UNSET TAG operations
+   :description: Syntax reference for ALTER SEMANTIC VIEW, covering RENAME TO, SET and UNSET of COMMENT and MAX_STALENESS, SET TAG, and UNSET TAG operations
 
 .. _ref-alter-semantic-view:
 
@@ -7,7 +7,7 @@
 ALTER SEMANTIC VIEW
 ======================
 
-Modifies an existing semantic view. Supports renaming, setting or removing the view-level comment, and setting or removing view-level tags. The view definition (tables, relationships, dimensions, metrics, facts) is preserved.
+Modifies an existing semantic view. Supports renaming, setting or removing the view-level comment and ``MAX_STALENESS``, and setting or removing view-level tags. The view definition (tables, relationships, dimensions, metrics, facts) is preserved.
 
 
 .. _ref-alter-syntax:
@@ -21,7 +21,9 @@ Syntax
 
    ALTER SEMANTIC VIEW [ IF EXISTS ] <name> SET COMMENT = '<text>'
 
-   ALTER SEMANTIC VIEW [ IF EXISTS ] <name> UNSET COMMENT
+   ALTER SEMANTIC VIEW [ IF EXISTS ] <name> SET MAX_STALENESS = { <seconds> | '<interval>' }
+
+   ALTER SEMANTIC VIEW [ IF EXISTS ] <name> UNSET { COMMENT | MAX_STALENESS } [ , ... ]
 
    ALTER SEMANTIC VIEW [ IF EXISTS ] <name> SET TAG <tag_name> = '<tag_value>' [ , ... ]
 
@@ -51,6 +53,20 @@ Statement Variants
 ``ALTER SEMANTIC VIEW IF EXISTS <name> UNSET COMMENT``
    Removes the view-level comment if the view exists. If the view does not exist, the statement succeeds silently.
 
+.. _ref-alter-max-staleness:
+
+``ALTER SEMANTIC VIEW <name> SET MAX_STALENESS = { <seconds> | '<interval>' }``
+   Sets the view's :ref:`MAX_STALENESS <ref-create-cortex-metadata>`, replacing any existing value. The value follows the ``CREATE`` rules: whole seconds or a single-quoted interval such as ``'2 hours'``, at least 120 seconds either way. Returns an error if the view does not exist.
+
+``ALTER SEMANTIC VIEW <name> UNSET COMMENT, MAX_STALENESS``
+   ``UNSET`` takes a list of view properties, as in Snowflake, each named once. Removing a property the view does not have is not an error.
+
+With ``IF EXISTS``, ``SET MAX_STALENESS`` and ``UNSET`` succeed silently when the view does not exist.
+
+.. versionadded:: 0.18.0
+
+   ``SET MAX_STALENESS``, ``UNSET MAX_STALENESS``, and several properties in one ``UNSET``.
+
 .. _ref-alter-tags:
 
 ``ALTER SEMANTIC VIEW <name> SET TAG <tag_name> = '<tag_value>' [ , ... ]``
@@ -75,7 +91,7 @@ With ``IF EXISTS``, ``SET TAG`` and ``UNSET TAG`` succeed silently when the view
 
 .. note::
 
-   ``ALTER`` participates in your surrounding transaction (``BEGIN ... ROLLBACK`` restores the previous name, comment and tags). The non-``IF EXISTS`` forms raise ``semantic view '<name>' does not exist`` when the view is absent at check time (and ``RENAME`` raises ``semantic view '<new_name>' already exists`` if the target name is taken); ``IF EXISTS`` keeps its silent no-op behavior. The existence/collision check and the update are atomic only inside an explicit transaction -- under autocommit a concurrent commit in the window between them is not detected (a concurrent drop leaves the update affecting 0 rows; a concurrently taken rename target surfaces a raw key-constraint error). See :ref:`explanation-transactional-ddl` for the guard window and how to close it.
+   ``ALTER`` participates in your surrounding transaction (``BEGIN ... ROLLBACK`` restores the previous name, comment, MAX_STALENESS and tags). The non-``IF EXISTS`` forms raise ``semantic view '<name>' does not exist`` when the view is absent at check time (and ``RENAME`` raises ``semantic view '<new_name>' already exists`` if the target name is taken); ``IF EXISTS`` keeps its silent no-op behavior. The existence/collision check and the update are atomic only inside an explicit transaction -- under autocommit a concurrent commit in the window between them is not detected (a concurrent drop leaves the update affecting 0 rows; a concurrently taken rename target surfaces a raw key-constraint error). See :ref:`explanation-transactional-ddl` for the guard window and how to close it.
 
 .. note::
 
@@ -95,6 +111,9 @@ Parameters
 
 ``<text>``
    The comment text (SET COMMENT only). Must be enclosed in single quotes. Use ``''`` to escape single quotes within the text.
+
+``<seconds>`` / ``'<interval>'``
+   The staleness limit (SET MAX_STALENESS only): a whole number of seconds, or a single-quoted count and unit (``second``, ``minute``, ``hour`` or ``day``, singular or plural, any case). At least 120 seconds.
 
 ``<tag_name>``
    A tag name (SET TAG and UNSET TAG), optionally qualified (``governance.pii``). Matched case-insensitively against the view's tags.
@@ -139,6 +158,8 @@ Output Columns
    * - ``status``
      - VARCHAR
      - The operation result: ``comment set`` or ``comment unset``.
+
+**SET MAX_STALENESS** returns the same two columns with ``status`` set to ``max_staleness set``. ``UNSET`` names what it removed: ``comment unset``, ``max_staleness unset``, or ``comment, max_staleness unset``.
 
 **SET TAG and UNSET TAG** return the same two columns, with ``status`` set to ``tags set`` or ``tags unset``.
 
@@ -207,6 +228,34 @@ The comment appears in :ref:`SHOW SEMANTIC VIEWS <ref-show-semantic-views>` and 
    ├───────┼───────────────┤
    │ sales │ comment unset │
    └───────┴───────────────┘
+
+**Set and remove MAX_STALENESS:**
+
+.. code-block:: sql
+
+   ALTER SEMANTIC VIEW sales SET MAX_STALENESS = '2 hours';
+
+.. code-block:: text
+
+   ┌───────┬───────────────────┐
+   │ name  │ status            │
+   ├───────┼───────────────────┤
+   │ sales │ max_staleness set │
+   └───────┴───────────────────┘
+
+``DESCRIBE`` now shows a ``MAX_STALENESS`` row reading ``2 hours``. Remove it and the comment in one statement:
+
+.. code-block:: sql
+
+   ALTER SEMANTIC VIEW sales UNSET COMMENT, MAX_STALENESS;
+
+.. code-block:: text
+
+   ┌───────┬──────────────────────────────┐
+   │ name  │ status                       │
+   ├───────┼──────────────────────────────┤
+   │ sales │ comment, max_staleness unset │
+   └───────┴──────────────────────────────┘
 
 **Set and remove view-level tags:**
 

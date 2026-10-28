@@ -38,6 +38,9 @@ fn make_def_with_private_metric() -> SemanticViewDefinition {
         temp_tables: vec![],
         comment: None,
         tags: Vec::new(),
+        max_staleness: None,
+        module_custom_instructions: Default::default(),
+        verified_queries: Vec::new(),
     }
 }
 
@@ -78,6 +81,9 @@ fn make_def_with_private_and_derived() -> SemanticViewDefinition {
         temp_tables: vec![],
         comment: None,
         tags: Vec::new(),
+        max_staleness: None,
+        module_custom_instructions: Default::default(),
+        verified_queries: Vec::new(),
     }
 }
 

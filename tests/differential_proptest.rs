@@ -600,6 +600,9 @@ fn build_def(s: &Schema) -> SemanticViewDefinition {
             synonyms: vec![],
             is_filter: false,
             tags: Vec::new(),
+            cortex_search_service: None,
+            is_enum: false,
+            sample_values: Vec::new(),
         })
         .chain((0..s.n_dims).map(|i| Dimension {
             name: format!("f{i}"),
@@ -610,6 +613,9 @@ fn build_def(s: &Schema) -> SemanticViewDefinition {
             synonyms: vec![],
             is_filter: true,
             tags: Vec::new(),
+            cortex_search_service: None,
+            is_enum: false,
+            sample_values: Vec::new(),
         }))
         .collect();
     let metrics = s
@@ -660,6 +666,7 @@ fn build_def(s: &Schema) -> SemanticViewDefinition {
                 is_filter: false,
                 access: AccessModifier::Public,
                 tags: Vec::new(),
+                sample_values: Vec::new(),
             })
             .collect(),
         materializations: vec![],
@@ -670,6 +677,9 @@ fn build_def(s: &Schema) -> SemanticViewDefinition {
         temp_tables: vec![],
         comment: None,
         tags: Vec::new(),
+        max_staleness: None,
+        module_custom_instructions: Default::default(),
+        verified_queries: Vec::new(),
     }
 }
 

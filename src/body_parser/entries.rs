@@ -51,6 +51,7 @@ pub(crate) fn parse_qualified_entries(
 ///
 /// `LABELS` may come before `AS`, where Snowflake puts it, or among the
 /// trailing annotations, but not both.
+#[allow(clippy::too_many_lines)]
 fn parse_single_qualified_entry(
     entry: &str,
     entry_offset: usize,
@@ -181,6 +182,17 @@ fn parse_single_qualified_entry(
             format!("Duplicate LABELS annotation in {clause_name} entry '{entry}'."),
         ));
     }
+    if clause_name == "facts" {
+        if let Some(clause) = annotations.dimension_only_clause() {
+            return Err(cur.err(
+                as_tok.end,
+                format!(
+                    "{clause} is not valid on a fact; it applies to {}.",
+                    super::applies_to(clause)
+                ),
+            ));
+        }
+    }
 
     Ok(ParsedQualifiedEntry {
         source_alias,
@@ -191,6 +203,9 @@ fn parse_single_qualified_entry(
         tags: annotations.tags,
         is_filter: leading_filter || annotations.is_filter,
         access,
+        sample_values: annotations.sample_values,
+        is_enum: annotations.is_enum,
+        cortex_search_service: annotations.cortex_search_service,
     })
 }
 
@@ -218,12 +233,17 @@ fn leading_labels(
     };
     let region = &text[labels.start..as_start];
     let (_, ann) = parse_leading_annotations(region, cur.abs_of(region))?;
-    if ann.comment.is_some() || !ann.synonyms.is_empty() || !ann.tags.is_empty() {
+    if ann.comment.is_some()
+        || !ann.synonyms.is_empty()
+        || !ann.tags.is_empty()
+        || ann.member_metadata_clause().is_some()
+    {
         return Err(cur.err(
             labels.start,
             format!(
                 "Only LABELS may come between the name and 'AS' in {clause_name} entry \
-                 '{entry}'. Put COMMENT, WITH SYNONYMS and TAG after the expression."
+                 '{entry}'. Put COMMENT, WITH SYNONYMS, TAG and the other annotations after \
+                 the expression."
             ),
         ));
     }

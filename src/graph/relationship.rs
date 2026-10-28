@@ -1440,6 +1440,9 @@ mod tests {
             temp_tables: vec![],
             comment: None,
             tags: Vec::new(),
+            max_staleness: None,
+            module_custom_instructions: Default::default(),
+            verified_queries: Vec::new(),
         };
         let err = validate_graph(&def)
             .expect_err("an FK-less relationship must be rejected on a one-table view too")
@@ -1655,6 +1658,9 @@ mod tests {
                 temp_tables: vec![],
                 comment: None,
                 tags: Vec::new(),
+                max_staleness: None,
+                module_custom_instructions: Default::default(),
+                verified_queries: Vec::new(),
             }
         }
 

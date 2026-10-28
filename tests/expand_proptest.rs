@@ -31,6 +31,9 @@ fn simple_definition() -> SemanticViewDefinition {
                 synonyms: vec![],
                 is_filter: false,
                 tags: Vec::new(),
+                sample_values: Vec::new(),
+                is_enum: false,
+                cortex_search_service: None,
             },
             Dimension {
                 name: "month".to_string(),
@@ -42,6 +45,9 @@ fn simple_definition() -> SemanticViewDefinition {
                 synonyms: vec![],
                 is_filter: false,
                 tags: Vec::new(),
+                sample_values: Vec::new(),
+                is_enum: false,
+                cortex_search_service: None,
             },
             Dimension {
                 name: "status".to_string(),
@@ -53,6 +59,9 @@ fn simple_definition() -> SemanticViewDefinition {
                 synonyms: vec![],
                 is_filter: false,
                 tags: Vec::new(),
+                sample_values: Vec::new(),
+                is_enum: false,
+                cortex_search_service: None,
             },
         ],
         metrics: vec![
@@ -107,6 +116,9 @@ fn simple_definition() -> SemanticViewDefinition {
         schema_name: None,
         resolution_schema_name: None,
         temp_tables: vec![],
+        max_staleness: None,
+        module_custom_instructions: Default::default(),
+        verified_queries: Vec::new(),
         comment: None,
         tags: Vec::new(),
     }
@@ -156,6 +168,9 @@ fn joined_definition() -> SemanticViewDefinition {
                 synonyms: vec![],
                 is_filter: false,
                 tags: Vec::new(),
+                sample_values: Vec::new(),
+                is_enum: false,
+                cortex_search_service: None,
             },
             Dimension {
                 name: "customer_name".to_string(),
@@ -167,6 +182,9 @@ fn joined_definition() -> SemanticViewDefinition {
                 synonyms: vec![],
                 is_filter: false,
                 tags: Vec::new(),
+                sample_values: Vec::new(),
+                is_enum: false,
+                cortex_search_service: None,
             },
             Dimension {
                 name: "month".to_string(),
@@ -178,6 +196,9 @@ fn joined_definition() -> SemanticViewDefinition {
                 synonyms: vec![],
                 is_filter: false,
                 tags: Vec::new(),
+                sample_values: Vec::new(),
+                is_enum: false,
+                cortex_search_service: None,
             },
             Dimension {
                 name: "product_category".to_string(),
@@ -189,6 +210,9 @@ fn joined_definition() -> SemanticViewDefinition {
                 synonyms: vec![],
                 is_filter: false,
                 tags: Vec::new(),
+                sample_values: Vec::new(),
+                is_enum: false,
+                cortex_search_service: None,
             },
         ],
         metrics: vec![
@@ -267,6 +291,9 @@ fn joined_definition() -> SemanticViewDefinition {
         schema_name: None,
         resolution_schema_name: None,
         temp_tables: vec![],
+        max_staleness: None,
+        module_custom_instructions: Default::default(),
+        verified_queries: Vec::new(),
         comment: None,
         tags: Vec::new(),
     }

@@ -226,6 +226,18 @@ Top-Level Keys
      - list of `Tag`_
      - No
      - View-level tags.
+   * - ``max_staleness``
+     - integer or string
+     - No
+     - ``MAX_STALENESS``: whole seconds (``3600``) or an interval (``'1 hour'``), at least 120 seconds. See :ref:`Cortex Analyst metadata <ref-create-cortex-metadata>`.
+   * - ``module_custom_instructions``
+     - mapping
+     - No
+     - Cortex Analyst instructions: ``sql_generation`` and ``question_categorization``, both optional strings. The YAML form of ``AI_SQL_GENERATION`` and ``AI_QUESTION_CATEGORIZATION``.
+   * - ``verified_queries``
+     - list of `VerifiedQuery`_
+     - No
+     - The YAML form of ``AI_VERIFIED_QUERIES``.
 
 :sup:`*` Both keys must be present -- a definition without a ``metrics`` key is rejected with a "missing field" error -- and at least one of the two must be non-empty. Use ``[]`` for the empty one.
 
@@ -359,6 +371,21 @@ Each entry in the ``dimensions`` list declares a named grouping expression.
      - No
      - ``false``
      - ``true`` declares the dimension a :ref:`named filter <howto-annotations-filters>`, the YAML form of ``LABELS = (FILTER)``. The expression should be boolean.
+   * - ``sample_values``
+     - list of string
+     - No
+     - ``[]``
+     - The YAML form of ``SAMPLE_VALUES``. See :ref:`Cortex Analyst metadata <ref-create-cortex-metadata>`.
+   * - ``is_enum``
+     - boolean
+     - No
+     - ``false``
+     - The YAML form of ``IS_ENUM``.
+   * - ``cortex_search_service``
+     - mapping
+     - No
+     - null
+     - The YAML form of ``WITH CORTEX SEARCH SERVICE``: ``service`` (required), with optional ``schema``, ``database`` and ``literal_column`` (the ``USING`` column). A ``database`` needs a ``schema``, and no part may be empty.
 
 .. code-block:: yaml
 
@@ -374,6 +401,15 @@ Each entry in the ``dimensions`` list declares a named grouping expression.
        expr: o.region = 'EU'
        source_table: o
        is_filter: true
+     - name: warehouse
+       expr: o.warehouse
+       source_table: o
+       sample_values: [SMALL, LARGE]
+       is_enum: true
+       cortex_search_service:
+         service: warehouses
+         schema: search
+         literal_column: warehouse_name
 
 
 .. _ref-yaml-format-metric:
@@ -572,6 +608,11 @@ Each entry in the ``facts`` list declares a named row-level expression. Facts ca
      - No
      - ``false``
      - ``true`` declares the fact a :ref:`named filter <howto-annotations-filters>`, the YAML form of ``LABELS = (FILTER)``. The expression should be boolean.
+   * - ``sample_values``
+     - list of string
+     - No
+     - ``[]``
+     - The YAML form of ``SAMPLE_VALUES``. See :ref:`Cortex Analyst metadata <ref-create-cortex-metadata>`.
 
 .. code-block:: yaml
 
@@ -884,6 +925,67 @@ Used within the ``tags`` list of the view, a table, a fact, a dimension or a met
        value: none
 
 A tag list may not name the same tag twice. Tags the SQL form could not write (an empty name part, a ``database`` without a ``schema``, a value over 256 characters, a duplicate) are rejected by ``CREATE SEMANTIC VIEW ... FROM YAML``.
+
+
+.. _ref-yaml-format-verifiedquery:
+
+VerifiedQuery
+=============
+
+.. versionadded:: 0.18.0
+
+Used within the top-level ``verified_queries`` list. The field names are Snowflake's semantic-view YAML names. See :ref:`Cortex Analyst metadata <ref-create-cortex-metadata>`.
+
+.. list-table::
+   :header-rows: 1
+   :widths: 30 12 12 10 36
+
+   * - Field
+     - Type
+     - Required
+     - Default
+     - Description
+   * - ``name``
+     - string
+     - Yes
+     -
+     - Entry name. One identifier, written as it would appear in ``AI_VERIFIED_QUERIES``: a name with characters other than letters, digits and ``_`` (or the name ``AS``) must include its double quotes. Unique in the list, compared case-insensitively whether quoted or not.
+   * - ``question``
+     - string
+     - Yes
+     -
+     - The question the query answers.
+   * - ``sql``
+     - string
+     - Yes
+     -
+     - The SQL that answers it. Stored, not checked.
+   * - ``verified_at``
+     - integer
+     - No
+     - null
+     - When the query was verified, in seconds since the Unix epoch.
+   * - ``verified_by``
+     - string
+     - No
+     - null
+     - Who verified it.
+   * - ``use_as_onboarding_question``
+     - boolean
+     - No
+     - ``false``
+     - The YAML form of ``ONBOARDING_QUESTION TRUE``.
+
+.. code-block:: yaml
+
+   max_staleness: 3600
+   module_custom_instructions:
+     sql_generation: Round all numeric columns to 2 decimal places.
+   verified_queries:
+     - name: revenue_by_region
+       question: What is the revenue for each region?
+       sql: SELECT region, revenue FROM SEMANTIC_VIEW(sales DIMENSIONS region METRICS revenue)
+       use_as_onboarding_question: true
 
 
 .. _ref-yaml-format-size-limit:

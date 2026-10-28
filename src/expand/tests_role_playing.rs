@@ -94,6 +94,9 @@ fn flights_airports_def() -> SemanticViewDefinition {
         temp_tables: vec![],
         comment: None,
         tags: Vec::new(),
+        max_staleness: None,
+        module_custom_instructions: Default::default(),
+        verified_queries: Vec::new(),
     }
 }
 
@@ -381,6 +384,9 @@ fn fan_trap_detection_works_with_using_paths() {
         temp_tables: vec![],
         comment: None,
         tags: Vec::new(),
+        max_staleness: None,
+        module_custom_instructions: Default::default(),
+        verified_queries: Vec::new(),
     };
     let req = QueryRequest {
         where_clause: None,
@@ -447,6 +453,9 @@ fn metric_using_from_base_table_no_unnecessary_join() {
         temp_tables: vec![],
         comment: None,
         tags: Vec::new(),
+        max_staleness: None,
+        module_custom_instructions: Default::default(),
+        verified_queries: Vec::new(),
     };
     let req = QueryRequest {
         where_clause: None,
@@ -506,6 +515,9 @@ fn backward_compat_no_using_expands_as_before() {
         temp_tables: vec![],
         comment: None,
         tags: Vec::new(),
+        max_staleness: None,
+        module_custom_instructions: Default::default(),
+        verified_queries: Vec::new(),
     };
     let req = QueryRequest {
         where_clause: None,

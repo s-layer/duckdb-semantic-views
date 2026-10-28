@@ -299,6 +299,9 @@ fn build_def(func: WFunc, mode: &PartMode) -> SemanticViewDefinition {
     }];
     let dimensions = (0..NDIMS)
         .map(|i| Dimension {
+            cortex_search_service: None,
+            is_enum: false,
+            sample_values: Vec::new(),
             name: dim_name(i),
             expr: dim_col(i),
             source_table: Some("s".to_string()),
@@ -313,6 +316,9 @@ fn build_def(func: WFunc, mode: &PartMode) -> SemanticViewDefinition {
         // expressions, so a splice that loses its parentheses changes which
         // rows reach the pre-aggregation.
         .chain((0..NDIMS).map(|i| Dimension {
+            cortex_search_service: None,
+            is_enum: false,
+            sample_values: Vec::new(),
             name: format!("f{i}"),
             expr: filter_expr(i),
             source_table: Some("s".to_string()),
@@ -351,6 +357,9 @@ fn build_def(func: WFunc, mode: &PartMode) -> SemanticViewDefinition {
         tags: Vec::new(),
     }];
     SemanticViewDefinition {
+        max_staleness: None,
+        module_custom_instructions: Default::default(),
+        verified_queries: Vec::new(),
         tables,
         dimensions,
         metrics,

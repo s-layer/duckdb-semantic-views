@@ -44,6 +44,9 @@ pub(super) fn make_def(
                 synonyms: vec![],
                 is_filter: false,
                 tags: Vec::new(),
+                cortex_search_service: None,
+                is_enum: false,
+                sample_values: Vec::new(),
             })
             .collect(),
         metrics: metrics
@@ -72,6 +75,9 @@ pub(super) fn make_def(
         temp_tables: vec![],
         comment: None,
         tags: Vec::new(),
+        max_staleness: None,
+        module_custom_instructions: Default::default(),
+        verified_queries: Vec::new(),
     }
 }
 
@@ -105,6 +111,7 @@ pub(super) fn make_def_with_facts(
                 is_filter: false,
                 access: AccessModifier::Public,
                 tags: Vec::new(),
+                sample_values: Vec::new(),
             })
             .collect(),
         dimensions: vec![],
@@ -119,6 +126,9 @@ pub(super) fn make_def_with_facts(
         temp_tables: vec![],
         comment: None,
         tags: Vec::new(),
+        max_staleness: None,
+        module_custom_instructions: Default::default(),
+        verified_queries: Vec::new(),
     }
 }
 
@@ -181,6 +191,9 @@ pub(super) fn make_def_with_derived_metrics(
         temp_tables: vec![],
         comment: None,
         tags: Vec::new(),
+        max_staleness: None,
+        module_custom_instructions: Default::default(),
+        verified_queries: Vec::new(),
     }
 }
 
@@ -240,5 +253,8 @@ pub(super) fn make_def_with_named_joins(
         temp_tables: vec![],
         comment: None,
         tags: Vec::new(),
+        max_staleness: None,
+        module_custom_instructions: Default::default(),
+        verified_queries: Vec::new(),
     }
 }

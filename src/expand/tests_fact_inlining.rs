@@ -28,6 +28,7 @@ fn toposort_facts_independent() {
             is_filter: false,
             access: AccessModifier::Public,
             tags: Vec::new(),
+            sample_values: Vec::new(),
         },
         Fact {
             name: "b".to_string(),
@@ -39,6 +40,7 @@ fn toposort_facts_independent() {
             is_filter: false,
             access: AccessModifier::Public,
             tags: Vec::new(),
+            sample_values: Vec::new(),
         },
     ];
     let order = toposort_facts(&facts).unwrap();
@@ -60,6 +62,7 @@ fn toposort_facts_chain() {
             is_filter: false,
             access: AccessModifier::Public,
             tags: Vec::new(),
+            sample_values: Vec::new(),
         },
         Fact {
             name: "b".to_string(),
@@ -71,6 +74,7 @@ fn toposort_facts_chain() {
             is_filter: false,
             access: AccessModifier::Public,
             tags: Vec::new(),
+            sample_values: Vec::new(),
         },
     ];
     let order = toposort_facts(&facts).unwrap();
@@ -93,6 +97,7 @@ fn toposort_facts_three_level_chain() {
             is_filter: false,
             access: AccessModifier::Public,
             tags: Vec::new(),
+            sample_values: Vec::new(),
         },
         Fact {
             name: "b".to_string(),
@@ -104,6 +109,7 @@ fn toposort_facts_three_level_chain() {
             is_filter: false,
             access: AccessModifier::Public,
             tags: Vec::new(),
+            sample_values: Vec::new(),
         },
         Fact {
             name: "c".to_string(),
@@ -115,6 +121,7 @@ fn toposort_facts_three_level_chain() {
             is_filter: false,
             access: AccessModifier::Public,
             tags: Vec::new(),
+            sample_values: Vec::new(),
         },
     ];
     let order = toposort_facts(&facts).unwrap();
@@ -144,6 +151,7 @@ fn inline_facts_single_fact() {
         is_filter: false,
         access: AccessModifier::Public,
         tags: Vec::new(),
+        sample_values: Vec::new(),
     }];
     let order = toposort_facts(&facts).unwrap();
     let result = inline_facts("SUM(net_price)", &facts, &order);
@@ -163,6 +171,7 @@ fn inline_facts_multi_level() {
             is_filter: false,
             access: AccessModifier::Public,
             tags: Vec::new(),
+            sample_values: Vec::new(),
         },
         Fact {
             name: "b".to_string(),
@@ -174,6 +183,7 @@ fn inline_facts_multi_level() {
             is_filter: false,
             access: AccessModifier::Public,
             tags: Vec::new(),
+            sample_values: Vec::new(),
         },
     ];
     let order = toposort_facts(&facts).unwrap();
@@ -193,6 +203,7 @@ fn inline_facts_preserves_parenthesization() {
         is_filter: false,
         access: AccessModifier::Public,
         tags: Vec::new(),
+        sample_values: Vec::new(),
     }];
     let order = toposort_facts(&facts).unwrap();
     let result = inline_facts("x * total", &facts, &order);
@@ -211,6 +222,7 @@ fn inline_facts_word_boundary_prevents_collision() {
         is_filter: false,
         access: AccessModifier::Public,
         tags: Vec::new(),
+        sample_values: Vec::new(),
     }];
     let order = toposort_facts(&facts).unwrap();
     let result = inline_facts("SUM(net_price_total)", &facts, &order);
@@ -232,6 +244,7 @@ fn inline_facts_with_qualified_name_in_metric() {
         is_filter: false,
         access: AccessModifier::Public,
         tags: Vec::new(),
+        sample_values: Vec::new(),
     }];
     let order = toposort_facts(&facts).unwrap();
     let result = inline_facts("SUM(li.net_price)", &facts, &order);

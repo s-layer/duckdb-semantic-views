@@ -381,6 +381,9 @@ fn build_def() -> SemanticViewDefinition {
             synonyms: vec![],
             is_filter: false,
             tags: Vec::new(),
+            cortex_search_service: None,
+            is_enum: false,
+            sample_values: Vec::new(),
         },
         Dimension {
             name: "ucat".to_string(),
@@ -391,6 +394,9 @@ fn build_def() -> SemanticViewDefinition {
             synonyms: vec![],
             is_filter: false,
             tags: Vec::new(),
+            cortex_search_service: None,
+            is_enum: false,
+            sample_values: Vec::new(),
         },
         // TECH-DEBT #54: a dimension whose expression names a FACT on its own
         // table, the form Snowflake's validation rules explicitly permit.
@@ -403,6 +409,9 @@ fn build_def() -> SemanticViewDefinition {
             synonyms: vec![],
             is_filter: false,
             tags: Vec::new(),
+            cortex_search_service: None,
+            is_enum: false,
+            sample_values: Vec::new(),
         },
         // PBT-6 filter members: never selected as output, named only by a
         // generated `where_clause`. Compound expressions, so a splice that
@@ -416,6 +425,9 @@ fn build_def() -> SemanticViewDefinition {
             synonyms: vec![],
             is_filter: true,
             tags: Vec::new(),
+            cortex_search_service: None,
+            is_enum: false,
+            sample_values: Vec::new(),
         },
         Dimension {
             name: "fucat".to_string(),
@@ -426,6 +438,9 @@ fn build_def() -> SemanticViewDefinition {
             synonyms: vec![],
             is_filter: true,
             tags: Vec::new(),
+            cortex_search_service: None,
+            is_enum: false,
+            sample_values: Vec::new(),
         },
         // EXP-27: declared on the PARENT, but its expression names a fact on
         // the CHILD. Resolving it joins `t`, which fans `u` — so a predicate
@@ -440,6 +455,9 @@ fn build_def() -> SemanticViewDefinition {
             synonyms: vec![],
             is_filter: true,
             tags: Vec::new(),
+            cortex_search_service: None,
+            is_enum: false,
+            sample_values: Vec::new(),
         },
     ];
     let base_metric = |name: &str, expr: &str, source: Option<&str>| Metric {
@@ -490,6 +508,7 @@ fn build_def() -> SemanticViewDefinition {
                 is_filter: false,
                 access: AccessModifier::Public,
                 tags: Vec::new(),
+                sample_values: Vec::new(),
             },
             // EXP-27: the CHILD-side fact the parent-declared `fchain` member
             // reaches. Compound, so a splice that loses the parentheses
@@ -504,6 +523,7 @@ fn build_def() -> SemanticViewDefinition {
                 is_filter: false,
                 access: AccessModifier::Public,
                 tags: Vec::new(),
+                sample_values: Vec::new(),
             },
         ],
         materializations: vec![],
@@ -514,6 +534,9 @@ fn build_def() -> SemanticViewDefinition {
         temp_tables: vec![],
         comment: None,
         tags: Vec::new(),
+        max_staleness: None,
+        module_custom_instructions: Default::default(),
+        verified_queries: Vec::new(),
     }
 }
 

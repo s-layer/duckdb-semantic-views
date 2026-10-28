@@ -34,6 +34,9 @@ pub(super) fn orders_view() -> SemanticViewDefinition {
                 synonyms: vec![],
                 is_filter: false,
                 tags: Vec::new(),
+                cortex_search_service: None,
+                is_enum: false,
+                sample_values: Vec::new(),
             },
             Dimension {
                 name: "status".to_string(),
@@ -44,6 +47,9 @@ pub(super) fn orders_view() -> SemanticViewDefinition {
                 synonyms: vec![],
                 is_filter: false,
                 tags: Vec::new(),
+                cortex_search_service: None,
+                is_enum: false,
+                sample_values: Vec::new(),
             },
         ],
         metrics: vec![
@@ -84,6 +90,9 @@ pub(super) fn orders_view() -> SemanticViewDefinition {
         temp_tables: vec![],
         comment: None,
         tags: Vec::new(),
+        max_staleness: None,
+        module_custom_instructions: Default::default(),
+        verified_queries: Vec::new(),
     }
 }
 
@@ -118,6 +127,9 @@ pub(super) fn minimal_def(
             synonyms: vec![],
             is_filter: false,
             tags: Vec::new(),
+            cortex_search_service: None,
+            is_enum: false,
+            sample_values: Vec::new(),
         }],
         metrics: vec![Metric {
             name: metric_name.to_string(),
@@ -142,6 +154,9 @@ pub(super) fn minimal_def(
         temp_tables: vec![],
         comment: None,
         tags: Vec::new(),
+        max_staleness: None,
+        module_custom_instructions: Default::default(),
+        verified_queries: Vec::new(),
     }
 }
 
@@ -191,6 +206,9 @@ impl TestFixtureExt for SemanticViewDefinition {
             synonyms: vec![],
             is_filter: false,
             tags: Vec::new(),
+            cortex_search_service: None,
+            is_enum: false,
+            sample_values: Vec::new(),
         });
         self
     }
@@ -236,6 +254,7 @@ impl TestFixtureExt for SemanticViewDefinition {
             is_filter: false,
             access: AccessModifier::Public,
             tags: Vec::new(),
+            sample_values: Vec::new(),
         });
         self
     }
@@ -251,6 +270,7 @@ impl TestFixtureExt for SemanticViewDefinition {
             is_filter: false,
             access: AccessModifier::Private,
             tags: Vec::new(),
+            sample_values: Vec::new(),
         });
         self
     }

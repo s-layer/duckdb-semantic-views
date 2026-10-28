@@ -303,6 +303,9 @@ fn build_def() -> SemanticViewDefinition {
     // FROM is anchored there with LEFT JOINs outward along the chain.
     let tables = vec![table("t", &[]), table("u", &["id"]), table("w", &["id"])];
     let dim = |name: &str, expr: &str, source: &str| Dimension {
+        cortex_search_service: None,
+        is_enum: false,
+        sample_values: Vec::new(),
         name: name.to_string(),
         expr: expr.to_string(),
         source_table: Some(source.to_string()),
@@ -317,6 +320,9 @@ fn build_def() -> SemanticViewDefinition {
     // `where_clause`, and their compound expressions make the member splice's
     // parenthesization load-bearing.
     let filter_dim = |name: &str, expr: &str, source: &str| Dimension {
+        cortex_search_service: None,
+        is_enum: false,
+        sample_values: Vec::new(),
         name: name.to_string(),
         expr: expr.to_string(),
         source_table: Some(source.to_string()),
@@ -372,6 +378,9 @@ fn build_def() -> SemanticViewDefinition {
         },
     ];
     SemanticViewDefinition {
+        max_staleness: None,
+        module_custom_instructions: Default::default(),
+        verified_queries: Vec::new(),
         tables,
         dimensions,
         metrics,

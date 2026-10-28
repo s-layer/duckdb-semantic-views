@@ -171,6 +171,15 @@ fn parse_single_metric_entry(entry: &str, entry_offset: usize) -> Result<ParsedM
             position: Some(cur.abs_of(raw_expr)),
         });
     }
+    if let Some(clause) = annotations.member_metadata_clause() {
+        return Err(ParseError {
+            message: format!(
+                "{clause} is not valid on a metric; it applies to {}.",
+                super::applies_to(clause)
+            ),
+            position: Some(cur.abs_of(raw_expr)),
+        });
+    }
 
     // Phase 48: Detect and parse OVER clause from the expression text.
     //   AVG(total_qty) OVER (PARTITION BY EXCLUDING d1, d2 ORDER BY d1)

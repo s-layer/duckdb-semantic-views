@@ -459,11 +459,38 @@ Annotation before AS
 .. code-block:: text
 
    Only LABELS may come between the name and 'AS' in facts entry '<entry>'.
-   Put COMMENT, WITH SYNONYMS and TAG after the expression.
+   Put COMMENT, WITH SYNONYMS, TAG and the other annotations after the expression.
 
-**Cause:** A fact or dimension entry has ``COMMENT``, ``WITH SYNONYMS`` or ``TAG`` between its name and ``AS``. Only ``LABELS`` may go there.
+**Cause:** A fact or dimension entry has ``COMMENT``, ``WITH SYNONYMS``, ``TAG`` or a :ref:`Cortex Analyst <ref-create-cortex-metadata>` clause such as ``SAMPLE_VALUES`` between its name and ``AS``. Only ``LABELS`` may go there.
 
 **Fix:** Move the other annotations after the expression: ``o.is_large LABELS = (FILTER) AS o.amount > 100 COMMENT = 'Large order'``.
+
+
+Cortex Analyst clause in the wrong place
+----------------------------------------
+
+.. code-block:: text
+
+   IS_ENUM is not valid on a fact; it applies to dimensions.
+   SAMPLE_VALUES is not valid on a metric; it applies to facts and dimensions.
+   WITH CORTEX SEARCH SERVICE is not valid at the view level; it applies to dimensions.
+
+**Cause:** A :ref:`Cortex Analyst <ref-create-cortex-metadata>` member clause is on an object Snowflake does not allow it on. ``SAMPLE_VALUES`` goes on facts and dimensions; ``IS_ENUM`` and ``WITH CORTEX SEARCH SERVICE`` go on dimensions only. The view-level clauses (``MAX_STALENESS``, ``AI_SQL_GENERATION``, ``AI_QUESTION_CATEGORIZATION``, ``AI_VERIFIED_QUERIES``, ``COPY GRANTS``) go after the last clause; after a member's annotations they raise ``Unexpected text in annotations``.
+
+**Fix:** Move the clause to the kind of object it applies to, or remove it.
+
+
+MAX_STALENESS out of range
+--------------------------
+
+.. code-block:: text
+
+   MAX_STALENESS is 60 seconds; the minimum is 120 seconds.
+   MAX_STALENESS '1 fortnight' is not an interval; ...
+
+**Cause:** ``MAX_STALENESS`` (in ``CREATE``, ``ALTER ... SET`` or YAML ``max_staleness``) is under Snowflake's 120-second minimum, or its quoted form is not a count and a unit of seconds, minutes, hours or days.
+
+**Fix:** Write at least 120 seconds: ``MAX_STALENESS = 120`` or ``MAX_STALENESS = '2 minutes'``.
 
 
 Aggregate in a dimension or fact

@@ -1,8 +1,8 @@
 use proptest::prelude::*;
 use semantic_views::model::{
-    AccessModifier, Cardinality, Dimension, Fact, Join, Materialization, Metric, NonAdditiveDim,
-    NullsOrder, SemanticViewDefinition, SortOrder, TableRef, Tag, TagName, WindowOrderBy,
-    WindowSpec,
+    AccessModifier, Cardinality, CortexSearchService, CustomInstructions, Dimension, Fact, Join,
+    Materialization, MaxStaleness, Metric, NonAdditiveDim, NullsOrder, SemanticViewDefinition,
+    SortOrder, TableRef, Tag, TagName, VerifiedQuery, WindowOrderBy, WindowSpec,
 };
 
 // ---------------------------------------------------------------------------
@@ -93,6 +93,56 @@ fn arb_tags() -> impl Strategy<Value = Vec<Tag>> {
     )
 }
 
+/// A Cortex Search service; any text in every part (the serde round trip does
+/// not validate).
+fn arb_cortex_search_service() -> impl Strategy<Value = CortexSearchService> {
+    (
+        arb_payload(),
+        proptest::option::of(arb_payload()),
+        proptest::option::of(arb_payload()),
+        proptest::option::of(arb_payload()),
+    )
+        .prop_map(
+            |(service, literal_column, database, schema)| CortexSearchService {
+                service,
+                literal_column,
+                database,
+                schema,
+            },
+        )
+}
+
+/// Both forms of `MAX_STALENESS`. An interval is any text, including the
+/// YAML-hostile scalars (`123`, `true`, `null`) that must come back as text,
+/// not as the seconds form or a missing value.
+fn arb_max_staleness() -> impl Strategy<Value = MaxStaleness> {
+    prop_oneof![
+        proptest::num::u64::ANY.prop_map(MaxStaleness::Seconds),
+        arb_payload().prop_map(MaxStaleness::Interval),
+    ]
+}
+
+fn arb_verified_query() -> impl Strategy<Value = VerifiedQuery> {
+    (
+        arb_name(),
+        arb_payload(),
+        proptest::option::of(proptest::num::u64::ANY),
+        proptest::option::of(arb_payload()),
+        proptest::bool::ANY,
+        arb_payload(),
+    )
+        .prop_map(
+            |(name, question, verified_at, verified_by, onboarding, sql)| VerifiedQuery {
+                name,
+                question,
+                verified_at,
+                verified_by,
+                use_as_onboarding_question: onboarding,
+                sql,
+            },
+        )
+}
+
 fn arb_table_ref() -> impl Strategy<Value = TableRef> {
     (
         arb_name(),
@@ -128,9 +178,23 @@ fn arb_dimension() -> impl Strategy<Value = Dimension> {
         // would silently stop covering LABELS = (FILTER).
         proptest::bool::ANY,
         arb_tags(),
+        proptest::collection::vec(arb_payload(), 0..=2),
+        proptest::bool::ANY,
+        proptest::option::of(arb_cortex_search_service()),
     )
         .prop_map(
-            |(name, expr, source_table, comment, synonyms, is_filter, tags)| Dimension {
+            |(
+                name,
+                expr,
+                source_table,
+                comment,
+                synonyms,
+                is_filter,
+                tags,
+                sample_values,
+                is_enum,
+                cortex_search_service,
+            )| Dimension {
                 name,
                 expr,
                 source_table,
@@ -139,6 +203,9 @@ fn arb_dimension() -> impl Strategy<Value = Dimension> {
                 synonyms,
                 tags,
                 is_filter,
+                cortex_search_service,
+                is_enum,
+                sample_values,
             },
         )
 }
@@ -241,9 +308,20 @@ fn arb_fact() -> impl Strategy<Value = Fact> {
         // Varied independently of `access` — see `arb_dimension`.
         proptest::bool::ANY,
         arb_tags(),
+        proptest::collection::vec(arb_payload(), 0..=2),
     )
         .prop_map(
-            |(name, expr, source_table, access, comment, synonyms, is_filter, tags)| Fact {
+            |(
+                name,
+                expr,
+                source_table,
+                access,
+                comment,
+                synonyms,
+                is_filter,
+                tags,
+                sample_values,
+            )| Fact {
                 name,
                 expr,
                 source_table,
@@ -253,6 +331,7 @@ fn arb_fact() -> impl Strategy<Value = Fact> {
                 tags,
                 is_filter,
                 access,
+                sample_values,
             },
         )
 }
@@ -303,9 +382,27 @@ fn arb_definition() -> impl Strategy<Value = SemanticViewDefinition> {
         proptest::option::of("[a-z ]{1,30}"),
         proptest::collection::vec(arb_materialization(), 0..=2),
         arb_tags(),
+        proptest::option::of(arb_max_staleness()),
+        (
+            proptest::option::of(arb_payload()),
+            proptest::option::of(arb_payload()),
+        ),
+        proptest::collection::vec(arb_verified_query(), 0..=2),
     )
         .prop_map(
-            |(tables, dimensions, metrics, joins, facts, comment, materializations, tags)| {
+            |(
+                tables,
+                dimensions,
+                metrics,
+                joins,
+                facts,
+                comment,
+                materializations,
+                tags,
+                max_staleness,
+                (sql_generation, question_categorization),
+                verified_queries,
+            )| {
                 SemanticViewDefinition {
                     tables,
                     dimensions,
@@ -320,6 +417,12 @@ fn arb_definition() -> impl Strategy<Value = SemanticViewDefinition> {
                     temp_tables: vec![],
                     comment,
                     tags,
+                    max_staleness,
+                    module_custom_instructions: CustomInstructions {
+                        sql_generation,
+                        question_categorization,
+                    },
+                    verified_queries,
                 }
             },
         )
@@ -445,9 +548,12 @@ fn arb_member_expr() -> impl Strategy<Value = String> {
 /// single test noticing. RT-7's resolution is that it is refused at import, and
 /// this generator is what keeps that assertion honest — the property asserts
 /// the outcome either way rather than assuming which one applies.
+///
+/// Every `Some` is refused, on each of two members, so its weight sets how
+/// often the round-trip half runs at all (`the_oracle_is_not_all_refusals`).
 fn arb_output_type() -> impl Strategy<Value = Option<String>> {
     prop_oneof![
-        6 => Just(None),
+        12 => Just(None),
         2 => Just(Some("VARCHAR".to_string())),
         1 => Just(Some("DECIMAL(10, 2)".to_string())),
         1 => Just(Some(String::new())),
@@ -564,18 +670,246 @@ fn arb_oracle_tags() -> impl Strategy<Value = Vec<Tag>> {
         })
 }
 
-/// [`arb_oracle_def_untagged`], with tags on the view and its dimension.
+/// Text for the metadata clauses' quoted slots: plain text, and what a
+/// renderer has to protect inside a single-quoted literal (a quote, comment
+/// markers, list punctuation, a clause keyword, a line break).
+fn arb_oracle_text() -> impl Strategy<Value = String> {
+    prop_oneof![
+        6 => Just("East".to_string()),
+        2 => Just("it's -- not /* a */ comment, ) SAMPLE_VALUES ('x') IS_ENUM".to_string()),
+        1 => Just(String::new()),
+        1 => Just("line\nbreak".to_string()),
+        1 => Just("Ünï code".to_string()),
+    ]
+}
+
+/// A Cortex Search service on the dimension, of a shape YAML accepts. The
+/// refused shapes come from [`arb_oracle_metadata_refusal`].
+fn arb_oracle_cortex() -> impl Strategy<Value = CortexSearchService> {
+    let p = || arb_oracle_tag_part().prop_filter("a non-empty part", |p| !p.is_empty());
+    let name = prop_oneof![
+        3 => p().prop_map(|service| (None, None, service)),
+        2 => (p(), p()).prop_map(|(schema, service)| (None, Some(schema), service)),
+        3 => (p(), p(), p()).prop_map(|(database, schema, service)| {
+            (Some(database), Some(schema), service)
+        }),
+    ];
+    (name, prop::option::of(p())).prop_map(|((database, schema, service), literal_column)| {
+        CortexSearchService {
+            service,
+            literal_column,
+            database,
+            schema,
+        }
+    })
+}
+
+/// A `MAX_STALENESS` YAML accepts, in both forms.
+fn arb_oracle_staleness() -> impl Strategy<Value = Option<MaxStaleness>> {
+    prop_oneof![
+        3 => Just(None),
+        2 => Just(Some(MaxStaleness::Seconds(3600))),
+        1 => Just(Some(MaxStaleness::Seconds(120))),
+        2 => Just(Some(MaxStaleness::Interval("1 hour".to_string()))),
+        1 => Just(Some(MaxStaleness::Interval("90 Minutes".to_string()))),
+    ]
+}
+
+/// Verified queries YAML accepts: bare, quoted and keyword names, quoted ones
+/// holding list punctuation or the `AS` keyword (kept apart by an index
+/// suffix), and hostile text in every quoted slot.
+fn arb_oracle_verified_queries() -> impl Strategy<Value = Vec<VerifiedQuery>> {
+    let name = prop::sample::select(vec![
+        "q",
+        "\"Top Q\"",
+        "select",
+        "\"a,b\"",
+        "\"q)\"",
+        "\"AS\"",
+    ]);
+    let query = (
+        name,
+        arb_oracle_text(),
+        prop::option::of(prop_oneof![
+            Just(0_u64),
+            Just(1_772_645_863),
+            Just(u64::MAX)
+        ]),
+        prop::option::of(arb_oracle_text()),
+        prop::bool::ANY,
+        arb_oracle_text(),
+    )
+        .prop_map(
+            |(name, question, verified_at, verified_by, onboarding, sql)| VerifiedQuery {
+                name: name.to_string(),
+                question,
+                verified_at,
+                verified_by,
+                use_as_onboarding_question: onboarding,
+                sql,
+            },
+        );
+    prop_oneof![
+        1 => Just(Vec::new()),
+        2 => prop::collection::vec(query, 1..=2),
+    ]
+    .prop_map(|queries| {
+        queries
+            .into_iter()
+            .enumerate()
+            .map(|(i, mut q)| {
+                if i > 0 {
+                    q.name = match q.name.strip_suffix('"') {
+                        Some(stripped) => format!("{stripped}{i}\""),
+                        None => format!("{}{i}", q.name),
+                    };
+                }
+                q
+            })
+            .collect()
+    })
+}
+
+/// One metadata shape YAML must refuse, applied to a definition now and then.
+/// Drawn as a single rare mutation rather than as arms of the generators
+/// above, so the refusals stay a fixed small share of the sample and do not
+/// starve the round-trip half (`the_oracle_is_not_all_refusals`).
+#[derive(Debug, Clone, Copy)]
+enum MetadataRefusal {
+    ShortStaleness,
+    StalenessNotAnInterval,
+    DuplicateVerifiedQuery,
+    DuplicateVerifiedQueryByQuotes,
+    VerifiedQueryNameOfTwoWords,
+    VerifiedQueryNameWithCommentMarker,
+    VerifiedQueryNameWithComma,
+    VerifiedQueryNameWithParen,
+    VerifiedQueryNamedAs,
+    QualifiedVerifiedQueryName,
+    CortexDatabaseWithoutSchema,
+    CortexEmptyPart,
+    CortexEmptyColumn,
+}
+
+fn arb_oracle_metadata_refusal() -> impl Strategy<Value = Option<MetadataRefusal>> {
+    use MetadataRefusal as R;
+    prop_oneof![
+        19 => Just(None),
+        1 => prop::sample::select(vec![
+            R::ShortStaleness,
+            R::StalenessNotAnInterval,
+            R::DuplicateVerifiedQuery,
+            R::DuplicateVerifiedQueryByQuotes,
+            R::VerifiedQueryNameOfTwoWords,
+            R::VerifiedQueryNameWithCommentMarker,
+            R::VerifiedQueryNameWithComma,
+            R::VerifiedQueryNameWithParen,
+            R::VerifiedQueryNamedAs,
+            R::QualifiedVerifiedQueryName,
+            R::CortexDatabaseWithoutSchema,
+            R::CortexEmptyPart,
+            R::CortexEmptyColumn,
+        ])
+        .prop_map(Some),
+    ]
+}
+
+fn apply_metadata_refusal(def: &mut SemanticViewDefinition, refusal: MetadataRefusal) {
+    use MetadataRefusal as R;
+    let query = |name: &str| VerifiedQuery {
+        name: name.to_string(),
+        question: "q".to_string(),
+        sql: "SELECT 1".to_string(),
+        ..Default::default()
+    };
+    let cortex = |database: Option<&str>, schema: Option<&str>, service: &str, column: &str| {
+        CortexSearchService {
+            service: service.to_string(),
+            literal_column: Some(column.to_string()),
+            database: database.map(str::to_string),
+            schema: schema.map(str::to_string),
+        }
+    };
+    match refusal {
+        R::ShortStaleness => def.max_staleness = Some(MaxStaleness::Seconds(119)),
+        R::StalenessNotAnInterval => {
+            def.max_staleness = Some(MaxStaleness::Interval("1 fortnight".to_string()));
+        }
+        R::DuplicateVerifiedQuery => def.verified_queries = vec![query("vq"), query("VQ")],
+        R::DuplicateVerifiedQueryByQuotes => {
+            def.verified_queries = vec![query("vq"), query("\"VQ\"")];
+        }
+        R::VerifiedQueryNameWithComma => def.verified_queries = vec![query("a,b")],
+        R::VerifiedQueryNameWithParen => def.verified_queries = vec![query("q)")],
+        R::VerifiedQueryNamedAs => def.verified_queries = vec![query("as")],
+        R::QualifiedVerifiedQueryName => def.verified_queries = vec![query("db.q")],
+        R::VerifiedQueryNameOfTwoWords => def.verified_queries = vec![query("two words")],
+        R::VerifiedQueryNameWithCommentMarker => def.verified_queries = vec![query("a--b")],
+        R::CortexDatabaseWithoutSchema => {
+            def.dimensions[0].cortex_search_service = Some(cortex(Some("db"), None, "s", "c"));
+        }
+        R::CortexEmptyPart => {
+            def.dimensions[0].cortex_search_service = Some(cortex(None, Some(""), "s", "c"));
+        }
+        R::CortexEmptyColumn => {
+            def.dimensions[0].cortex_search_service = Some(cortex(None, None, "s", ""));
+        }
+    }
+}
+
+/// [`arb_oracle_def_untagged`], with tags on the view and its dimension, and
+/// the metadata clauses: sample values, `IS_ENUM` and a Cortex Search service on
+/// the dimension, and `MAX_STALENESS`, custom instructions and verified queries
+/// on the view; now and then one metadata shape YAML must refuse.
 fn arb_oracle_def() -> impl Strategy<Value = SemanticViewDefinition> {
     (
         arb_oracle_def_untagged(),
         arb_oracle_tags(),
         arb_oracle_tags(),
+        prop_oneof![
+            2 => Just(Vec::new()),
+            1 => prop::collection::vec(arb_oracle_text(), 1..=3),
+        ],
+        prop::bool::ANY,
+        prop::option::of(arb_oracle_cortex()),
+        arb_oracle_staleness(),
+        (
+            prop::option::of(arb_oracle_text()),
+            prop::option::of(arb_oracle_text()),
+        ),
+        arb_oracle_verified_queries(),
+        arb_oracle_metadata_refusal(),
     )
-        .prop_map(|(mut def, view_tags, dim_tags)| {
-            def.tags = view_tags;
-            def.dimensions[0].tags = dim_tags;
-            def
-        })
+        .prop_map(
+            |(
+                mut def,
+                view_tags,
+                dim_tags,
+                sample_values,
+                is_enum,
+                cortex,
+                max_staleness,
+                (sql_generation, question_categorization),
+                verified_queries,
+                refusal,
+            )| {
+                def.tags = view_tags;
+                def.dimensions[0].tags = dim_tags;
+                def.dimensions[0].sample_values = sample_values;
+                def.dimensions[0].is_enum = is_enum;
+                def.dimensions[0].cortex_search_service = cortex;
+                def.max_staleness = max_staleness;
+                def.module_custom_instructions = CustomInstructions {
+                    sql_generation,
+                    question_categorization,
+                };
+                def.verified_queries = verified_queries;
+                if let Some(refusal) = refusal {
+                    apply_metadata_refusal(&mut def, refusal);
+                }
+                def
+            },
+        )
 }
 
 /// A definition anchored at one table `o`, with one dimension, one base metric
@@ -763,6 +1097,21 @@ proptest! {
             ddl
         );
         prop_assert_eq!(&replayed.tags, &imported.tags, "view tags drift\n{}", ddl);
+        prop_assert_eq!(
+            &replayed.max_staleness, &imported.max_staleness, "MAX_STALENESS drift\n{}", ddl
+        );
+        prop_assert_eq!(
+            &replayed.module_custom_instructions,
+            &imported.module_custom_instructions,
+            "custom instructions drift\n{}",
+            ddl
+        );
+        prop_assert_eq!(
+            &replayed.verified_queries,
+            &imported.verified_queries,
+            "verified queries drift\n{}",
+            ddl
+        );
 
         // Metrics are compared field-by-field with ONE documented exemption: a
         // window metric's `expr` is REBUILT from its `WindowSpec` at render
@@ -870,6 +1219,118 @@ fn generator_reaches_both_outcomes_on_the_tag_axis() {
         ("a database with no schema", "no schema"),
         ("a value over the limit", "257 characters"),
         ("a duplicate name", "duplicate tag"),
+    ] {
+        assert!(
+            defs.iter()
+                .any(|d| imports(d).is_err_and(|e| e.contains(needle))),
+            "no definition was refused for {label}"
+        );
+    }
+}
+
+#[test]
+fn generator_reaches_both_outcomes_on_the_metadata_axis() {
+    // More samples than the other guards: each refusal shape is one rare draw,
+    // and shows only on a definition no earlier check refuses.
+    let defs = sample_defs(12288);
+    let imports = |d: &SemanticViewDefinition| {
+        let yaml = yaml_serde::to_string(d).expect("YAML serialize");
+        SemanticViewDefinition::from_yaml_with_size_cap(VIEW, &yaml)
+    };
+    let imported: Vec<SemanticViewDefinition> =
+        defs.iter().filter_map(|d| imports(d).ok()).collect();
+    let dim = |d: &SemanticViewDefinition| d.dimensions[0].clone();
+    for (label, hit) in [
+        (
+            "sample values",
+            imported.iter().any(|d| !dim(d).sample_values.is_empty()),
+        ),
+        ("IS_ENUM", imported.iter().any(|d| dim(d).is_enum)),
+        (
+            "a three-part Cortex Search service with a column",
+            imported.iter().any(|d| {
+                dim(d)
+                    .cortex_search_service
+                    .is_some_and(|c| c.database.is_some() && c.literal_column.is_some())
+            }),
+        ),
+        (
+            "MAX_STALENESS in seconds",
+            imported
+                .iter()
+                .any(|d| matches!(d.max_staleness, Some(MaxStaleness::Seconds(_)))),
+        ),
+        (
+            "MAX_STALENESS as an interval",
+            imported
+                .iter()
+                .any(|d| matches!(d.max_staleness, Some(MaxStaleness::Interval(_)))),
+        ),
+        (
+            "both custom instructions",
+            imported.iter().any(|d| {
+                let c = &d.module_custom_instructions;
+                c.sql_generation.is_some() && c.question_categorization.is_some()
+            }),
+        ),
+        (
+            "two verified queries, one fully written",
+            imported.iter().any(|d| {
+                d.verified_queries.len() == 2
+                    && d.verified_queries.iter().any(|q| {
+                        q.verified_at.is_some()
+                            && q.verified_by.is_some()
+                            && q.use_as_onboarding_question
+                    })
+            }),
+        ),
+    ] {
+        assert!(hit, "no definition with {label} ever imported");
+    }
+    for (label, needle) in [
+        ("a short MAX_STALENESS", "the minimum is 120 seconds"),
+        (
+            "a MAX_STALENESS that is not an interval",
+            "is not an interval",
+        ),
+        (
+            "a duplicate verified query",
+            "duplicate verified query 'VQ'",
+        ),
+        (
+            "a verified query repeated with quotes",
+            "duplicate verified query '\"VQ\"'",
+        ),
+        (
+            "a verified query name with a comma",
+            "verified query name 'a,b'",
+        ),
+        (
+            "a verified query name with a parenthesis",
+            "verified query name 'q)'",
+        ),
+        ("a verified query named AS", "verified query name 'as'"),
+        (
+            "a qualified verified query name",
+            "verified query name 'db.q'",
+        ),
+        (
+            "a verified query name of two words",
+            "verified query name 'two words",
+        ),
+        (
+            "a verified query name with a comment marker",
+            "verified query name 'a--b'",
+        ),
+        (
+            "a Cortex database with no schema",
+            "names a database but no schema",
+        ),
+        (
+            "an empty Cortex name part",
+            "Cortex Search Service name part is empty",
+        ),
+        ("an empty Cortex column", "USING column is empty"),
     ] {
         assert!(
             defs.iter()

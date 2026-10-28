@@ -26,8 +26,10 @@ pub(crate) mod messages {
     pub(crate) const INVALID_RENAME_TARGET: &str = "Invalid new view name in RENAME TO";
     pub(crate) const EXPECTED_COMMENT_STRING: &str =
         "Expected single-quoted string after SET COMMENT =";
+    pub(crate) const EXPECTED_STALENESS: &str =
+        "Expected a whole number of seconds or a single-quoted interval such as '1 hour' after SET MAX_STALENESS =";
     pub(crate) const UNSUPPORTED_ALTER: &str =
-        "Unsupported ALTER operation. Supported: RENAME TO, SET COMMENT, UNSET COMMENT, SET TAG, UNSET TAG.";
+        "Unsupported ALTER operation. Supported: RENAME TO, SET COMMENT, SET MAX_STALENESS, UNSET COMMENT, UNSET MAX_STALENESS, SET TAG, UNSET TAG.";
 
     pub(crate) fn unexpected_after_view_name(rest: &str) -> String {
         format!("Unexpected tokens after view name: '{rest}'")
@@ -180,8 +182,19 @@ pub enum RewriteAction {
         comment: String,
         if_exists: bool,
     },
-    /// ALTER ... UNSET COMMENT — native UPDATE via `json_merge_patch`.
-    AlterUnsetComment { name: ViewRef, if_exists: bool },
+    /// ALTER ... SET `MAX_STALENESS` — native UPDATE via `json_merge_patch`.
+    AlterSetMaxStaleness {
+        name: ViewRef,
+        value: crate::model::MaxStaleness,
+        if_exists: bool,
+    },
+    /// ALTER ... UNSET COMMENT / `MAX_STALENESS` (one or more, comma-separated) —
+    /// native UPDATE via `json_merge_patch`.
+    AlterUnset {
+        name: ViewRef,
+        properties: Vec<ViewProperty>,
+        if_exists: bool,
+    },
     /// ALTER ... SET TAG — native UPDATE of the view's tags: each named tag's
     /// value is replaced, or the tag added.
     AlterSetTags {
@@ -199,6 +212,33 @@ pub enum RewriteAction {
     /// `SELECT * FROM <read_side_fn>(...)` SQL that `DuckDB` runs on the caller's
     /// connection unchanged.
     Passthrough(String),
+}
+
+/// A view-level property `ALTER SEMANTIC VIEW ... UNSET` removes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ViewProperty {
+    Comment,
+    MaxStaleness,
+}
+
+impl ViewProperty {
+    /// The property's key in the stored definition.
+    #[must_use]
+    pub fn key(self) -> &'static str {
+        match self {
+            Self::Comment => "comment",
+            Self::MaxStaleness => "max_staleness",
+        }
+    }
+
+    /// The property as DDL writes it.
+    #[must_use]
+    pub fn keyword(self) -> &'static str {
+        match self {
+            Self::Comment => "COMMENT",
+            Self::MaxStaleness => "MAX_STALENESS",
+        }
+    }
 }
 
 impl RewriteAction {
@@ -219,7 +259,8 @@ impl RewriteAction {
             | RewriteAction::CreateFromYamlFile { name, .. }
             | RewriteAction::Drop { name, .. }
             | RewriteAction::AlterSetComment { name, .. }
-            | RewriteAction::AlterUnsetComment { name, .. }
+            | RewriteAction::AlterSetMaxStaleness { name, .. }
+            | RewriteAction::AlterUnset { name, .. }
             | RewriteAction::AlterSetTags { name, .. }
             | RewriteAction::AlterUnsetTags { name, .. } => vec![name],
             RewriteAction::AlterRename { name, new_name, .. } => vec![name, new_name],

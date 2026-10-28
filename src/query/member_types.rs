@@ -645,6 +645,9 @@ mod tests {
             temp_tables: vec![],
             comment: None,
             tags: Vec::new(),
+            max_staleness: None,
+            module_custom_instructions: Default::default(),
+            verified_queries: Vec::new(),
         }
     }
 

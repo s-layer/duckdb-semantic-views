@@ -20,8 +20,9 @@
 
 use proptest::prelude::*;
 use semantic_views::model::{
-    AccessModifier, Dimension, Fact, Join, Materialization, Metric, NonAdditiveDim, NullsOrder,
-    SemanticViewDefinition, SortOrder, TableRef, Tag, TagName,
+    AccessModifier, CortexSearchService, CustomInstructions, Dimension, Fact, Join,
+    Materialization, MaxStaleness, Metric, NonAdditiveDim, NullsOrder, SemanticViewDefinition,
+    SortOrder, TableRef, Tag, TagName, VerifiedQuery,
 };
 
 /// Bare identifier — safe to emit unquoted.
@@ -126,6 +127,109 @@ pub fn arb_canonical_tags() -> impl Strategy<Value = Vec<Tag>> {
     })
 }
 
+/// A Cortex Search service reference the DDL grammar can produce: one to three
+/// name parts (a database needs a schema between it and the service) and an
+/// optional `USING` column, all stored unquoted like tag-name parts.
+pub fn arb_cortex_search_service() -> impl Strategy<Value = CortexSearchService> {
+    (
+        prop::option::of(arb_tag_part()),
+        prop::option::of(arb_tag_part()),
+        arb_tag_part(),
+        prop::option::of(arb_tag_part()),
+    )
+        .prop_map(
+            |(database, schema, service, literal_column)| CortexSearchService {
+                database: schema.as_ref().and(database),
+                schema,
+                service,
+                literal_column,
+            },
+        )
+}
+
+/// A member's metadata clauses: `SAMPLE_VALUES` (none, or one to three values,
+/// empty and hostile strings included), `IS_ENUM`, and a Cortex Search service.
+/// Facts take only the sample values.
+pub fn arb_member_metadata() -> impl Strategy<Value = MemberMetadata> {
+    (
+        prop::collection::vec(arb_payload(), 0..=3),
+        any::<bool>(),
+        prop::option::of(arb_cortex_search_service()),
+    )
+}
+
+/// A `MAX_STALENESS` the grammar accepts: whole seconds from the 120-second
+/// minimum up to `u64::MAX`, or an interval in any unit, case and plural.
+pub fn arb_max_staleness() -> impl Strategy<Value = MaxStaleness> {
+    prop_oneof![
+        (120_u64..=10_000_000).prop_map(MaxStaleness::Seconds),
+        Just(MaxStaleness::Seconds(120)),
+        Just(MaxStaleness::Seconds(u64::MAX)),
+        prop::sample::select(vec![
+            "120 seconds",
+            "2 minute",
+            "1 hour",
+            "1 HOUR",
+            "90 Minutes",
+            "1 day",
+            "3 days",
+        ])
+        .prop_map(|t| MaxStaleness::Interval(t.to_string())),
+    ]
+}
+
+/// A list of verified queries the grammar can produce: names in stored form,
+/// made distinct by index; hostile text in every quoted slot.
+pub fn arb_verified_queries() -> impl Strategy<Value = Vec<VerifiedQuery>> {
+    let query = (
+        arb_stored_ident(),
+        arb_payload(),
+        prop::option::of(any::<u64>()),
+        prop::option::of(arb_payload()),
+        any::<bool>(),
+        arb_payload(),
+    );
+    prop::collection::vec(query, 0..=3).prop_map(|queries| {
+        queries
+            .into_iter()
+            .enumerate()
+            .map(
+                |(i, (name, question, verified_at, verified_by, onboarding, sql))| VerifiedQuery {
+                    name: distinct_name(&name, i),
+                    question,
+                    verified_at,
+                    verified_by,
+                    use_as_onboarding_question: onboarding,
+                    sql,
+                },
+            )
+            .collect()
+    })
+}
+
+/// The view's Cortex Analyst clauses: `MAX_STALENESS`, `AI_SQL_GENERATION`,
+/// `AI_QUESTION_CATEGORIZATION` and `AI_VERIFIED_QUERIES`.
+pub fn arb_view_metadata() -> impl Strategy<Value = ViewMetadata> {
+    (
+        prop::option::of(arb_max_staleness()),
+        prop::option::of(arb_payload()),
+        prop::option::of(arb_payload()),
+        arb_verified_queries(),
+    )
+        .prop_map(
+            |(max_staleness, sql_generation, question_categorization, verified_queries)| {
+                (
+                    max_staleness,
+                    CustomInstructions {
+                        sql_generation,
+                        question_categorization,
+                    },
+                    verified_queries,
+                )
+            },
+        )
+}
+
 /// A canonical expression: composed so that no depth-0 comma or annotation
 /// keyword appears outside quotes, and all quotes/parens are balanced.
 pub fn arb_expr(aliases: Vec<String>) -> impl Strategy<Value = String> {
@@ -180,6 +284,10 @@ type MetricSpec = (EntrySpec, bool, Option<(SortOrder, NullsOrder)>);
 /// resolves to a declared name by construction (mirroring how USING / NON
 /// ADDITIVE BY resolve against the built `joins` / `dimensions`).
 type MaterializationSpec = (String, Vec<bool>, Vec<bool>);
+/// A member's sample values, `IS_ENUM` flag and Cortex Search service.
+pub type MemberMetadata = (Vec<String>, bool, Option<CortexSearchService>);
+/// A view's `MAX_STALENESS`, custom instructions and verified queries.
+pub type ViewMetadata = (Option<MaxStaleness>, CustomInstructions, Vec<VerifiedQuery>);
 
 /// All cross-references (USING → declared relationship, NON ADDITIVE BY →
 /// declared dimension) are resolved during assembly, so every generated
@@ -241,6 +349,10 @@ pub fn arb_canonical_def() -> impl Strategy<Value = SemanticViewDefinition> {
         // Tags for the view and every table and member, dealt from one pool
         // (VARIED on all of them, so the round-trip covers TAG everywhere).
         prop::collection::vec(arb_canonical_tags(), 12),
+        // Metadata clauses for every dimension and fact (two of each at most),
+        // and for the view.
+        prop::collection::vec(arb_member_metadata(), 4),
+        arb_view_metadata(),
     )
         .prop_map(
             |(
@@ -251,9 +363,13 @@ pub fn arb_canonical_def() -> impl Strategy<Value = SemanticViewDefinition> {
                 metric_specs,
                 mat_specs,
                 tag_pool,
+                member_metadata,
+                (max_staleness, module_custom_instructions, verified_queries),
             )| {
                 let mut tag_pool = tag_pool.into_iter();
                 let mut next_tags = move || tag_pool.next().unwrap_or_default();
+                let mut member_metadata = member_metadata.into_iter();
+                let mut next_metadata = move || member_metadata.next().unwrap_or_default();
                 let tables: Vec<TableRef> = table_specs
                     .into_iter()
                     .enumerate()
@@ -331,6 +447,7 @@ pub fn arb_canonical_def() -> impl Strategy<Value = SemanticViewDefinition> {
                             usize,
                             EntrySpec,
                         )| {
+                            let (sample_values, is_enum, cortex_search_service) = next_metadata();
                             Dimension {
                                 name: distinct_name(&name, i),
                                 expr,
@@ -345,6 +462,9 @@ pub fn arb_canonical_def() -> impl Strategy<Value = SemanticViewDefinition> {
                                 // being vacuous on a field always left false.
                                 is_filter: private,
                                 tags: next_tags(),
+                                sample_values,
+                                is_enum,
+                                cortex_search_service,
                                 ..Default::default()
                             }
                         },
@@ -374,6 +494,7 @@ pub fn arb_canonical_def() -> impl Strategy<Value = SemanticViewDefinition> {
                             // both access levels.
                             is_filter: i % 2 == 0,
                             tags: next_tags(),
+                            sample_values: next_metadata().0,
                             ..Default::default()
                         },
                     )
@@ -485,6 +606,9 @@ pub fn arb_canonical_def() -> impl Strategy<Value = SemanticViewDefinition> {
                     metrics,
                     materializations,
                     tags: next_tags(),
+                    max_staleness,
+                    module_custom_instructions,
+                    verified_queries,
                     ..Default::default()
                 }
             },

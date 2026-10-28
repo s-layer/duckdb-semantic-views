@@ -9,6 +9,7 @@
 //! can run under `cargo test` without the `extension` feature.
 
 use crate::model::{AccessModifier, NullsOrder, SemanticViewDefinition, SortOrder};
+use std::fmt::Write as _;
 
 /// SQL single-quote escaping: `'` -> `''`.
 ///
@@ -61,6 +62,95 @@ fn emit_tags(out: &mut String, tags: &[crate::model::Tag]) {
             out.push('\'');
         }
         out.push(')');
+    }
+}
+
+/// `'a', 'b'`: each string single-quoted and escaped, comma-separated.
+fn quoted_list(items: &[String]) -> String {
+    items
+        .iter()
+        .map(|s| format!("'{}'", escape_single_quote(s)))
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+/// Append a member's metadata-only clauses: ` SAMPLE_VALUES (...)`,
+/// ` IS_ENUM` and ` WITH CORTEX SEARCH SERVICE <name> [USING <column>]`, in
+/// that order, Snowflake's (`IS_ENUM` after `SAMPLE_VALUES`, the service last).
+fn emit_member_metadata(
+    out: &mut String,
+    sample_values: &[String],
+    is_enum: bool,
+    cortex: Option<&crate::model::CortexSearchService>,
+) {
+    if !sample_values.is_empty() {
+        out.push_str(" SAMPLE_VALUES (");
+        out.push_str(&quoted_list(sample_values));
+        out.push(')');
+    }
+    if is_enum {
+        out.push_str(" IS_ENUM");
+    }
+    if let Some(c) = cortex {
+        out.push_str(" WITH CORTEX SEARCH SERVICE ");
+        out.push_str(&c.render_name());
+        if let Some(col) = c.render_column() {
+            out.push_str(" USING ");
+            out.push_str(&col);
+        }
+    }
+}
+
+/// Append the view-level clauses Snowflake writes after the last clause and
+/// before the view's tags: `MAX_STALENESS`, `AI_SQL_GENERATION`,
+/// `AI_QUESTION_CATEGORIZATION` and `AI_VERIFIED_QUERIES`, each on its own
+/// line, in Snowflake's order.
+fn emit_view_metadata(out: &mut String, def: &SemanticViewDefinition) {
+    use crate::model::MaxStaleness;
+    match &def.max_staleness {
+        Some(MaxStaleness::Seconds(s)) => {
+            let _ = writeln!(out, "MAX_STALENESS = {s}");
+        }
+        Some(MaxStaleness::Interval(i)) => {
+            let _ = writeln!(out, "MAX_STALENESS = '{}'", escape_single_quote(i));
+        }
+        None => {}
+    }
+    let ci = &def.module_custom_instructions;
+    for (kw, text) in [
+        ("AI_SQL_GENERATION", &ci.sql_generation),
+        ("AI_QUESTION_CATEGORIZATION", &ci.question_categorization),
+    ] {
+        if let Some(text) = text {
+            let _ = writeln!(out, "{kw} '{}'", escape_single_quote(text));
+        }
+    }
+    if !def.verified_queries.is_empty() {
+        out.push_str("AI_VERIFIED_QUERIES (\n");
+        for (i, q) in def.verified_queries.iter().enumerate() {
+            let _ = writeln!(out, "    {} AS (", q.name);
+            let _ = writeln!(
+                out,
+                "        QUESTION '{}'",
+                escape_single_quote(&q.question)
+            );
+            if let Some(at) = q.verified_at {
+                let _ = writeln!(out, "        VERIFIED_AT {at}");
+            }
+            if q.use_as_onboarding_question {
+                out.push_str("        ONBOARDING_QUESTION TRUE\n");
+            }
+            if let Some(by) = &q.verified_by {
+                let _ = writeln!(out, "        VERIFIED_BY '{}'", escape_single_quote(by));
+            }
+            let _ = writeln!(out, "        SQL '{}'", escape_single_quote(&q.sql));
+            out.push_str("    )");
+            if i + 1 < def.verified_queries.len() {
+                out.push(',');
+            }
+            out.push('\n');
+        }
+        out.push_str(")\n");
     }
 }
 
@@ -323,6 +413,7 @@ fn emit_facts(out: &mut String, def: &SemanticViewDefinition) {
         emit_comment(out, fact.comment.as_deref());
         emit_synonyms(out, &fact.synonyms);
         emit_tags(out, &fact.tags);
+        emit_member_metadata(out, &fact.sample_values, false, None);
         if i + 1 < def.facts.len() {
             out.push(',');
         }
@@ -344,6 +435,12 @@ fn emit_dimensions(out: &mut String, def: &SemanticViewDefinition) {
         emit_comment(out, dim.comment.as_deref());
         emit_synonyms(out, &dim.synonyms);
         emit_tags(out, &dim.tags);
+        emit_member_metadata(
+            out,
+            &dim.sample_values,
+            dim.is_enum,
+            dim.cortex_search_service.as_ref(),
+        );
         if i + 1 < def.dimensions.len() {
             out.push(',');
         }
@@ -606,6 +703,7 @@ pub fn render_create_ddl_qualified(
     if !def.materializations.is_empty() {
         emit_materializations(&mut out, def);
     }
+    emit_view_metadata(&mut out, def);
     // View-level tags follow the last clause, Snowflake's position for them.
     // (The view comment stays in the header, where it always rendered.)
     if !def.tags.is_empty() {

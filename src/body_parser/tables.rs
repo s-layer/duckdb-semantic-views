@@ -216,6 +216,15 @@ fn parse_single_table_entry(entry: &str, entry_offset: usize) -> Result<TableRef
             position: Some(entry_offset),
         });
     }
+    if let Some(clause) = annotations.member_metadata_clause() {
+        return Err(ParseError {
+            message: format!(
+                "{clause} is not valid on a table; it applies to {}.",
+                super::applies_to(clause)
+            ),
+            position: Some(entry_offset),
+        });
+    }
 
     Ok(TableRef {
         alias: alias.to_string(),

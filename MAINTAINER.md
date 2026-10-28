@@ -72,6 +72,7 @@ src/
 │   ├── lexer.rs cursor.rs scan.rs clause_bounds.rs   #   token layer, cursor, clause bounds
 │   ├── tables.rs relationships.rs metrics.rs entries.rs
 │   ├── annotations.rs window.rs materializations.rs
+│   ├── metadata.rs            #   Cortex Analyst clauses: SAMPLE_VALUES, CORTEX SEARCH, MAX_STALENESS, AI_*
 │   ├── cross_refs.rs          #   semantic cross-reference checks shared by the DDL and YAML paths
 │   └── mod.rs
 ├── parse/                     # Text-level planning behind the grammar productions (write side)

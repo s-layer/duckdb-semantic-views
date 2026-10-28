@@ -95,7 +95,7 @@ Concept Mapping
      - :ref:`GET_DDL <ref-get-ddl>`, with either spelling of the object type
    * - Alter a view
      - ``ALTER SEMANTIC VIEW``
-     - :ref:`ALTER SEMANTIC VIEW <ref-alter-semantic-view>` (RENAME TO, SET COMMENT, UNSET COMMENT, SET TAG, UNSET TAG)
+     - :ref:`ALTER SEMANTIC VIEW <ref-alter-semantic-view>` (RENAME TO, SET and UNSET of COMMENT and MAX_STALENESS, SET TAG, UNSET TAG)
    * - Drop a view
      - ``DROP SEMANTIC VIEW``
      - :ref:`DROP SEMANTIC VIEW <ref-drop-semantic-view>`
@@ -580,11 +580,13 @@ Snowflake ``CREATE SEMANTIC VIEW`` features that are commonly asked about, and w
      - **Supported.** ``LABELS = (FILTER)`` is accepted on a fact or dimension entry, between the name and ``AS`` as Snowflake writes it, or after the expression in any order among ``COMMENT`` / ``WITH SYNONYMS``. It survives ``GET_DDL`` (written before ``AS``), YAML export, and ``DESCRIBE`` (as a ``LABELS`` property row valued ``["FILTER"]``), and shows in the ``labels`` column of ``SHOW SEMANTIC DIMENSIONS`` / ``FACTS``, as in Snowflake. Referencing the member bare in the query's ``WHERE`` works via the pre-aggregation predicate above -- a filter is an ordinary boolean member, so the label declares *intent* and drives introspection rather than gating resolution. The ``BOOLEAN`` requirement is enforced by DuckDB's binder at query time, not at ``CREATE``: ``CREATE`` binds the member but does not check its type, so a non-boolean filter raises DuckDB's own type error when queried. Labels other than ``FILTER`` are rejected rather than silently dropped.
    * - Tags -- ``[WITH] TAG (<tag_name> = '<value>', ...)`` on the view, a logical table, a fact, a dimension or a metric
      - **Supported**, with Snowflake's placement and syntax. Tags are stored with the view and shown as a ``TAGS`` row (a JSON object) in ``DESCRIBE``; they survive ``GET_DDL`` and YAML export, and ``SHOW`` commands omit them, as Snowflake's do. ``ALTER SEMANTIC VIEW ... SET TAG`` / ``UNSET TAG`` change the view's own tags, at view level only, as in Snowflake. Snowflake requires each tag to exist as a ``CREATE TAG`` object; DuckDB has no tag objects, so the name (up to ``database.schema.tag``) is stored as written. Values are limited to 256 characters, as in Snowflake. See :ref:`Tags <ref-create-tags>`.
+   * - Cortex Analyst metadata -- ``SAMPLE_VALUES`` and ``WITH CORTEX SEARCH SERVICE`` on members, ``IS_ENUM`` on dimensions, and ``MAX_STALENESS``, ``AI_SQL_GENERATION``, ``AI_QUESTION_CATEGORIZATION``, ``AI_VERIFIED_QUERIES`` and ``COPY GRANTS`` on the view
+     - **Accepted and stored**, with Snowflake's syntax, so Snowflake DDL pastes as written. None of it changes a query: there is no Cortex Analyst to read it, no search service to call, and no automatic refresh for ``MAX_STALENESS`` to bound. The clauses show in ``DESCRIBE`` with Snowflake's ``CUSTOM_INSTRUCTIONS`` and ``AI_VERIFIED_QUERY`` rows and survive ``GET_DDL`` and YAML export. ``MAX_STALENESS`` takes whole seconds, as Snowflake's ``CREATE`` reference writes it, and also the ``'1 hour'`` form its materializations guide uses; ``ALTER ... SET`` / ``UNSET MAX_STALENESS`` work. ``COPY GRANTS`` is accepted and ignored, as DuckDB has no grants on these views. Snowflake's ``GET_DDL`` can write sample values set outside the DDL as a trailing ``WITH EXTENSION (CA = '<json>')`` clause; that clause is not accepted. See :ref:`Cortex Analyst metadata <ref-create-cortex-metadata>`.
    * - Column-level security
      - Out of scope; DuckDB handles access control
    * - ``ASOF`` / temporal relationships
      - Not planned; standard equi-joins cover most use cases
-   * - ``CREATE OR ALTER``, ``LABELS`` values other than ``FILTER``, ``MAX_STALENESS``, and the ``AI_*`` / ``COPILOT`` clauses
+   * - ``CREATE OR ALTER``, ``LABELS`` values other than ``FILTER``, and the ``COPILOT`` clauses
      - Not planned; these are Snowflake-catalog or Cortex-specific and have no DuckDB equivalent
 
 
@@ -596,9 +598,7 @@ A Note on Snowflake's YAML Spec
 Snowflake's `YAML-based semantic view definition <https://docs.snowflake.com/en/user-guide/views-semantic/semantic-view-yaml-spec>`_ (``CREATE SEMANTIC VIEW FROM YAML``) is a separate interface designed for Cortex Analyst, Snowflake's AI SQL generation layer. The YAML spec includes concepts that do not exist in the SQL DDL:
 
 - ``time_dimensions`` with granularity controls (the SQL DDL uses regular dimensions with ``date_trunc()``)
-- ``custom_instructions`` for AI prompt tuning
-- ``sample_values`` for AI context
 
-DuckDB Semantic Views supports YAML definition import (``FROM YAML``) and export (:ref:`READ_YAML_FROM_SEMANTIC_VIEW() <ref-read-yaml>`), but these use the extension's own YAML schema -- not Snowflake's Cortex Analyst YAML spec. The DuckDB YAML format is a serialization of the same model used by the SQL DDL (tables, relationships, facts, dimensions, metrics, materializations). It is designed for version control, migration, and sharing -- not for AI prompt tuning. Comparisons against Snowflake YAML-spec-only features remain not applicable.
+DuckDB Semantic Views supports YAML definition import (``FROM YAML``) and export (:ref:`READ_YAML_FROM_SEMANTIC_VIEW() <ref-read-yaml>`), but these use the extension's own YAML schema -- not Snowflake's Cortex Analyst YAML spec. Where the SQL DDL carries Cortex Analyst metadata, the YAML uses Snowflake's field names for it (``sample_values``, ``is_enum``, ``cortex_search_service``, ``max_staleness``, ``module_custom_instructions``, ``verified_queries``); see :ref:`ref-yaml-format`. The DuckDB YAML format is a serialization of the same model used by the SQL DDL (tables, relationships, facts, dimensions, metrics, materializations). It is designed for version control, migration, and sharing -- not for AI prompt tuning. Comparisons against Snowflake YAML-spec-only features remain not applicable.
 
 See :ref:`howto-yaml-definitions` for the DuckDB YAML workflow.

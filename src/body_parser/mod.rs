@@ -10,6 +10,7 @@ mod cursor;
 mod entries;
 mod lexer;
 mod materializations;
+mod metadata;
 mod metrics;
 mod relationships;
 mod scan;
@@ -65,6 +66,11 @@ pub(super) struct ParsedQualifiedEntry {
     /// `LABELS = (FILTER)` — the member is a named filter.
     pub(super) is_filter: bool,
     pub(super) access: AccessModifier,
+    pub(super) sample_values: Vec<String>,
+    /// `IS_ENUM`; FACTS refuses it.
+    pub(super) is_enum: bool,
+    /// `WITH CORTEX SEARCH SERVICE`; FACTS refuses it.
+    pub(super) cortex_search_service: Option<crate::model::CortexSearchService>,
 }
 
 /// Parsed METRICS entry (R-4: named fields, was a 9-tuple with `// tuple
@@ -102,6 +108,12 @@ pub struct KeywordBody {
     /// A trailing view-level `[WITH] TAG (...)` after the last clause
     /// (Snowflake's position for the view's tags). Empty when absent.
     pub view_tags: Vec<crate::model::Tag>,
+    /// A trailing `MAX_STALENESS = ...`.
+    pub max_staleness: Option<crate::model::MaxStaleness>,
+    /// Trailing `AI_SQL_GENERATION '...'` and `AI_QUESTION_CATEGORIZATION '...'`.
+    pub custom_instructions: crate::model::CustomInstructions,
+    /// A trailing `AI_VERIFIED_QUERIES (...)`. Empty when absent.
+    pub verified_queries: Vec<crate::model::VerifiedQuery>,
 }
 
 impl KeywordBody {
@@ -119,6 +131,9 @@ impl KeywordBody {
             materializations: self.materializations,
             comment: self.view_comment,
             tags: self.view_tags,
+            max_staleness: self.max_staleness,
+            module_custom_instructions: self.custom_instructions,
+            verified_queries: self.verified_queries,
             ..Default::default()
         }
     }
@@ -157,8 +172,7 @@ pub fn parse_keyword_body(text: &str, base_offset: usize) -> Result<KeywordBody,
     // F-6 (code-review 2026-07-16): peel an optional trailing view-level
     // `COMMENT = '...'` (Snowflake places it after the last clause) before the
     // clause scan, so the COMMENT keyword is not read as an unknown clause.
-    let (after_as, view_comment, view_tags) =
-        split_trailing_view_annotations(after_as, after_as_offset)?;
+    let (after_as, trailing) = split_trailing_view_annotations(after_as, after_as_offset)?;
 
     let bounds = find_clause_bounds(after_as, after_as_offset)?;
 
@@ -235,6 +249,7 @@ pub fn parse_keyword_body(text: &str, base_offset: usize) -> Result<KeywordBody,
             tags: e.tags,
             is_filter: e.is_filter,
             access: e.access,
+            sample_values: e.sample_values,
         })
         .collect();
 
@@ -251,6 +266,9 @@ pub fn parse_keyword_body(text: &str, base_offset: usize) -> Result<KeywordBody,
             synonyms: e.synonyms,
             tags: e.tags,
             is_filter: e.is_filter,
+            sample_values: e.sample_values,
+            is_enum: e.is_enum,
+            cortex_search_service: e.cortex_search_service,
         })
         .collect();
 
@@ -294,8 +312,14 @@ pub fn parse_keyword_body(text: &str, base_offset: usize) -> Result<KeywordBody,
         dimensions,
         metrics,
         materializations,
-        view_comment,
-        view_tags,
+        view_comment: trailing.comment,
+        view_tags: trailing.tags,
+        max_staleness: trailing.view.max_staleness,
+        custom_instructions: crate::model::CustomInstructions {
+            sql_generation: trailing.view.ai_sql_generation,
+            question_categorization: trailing.view.ai_question_categorization,
+        },
+        verified_queries: trailing.view.verified_queries,
     })
 }
 
@@ -312,7 +336,9 @@ pub(crate) fn starts_with_word(text: &str, word: &str) -> bool {
 }
 
 /// Peel the optional trailing view-level annotations off the clause region:
-/// `COMMENT = '...'` and `[WITH] TAG (...)`, in either order.
+/// `COMMENT = '...'`, `[WITH] TAG (...)`, `MAX_STALENESS`, `AI_SQL_GENERATION`,
+/// `AI_QUESTION_CATEGORIZATION`, `AI_VERIFIED_QUERIES` and `COPY GRANTS`, in
+/// any order.
 ///
 /// Snowflake places both AFTER the last clause
 /// (`... METRICS (...) COMMENT = '...' WITH TAG (...)`), whereas this parser
@@ -320,25 +346,35 @@ pub(crate) fn starts_with_word(text: &str, word: &str) -> bool {
 /// peeling them here the trailing keyword is read as an unknown clause (F-6,
 /// code-review 2026-07-16).
 ///
-/// The region runs from the first depth-0 `COMMENT`, `WITH` or `TAG` keyword to
+/// The region runs from the first depth-0 keyword that opens one of them to
 /// the end of `after_as` — one inside a clause's `(...)` sits at depth > 0 and
-/// is inert, and no clause keyword is one of the three. Returns the clause
-/// region with the annotations sliced off, plus the parsed comment and tags.
-/// `WITH SYNONYMS` and `LABELS` are member annotations and are rejected here.
+/// is inert, and no clause keyword is one of them. Returns the clause region
+/// with the annotations sliced off, plus the parsed annotations. `WITH
+/// SYNONYMS`, `LABELS`, `SAMPLE_VALUES`, `IS_ENUM` and `WITH CORTEX SEARCH
+/// SERVICE` are member annotations and are rejected here.
 fn split_trailing_view_annotations(
     after_as: &str,
     base_offset: usize,
-) -> Result<(&str, Option<String>, Vec<crate::model::Tag>), ParseError> {
+) -> Result<(&str, annotations::ParsedAnnotations), ParseError> {
     let cur = cursor::Cursor::new(after_as, base_offset);
     let Some(first_tok) = cur
-        .find_all_kw_depth0(&["COMMENT", "WITH", "TAG"])
+        .find_all_kw_depth0(&[
+            "COMMENT",
+            "WITH",
+            "TAG",
+            "MAX_STALENESS",
+            "AI_SQL_GENERATION",
+            "AI_QUESTION_CATEGORIZATION",
+            "AI_VERIFIED_QUERIES",
+            "COPY",
+        ])
         .into_iter()
         .next()
     else {
-        return Ok((after_as, None, Vec::new()));
+        return Ok((after_as, annotations::ParsedAnnotations::default()));
     };
     let trailing = &after_as[first_tok.start..];
-    let (leftover, ann) = annotations::parse_leading_annotations(trailing, cur.abs_of(trailing))?;
+    let (leftover, ann) = annotations::parse_view_annotations(trailing, cur.abs_of(trailing))?;
     // `trailing` begins at an annotation keyword, so the "expression" prefix the
     // annotation parser peels off must be empty.
     if !leftover.trim().is_empty() {
@@ -365,7 +401,25 @@ fn split_trailing_view_annotations(
             position: Some(base_offset + first_tok.start),
         });
     }
-    Ok((&after_as[..first_tok.start], ann.comment, ann.tags))
+    if let Some(clause) = ann.member_metadata_clause() {
+        return Err(ParseError {
+            message: format!(
+                "{clause} is not valid at the view level; it applies to {}.",
+                applies_to(clause)
+            ),
+            position: Some(base_offset + first_tok.start),
+        });
+    }
+    Ok((&after_as[..first_tok.start], ann))
+}
+
+/// The objects a member-only metadata clause applies to, for its error.
+pub(super) fn applies_to(clause: &str) -> &'static str {
+    if clause == "SAMPLE_VALUES" {
+        "facts and dimensions"
+    } else {
+        "dimensions"
+    }
 }
 
 #[cfg(test)]
@@ -1757,7 +1811,8 @@ mod tests {
         // error, not junk.
         let err = parse_trailing_annotations("x COMMENT = 'a' WITH FOO", 0).unwrap_err();
         assert!(
-            err.message.contains("Expected SYNONYMS or TAG after WITH"),
+            err.message
+                .contains("Expected SYNONYMS, TAG or CORTEX SEARCH SERVICE after WITH"),
             "got: {}",
             err.message
         );

@@ -52,6 +52,9 @@ fn qualified_ref_def() -> SemanticViewDefinition {
         temp_tables: vec![],
         comment: None,
         tags: Vec::new(),
+        max_staleness: None,
+        module_custom_instructions: Default::default(),
+        verified_queries: Vec::new(),
     }
 }
 
@@ -131,6 +134,9 @@ fn test_expand_multiple_qualified_refs_different_tables() {
         temp_tables: vec![],
         comment: None,
         tags: Vec::new(),
+        max_staleness: None,
+        module_custom_instructions: Default::default(),
+        verified_queries: Vec::new(),
     };
     let req = QueryRequest {
         where_clause: None,

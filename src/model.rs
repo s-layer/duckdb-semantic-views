@@ -197,6 +197,223 @@ pub fn tags_json(tags: &[Tag]) -> String {
     format!("{{{}}}", entries.join(","))
 }
 
+/// The Cortex Search Service a dimension names, Snowflake's
+/// `WITH CORTEX SEARCH SERVICE <name> [USING <column>]`. Metadata only: no
+/// service needs to exist.
+///
+/// The serde shape is Snowflake's YAML spec: `service`, then the optional
+/// `literal_column`, `database` and `schema`. Each name part is stored unquoted,
+/// as written, like a [`TagName`] part, and DDL writes it bare when it re-reads as
+/// itself and double-quoted otherwise.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "arbitrary", derive(arbitrary::Arbitrary))]
+pub struct CortexSearchService {
+    pub service: String,
+    /// The `USING` column of the service.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub literal_column: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub database: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub schema: Option<String>,
+}
+
+impl CortexSearchService {
+    /// The service name's parts, outermost first.
+    #[must_use]
+    pub fn name_parts(&self) -> Vec<&str> {
+        self.database
+            .iter()
+            .chain(self.schema.iter())
+            .chain(std::iter::once(&self.service))
+            .map(String::as_str)
+            .collect()
+    }
+
+    /// The service name as DDL writes it: dotted, each part bare or quoted.
+    #[must_use]
+    pub fn render_name(&self) -> String {
+        self.name_parts()
+            .into_iter()
+            .map(render_tag_name_part)
+            .collect::<Vec<_>>()
+            .join(".")
+    }
+
+    /// The `USING` column as DDL writes it, if any.
+    #[must_use]
+    pub fn render_column(&self) -> Option<String> {
+        self.literal_column.as_deref().map(render_tag_name_part)
+    }
+}
+
+/// Why a Cortex Search Service reference cannot be written in DDL: an empty
+/// name part or column, or a database with no schema.
+#[must_use]
+pub fn cortex_search_service_error(c: &CortexSearchService) -> Option<String> {
+    if c.name_parts().iter().any(|p| p.is_empty()) {
+        return Some("a Cortex Search Service name part is empty".to_string());
+    }
+    if c.database.is_some() && c.schema.is_none() {
+        return Some(format!(
+            "Cortex Search Service '{}' names a database but no schema; a qualified name is \
+             'schema.service' or 'database.schema.service'",
+            c.service
+        ));
+    }
+    if c.literal_column.as_deref() == Some("") {
+        return Some("the Cortex Search Service USING column is empty".to_string());
+    }
+    None
+}
+
+/// A view's `MAX_STALENESS`: integer seconds, as Snowflake's CREATE reference
+/// writes it, or a quoted interval such as `'1 hour'`, as its materializations
+/// guide does. Metadata only: this extension has no automatic refresh to bound.
+///
+/// Untagged in serde, so YAML writes `max_staleness: 120` or
+/// `max_staleness: '1 hour'`, Snowflake's YAML shape for the first.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "arbitrary", derive(arbitrary::Arbitrary))]
+#[serde(untagged)]
+pub enum MaxStaleness {
+    Seconds(u64),
+    Interval(String),
+}
+
+/// Snowflake's minimum `MAX_STALENESS`, in seconds.
+pub const MAX_STALENESS_MIN_SECONDS: u64 = 120;
+
+impl MaxStaleness {
+    /// The value as `DESCRIBE` shows it: the seconds, or the interval's text.
+    #[must_use]
+    pub fn display(&self) -> String {
+        match self {
+            Self::Seconds(s) => s.to_string(),
+            Self::Interval(i) => i.clone(),
+        }
+    }
+
+    /// The value in seconds, or why it is not a staleness: an interval that is
+    /// not `<number> <unit>` with a unit of seconds, minutes, hours or days, or a
+    /// value under [`MAX_STALENESS_MIN_SECONDS`].
+    pub fn seconds(&self) -> Result<u64, String> {
+        let secs = match self {
+            Self::Seconds(s) => *s,
+            Self::Interval(text) => interval_seconds(text).ok_or_else(|| {
+                format!(
+                    "MAX_STALENESS '{text}' is not an interval; write '<number> \
+                     {{seconds | minutes | hours | days}}', or a number of seconds"
+                )
+            })?,
+        };
+        if secs < MAX_STALENESS_MIN_SECONDS {
+            return Err(format!(
+                "MAX_STALENESS is {secs} seconds; the minimum is \
+                 {MAX_STALENESS_MIN_SECONDS} seconds"
+            ));
+        }
+        Ok(secs)
+    }
+}
+
+/// `<number> <unit>`, the unit singular or plural, any case.
+fn interval_seconds(text: &str) -> Option<u64> {
+    let mut words = text.split_ascii_whitespace();
+    let (number, unit, rest) = (words.next()?, words.next()?, words.next());
+    if rest.is_some() || !number.bytes().all(|b| b.is_ascii_digit()) {
+        return None;
+    }
+    let number: u64 = number.parse().ok()?;
+    let unit = unit.to_ascii_lowercase();
+    let per = match unit.strip_suffix('s').unwrap_or(&unit) {
+        "second" => 1,
+        "minute" => 60,
+        "hour" => 3600,
+        "day" => 86_400,
+        _ => return None,
+    };
+    number.checked_mul(per)
+}
+
+/// Cortex Analyst's instructions for a view: Snowflake's `AI_SQL_GENERATION`
+/// and `AI_QUESTION_CATEGORIZATION` clauses, shown by `DESCRIBE` as
+/// `CUSTOM_INSTRUCTIONS` rows. The serde shape is Snowflake's YAML
+/// `module_custom_instructions`.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "arbitrary", derive(arbitrary::Arbitrary))]
+pub struct CustomInstructions {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sql_generation: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub question_categorization: Option<String>,
+}
+
+impl CustomInstructions {
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.sql_generation.is_none() && self.question_categorization.is_none()
+    }
+}
+
+/// One entry of Snowflake's `AI_VERIFIED_QUERIES`: a question and the SQL that
+/// answers it, for Cortex Analyst. Metadata only: the SQL is stored, not run or
+/// checked. The serde shape is Snowflake's YAML `verified_queries` entry.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "arbitrary", derive(arbitrary::Arbitrary))]
+pub struct VerifiedQuery {
+    /// Stored as written, quotes kept, like a member name.
+    pub name: String,
+    pub question: String,
+    /// When the query was verified, in seconds since the Unix epoch.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub verified_at: Option<u64>,
+    /// Who verified it, as written: `'(<purpose> = <contact>)'`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub verified_by: Option<String>,
+    /// `ONBOARDING_QUESTION TRUE`. Snowflake's default is `FALSE`.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub use_as_onboarding_question: bool,
+    pub sql: String,
+}
+
+/// The first verified query, by index, whose name repeats an earlier one,
+/// matched as identifiers are: case-insensitively, quoted or not
+/// ([`crate::ident::ident_matches`]).
+#[must_use]
+pub fn duplicate_verified_query(queries: &[VerifiedQuery]) -> Option<usize> {
+    queries.iter().enumerate().position(|(i, q)| {
+        queries[..i]
+            .iter()
+            .any(|p| crate::ident::ident_matches(&p.name, &q.name))
+    })
+}
+
+/// Why `name` cannot name a verified query, or `None`. One rule for the DDL
+/// parser and YAML, so the name `GET_DDL` writes (as stored) always reads back:
+/// one bare identifier other than `AS`, or one double-quoted identifier. As in
+/// Snowflake, the name is never qualified.
+#[must_use]
+pub fn verified_query_name_error(name: &str) -> Option<String> {
+    if name.starts_with('"') {
+        return match crate::ident::parse_qualified_identifier(name) {
+            Ok(parts) if parts.len() == 1 && name.ends_with('"') => None,
+            _ => Some(format!("'{name}' is not one quoted identifier")),
+        };
+    }
+    let bytes = name.as_bytes();
+    if bytes.is_empty()
+        || bytes[0].is_ascii_digit()
+        || !bytes.iter().all(|&b| crate::util::is_ident_continue(b))
+    {
+        return Some(format!("'{name}' is not one identifier; double-quote it"));
+    }
+    if name.eq_ignore_ascii_case("AS") {
+        return Some("'AS' must be double-quoted to be a name".to_string());
+    }
+    None
+}
+
 /// A named SQL column expression used as a dimension.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[cfg_attr(feature = "arbitrary", derive(arbitrary::Arbitrary))]
@@ -243,6 +460,17 @@ pub struct Dimension {
     /// Old stored JSON without this field deserializes to `false`.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub is_filter: bool,
+    /// Snowflake's `SAMPLE_VALUES ('a', ...)`: representative values for
+    /// Cortex Analyst, in the order written. Metadata only.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub sample_values: Vec<String>,
+    /// Snowflake's `IS_ENUM`: the sample values are every value the dimension
+    /// takes. Metadata only; nothing checks the data against them.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub is_enum: bool,
+    /// Snowflake's `WITH CORTEX SEARCH SERVICE <name> [USING <column>]`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cortex_search_service: Option<CortexSearchService>,
 }
 
 /// Sort order for NON ADDITIVE BY dimension ordering.
@@ -473,6 +701,10 @@ pub struct Fact {
     /// Old stored JSON without this field deserializes as Public.
     #[serde(default, skip_serializing_if = "AccessModifier::is_default")]
     pub access: AccessModifier,
+    /// Snowflake's `SAMPLE_VALUES ('a', ...)`: representative values for
+    /// Cortex Analyst, in the order written. Metadata only.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub sample_values: Vec<String>,
 }
 
 /// Cardinality of a relationship between two tables.
@@ -650,6 +882,15 @@ pub struct SemanticViewDefinition {
     /// Old stored JSON without this field deserializes to empty Vec.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub tags: Vec<Tag>,
+    /// Snowflake's `MAX_STALENESS`. Metadata only.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_staleness: Option<MaxStaleness>,
+    /// Snowflake's `AI_SQL_GENERATION` and `AI_QUESTION_CATEGORIZATION`.
+    #[serde(default, skip_serializing_if = "CustomInstructions::is_empty")]
+    pub module_custom_instructions: CustomInstructions,
+    /// Snowflake's `AI_VERIFIED_QUERIES`, in the order written.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub verified_queries: Vec<VerifiedQuery>,
 }
 
 impl SemanticViewDefinition {
@@ -993,17 +1234,18 @@ fn member_expr(kind: &str, name: &str, expr: &str) -> Result<(), String> {
     // parser trims, silently storing a different expression than the one given).
     free_expr_common(kind, &format!("'{name}' has an expression"), expr)?;
     // After `AS`, the keyword grammar ends the expression at the first
-    // depth-0 `COMMENT`, `LABELS` or `WITH SYNONYMS` and reads the rest as
+    // depth-0 annotation keyword (`COMMENT`, `LABELS`, `WITH SYNONYMS`, a tag
+    // or Cortex Analyst clause; see `find_annotation_start`) and reads the rest as
     // the entry's annotations, so an expression holding one renders to DDL
     // that no longer plans (fuzz_create_text, CI run 40184213171). Window
     // arguments are not checked: they sit inside `OVER (…)`, below depth 0.
     if let Some(at) = crate::body_parser::find_annotation_start(expr) {
         let mut words = expr[at..]
-            .split(|c: char| !c.is_ascii_alphabetic())
+            .split(|c: char| !c.is_ascii_alphabetic() && c != '_')
             .filter(|w| !w.is_empty());
         let word = words.next().unwrap_or_default();
-        // `WITH` starts annotations only as `WITH SYNONYMS` or `WITH TAG`;
-        // name both words.
+        // `WITH` starts annotations only as `WITH SYNONYMS`, `WITH TAG` or
+        // `WITH CORTEX`; name both words.
         let keyword = if word.eq_ignore_ascii_case("WITH") {
             format!("{word} {}", words.next().unwrap_or_default())
         } else {
@@ -1264,6 +1506,35 @@ fn validate_yaml_tags(def: &SemanticViewDefinition) -> Result<(), String> {
     Ok(())
 }
 
+/// The metadata-only clauses' rules, as their DDL parsers apply them: a Cortex
+/// Search Service name the grammar can write, a `MAX_STALENESS` of at least
+/// [`MAX_STALENESS_MIN_SECONDS`] (an interval written as `<number> <unit>`), and
+/// verified queries with identifier names, none repeated.
+fn validate_yaml_metadata(def: &SemanticViewDefinition) -> Result<(), String> {
+    for d in &def.dimensions {
+        if let Some(ref c) = d.cortex_search_service {
+            if let Some(e) = cortex_search_service_error(c) {
+                return Err(format!("dimension '{}': {e}", d.name));
+            }
+        }
+    }
+    if let Some(ref staleness) = def.max_staleness {
+        staleness.seconds()?;
+    }
+    for q in &def.verified_queries {
+        if let Some(e) = verified_query_name_error(&q.name) {
+            return Err(format!("verified query name '{}' is invalid: {e}", q.name));
+        }
+    }
+    if let Some(i) = duplicate_verified_query(&def.verified_queries) {
+        return Err(format!(
+            "duplicate verified query '{}'",
+            def.verified_queries[i].name
+        ));
+    }
+    Ok(())
+}
+
 /// Reject a definition whose CLAUSE STRUCTURE the DDL grammar could not have
 /// produced, independently of what its identifier slots contain.
 ///
@@ -1325,6 +1596,7 @@ pub fn validate_ddl_representable(def: &SemanticViewDefinition) -> Result<(), St
     validate_yaml_members(def)?;
     validate_yaml_materializations(def)?;
     validate_yaml_tags(def)?;
+    validate_yaml_metadata(def)?;
     // MODEL-1 (code-review 2026-08-08): the semantic cross-reference checks —
     // NON ADDITIVE BY, a window metric's dimensions and inner metric,
     // materialization names and references — lived only in
@@ -1803,6 +2075,9 @@ mod tests {
             ("o.d WITH TAG (a = '1')", "'WITH TAG'"),
             ("o.d TAG (a = '1')", "'TAG'"),
             ("o.d WITH SYNONYMS = ('x')", "'WITH SYNONYMS'"),
+            ("o.d SAMPLE_VALUES ('x')", "'SAMPLE_VALUES'"),
+            ("o.d IS_ENUM", "'IS_ENUM'"),
+            ("o.d WITH CORTEX SEARCH SERVICE s", "'WITH CORTEX'"),
         ] {
             let yaml = format!(
                 "{VALID_TABLES}dimensions:\n  - name: d\n    expr: \"{expr}\"\n    source_table: o\n\
@@ -1839,6 +2114,154 @@ mod tests {
         let def = SemanticViewDefinition::from_json("v", json).unwrap();
         assert!(def.tags.is_empty() && def.dimensions[0].tags.is_empty());
         assert!(!serde_json::to_string(&def).unwrap().contains("tags"));
+    }
+
+    #[test]
+    fn stored_json_without_metadata_clauses_still_loads_and_writes_none_of_their_keys() {
+        let json = r#"{"tables":[{"alias":"o","table":"orders"}],
+            "dimensions":[{"name":"d","expr":"o.d","source_table":"o"}],
+            "facts":[{"name":"f","expr":"o.f","source_table":"o"}],"metrics":[]}"#;
+        let def = SemanticViewDefinition::from_json("v", json).unwrap();
+        assert!(def.max_staleness.is_none() && def.module_custom_instructions.is_empty());
+        assert!(def.verified_queries.is_empty());
+        let d = &def.dimensions[0];
+        assert!(d.sample_values.is_empty() && !d.is_enum && d.cortex_search_service.is_none());
+        assert!(def.facts[0].sample_values.is_empty());
+        let out = serde_json::to_string(&def).unwrap();
+        for key in [
+            "max_staleness",
+            "module_custom_instructions",
+            "verified_queries",
+            "sample_values",
+            "is_enum",
+            "cortex_search_service",
+        ] {
+            assert!(!out.contains(key), "{key} in {out}");
+        }
+    }
+
+    #[test]
+    fn max_staleness_takes_whole_seconds_or_an_interval_of_at_least_120_seconds() {
+        let secs = |m: MaxStaleness| m.seconds();
+        let interval = |t: &str| MaxStaleness::Interval(t.to_string()).seconds();
+        assert_eq!(secs(MaxStaleness::Seconds(120)), Ok(120));
+        assert_eq!(interval("2 minutes"), Ok(120));
+        assert_eq!(interval("1 HOUR"), Ok(3600));
+        assert_eq!(interval("  3\tdays "), Ok(259_200));
+        for t in ["1 second", "1 minute"] {
+            assert!(
+                interval(t)
+                    .unwrap_err()
+                    .contains("the minimum is 120 seconds"),
+                "{t}"
+            );
+        }
+        assert!(secs(MaxStaleness::Seconds(119))
+            .unwrap_err()
+            .contains("MAX_STALENESS is 119 seconds"));
+        for t in [
+            "",
+            "hour",
+            "1",
+            "1 fortnight",
+            "1.5 hours",
+            "-2 hours",
+            "2 hours ago",
+        ] {
+            assert!(
+                interval(t).unwrap_err().contains("is not an interval"),
+                "{t:?}"
+            );
+        }
+        // Overflow is not an interval either, rather than wrapping to a small value.
+        assert!(interval("18446744073709551615 days").is_err());
+        // YAML writes a number as seconds and quoted text as an interval.
+        assert_eq!(
+            serde_json::from_str::<MaxStaleness>("3600").unwrap(),
+            MaxStaleness::Seconds(3600)
+        );
+        assert_eq!(
+            serde_json::from_str::<MaxStaleness>(r#""3600""#).unwrap(),
+            MaxStaleness::Interval("3600".to_string())
+        );
+    }
+
+    #[test]
+    fn yaml_metadata_the_ddl_cannot_write_is_rejected() {
+        let dim = |extra: &str| {
+            format!(
+                "{VALID_TABLES}dimensions:\n  - name: d\n    expr: o.d\n    source_table: o\n{extra}\
+                 metrics:\n  - name: total\n    expr: sum(o.amount)\n    source_table: o\n"
+            )
+        };
+        let view = |extra: &str| format!("{}{extra}", dim(""));
+        for (yaml, needle) in [
+            (
+                dim("    cortex_search_service: {service: s, database: db}\n"),
+                "dimension 'd': Cortex Search Service 's' names a database but no schema",
+            ),
+            (
+                dim("    cortex_search_service: {service: s, schema: ''}\n"),
+                "name part is empty",
+            ),
+            (
+                dim("    cortex_search_service: {service: s, literal_column: ''}\n"),
+                "USING column is empty",
+            ),
+            (view("max_staleness: 60\n"), "the minimum is 120 seconds"),
+            (view("max_staleness: '1 fortnight'\n"), "is not an interval"),
+            (
+                view("verified_queries:\n  - {name: a b, question: q, sql: s}\n"),
+                "verified query name 'a b'",
+            ),
+            (
+                view(
+                    "verified_queries:\n  - {name: q1, question: q, sql: s}\n  \
+                     - {name: Q1, question: q, sql: s}\n",
+                ),
+                "duplicate verified query 'Q1'",
+            ),
+        ] {
+            let e = yaml_err(&yaml);
+            assert!(e.contains(needle), "{yaml}\n=> {e}");
+        }
+        // And the same clauses, well formed, import.
+        let ok = format!(
+            "{}max_staleness: '1 hour'\nverified_queries:\n  - {{name: q1, question: q, sql: s}}\n",
+            dim("    sample_values: [a]\n    is_enum: true\n    \
+                 cortex_search_service: {service: s, schema: sc, database: db}\n")
+        );
+        SemanticViewDefinition::from_yaml_with_size_cap("v", &ok).expect("well-formed metadata");
+    }
+
+    #[test]
+    fn yaml_verified_query_names_get_ddl_could_not_read_back_are_rejected() {
+        for name in ["'a,b'", "'q)'", "as", "db.q", "'(q'"] {
+            let yaml = format!(
+                "{VALID_TABLES}dimensions:\n  - name: d\n    expr: o.d\n    source_table: o\n\
+                 metrics: []\nverified_queries:\n  - {{name: {name}, question: q, sql: s}}\n"
+            );
+            let e = yaml_err(&yaml);
+            assert!(e.contains("verified query name"), "{name}: {e}");
+        }
+        // Quoted, the same names are fine.
+        let yaml = format!(
+            "{VALID_TABLES}dimensions:\n  - name: d\n    expr: o.d\n    source_table: o\n\
+             metrics: []\nverified_queries:\n  - {{name: '\"a,b\"', question: q, sql: s}}\n  \
+             - {{name: '\"AS\"', question: q, sql: s}}\n"
+        );
+        SemanticViewDefinition::from_yaml_with_size_cap("v", &yaml).expect("quoted names import");
+    }
+
+    #[test]
+    fn yaml_verified_query_names_differing_only_by_quotes_are_duplicates() {
+        let yaml = format!(
+            "{VALID_TABLES}dimensions:\n  - name: d\n    expr: o.d\n    source_table: o\n\
+             metrics: []\nverified_queries:\n  - {{name: q, question: q, sql: s}}\n  \
+             - {{name: '\"Q\"', question: q, sql: s}}\n"
+        );
+        let e = yaml_err(&yaml);
+        assert!(e.contains("duplicate verified query"), "{e}");
     }
 
     #[test]
@@ -2523,6 +2946,9 @@ mod tests {
                 temp_tables: vec![],
                 comment: None,
                 tags: Vec::new(),
+                max_staleness: None,
+                module_custom_instructions: Default::default(),
+                verified_queries: Vec::new(),
             };
             let json = serde_json::to_string(&def).unwrap();
             assert!(
@@ -2697,6 +3123,9 @@ mod tests {
                 synonyms: vec![],
                 is_filter: false,
                 tags: Vec::new(),
+                cortex_search_service: None,
+                is_enum: false,
+                sample_values: Vec::new(),
             };
             let json = serde_json::to_string(&dim).unwrap();
             let rt: Dimension = serde_json::from_str(&json).unwrap();
@@ -2926,6 +3355,7 @@ mod tests {
                 is_filter: false,
                 access: AccessModifier::Public,
                 tags: Vec::new(),
+                sample_values: Vec::new(),
             };
             let json = serde_json::to_string(&fact).unwrap();
             let rt: Fact = serde_json::from_str(&json).unwrap();
@@ -3096,6 +3526,9 @@ mod tests {
                 synonyms: vec!["area".to_string(), "territory".to_string()],
                 is_filter: false,
                 tags: Vec::new(),
+                cortex_search_service: None,
+                is_enum: false,
+                sample_values: Vec::new(),
             };
             let json = serde_json::to_string(&dim).unwrap();
             assert!(
@@ -3148,6 +3581,7 @@ mod tests {
                 is_filter: false,
                 access: AccessModifier::Private,
                 tags: Vec::new(),
+                sample_values: Vec::new(),
             };
             let json = serde_json::to_string(&fact).unwrap();
             assert!(

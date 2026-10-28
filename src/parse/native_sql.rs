@@ -149,7 +149,7 @@ pub(crate) fn lower_action(action: RewriteAction) -> Result<String, ParseError> 
         // connection. Names carried raw; `SqlLit::escape` at the boundary
         // produces the escaped literal the emission helpers embed (R-1: the
         // escaped-vs-raw distinction is type-enforced, not by convention).
-        // The comment is passed RAW — `rewrite_alter_comment` needs it
+        // The comment is passed RAW — `rewrite_alter_patch` needs it
         // un-escaped to build the JSON patch and escapes the patch itself.
         RewriteAction::Drop { name, if_exists } => rewrite_drop(&name, if_exists)?,
         RewriteAction::AlterRename {
@@ -161,9 +161,39 @@ pub(crate) fn lower_action(action: RewriteAction) -> Result<String, ParseError> 
             name,
             comment,
             if_exists,
-        } => rewrite_alter_comment(&name, Some(&comment), if_exists)?,
-        RewriteAction::AlterUnsetComment { name, if_exists } => {
-            rewrite_alter_comment(&name, None, if_exists)?
+        } => rewrite_alter_patch(
+            &name,
+            &serde_json::json!({ "comment": comment }),
+            "comment set",
+            if_exists,
+        )?,
+        RewriteAction::AlterSetMaxStaleness {
+            name,
+            value,
+            if_exists,
+        } => rewrite_alter_patch(
+            &name,
+            &serde_json::json!({ "max_staleness": value }),
+            "max_staleness set",
+            if_exists,
+        )?,
+        RewriteAction::AlterUnset {
+            name,
+            properties,
+            if_exists,
+        } => {
+            // RFC-7396: a `null` member deletes the key.
+            let patch: serde_json::Map<String, serde_json::Value> = properties
+                .iter()
+                .map(|p| (p.key().to_string(), serde_json::Value::Null))
+                .collect();
+            let keys: Vec<&str> = properties.iter().map(|p| p.key()).collect();
+            rewrite_alter_patch(
+                &name,
+                &serde_json::Value::Object(patch),
+                &format!("{} unset", keys.join(", ")),
+                if_exists,
+            )?
         }
         RewriteAction::AlterSetTags {
             name,
@@ -482,11 +512,11 @@ fn emit_native_create_from_yaml_file(
 // of a naming convention (R-1). The old free `escape_sql_arg` /
 // `unescape_sql_arg` pair was removed: names are escaped exactly once at the
 // `lower_action` boundary via `SqlLit::escape`, and the comment now
-// flows RAW to `rewrite_alter_comment` (no escape→unescape round-trip).
+// flows RAW to `rewrite_alter_patch` (no escape→unescape round-trip).
 
 #[cfg(feature = "extension")]
 // Infallible today, but kept `Result`-returning for symmetry with the fallible
-// `rewrite_*` siblings (e.g. `rewrite_alter_comment`) dispatched through the
+// `rewrite_*` siblings (e.g. `rewrite_alter_patch`) dispatched through the
 // same `?`-chained match in `lower_action`; diverging one signature
 // would fragment that dispatch.
 #[allow(clippy::unnecessary_wraps)]
@@ -641,10 +671,14 @@ fn rewrite_alter_rename(
     ))
 }
 
+/// `ALTER SEMANTIC VIEW ... SET` / `UNSET` of view-level properties: one UPDATE
+/// merging `patch` into the stored definition (RFC-7396, so a `null` member
+/// deletes the key). `status_label` is the statement's status column.
 #[cfg(feature = "extension")]
-fn rewrite_alter_comment(
+fn rewrite_alter_patch(
     view: &ViewRef,
-    new_comment_raw: Option<&str>,
+    patch: &serde_json::Value,
+    status_label: &str,
     if_exists: bool,
 ) -> Result<String, ParseError> {
     let (name_escaped, target) = escaped_parts(view);
@@ -667,32 +701,16 @@ fn rewrite_alter_comment(
     //   SET COMMENT 'new text' -> `'{"comment":"new text"}'::JSON`
     //   UNSET COMMENT          -> `'{"comment":null}'::JSON`  (RFC-7396 null-as-delete)
     //
-    // For SET, we use serde_json::to_string on a one-key object so internal
-    // `"` and `\` characters in the user's comment are JSON-escaped
-    // correctly; then `SqlLit::escape` doubles any embedded single quotes for
-    // the outer single-quoted SQL literal. Belt-and-braces escape: JSON
-    // first (handles `"`/`\`/control chars), SQL second (handles `'`).
-    let (patch_json_for_sql, status_label) =
-        match new_comment_raw {
-            Some(comment) => {
-                // The comment arrives RAW; serde_json handles `"`/`\`/control
-                // chars, then `SqlLit::escape` doubles any `'` for the outer
-                // single-quoted SQL literal (belt-and-braces: JSON then SQL).
-                let patch = serde_json::to_string(&serde_json::json!({"comment": comment}))
-                    .map_err(|e| ParseError {
-                        message: format!("failed to build comment patch: {e}"),
-                        position: None,
-                    })?;
-                (SqlLit::escape(&patch), "comment set")
-            }
-            None => {
-                // UNSET COMMENT: constant patch (no single quotes, so the
-                // escape is a no-op — wrapped in SqlLit for type parity with
-                // the SET arm). The Wave 0 spike empirically confirms DuckDB
-                // v1.5.2 implements RFC-7396 null-as-delete.
-                (SqlLit::escape(r#"{"comment":null}"#), "comment unset")
-            }
-        };
+    // The values arrive RAW: serde_json escapes `"`, `\` and control
+    // characters, then `SqlLit::escape` doubles any embedded single quote for
+    // the outer single-quoted SQL literal. Belt-and-braces escape: JSON first,
+    // SQL second.
+    let patch = serde_json::to_string(patch).map_err(|e| ParseError {
+        message: format!("failed to build the ALTER patch: {e}"),
+        position: None,
+    })?;
+    let patch_json_for_sql = SqlLit::escape(&patch);
+    let status_label = SqlLit::escape(status_label);
 
     if if_exists {
         // IF EXISTS preserves its silent contract on race: pre-check saw the
@@ -742,7 +760,7 @@ fn rewrite_alter_comment(
 
 /// `ALTER SEMANTIC VIEW ... SET TAG` (`set` holds the tags) or `UNSET TAG`
 /// (`unset` holds the names): one UPDATE of the stored definition's view-level
-/// `tags`, like [`rewrite_alter_comment`] in every other respect.
+/// `tags`, like [`rewrite_alter_patch`] in every other respect.
 ///
 /// The new list is the stored one without any tag named in the statement, then
 /// the statement's tags (none for UNSET). Names compare case-insensitively,
@@ -816,7 +834,7 @@ fn rewrite_alter_tags(
     let schema_expr = resolved_schema_expr(&target, &name_escaped, &suggested_name(view));
     let row = row_predicate(&name_escaped, &schema_expr);
     let table_guard = definitions_table_guard_select(&display);
-    // As in `rewrite_alter_comment`: IF EXISTS updates no row on a missing
+    // As in `rewrite_alter_patch`: IF EXISTS updates no row on a missing
     // view, and the plain form is refused by the existence guard first.
     let guard = if if_exists {
         String::new()
