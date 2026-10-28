@@ -200,12 +200,12 @@ customers = show(
 )
 assert customers == [("East", 2, 3), ("West", 1, 2)]
 
-# A FACTS expression is a row-level value, one row per order.
+# A FACTS expression is a row-level value, one row per order. A dimension
+# listed in FACTS is read row by row beside it.
 facts = show(
-    "FACTS amount, round(amount * 0.9, 2) AS after_discount:",
+    "FACTS channel, amount, round(amount * 0.9, 2) AS after_discount:",
     """SELECT * FROM SEMANTIC_VIEW(shop
-           DIMENSIONS channel
-           FACTS amount, round(amount * 0.9, 2) AS after_discount
+           FACTS channel, amount, round(amount * 0.9, 2) AS after_discount
        ) ORDER BY amount""",
 )
 assert [(r[0], r[1], float(r[2])) for r in facts] == [
