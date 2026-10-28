@@ -464,6 +464,15 @@ CREATE SEMANTIC VIEW mc_bad TABLES (o AS mc_orders PRIMARY KEY (id))
 ----
 Verified query 'q' needs SQL '...'.
 
+# Snowflake GET_DDL's Cortex Analyst export is refused by name, not as a
+# malformed WITH clause (TECH-DEBT accepted decision 13).
+statement error
+CREATE SEMANTIC VIEW mc_bad TABLES (o AS mc_orders PRIMARY KEY (id))
+  DIMENSIONS (o.region AS o.region)
+  with extension (CA='{"tables":[{"name":"O","dimensions":[{"name":"REGION","sample_values":["East"]}]}]}')
+----
+WITH EXTENSION is not supported
+
 statement ok
 DROP SEMANTIC VIEW mc_v
 

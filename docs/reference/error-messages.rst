@@ -480,6 +480,18 @@ Cortex Analyst clause in the wrong place
 **Fix:** Move the clause to the kind of object it applies to, or remove it.
 
 
+WITH EXTENSION
+--------------
+
+.. code-block:: text
+
+   WITH EXTENSION is not supported: it is Snowflake's undocumented Cortex Analyst export from GET_DDL. ...
+
+**Cause:** The DDL ends with ``WITH EXTENSION (CA = '<json>')``. Snowflake's ``GET_DDL`` writes this clause for Cortex Analyst metadata that was set outside the DDL, such as sample values entered in Snowsight. It is not part of Snowflake's ``CREATE SEMANTIC VIEW`` syntax, and its JSON format is not documented, so this extension does not read it.
+
+**Fix:** Remove the clause. To keep the sample values, write them as ``SAMPLE_VALUES ('...')`` on their dimensions and facts (see :ref:`Cortex Analyst metadata <ref-create-cortex-metadata>`).
+
+
 MAX_STALENESS out of range
 --------------------------
 

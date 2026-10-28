@@ -85,6 +85,12 @@ These are intentional trade-offs made during v0.1.0 development. Each was the be
 - **Decision (historical):** The v0.5-era DDL parser hook pipeline (`sv_ddl_bind`/`sv_ddl_execute` executing on `sv_ddl_conn`) read results via `duckdb_value_varchar` into `vector<vector<string>>` and declared all output columns as VARCHAR.
 - **Superseded:** That pipeline no longer exists — `sv_ddl_bind`, `sv_ddl_execute`, and `sv_ddl_conn` have zero occurrences in `shim.cpp`. Since Phase 65 the read-side table functions (DESCRIBE / SHOW / GET_DDL / READ_YAML) are real C++ Catalog-API table functions whose Rust dispatchers assemble rows and serialize them over the AR-3 self-describing wire format (`src/ddl/read_ffi.rs`). DESCRIBE still declares a deliberate 5-column VARCHAR schema (`object_kind, object_name, parent_entity, property, property_value`) — that is the intended Snowflake-shaped property table, not the retired forwarding pipeline. No further action.
 
+### 13. ✅ Snowflake GET_DDL's `WITH EXTENSION (CA = '<json>')` is not accepted
+
+- **Origin:** Phase 6.2 (Cortex Analyst metadata clauses, #320), decided by Anentropic 2026-10-28
+- **Decision:** Snowflake's `GET_DDL` can end a semantic view's DDL with `WITH EXTENSION (CA = '<json>')`, carrying Cortex Analyst metadata set outside the DDL (for example sample values entered in Snowsight). The clause is not in Snowflake's `CREATE SEMANTIC VIEW` reference; its only documentation is one example on the semantic-view best-practices page, and the JSON's schema (and whether keys other than `CA` exist) is undocumented. Reading it would mean reverse-engineering that format, while everything it is known to carry has first-class DDL (`SAMPLE_VALUES`, `IS_ENUM`, `WITH CORTEX SEARCH SERVICE`, the view-level `AI_*` clauses), which this extension accepts and stores. A pasted `GET_DDL` that ends with the clause is refused with an error naming it (`annotations.rs`, test `with_extension_is_refused_by_name`, and `metadata_clauses.test`).
+- **Action:** None planned. Revisit only if Snowflake documents the clause or users report pasting it in practice.
+
 ## Deferred Requirements
 
 Requirements originally deferred from v0.1.0. Updated to reflect status as of v0.5.0.

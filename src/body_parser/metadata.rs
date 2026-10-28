@@ -852,8 +852,6 @@ mod tests {
         }
     }
 
-    /// GET_DDL writes every clause back in a form the parser reads to the same
-    /// definition.
     #[test]
     fn a_verified_query_name_is_one_identifier() {
         let e = err("DIMENSIONS (o.d AS o.d) AI_VERIFIED_QUERIES (db.q AS (QUESTION 'x' SQL 'y'))");
@@ -911,6 +909,25 @@ mod tests {
         }
     }
 
+    /// Snowflake's GET_DDL can end with `WITH EXTENSION (CA = '<json>')`, an
+    /// undocumented Cortex Analyst export that is deliberately not accepted
+    /// (TECH-DEBT accepted decision 13). A paste names it rather than reporting
+    /// a malformed `WITH` clause.
+    #[test]
+    fn with_extension_is_refused_by_name() {
+        let misread = [
+            "DIMENSIONS (o.d AS o.d) with extension (CA='{\"tables\":[]}')",
+            "DIMENSIONS (o.d AS o.d) COMMENT = 'c' WITH EXTENSION (CA = '{}')",
+        ]
+        .into_iter()
+        .map(|body| (body, err(body)))
+        .filter(|(_, e)| !e.contains("WITH EXTENSION is not supported"))
+        .collect::<Vec<_>>();
+        assert!(misread.is_empty(), "{misread:#?}");
+    }
+
+    /// GET_DDL writes every clause back in a form the parser reads to the same
+    /// definition.
     #[test]
     fn rendered_clauses_parse_back_unchanged() {
         let kb = parse(
