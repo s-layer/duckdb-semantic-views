@@ -8,7 +8,9 @@
 //! SYNONYMS region continue to use their shared helpers (the annotation tail is
 //! handed the post-`AS` source verbatim, as TABLES does).
 
-use super::annotations::{parse_leading_access_modifier, parse_trailing_annotations};
+use super::annotations::{
+    parse_leading_access_modifier, parse_leading_annotations, parse_trailing_annotations,
+};
 use super::cursor::Cursor;
 use super::scan::unterminated_quote_error;
 use super::{split_at_depth0_commas, ParsedQualifiedEntry};
@@ -45,7 +47,10 @@ pub(crate) fn parse_qualified_entries(
     Ok(result)
 }
 
-/// Parse one DIMENSIONS/FACTS entry: `[PRIVATE|PUBLIC] alias.bare_name AS expr [COMMENT = '...'] [WITH SYNONYMS = ('...')]`
+/// Parse one DIMENSIONS/FACTS entry: `[PRIVATE|PUBLIC] alias.bare_name [LABELS = (...)] AS expr [COMMENT = '...'] [WITH SYNONYMS = ('...')]`.
+///
+/// `LABELS` may come before `AS`, where Snowflake puts it, or among the
+/// trailing annotations, but not both.
 fn parse_single_qualified_entry(
     entry: &str,
     entry_offset: usize,
@@ -124,9 +129,18 @@ fn parse_single_qualified_entry(
         ));
     }
 
-    let bare_name = entry_after_access[dot_tok.end..as_tok.start]
-        .trim()
-        .to_string();
+    // Snowflake writes `LABELS = (...)` between the name and `AS`. A `LABELS`
+    // keyword in the name slot ends the name there.
+    let (name_end, leading_filter) = leading_labels(
+        &cur,
+        entry_after_access,
+        dot_tok.end,
+        as_tok.start,
+        entry,
+        clause_name,
+    )?;
+
+    let bare_name = entry_after_access[dot_tok.end..name_end].trim().to_string();
     if bare_name.is_empty() {
         return Err(cur.err(
             dot_tok.end,
@@ -161,6 +175,12 @@ fn parse_single_qualified_entry(
 
     // Phase 43: Parse trailing annotations from expression
     let (expr, annotations) = parse_trailing_annotations(raw_expr, cur.abs_of(raw_expr))?;
+    if leading_filter && annotations.is_filter {
+        return Err(cur.err(
+            name_end,
+            format!("Duplicate LABELS annotation in {clause_name} entry '{entry}'."),
+        ));
+    }
 
     Ok(ParsedQualifiedEntry {
         source_alias,
@@ -169,7 +189,38 @@ fn parse_single_qualified_entry(
         comment: annotations.comment,
         synonyms: annotations.synonyms,
         tags: annotations.tags,
-        is_filter: annotations.is_filter,
+        is_filter: leading_filter || annotations.is_filter,
         access,
     })
+}
+
+/// A `LABELS = (...)` between an entry's name and its `AS`, where Snowflake
+/// writes it: where the name ends, and whether the labels declare `FILTER`.
+/// Without one the name runs up to `AS`. Nothing else may sit there.
+fn leading_labels(
+    cur: &Cursor<'_>,
+    text: &str,
+    name_start: usize,
+    as_start: usize,
+    entry: &str,
+    clause_name: &str,
+) -> Result<(usize, bool), ParseError> {
+    let Some(labels) = cur
+        .find_kw("LABELS")
+        .filter(|l| l.start > name_start && l.start < as_start)
+    else {
+        return Ok((as_start, false));
+    };
+    let region = &text[labels.start..as_start];
+    let (_, ann) = parse_leading_annotations(region, cur.abs_of(region))?;
+    if ann.comment.is_some() || !ann.synonyms.is_empty() || !ann.tags.is_empty() {
+        return Err(cur.err(
+            labels.start,
+            format!(
+                "Only LABELS may come between the name and 'AS' in {clause_name} entry \
+                 '{entry}'. Put COMMENT, WITH SYNONYMS and TAG after the expression."
+            ),
+        ));
+    }
+    Ok((labels.start, ann.is_filter))
 }

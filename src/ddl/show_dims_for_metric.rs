@@ -1,9 +1,10 @@
 //! `SHOW SEMANTIC DIMENSIONS ... FOR METRIC` dispatcher (ST-2).
 //!
-//! A two-argument TF `(view_name, metric_name)` returning 3 VARCHAR + 1 BOOL
-//! per row `(table_name, name, data_type, required)`. It doesn't fit the
-//! shared 8-column `EntityRow` (extra metric arg, fan-trap reachability
-//! filter, trailing BOOL column), so it keeps its own body — but routes the
+//! A two-argument TF `(view_name, metric_name)` returning Snowflake's columns
+//! `(table_name, name, data_type, required, synonyms, comment)`: five VARCHAR
+//! and the BOOL `required`, which goes last on the wire and fourth in the
+//! output. It doesn't fit the shared `EntityRow` (extra metric arg, fan-trap
+//! reachability filter, BOOL column), so it keeps its own body — but routes the
 //! scaffold through [`crate::ddl::read_ffi::run_dispatcher`] like every other
 //! read-side function.
 
@@ -12,6 +13,7 @@
 use std::collections::{HashMap, HashSet};
 
 use crate::catalog::CatalogReader;
+use crate::ddl::describe::format_json_array;
 use crate::ddl::read_ffi::{read_str_arg, run_dispatcher, serialize_varchar_bool_rows};
 use crate::expand::collect_derived_metric_source_tables;
 use crate::graph::{JoinTree, RelationshipGraph};
@@ -159,6 +161,8 @@ unsafe fn show_dims_for_metric(
                         table_name,
                         d.name.clone(),
                         types.dimension(&d.name, d.output_type.as_ref()),
+                        format_json_array(&d.synonyms),
+                        d.comment.clone().unwrap_or_default(),
                     ],
                     required_dim_names.contains(&crate::ident::normalize_ident_part(&d.name)),
                 )
@@ -197,6 +201,8 @@ unsafe fn show_dims_for_metric(
                         table_name,
                         d.name.clone(),
                         types.dimension(&d.name, d.output_type.as_ref()),
+                        format_json_array(&d.synonyms),
+                        d.comment.clone().unwrap_or_default(),
                     ],
                     required_dim_names.contains(&crate::ident::normalize_ident_part(&d.name)),
                 )

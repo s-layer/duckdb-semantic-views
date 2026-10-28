@@ -66,22 +66,21 @@ SELECT count(*) FROM describe_semantic_view('nf_sv')
 ----
 0
 
-# SHOW keeps its 8 Snowflake-aligned columns — the filter flag is reported
-# through DESCRIBE, exactly as ACCESS_MODIFIER is. The 8-character type string
-# guards that decision: a 9th `labels` column would fail these outright. A
-# labelled member still lists as an ordinary dimension / fact.
+# SHOW SEMANTIC DIMENSIONS / FACTS end with Snowflake's `labels` column: `[]`
+# for a plain member and `["FILTER"]` for a named filter. A labelled member
+# still lists as an ordinary dimension / fact.
 
-query TTTTTTTT rowsort
+query TTTTTTTTT rowsort
 SHOW SEMANTIC DIMENSIONS IN nf_sv
 ----
-memory	main	nf_sv	nf_orders	country	VARCHAR	[]	(empty)
-memory	main	nf_sv	nf_orders	is_domestic	BOOLEAN	[]	(empty)
+memory	main	nf_sv	nf_orders	country	VARCHAR	[]	(empty)	[]
+memory	main	nf_sv	nf_orders	is_domestic	BOOLEAN	[]	(empty)	["FILTER"]
 
-query TTTTTTTT rowsort
+query TTTTTTTTT rowsort
 SHOW SEMANTIC FACTS IN nf_sv
 ----
-memory	main	nf_sv	nf_orders	amt	DECIMAL(10,2)	[]	(empty)
-memory	main	nf_sv	nf_orders	is_large	BOOLEAN	[]	(empty)
+memory	main	nf_sv	nf_orders	amt	DECIMAL(10,2)	[]	(empty)	[]
+memory	main	nf_sv	nf_orders	is_large	BOOLEAN	[]	(empty)	["FILTER"]
 
 # ============================================================
 # Test 2: GET_DDL renders the clause back, exactly twice — once per labelled

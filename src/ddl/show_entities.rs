@@ -1,17 +1,18 @@
 //! Unified `SHOW SEMANTIC {DIMENSIONS,METRICS,FACTS}` dispatchers (ST-2).
 //!
-//! Dimensions, metrics, and facts produce an identical 8-column VARCHAR row
-//! shape and identical dispatch logic — they differ only in which slice of the
-//! definition they iterate. This module collapses the previously
+//! Dimensions, metrics, and facts produce the same VARCHAR row shape and
+//! identical dispatch logic — they differ only in which slice of the
+//! definition they iterate, and in the `labels` column dimensions and facts add. This module collapses the previously
 //! near-duplicate `show_dims.rs` / `show_metrics.rs` / `show_facts.rs` into a
 //! single [`EntityRow`] + [`collect_entities`] over an [`EntityKind`], with the
 //! six `#[no_mangle]` dispatchers reduced to one-line bodies over the shared
 //! [`crate::ddl::read_ffi::run_dispatcher`] scaffold.
 //!
-//! 8 Snowflake-aligned columns: `database_name, schema_name,
-//! semantic_view_name, table_name, name, data_type, synonyms, comment` — the
-//! same list, in the same order, that Snowflake's `SHOW SEMANTIC …` commands
-//! return.
+//! Snowflake-aligned columns: `database_name, schema_name,
+//! semantic_view_name, table_name, name, data_type, synonyms, comment`, and for
+//! dimensions and facts `labels` — the same list, in the same order, that
+//! Snowflake's `SHOW SEMANTIC …` commands return. `labels` is a JSON array,
+//! `["FILTER"]` for a named filter and `[]` otherwise, as `synonyms` is.
 //!
 //! `data_type` is the type `semantic_view()` returns for the member, probed at
 //! this bind on its connection by `query::member_types` (TECH-DEBT #51): one
@@ -64,7 +65,7 @@ fn probe_types(
     member_types_for_bind(view_name, def, kind.wanted())
 }
 
-/// A single 8-column row of `SHOW SEMANTIC {DIMENSIONS,METRICS,FACTS}` output.
+/// A single row of `SHOW SEMANTIC {DIMENSIONS,METRICS,FACTS}` output.
 struct EntityRow {
     database_name: String,
     schema_name: String,
@@ -74,12 +75,14 @@ struct EntityRow {
     data_type: String,
     synonyms: String,
     comment: String,
+    /// `None` for metrics, which have no `labels` column.
+    labels: Option<String>,
 }
 
 impl EntityRow {
     /// Flatten into the ordered VARCHAR cells for the wire format.
     fn into_cells(self) -> Vec<String> {
-        vec![
+        let mut cells = vec![
             self.database_name,
             self.schema_name,
             self.semantic_view_name,
@@ -88,7 +91,9 @@ impl EntityRow {
             self.data_type,
             self.synonyms,
             self.comment,
-        ]
+        ];
+        cells.extend(self.labels);
+        cells
     }
 }
 
@@ -107,12 +112,14 @@ fn collect_entities(
     let alias_map = def.alias_to_table_map();
 
     // Dimension / Metric / Fact all expose (name, source_table, synonyms,
-    // comment); build one row from those plus the member's reported type.
+    // comment); build one row from those plus the member's reported type, and
+    // for a dimension or fact whether it is a named filter.
     let build = |name: &str,
                  source_table: Option<&String>,
                  data_type: String,
                  synonyms: &[String],
-                 comment: Option<&String>| {
+                 comment: Option<&String>,
+                 is_filter: Option<bool>| {
         let table_name = source_table
             .and_then(|a| alias_map.get(a).cloned())
             .unwrap_or_default();
@@ -125,6 +132,14 @@ fn collect_entities(
             data_type,
             synonyms: format_json_array(synonyms),
             comment: comment.cloned().unwrap_or_default(),
+            labels: is_filter.map(|f| {
+                let labels = if f {
+                    vec!["FILTER".to_string()]
+                } else {
+                    Vec::new()
+                };
+                format_json_array(&labels)
+            }),
         }
     };
 
@@ -139,6 +154,7 @@ fn collect_entities(
                     types.dimension(&d.name, d.output_type.as_ref()),
                     &d.synonyms,
                     d.comment.as_ref(),
+                    Some(d.is_filter),
                 )
             })
             .collect(),
@@ -152,6 +168,7 @@ fn collect_entities(
                     types.metric(&m.name, m.output_type.as_ref()),
                     &m.synonyms,
                     m.comment.as_ref(),
+                    None,
                 )
             })
             .collect(),
@@ -165,6 +182,7 @@ fn collect_entities(
                     types.fact(&f.name, f.output_type.as_ref()),
                     &f.synonyms,
                     f.comment.as_ref(),
+                    Some(f.is_filter),
                 )
             })
             .collect(),

@@ -34,13 +34,17 @@ Parameters
      - Description
    * - ``<object_type>``
      - VARCHAR
-     - The object type. Only ``'SEMANTIC_VIEW'`` is supported (case-insensitive).
+     - The object type: ``'SEMANTIC_VIEW'`` or ``'SEMANTIC VIEW'`` (case-insensitive). Snowflake's semantic-view guides use the first spelling and its ``GET_DDL`` reference the second.
    * - ``<object_name>``
      - VARCHAR
      - The name of the semantic view, optionally schema-qualified (``analytics.sales``). An unqualified name resolves to the unique view of that name; if several schemas hold one, the result is an ambiguity error naming them, not a ``search_path`` walk (see :ref:`ref-get-ddl-resolution`). Returns an error if the view does not exist.
    * - ``<use_fully_qualified_names>``
      - BOOLEAN
      - Optional. When ``true``, the rendered ``CREATE`` name carries the view's own schema, so re-running the output recreates the view in that schema. Defaults to ``false`` (a bare name), matching Snowflake. A ``NULL`` returns ``NULL``.
+
+.. versionchanged:: 0.18.0
+
+   ``'SEMANTIC VIEW'``, with a space, is accepted as the object type. Earlier versions took only ``'SEMANTIC_VIEW'``.
 
 
 .. _ref-get-ddl-output:
@@ -52,9 +56,14 @@ Returns a single VARCHAR value containing the full ``CREATE OR REPLACE SEMANTIC 
 
 The rendered DDL re-parses to the same definition. In particular:
 
+- A named filter's ``LABELS = (FILTER)`` is written between the member's name and its ``AS`` (``o.is_large LABELS = (FILTER) AS o.amount > 100``), where Snowflake writes it.
 - A relationship declared against a ``UNIQUE`` key (rather than the primary key) renders its ``REFERENCES <target>(<columns>)`` column list, so re-parsing keeps the join wired to the unique key instead of silently falling back to the primary key.
 - A view name that needs quoting (embedded whitespace or non-ASCII characters) is quoted in the rendered ``CREATE OR REPLACE SEMANTIC VIEW`` header. (Mixed-case names are never quoted for case: names fold to lowercase -- see :ref:`ref-create-semantic-view`.)
 - With ``<use_fully_qualified_names>`` set to ``true``, the schema and the view name are quoted independently -- ``"my schema"."my view"``, never ``"my schema.my view"`` -- so the header re-parses as a schema-qualified reference rather than as one name containing a dot.
+
+.. versionchanged:: 0.18.0
+
+   ``LABELS = (FILTER)`` is written before ``AS``. Earlier versions wrote it after the expression. Both forms re-parse to the same definition.
 
 The schema rendered is where the view actually lives, not how the lookup was spelled: ``GET_DDL('SEMANTIC_VIEW', 'sales', true)`` on a view that lives in ``analytics`` renders ``analytics.sales``.
 
@@ -217,7 +226,7 @@ Replayed from any session, that statement puts ``sales`` back in ``analytics``. 
 
 .. code-block:: text
 
-   Error: get_ddl: GET_DDL: unsupported object type 'TABLE'. Only 'SEMANTIC_VIEW' is supported.
+   Error: get_ddl: GET_DDL: unsupported object type 'TABLE'. Only 'SEMANTIC_VIEW' or 'SEMANTIC VIEW' is supported.
 
 **Error: view does not exist:**
 

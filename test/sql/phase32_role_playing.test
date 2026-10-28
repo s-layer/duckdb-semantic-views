@@ -222,12 +222,12 @@ San Francisco	1
 # Test 11: SHOW SEMANTIC DIMENSIONS resolves aliases to table names
 # ============================================================
 
-query TTTTTTTT rowsort
+query TTTTTTTTT rowsort
 SHOW SEMANTIC DIMENSIONS IN p32_flights_view;
 ----
-memory	main	p32_flights_view	p32_airports	city	VARCHAR	[]	(empty)
-memory	main	p32_flights_view	p32_airports	country	VARCHAR	[]	(empty)
-memory	main	p32_flights_view	p32_flights	carrier	VARCHAR	[]	(empty)
+memory	main	p32_flights_view	p32_airports	city	VARCHAR	[]	(empty)	[]
+memory	main	p32_flights_view	p32_airports	country	VARCHAR	[]	(empty)	[]
+memory	main	p32_flights_view	p32_flights	carrier	VARCHAR	[]	(empty)	[]
 
 # ============================================================
 # Test 12: SHOW SEMANTIC METRICS resolves aliases to table names

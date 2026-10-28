@@ -83,22 +83,22 @@ CREATE SEMANTIC VIEW fi_sv AS
 # o -> li backwards, which fans out.
 # ============================================================
 
-query TTTT rowsort
+query TTTTTT rowsort
 SHOW SEMANTIC DIMENSIONS IN fi_sv FOR METRIC total_ship_cost
 ----
-fi_customers	customer_country	VARCHAR	false
-fi_shipments	carrier	VARCHAR	false
+fi_customers	customer_country	VARCHAR	false	[]	(empty)
+fi_shipments	carrier	VARCHAR	false	[]	(empty)
 
 # ============================================================
 # Test 2: the mirror case -- a metric on the sibling branch reaches `c` too,
 # and does not reach `s`.
 # ============================================================
 
-query TTTT rowsort
+query TTTTTT rowsort
 SHOW SEMANTIC DIMENSIONS IN fi_sv FOR METRIC line_total
 ----
-fi_customers	customer_country	VARCHAR	false
-fi_line_items	item_qty	INTEGER	false
+fi_customers	customer_country	VARCHAR	false	[]	(empty)
+fi_line_items	item_qty	INTEGER	false	[]	(empty)
 
 # ============================================================
 # Test 3: a fact on the base table with a dimension across the fan-in

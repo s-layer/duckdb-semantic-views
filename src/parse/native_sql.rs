@@ -165,6 +165,16 @@ pub(crate) fn lower_action(action: RewriteAction) -> Result<String, ParseError> 
         RewriteAction::AlterUnsetComment { name, if_exists } => {
             rewrite_alter_comment(&name, None, if_exists)?
         }
+        RewriteAction::AlterSetTags {
+            name,
+            tags,
+            if_exists,
+        } => rewrite_alter_tags(&name, &tags, &[], if_exists)?,
+        RewriteAction::AlterUnsetTags {
+            name,
+            names,
+            if_exists,
+        } => rewrite_alter_tags(&name, &[], &names, if_exists)?,
     };
 
     // FF-3: prepend the single-catalog guard to every write DDL. Run as the
@@ -725,6 +735,93 @@ fn rewrite_alter_comment(
          {guard}; \
          UPDATE {DEFINITIONS_TABLE} \
             SET definition = json_merge_patch(definition::JSON, '{patch_json_for_sql}'::JSON)::VARCHAR \
+          WHERE {row} \
+         RETURNING name, '{status_label}'::VARCHAR AS status"
+    ))
+}
+
+/// `ALTER SEMANTIC VIEW ... SET TAG` (`set` holds the tags) or `UNSET TAG`
+/// (`unset` holds the names): one UPDATE of the stored definition's view-level
+/// `tags`, like [`rewrite_alter_comment`] in every other respect.
+///
+/// The new list is the stored one without any tag named in the statement, then
+/// the statement's tags (none for UNSET). Names compare case-insensitively,
+/// part by part, the identity `model::tag_error` uses, so `SET TAG` replaces a
+/// tag's value, moving it to the end, and `UNSET TAG` of a name the view does
+/// not carry changes nothing, as in Snowflake. An empty list deletes the key
+/// (RFC-7396 null), matching a view created without tags.
+#[cfg(feature = "extension")]
+fn rewrite_alter_tags(
+    view: &ViewRef,
+    set: &[crate::model::Tag],
+    unset: &[crate::model::TagName],
+    if_exists: bool,
+) -> Result<String, ParseError> {
+    let to_json = |v: serde_json::Value| {
+        serde_json::to_string(&v)
+            .map(|j| SqlLit::escape(&j))
+            .map_err(|e| ParseError {
+                message: format!("failed to build tag patch: {e}"),
+                position: None,
+            })
+    };
+    // The statement's names, as `{"name": ...}` objects so one key expression
+    // reads both them and the stored tags.
+    let named: Vec<serde_json::Value> = set
+        .iter()
+        .map(|t| &t.name)
+        .chain(unset)
+        .map(|n| serde_json::json!({ "name": n }))
+        .collect();
+    let named = to_json(serde_json::Value::Array(named))?;
+    let added = to_json(serde_json::to_value(set).map_err(|e| ParseError {
+        message: format!("failed to build tag patch: {e}"),
+        position: None,
+    })?)?;
+    let key = |x: &str| {
+        format!(
+            "lower(coalesce({x} ->> '$.name.database', '')) || chr(1) || \
+             lower(coalesce({x} ->> '$.name.schema', '')) || chr(1) || \
+             lower({x} ->> '$.name.tag')"
+        )
+    };
+    let (key_t, key_n) = (key("t"), key("n"));
+    let tags = format!(
+        "list_concat(\
+           list_filter(\
+             coalesce(from_json(json_extract(definition, '$.tags'), '[\"JSON\"]'), []::JSON[]), \
+             lambda t: NOT list_contains(\
+               list_transform(from_json('{named}', '[\"JSON\"]'), lambda n: {key_n}), \
+               {key_t})), \
+           from_json('{added}', '[\"JSON\"]'))"
+    );
+    let new_definition = format!(
+        "json_merge_patch(definition::JSON, json_object('tags', \
+           CASE WHEN len({tags}) = 0 THEN NULL ELSE to_json({tags}) END))::VARCHAR"
+    );
+    let status_label = if set.is_empty() {
+        "tags unset"
+    } else {
+        "tags set"
+    };
+
+    let (name_escaped, target) = escaped_parts(view);
+    let display = SqlLit::escape(&view.to_string());
+    let schema_expr = resolved_schema_expr(&target, &name_escaped, &suggested_name(view));
+    let row = row_predicate(&name_escaped, &schema_expr);
+    let table_guard = definitions_table_guard_select(&display);
+    // As in `rewrite_alter_comment`: IF EXISTS updates no row on a missing
+    // view, and the plain form is refused by the existence guard first.
+    let guard = if if_exists {
+        String::new()
+    } else {
+        format!("{}; ", existence_guard_select(&row, &display))
+    };
+    Ok(format!(
+        "{table_guard}; \
+         {guard}\
+         UPDATE {DEFINITIONS_TABLE} \
+            SET definition = {new_definition} \
           WHERE {row} \
          RETURNING name, '{status_label}'::VARCHAR AS status"
     ))

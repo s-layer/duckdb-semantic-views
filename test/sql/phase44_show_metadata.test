@@ -64,12 +64,12 @@ CREATE SEMANTIC VIEW plain_sv AS
 # Test 1: SHOW SEMANTIC DIMENSIONS IN annotated_sv — verify synonyms and comment
 # ============================================================
 
-query TTTTTTTT rowsort
+query TTTTTTTTT rowsort
 SHOW SEMANTIC DIMENSIONS IN annotated_sv
 ----
-memory	main	annotated_sv	p44s_customers	customer_name	VARCHAR	["client_name"]	Customer full name
-memory	main	annotated_sv	p44s_customers	region	VARCHAR	[]	(empty)
-memory	main	annotated_sv	p44s_orders	order_date	DATE	[]	Date of order
+memory	main	annotated_sv	p44s_customers	customer_name	VARCHAR	["client_name"]	Customer full name	[]
+memory	main	annotated_sv	p44s_customers	region	VARCHAR	[]	(empty)	[]
+memory	main	annotated_sv	p44s_orders	order_date	DATE	[]	Date of order	[]
 
 # ============================================================
 # Test 2: SHOW SEMANTIC METRICS IN annotated_sv — verify synonyms and comment
@@ -85,10 +85,10 @@ memory	main	annotated_sv	p44s_orders	total_amount	DECIMAL(38,2)	["total_sales","
 # Test 3: SHOW SEMANTIC FACTS IN annotated_sv — verify synonyms and comment
 # ============================================================
 
-query TTTTTTTT rowsort
+query TTTTTTTTT rowsort
 SHOW SEMANTIC FACTS IN annotated_sv
 ----
-memory	main	annotated_sv	p44s_orders	raw_amount	DECIMAL(10,2)	["order_value","sale_amount"]	Raw order amount
+memory	main	annotated_sv	p44s_orders	raw_amount	DECIMAL(10,2)	["order_value","sale_amount"]	Raw order amount	[]
 
 # ============================================================
 # Test 4: SHOW SEMANTIC VIEWS — verify comment column (6 columns total)
@@ -105,22 +105,22 @@ plain_sv	SEMANTIC_VIEW	memory	main	(empty)
 # Test 5: Cross-view SHOW SEMANTIC DIMENSIONS — metadata from multiple views
 # ============================================================
 
-query TTTTTTTT rowsort
+query TTTTTTTTT rowsort
 SHOW SEMANTIC DIMENSIONS
 ----
-memory	main	annotated_sv	p44s_customers	customer_name	VARCHAR	["client_name"]	Customer full name
-memory	main	annotated_sv	p44s_customers	region	VARCHAR	[]	(empty)
-memory	main	annotated_sv	p44s_orders	order_date	DATE	[]	Date of order
-memory	main	plain_sv	p44s_orders	order_date	DATE	[]	(empty)
+memory	main	annotated_sv	p44s_customers	customer_name	VARCHAR	["client_name"]	Customer full name	[]
+memory	main	annotated_sv	p44s_customers	region	VARCHAR	[]	(empty)	[]
+memory	main	annotated_sv	p44s_orders	order_date	DATE	[]	Date of order	[]
+memory	main	plain_sv	p44s_orders	order_date	DATE	[]	(empty)	[]
 
 # ============================================================
 # Test 6: Plain view dims/metrics/facts have empty synonyms and comment
 # ============================================================
 
-query TTTTTTTT rowsort
+query TTTTTTTTT rowsort
 SHOW SEMANTIC DIMENSIONS IN plain_sv
 ----
-memory	main	plain_sv	p44s_orders	order_date	DATE	[]	(empty)
+memory	main	plain_sv	p44s_orders	order_date	DATE	[]	(empty)	[]
 
 query TTTTTTTT rowsort
 SHOW SEMANTIC METRICS IN plain_sv

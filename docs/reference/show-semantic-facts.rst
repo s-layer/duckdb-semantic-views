@@ -7,7 +7,7 @@
 SHOW SEMANTIC FACTS
 =====================
 
-Lists facts (named row-level expressions) registered in one or all semantic views. Each row describes a single fact with its name, source table, data type, synonyms, and comment. Views that have no facts defined return no rows.
+Lists facts (named row-level expressions) registered in one or all semantic views. Each row describes a single fact with its name, source table, data type, synonyms, comment, and labels. Views that have no facts defined return no rows.
 
 
 .. _ref-show-facts-syntax:
@@ -92,7 +92,7 @@ When ``LIKE`` and ``STARTS WITH`` are both present, a fact must satisfy both con
 Output Columns
 ==============
 
-Returns one row per fact with 8 columns:
+Returns one row per fact with 9 columns:
 
 .. list-table::
    :header-rows: 1
@@ -125,6 +125,9 @@ Returns one row per fact with 8 columns:
    * - ``comment``
      - VARCHAR
      - The fact comment text. Empty string if no comment is set.
+   * - ``labels``
+     - VARCHAR
+     - JSON array of the fact's labels: ``["FILTER"]`` for a :ref:`named filter <howto-annotations-filters>`, ``[]`` otherwise.
 
 
 .. versionchanged:: 0.14.0
@@ -132,6 +135,10 @@ Returns one row per fact with 8 columns:
    ``data_type`` is populated again. It had been empty for every view created
    since v0.10.0. The type is now worked out when the command runs, so views
    created in that window report it too, with no need to re-create them.
+
+.. versionchanged:: 0.18.0
+
+   Added the ``labels`` column, after ``comment``, as in Snowflake's output.
 
 
 .. _ref-show-facts-examples:
@@ -149,11 +156,11 @@ Given a semantic view ``orders_sv`` with one fact:
 
 .. code-block:: text
 
-   ┌───────────────┬─────────────┬────────────────────┬────────────┬────────────┬───────────────┬──────────┬─────────┐
-   │ database_name │ schema_name │ semantic_view_name │ table_name │ name       │ data_type     │ synonyms │ comment │
-   ├───────────────┼─────────────┼────────────────────┼────────────┼────────────┼───────────────┼──────────┼─────────┤
-   │ memory        │ main        │ orders_sv          │ orders     │ raw_amount │ DECIMAL(10,2) │ []       │         │
-   └───────────────┴─────────────┴────────────────────┴────────────┴────────────┴───────────────┴──────────┴─────────┘
+   ┌───────────────┬─────────────┬────────────────────┬────────────┬────────────┬───────────────┬──────────┬─────────┬────────┐
+   │ database_name │ schema_name │ semantic_view_name │ table_name │ name       │ data_type     │ synonyms │ comment │ labels │
+   ├───────────────┼─────────────┼────────────────────┼────────────┼────────────┼───────────────┼──────────┼─────────┼────────┤
+   │ memory        │ main        │ orders_sv          │ orders     │ raw_amount │ DECIMAL(10,2) │ []       │         │ []     │
+   └───────────────┴─────────────┴────────────────────┴────────────┴────────────┴───────────────┴──────────┴─────────┴────────┘
 
 The example tables use ``VARCHAR`` text columns, ``DATE`` dates, ``INTEGER`` quantities and ``DECIMAL(10,2)`` amounts and prices. ``data_type`` is each member's type as a query returns it -- an aggregate's own type, not its input's: ``COUNT`` is ``BIGINT``, ``SUM`` of a ``DECIMAL(10,2)`` is ``DECIMAL(38,2)``, and a ratio of two metrics is ``DOUBLE``. See :ref:`Reported Data Types <explanation-sf-data-types>`.
 
@@ -206,14 +213,39 @@ Facts can reference other facts. Consider a view with two chained facts:
 
 .. code-block:: text
 
-   ┌───────────────┬─────────────┬────────────────────┬────────────┬────────────┬───────────────┬──────────┬─────────┐
-   │ database_name │ schema_name │ semantic_view_name │ table_name │ name       │ data_type     │ synonyms │ comment │
-   ├───────────────┼─────────────┼────────────────────┼────────────┼────────────┼───────────────┼──────────┼─────────┤
-   │ memory        │ main        │ tpch_analysis      │ line_items │ net_price  │ DECIMAL(18,4) │ []       │         │
-   │ memory        │ main        │ tpch_analysis      │ line_items │ tax_amount │ DECIMAL(18,6) │ []       │         │
-   └───────────────┴─────────────┴────────────────────┴────────────┴────────────┴───────────────┴──────────┴─────────┘
+   ┌───────────────┬─────────────┬────────────────────┬────────────┬────────────┬───────────────┬──────────┬─────────┬────────┐
+   │ database_name │ schema_name │ semantic_view_name │ table_name │ name       │ data_type     │ synonyms │ comment │ labels │
+   ├───────────────┼─────────────┼────────────────────┼────────────┼────────────┼───────────────┼──────────┼─────────┼────────┤
+   │ memory        │ main        │ tpch_analysis      │ line_items │ net_price  │ DECIMAL(18,4) │ []       │         │ []     │
+   │ memory        │ main        │ tpch_analysis      │ line_items │ tax_amount │ DECIMAL(18,6) │ []       │         │ []     │
+   └───────────────┴─────────────┴────────────────────┴────────────┴────────────┴───────────────┴──────────┴─────────┴────────┘
 
 Assuming ``extended_price DECIMAL(12,2)`` and ``discount`` / ``tax_rate DECIMAL(4,2)``, each fact reports the type of its expression with the referenced fact substituted in: ``tax_amount`` is typed through ``li.net_price``. Chained references are resolved the same way at query expansion time.
+
+**A named filter:**
+
+A fact declared with ``LABELS = (FILTER)`` reports ``["FILTER"]`` in the ``labels`` column:
+
+.. code-block:: sql
+
+   CREATE SEMANTIC VIEW orders_sv
+     TABLES (o AS orders PRIMARY KEY (id))
+     FACTS (
+       o.raw_amount AS o.amount,
+       o.is_large LABELS = (FILTER) AS o.amount > 100
+     )
+     METRICS (o.revenue AS SUM(o.raw_amount));
+
+   SHOW SEMANTIC FACTS IN orders_sv;
+
+.. code-block:: text
+
+   ┌───────────────┬─────────────┬────────────────────┬────────────┬────────────┬───────────────┬──────────┬─────────┬────────────┐
+   │ database_name │ schema_name │ semantic_view_name │ table_name │ name       │ data_type     │ synonyms │ comment │ labels     │
+   ├───────────────┼─────────────┼────────────────────┼────────────┼────────────┼───────────────┼──────────┼─────────┼────────────┤
+   │ memory        │ main        │ orders_sv          │ orders     │ is_large   │ BOOLEAN       │ []       │         │ ["FILTER"] │
+   │ memory        │ main        │ orders_sv          │ orders     │ raw_amount │ DECIMAL(10,2) │ []       │         │ []         │
+   └───────────────┴─────────────┴────────────────────┴────────────┴────────────┴───────────────┴──────────┴─────────┴────────────┘
 
 **Error: view does not exist:**
 

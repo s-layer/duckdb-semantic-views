@@ -951,7 +951,7 @@ TABLES (
     o AS dcc_orders PRIMARY KEY (id)
 )
 DIMENSIONS (
-    o.is_big AS o.amount > 100 LABELS = (FILTER),
+    o.is_big LABELS = (FILTER) AS o.amount > 100,
     o.big_plain AS o.amount > 100
 )
 
@@ -974,10 +974,10 @@ TABLES (
     o AS dcc_orders PRIMARY KEY (id)
 )
 DIMENSIONS (
-    o.a AS o.amount > 1 LABELS = (FILTER),
-    o.b AS o.amount > 2 LABELS = (FILTER),
-    o.c AS o.amount > 3 LABELS = (FILTER),
-    o.d AS o.amount > 4 LABELS = (FILTER)
+    o.a LABELS = (FILTER) AS o.amount > 1,
+    o.b LABELS = (FILTER) AS o.amount > 2,
+    o.c LABELS = (FILTER) AS o.amount > 3,
+    o.d LABELS = (FILTER) AS o.amount > 4
 )
 
 query TTTT rowsort
@@ -1000,9 +1000,9 @@ TABLES (
     o AS dcc_orders PRIMARY KEY (id)
 )
 DIMENSIONS (
-    o.a AS o.amount > 1 COMMENT = 'c' WITH SYNONYMS = ('s') LABELS = (FILTER),
-    o.b AS o.amount > 1 COMMENT = 'c' WITH SYNONYMS = ('s') LABELS = (FILTER),
-    o.e AS o.amount > 1 COMMENT = 'c' WITH SYNONYMS = ('s') LABELS = (FILTER)
+    o.a LABELS = (FILTER) AS o.amount > 1 COMMENT = 'c' WITH SYNONYMS = ('s'),
+    o.b LABELS = (FILTER) AS o.amount > 1 COMMENT = 'c' WITH SYNONYMS = ('s'),
+    o.e LABELS = (FILTER) AS o.amount > 1 COMMENT = 'c' WITH SYNONYMS = ('s')
 )
 
 query TTTT rowsort

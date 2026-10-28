@@ -27,11 +27,11 @@ CREATE SEMANTIC VIEW simple_sv AS
 # Test 1: Single-table view -- all dims reachable
 # ============================================================
 
-query TTTT rowsort
+query TTTTTT rowsort
 SHOW SEMANTIC DIMENSIONS IN simple_sv FOR METRIC total
 ----
-p34fm_sales	product	VARCHAR	false
-p34fm_sales	region	VARCHAR	false
+p34fm_sales	product	VARCHAR	false	[]	(empty)
+p34fm_sales	region	VARCHAR	false	[]	(empty)
 
 # ============================================================
 # Setup: multi-table view with fan trap potential
@@ -85,11 +85,11 @@ CREATE SEMANTIC VIEW star_sv AS
 # - item_qty (source: li): path o->li, reverse of li->o ManyToOne = fan-out. EXCLUDED.
 # ============================================================
 
-query TTTT rowsort
+query TTTTTT rowsort
 SHOW SEMANTIC DIMENSIONS IN star_sv FOR METRIC order_total
 ----
-p34fm_customers	customer_country	VARCHAR	false
-p34fm_customers	customer_name	VARCHAR	false
+p34fm_customers	customer_country	VARCHAR	false	[]	(empty)
+p34fm_customers	customer_name	VARCHAR	false	[]	(empty)
 
 # ============================================================
 # Test 3: line_item_sum metric (source: li)
@@ -98,12 +98,12 @@ p34fm_customers	customer_name	VARCHAR	false
 # - item_qty (source: li): same table. INCLUDED.
 # ============================================================
 
-query TTTT rowsort
+query TTTTTT rowsort
 SHOW SEMANTIC DIMENSIONS IN star_sv FOR METRIC line_item_sum
 ----
-p34fm_customers	customer_country	VARCHAR	false
-p34fm_customers	customer_name	VARCHAR	false
-p34fm_line_items	item_qty	INTEGER	false
+p34fm_customers	customer_country	VARCHAR	false	[]	(empty)
+p34fm_customers	customer_name	VARCHAR	false	[]	(empty)
+p34fm_line_items	item_qty	INTEGER	false	[]	(empty)
 
 # ============================================================
 # Test 4: Non-existent metric
@@ -153,19 +153,19 @@ CREATE SEMANTIC VIEW derived_sv AS
 # customer_name (source: c): path o->c, ManyToOne forward = safe. INCLUDED.
 # ============================================================
 
-query TTTT rowsort
+query TTTTTT rowsort
 SHOW SEMANTIC DIMENSIONS IN derived_sv FOR METRIC double_total
 ----
-p34fm_customers	customer_name	VARCHAR	false
+p34fm_customers	customer_name	VARCHAR	false	[]	(empty)
 
 # ============================================================
 # Test 7: Case insensitivity
 # ============================================================
 
-query TTTT rowsort
+query TTTTTT rowsort
 show semantic dimensions in derived_sv for metric order_total
 ----
-p34fm_customers	customer_name	VARCHAR	false
+p34fm_customers	customer_name	VARCHAR	false	[]	(empty)
 
 # ============================================================
 # Cleanup

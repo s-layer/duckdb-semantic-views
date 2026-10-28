@@ -15,13 +15,13 @@ Creates a semantic view definition, registering dimensions, metrics, relationshi
 Syntax
 ======
 
-**Keyword body (AS):**
+**Keyword body:**
 
 .. code-block:: sqlgrammar
 
    CREATE [ OR REPLACE ] SEMANTIC VIEW [ IF NOT EXISTS ] <name>
        [ COMMENT = '<text>' ]
-   AS
+   [ AS ]
    TABLES (
        [ <alias> AS ] <table_name>
            [ PRIMARY KEY ( <column> [, <column> ...] ) ]
@@ -37,18 +37,16 @@ Syntax
        [, ... ]
    ) ]
    [ FACTS (
-       [ PRIVATE ] <alias>.<fact_name> AS <row_level_expression>
+       [ PRIVATE ] <alias>.<fact_name> [ LABELS = ( FILTER ) ] AS <row_level_expression>
            [ COMMENT = '<text>' ]
            [ WITH SYNONYMS = ( '<synonym>' [, '<synonym>' ...] ) ]
-           [ LABELS = ( FILTER ) ]
            [ [ WITH ] TAG ( <tag_name> = '<value>' [, ...] ) ]
        [, ... ]
    ) ]
    [ DIMENSIONS (
-       [ PUBLIC ] <alias>.<dim_name> AS <expression>
+       [ PUBLIC ] <alias>.<dim_name> [ LABELS = ( FILTER ) ] AS <expression>
            [ COMMENT = '<text>' ]
            [ WITH SYNONYMS = ( '<synonym>' [, '<synonym>' ...] ) ]
-           [ LABELS = ( FILTER ) ]
            [ [ WITH ] TAG ( <tag_name> = '<value>' [, ...] ) ]
        [, ... ]
    ) ]
@@ -105,10 +103,22 @@ Syntax
    - ``WITH SYNONYMS (...)`` is accepted **without** the ``=``.
    - ``LABELS (...)`` is likewise accepted **without** the ``=``.
 
+   .. versionadded:: 0.18.0
+
+   - ``AS`` before ``TABLES`` is **optional**. Snowflake writes none, so
+     ``CREATE SEMANTIC VIEW sales TABLES (...)`` works as pasted. This holds with
+     ``OR REPLACE``, ``IF NOT EXISTS`` and a view ``COMMENT`` before ``TABLES``.
+   - ``LABELS = (FILTER)`` goes between a fact or dimension's name and its
+     ``AS``, where Snowflake writes it (``o.is_large LABELS = (FILTER) AS
+     o.amount > 100``). It is also accepted after the expression, among the
+     other annotations, but not in both places on one entry. Only ``LABELS``
+     may come before ``AS``: ``COMMENT``, ``WITH SYNONYMS`` and ``TAG`` there
+     are rejected. ``GET_DDL`` writes ``LABELS`` before ``AS``.
+
 .. note::
 
    **Annotation order.** ``COMMENT``, ``WITH SYNONYMS``, ``LABELS`` and
-   ``[WITH] TAG`` may appear in any order on a single entry; the grammar above shows one
+   ``[WITH] TAG`` may appear in any order after an entry's expression; the grammar above shows one
    canonical spelling, not a required sequence. What *is* required is that the
    annotations be contiguous and complete: once the first annotation keyword is
    seen, the remainder of the entry must consist only of valid annotation
@@ -183,16 +193,16 @@ The ``FROM YAML`` variant accepts a YAML definition in a dollar-quoted string (`
 Statement Variants
 ==================
 
-``CREATE SEMANTIC VIEW <name> AS ...``
+``CREATE SEMANTIC VIEW <name> [AS] TABLES ...``
    Creates a new semantic view. Returns an error if a view with the same name already exists.
 
-``CREATE OR REPLACE SEMANTIC VIEW <name> AS ...``
+``CREATE OR REPLACE SEMANTIC VIEW <name> [AS] TABLES ...``
    Creates or replaces an existing semantic view with the same name. If the view does not exist, creates it. If it does, replaces the definition.
 
-``CREATE SEMANTIC VIEW IF NOT EXISTS <name> AS ...``
+``CREATE SEMANTIC VIEW IF NOT EXISTS <name> [AS] TABLES ...``
    Creates a new semantic view only if no view with the same name exists. If a view with the name already exists, the statement succeeds silently without modifying it.
 
-All three variants work with both the ``AS`` keyword body and the ``FROM YAML`` / ``FROM YAML FILE`` body.
+All three variants work with both the keyword body (with or without ``AS``) and the ``FROM YAML`` / ``FROM YAML FILE`` body.
 
 .. note::
 
@@ -351,7 +361,7 @@ Declares named row-level expressions. Facts are inlined into metric expressions 
 - ``<row_level_expression>``, the SQL expression **after** ``AS``: any expression that operates on individual rows. Must not contain aggregate functions. A fact may be named after its own backing column (``s.unit_price AS s.unit_price``), giving a passthrough fact.
 - ``COMMENT = '<text>'``, optional. A human-readable description.
 - ``WITH SYNONYMS = ('<synonym>', ...)``, optional. Alternative names for discoverability.
-- ``LABELS = (FILTER)``, optional. Declares the fact a :ref:`named filter <howto-annotations-filters>` -- a boolean-valued member meant for reuse in a query's :ref:`WHERE <ref-sv-pre-agg-filtering>`. Metadata only: it does not restrict querying, and the ``BOOLEAN`` requirement is enforced by DuckDB's binder at query time. ``FILTER`` is the only accepted label.
+- ``LABELS = (FILTER)``, optional. Declares the fact a :ref:`named filter <howto-annotations-filters>` -- a boolean-valued member meant for reuse in a query's :ref:`WHERE <ref-sv-pre-agg-filtering>`. Metadata only: it does not restrict querying, and the ``BOOLEAN`` requirement is enforced by DuckDB's binder at query time. ``FILTER`` is the only accepted label. Write it between the fact's name and ``AS``, as Snowflake does, or after the expression.
 - ``[WITH] TAG (<tag_name> = '<value>', ...)``, optional. Name/value metadata tags. See :ref:`Tags <ref-create-tags>`.
 
 **Fact chaining:**
@@ -391,7 +401,7 @@ Declares named grouping expressions available for queries.
 - ``<expression>``, any row-level SQL expression: no aggregate (outside a subquery or ``OVER``) and no prepared statement parameter. Can be a simple column reference (``o.region``) or a computed expression (``date_trunc('month', o.ordered_at)``).
 - ``COMMENT = '<text>'``, optional. A human-readable description.
 - ``WITH SYNONYMS = ('<synonym>', ...)``, optional. Alternative names for discoverability.
-- ``LABELS = (FILTER)``, optional. Declares the dimension a :ref:`named filter <howto-annotations-filters>` -- a boolean-valued member meant for reuse in a query's :ref:`WHERE <ref-sv-pre-agg-filtering>`. Metadata only: it does not hide the dimension from output, and the ``BOOLEAN`` requirement is enforced by DuckDB's binder at query time. ``FILTER`` is the only accepted label.
+- ``LABELS = (FILTER)``, optional. Declares the dimension a :ref:`named filter <howto-annotations-filters>` -- a boolean-valued member meant for reuse in a query's :ref:`WHERE <ref-sv-pre-agg-filtering>`. Metadata only: it does not hide the dimension from output, and the ``BOOLEAN`` requirement is enforced by DuckDB's binder at query time. ``FILTER`` is the only accepted label. Write it between the dimension's name and ``AS``, as Snowflake does, or after the expression.
 - ``[WITH] TAG (<tag_name> = '<value>', ...)``, optional. Name/value metadata tags. See :ref:`Tags <ref-create-tags>`.
 
 .. note::
@@ -610,7 +620,7 @@ FROM YAML
 
 .. versionadded:: 0.7.0
 
-Creates a semantic view from a YAML definition instead of the keyword-based ``AS`` body. Two forms are supported:
+Creates a semantic view from a YAML definition instead of the keyword body. Two forms are supported:
 
 **Inline YAML (dollar-quoted):**
 

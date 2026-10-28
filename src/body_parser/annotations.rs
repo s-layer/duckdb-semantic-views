@@ -179,6 +179,58 @@ fn parse_tag_list(content: &str, base_offset: usize) -> Result<Vec<Tag>, ParseEr
     Ok(tags)
 }
 
+/// The tag list of `ALTER SEMANTIC VIEW ... SET TAG name = 'value', ...`: the
+/// same entries as a `TAG (...)` clause, without the parentheses.
+pub(crate) fn parse_tag_assignments(
+    text: &str,
+    base_offset: usize,
+) -> Result<Vec<Tag>, ParseError> {
+    parse_tag_list(text, base_offset)
+}
+
+/// The names of `ALTER SEMANTIC VIEW ... UNSET TAG name, ...`. A name may be
+/// listed once.
+pub(crate) fn parse_tag_names(text: &str, base_offset: usize) -> Result<Vec<TagName>, ParseError> {
+    let as_tags = |names: &[TagName]| -> Vec<Tag> {
+        names
+            .iter()
+            .map(|name| Tag {
+                name: name.clone(),
+                value: String::new(),
+            })
+            .collect()
+    };
+    let mut names = Vec::new();
+    let mut offsets = Vec::new();
+    if text.trim_end().ends_with(',') {
+        return Err(ParseError {
+            message: "Empty entry in the tag name list.".to_string(),
+            position: Some(base_offset + text.trim_end().len() - 1),
+        });
+    }
+    for (_, entry) in split_at_depth0_commas(text)? {
+        let trimmed = entry.trim();
+        let entry_offset = base_offset + crate::util::byte_offset_within(text, trimmed);
+        let name = parse_tag_name(trimmed).map_err(|e| ParseError {
+            message: if trimmed.is_empty() {
+                "Empty entry in the tag name list.".to_string()
+            } else {
+                format!("Invalid tag name '{trimmed}': {e}.")
+            },
+            position: Some(entry_offset),
+        })?;
+        names.push(name);
+        offsets.push(entry_offset);
+    }
+    if let Some((i, message)) = crate::model::tag_error(&as_tags(&names)) {
+        return Err(ParseError {
+            message: format!("Invalid TAG: {message}."),
+            position: Some(offsets[i]),
+        });
+    }
+    Ok(names)
+}
+
 /// One `name = 'value'` entry of a TAG list (already trimmed).
 fn parse_tag_entry(entry: &str, base_offset: usize) -> Result<Tag, ParseError> {
     // The `=` that ends the name: the first one outside a quoted part.

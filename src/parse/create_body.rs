@@ -114,16 +114,18 @@ pub(crate) fn validate_create_body(
     let after_name_pre = after_name.trim_start();
     let (view_comment, remaining_after_comment) = extract_view_comment(after_name_pre)?;
 
-    // --- AS keyword body path (new in Phase 25) ---
+    // --- Keyword body path (new in Phase 25) ---
     // If text after the name starts with "AS" (whitespace-delimited), route to the
-    // AS-body keyword parser instead of the legacy paren-body path.
+    // keyword body parser instead of the legacy paren-body path. Snowflake writes
+    // no `AS` and starts the body at `TABLES`, which takes the same path.
     let after_name_trimmed = remaining_after_comment.trim_start();
     let is_as_body = after_name_trimmed
         .get(..2)
         .is_some_and(|s| s.eq_ignore_ascii_case("AS"))
         && (after_name_trimmed.len() == 2
             || after_name_trimmed.as_bytes()[2].is_ascii_whitespace());
-    if is_as_body {
+    let is_tables_body = crate::body_parser::starts_with_word(after_name_trimmed, "TABLES");
+    if is_as_body || is_tables_body {
         // Compute the byte offset of after_name_trimmed[0] within trimmed_no_semi.
         // after_prefix starts at: plen + whitespace-gap between trimmed_no_semi[plen..] and after_prefix
         let after_prefix_in_tns = plen + (trimmed_no_semi.len() - plen - after_prefix.len());
@@ -145,7 +147,7 @@ pub(crate) fn validate_create_body(
     // — the previous 9-byte literal compare required exactly one ASCII space,
     // so `FROM  YAML`, `FROM\tYAML`, and `FROM /* fmt */ YAML` (comments are
     // blanked to a RUN of spaces before this runs) all fell through to the
-    // generic "Expected 'AS' or 'FROM YAML'" error. Same fixed class as
+    // generic "Expected 'AS', 'TABLES' or 'FROM YAML'" error. Same fixed class as
     // PA-10 / TECH-DEBT #4; this site was missed.
     if let Some(kw_len) =
         super::match_keyword_prefix(after_name_trimmed.as_bytes(), &[b"from", b"yaml"])
@@ -166,8 +168,8 @@ pub(crate) fn validate_create_body(
     // Non-AS/FROM-YAML syntax rejected -- AS keyword or FROM YAML required after view name.
     let pos_in_trimmed = plen + (trimmed_no_semi.len() - plen - after_prefix.len()) + name_end;
     Err(ParseError {
-        message: "Expected 'AS' or 'FROM YAML' after view name. Use: CREATE SEMANTIC VIEW name \
-                  AS TABLES (...) DIMENSIONS (...) METRICS (...) or: CREATE SEMANTIC VIEW name \
+        message: "Expected 'AS', 'TABLES' or 'FROM YAML' after view name. Use: CREATE SEMANTIC \
+                  VIEW name [AS] TABLES (...) DIMENSIONS (...) METRICS (...) or: CREATE SEMANTIC VIEW name \
                   FROM YAML $$ ... $$ or: CREATE SEMANTIC VIEW name FROM YAML FILE \
                   '/path/to/file.yaml'"
             .to_string(),
@@ -183,7 +185,7 @@ pub(crate) fn validate_create_body(
 fn rewrite_ddl_keyword_body(
     kind: DdlKind,
     name: &ViewRef,
-    body_text: &str,              // text starting at "AS" (inclusive)
+    body_text: &str,              // text starting at "AS" or "TABLES" (inclusive)
     body_offset: usize,           // byte offset of body_text[0] in original query
     view_comment: Option<String>, // Phase 43: optional view-level COMMENT
 ) -> Result<RewriteAction, ParseError> {

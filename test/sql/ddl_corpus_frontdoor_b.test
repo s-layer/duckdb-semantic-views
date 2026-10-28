@@ -324,12 +324,12 @@ RELATIONSHIPS (
     "we""ird rel" AS t1(fk_0_0) REFERENCES t0
 )
 FACTS (
-    PRIVATE t0."fact.X" AS (t0.n + 1) * 2 COMMENT = 'it''s -- fine' LABELS = (FILTER),
+    PRIVATE t0."fact.X" LABELS = (FILTER) AS (t0.n + 1) * 2 COMMENT = 'it''s -- fine',
     t1.f2 AS e'it\'s, -- a /* b */' WITH SYNONYMS = ('wéird')
 )
 DIMENSIONS (
     t0."Dim, One" AS t0.c || ' -- not a comment' COMMENT = '/* nope */',
-    t1.d2 AS 'x' || t1.d2 WITH SYNONYMS = ('the PRIMARY KEY (id) lives here') LABELS = (FILTER)
+    t1.d2 LABELS = (FILTER) AS 'x' || t1.d2 WITH SYNONYMS = ('the PRIMARY KEY (id) lives here')
 )
 METRICS (
     t1.m1 USING ("we""ird rel") NON ADDITIVE BY ("Dim, One" DESC NULLS FIRST) AS SUM(t1.fk_0_0) COMMENT = 'μ',
@@ -383,7 +383,7 @@ RELATIONSHIPS (
 )
 FACTS (
     t1.f_0 AS 1 - 2 * (t1.n),
-    t0.f_1 AS e'a\\b\'c' LABELS = (FILTER)
+    t0.f_1 LABELS = (FILTER) AS e'a\\b\'c'
 )
 DIMENSIONS (
     t0.d_0 AS 'it''s ' || t0.c,
@@ -425,7 +425,7 @@ TABLES (
     t0 AS dcf_orders COMMENT = '' WITH SYNONYMS = ('the PRIMARY KEY (id) lives here', 'has -- and /* inside */')
 )
 DIMENSIONS (
-    t0.d_0 AS t0.region COMMENT = 'back\slash and '' quote' LABELS = (FILTER)
+    t0.d_0 LABELS = (FILTER) AS t0.region COMMENT = 'back\slash and '' quote'
 )
 
 # --- Statement framing: one DDL statement per call (ffi.rs, TECH-DEBT #85) ---

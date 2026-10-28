@@ -218,6 +218,20 @@ fn parse_single_metric_entry(entry: &str, entry_offset: usize) -> Result<ParsedM
     // token carets stay accurate under a leading access modifier).
     let before_base = entry_offset + byte_offset_within(entry, before_as);
 
+    // Snowflake writes a fact's or dimension's LABELS between its name and
+    // `AS`. On a metric it is as invalid there as after the expression, so say
+    // that rather than misreading it as part of the name or USING.
+    let before_cur = Cursor::new(before_as, before_base);
+    if let Some(labels) = before_cur
+        .find_kw_depth0("LABELS")
+        .filter(|l| l.start > 0 && before_as.as_bytes()[l.start - 1].is_ascii_whitespace())
+    {
+        return Err(before_cur.err(
+            labels.start,
+            "LABELS is not valid on a metric; it applies to facts and dimensions.".to_string(),
+        ));
+    }
+
     // Phase 47: NON ADDITIVE BY appears after USING when both are present, so
     // peel it off the tail first.
     let mut non_additive_by: Vec<NonAdditiveDim> = Vec::new();

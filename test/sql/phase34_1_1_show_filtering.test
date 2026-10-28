@@ -55,48 +55,48 @@ CREATE SEMANTIC VIEW products_sv AS
 # Matches: customer_name (filter_sv), product_name (products_sv)
 # ============================================================
 
-query TTTTTTTT rowsort
+query TTTTTTTTT rowsort
 SHOW SEMANTIC DIMENSIONS LIKE '%name%'
 ----
-memory	main	filter_sv	p3411_customers	customer_name	VARCHAR	[]	(empty)
-memory	main	products_sv	p3411_products	product_name	VARCHAR	[]	(empty)
+memory	main	filter_sv	p3411_customers	customer_name	VARCHAR	[]	(empty)	[]
+memory	main	products_sv	p3411_products	product_name	VARCHAR	[]	(empty)	[]
 
 # ============================================================
 # Test 2: SHOW SEMANTIC DIMENSIONS LIKE '%order%' (cross-view)
 # Matches: order_date (filter_sv) only
 # ============================================================
 
-query TTTTTTTT rowsort
+query TTTTTTTTT rowsort
 SHOW SEMANTIC DIMENSIONS LIKE '%order%'
 ----
-memory	main	filter_sv	p3411_orders	order_date	DATE	[]	(empty)
+memory	main	filter_sv	p3411_orders	order_date	DATE	[]	(empty)	[]
 
 # ============================================================
 # Test 3: SHOW SEMANTIC DIMENSIONS LIKE '%NAME%' IN filter_sv
 # Case-insensitive: matches customer_name
 # ============================================================
 
-query TTTTTTTT rowsort
+query TTTTTTTTT rowsort
 SHOW SEMANTIC DIMENSIONS LIKE '%NAME%' IN filter_sv
 ----
-memory	main	filter_sv	p3411_customers	customer_name	VARCHAR	[]	(empty)
+memory	main	filter_sv	p3411_customers	customer_name	VARCHAR	[]	(empty)	[]
 
 # ============================================================
 # Test 4: SHOW SEMANTIC DIMENSIONS STARTS WITH 'customer' (cross-view)
 # Case-sensitive: matches customer_name from filter_sv
 # ============================================================
 
-query TTTTTTTT rowsort
+query TTTTTTTTT rowsort
 SHOW SEMANTIC DIMENSIONS STARTS WITH 'customer'
 ----
-memory	main	filter_sv	p3411_customers	customer_name	VARCHAR	[]	(empty)
+memory	main	filter_sv	p3411_customers	customer_name	VARCHAR	[]	(empty)	[]
 
 # ============================================================
 # Test 5: SHOW SEMANTIC DIMENSIONS STARTS WITH 'Customer' (cross-view)
 # Case-sensitive, wrong case: no matches
 # ============================================================
 
-query TTTTTTTT rowsort
+query TTTTTTTTT rowsort
 SHOW SEMANTIC DIMENSIONS STARTS WITH 'Customer'
 ----
 
@@ -105,10 +105,10 @@ SHOW SEMANTIC DIMENSIONS STARTS WITH 'Customer'
 # '%name%' matches only customer_name in filter_sv; LIMIT 1 is deterministic
 # ============================================================
 
-query TTTTTTTT rowsort
+query TTTTTTTTT rowsort
 SHOW SEMANTIC DIMENSIONS LIKE '%name%' IN filter_sv LIMIT 1
 ----
-memory	main	filter_sv	p3411_customers	customer_name	VARCHAR	[]	(empty)
+memory	main	filter_sv	p3411_customers	customer_name	VARCHAR	[]	(empty)	[]
 
 # ============================================================
 # Test 7: SHOW SEMANTIC METRICS LIKE '%amount%' (cross-view)
@@ -135,40 +135,40 @@ memory	main	filter_sv	p3411_orders	order_count	BIGINT	[]	(empty)
 # Matches: raw_amount from filter_sv
 # ============================================================
 
-query TTTTTTTT rowsort
+query TTTTTTTTT rowsort
 SHOW SEMANTIC FACTS LIKE '%amount%'
 ----
-memory	main	filter_sv	p3411_orders	raw_amount	DECIMAL(10,2)	[]	(empty)
+memory	main	filter_sv	p3411_orders	raw_amount	DECIMAL(10,2)	[]	(empty)	[]
 
 # ============================================================
 # Test 10: SHOW SEMANTIC FACTS STARTS WITH 'raw' (cross-view)
 # Matches: raw_amount from filter_sv
 # ============================================================
 
-query TTTTTTTT rowsort
+query TTTTTTTTT rowsort
 SHOW SEMANTIC FACTS STARTS WITH 'raw'
 ----
-memory	main	filter_sv	p3411_orders	raw_amount	DECIMAL(10,2)	[]	(empty)
+memory	main	filter_sv	p3411_orders	raw_amount	DECIMAL(10,2)	[]	(empty)	[]
 
 # ============================================================
 # Test 11: SHOW SEMANTIC FACTS IN filter_sv LIMIT 1
 # filter_sv has 1 fact; LIMIT 1 returns that one
 # ============================================================
 
-query TTTTTTTT
+query TTTTTTTTT
 SHOW SEMANTIC FACTS IN filter_sv LIMIT 1
 ----
-memory	main	filter_sv	p3411_orders	raw_amount	DECIMAL(10,2)	[]	(empty)
+memory	main	filter_sv	p3411_orders	raw_amount	DECIMAL(10,2)	[]	(empty)	[]
 
 # ============================================================
 # Test 12: Composition: LIKE + IN + STARTS WITH + LIMIT
 # LIKE '%name%' matches customer_name, STARTS WITH 'cust' also matches
 # ============================================================
 
-query TTTTTTTT rowsort
+query TTTTTTTTT rowsort
 SHOW SEMANTIC DIMENSIONS LIKE '%name%' IN filter_sv STARTS WITH 'cust' LIMIT 10
 ----
-memory	main	filter_sv	p3411_customers	customer_name	VARCHAR	[]	(empty)
+memory	main	filter_sv	p3411_customers	customer_name	VARCHAR	[]	(empty)	[]
 
 # ============================================================
 # Test 13: FOR METRIC with LIKE
@@ -176,10 +176,10 @@ memory	main	filter_sv	p3411_customers	customer_name	VARCHAR	[]	(empty)
 # LIKE '%gio%' matches only region
 # ============================================================
 
-query TTTT rowsort
+query TTTTTT rowsort
 SHOW SEMANTIC DIMENSIONS LIKE '%gio%' IN filter_sv FOR METRIC total_amount
 ----
-p3411_customers	region	VARCHAR	false
+p3411_customers	region	VARCHAR	false	[]	(empty)
 
 # ============================================================
 # Test 14: FOR METRIC with STARTS WITH
@@ -187,10 +187,10 @@ p3411_customers	region	VARCHAR	false
 # STARTS WITH 'customer' matches customer_name
 # ============================================================
 
-query TTTT rowsort
+query TTTTTT rowsort
 SHOW SEMANTIC DIMENSIONS IN filter_sv FOR METRIC total_amount STARTS WITH 'customer'
 ----
-p3411_customers	customer_name	VARCHAR	false
+p3411_customers	customer_name	VARCHAR	false	[]	(empty)
 
 # ============================================================
 # Test 15: FOR METRIC with LIMIT
@@ -198,12 +198,12 @@ p3411_customers	customer_name	VARCHAR	false
 # LIMIT 3 returns all (deterministic since there are exactly 3)
 # ============================================================
 
-query TTTT rowsort
+query TTTTTT rowsort
 SHOW SEMANTIC DIMENSIONS IN filter_sv FOR METRIC total_amount LIMIT 3
 ----
-p3411_customers	customer_name	VARCHAR	false
-p3411_customers	region	VARCHAR	false
-p3411_orders	order_date	DATE	false
+p3411_customers	customer_name	VARCHAR	false	[]	(empty)
+p3411_customers	region	VARCHAR	false	[]	(empty)
+p3411_orders	order_date	DATE	false	[]	(empty)
 
 # ============================================================
 # Test 16: Error: wrong clause order (LIKE after IN)
@@ -218,16 +218,16 @@ syntax error at or near "LIKE"
 # Test 17: Case insensitivity of keywords
 # ============================================================
 
-query TTTTTTTT rowsort
+query TTTTTTTTT rowsort
 show semantic dimensions like '%name%' in filter_sv
 ----
-memory	main	filter_sv	p3411_customers	customer_name	VARCHAR	[]	(empty)
+memory	main	filter_sv	p3411_customers	customer_name	VARCHAR	[]	(empty)	[]
 
 # ============================================================
 # Test 18: Empty LIKE pattern (matches nothing)
 # ============================================================
 
-query TTTTTTTT rowsort
+query TTTTTTTTT rowsort
 SHOW SEMANTIC DIMENSIONS LIKE '' IN filter_sv
 ----
 

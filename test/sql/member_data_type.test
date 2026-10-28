@@ -81,10 +81,10 @@ SELECT name, data_type FROM show_semantic_dimensions('dt_sv') WHERE name IN ('"C
 tier	SMALLINT
 
 # CASE dimension: a nested (LIST) type keeps its child type
-query TTTTTTTT
+query TTTTTTTTT
 SHOW SEMANTIC DIMENSIONS LIKE 'tags' IN dt_sv
 ----
-memory	main	dt_sv	dt_orders	tags	VARCHAR[]	[]	(empty)
+memory	main	dt_sv	dt_orders	tags	VARCHAR[]	[]	(empty)	[]
 
 # CASE metric: COUNT is BIGINT
 query TTTTTTTT
@@ -136,11 +136,11 @@ SELECT name, data_type FROM show_semantic_metrics('dt_sv') WHERE name = 'score_s
 score_sum	DOUBLE
 
 # CASE fact: DECIMAL(10,2) * INTEGER
-query TTTTTTTT
+query TTTTTTTTT
 SHOW SEMANTIC FACTS IN dt_sv
 ----
-memory	main	dt_sv	dt_orders	line_total	DECIMAL(18,2)	[]	(empty)
-memory	main	dt_sv	dt_orders	raw_score	DOUBLE	[]	(empty)
+memory	main	dt_sv	dt_orders	line_total	DECIMAL(18,2)	[]	(empty)	[]
+memory	main	dt_sv	dt_orders	raw_score	DOUBLE	[]	(empty)	[]
 
 # CASE the cross-view SHOW form (no IN) reports the same types
 query TT

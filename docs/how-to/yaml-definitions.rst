@@ -168,8 +168,8 @@ The exported YAML produces the same semantic view definition when imported, incl
 Troubleshooting
 ===============
 
-**Error: Expected 'AS' or 'FROM YAML' after view name**
-   The DDL body must start with either ``AS`` (keyword body) or ``FROM YAML`` (YAML body). Check that the ``FROM YAML`` keywords appear directly after the view name.
+**Error: Expected 'AS', 'TABLES' or 'FROM YAML' after view name**
+   The DDL body must start with ``AS`` or ``TABLES`` (keyword body) or ``FROM YAML`` (YAML body). Check that the ``FROM YAML`` keywords appear directly after the view name.
 
 **Error: Expected '$' to begin dollar-quoted string**
    The inline YAML body must be enclosed in dollar-quote delimiters (``$$`` or ``$tag$``). Ensure the YAML content starts with ``$$`` immediately after ``FROM YAML``.

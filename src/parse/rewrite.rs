@@ -27,7 +27,7 @@ pub(crate) mod messages {
     pub(crate) const EXPECTED_COMMENT_STRING: &str =
         "Expected single-quoted string after SET COMMENT =";
     pub(crate) const UNSUPPORTED_ALTER: &str =
-        "Unsupported ALTER operation. Supported: RENAME TO, SET COMMENT, UNSET COMMENT.";
+        "Unsupported ALTER operation. Supported: RENAME TO, SET COMMENT, UNSET COMMENT, SET TAG, UNSET TAG.";
 
     pub(crate) fn unexpected_after_view_name(rest: &str) -> String {
         format!("Unexpected tokens after view name: '{rest}'")
@@ -132,6 +132,7 @@ pub(crate) fn lower_show(
         clauses.limit,
         clauses.in_schema.as_ref(),
         clauses.in_database.as_ref(),
+        clauses.limit_from.as_deref(),
     );
     Ok(format!("{base}{suffix}"))
 }
@@ -181,6 +182,19 @@ pub enum RewriteAction {
     },
     /// ALTER ... UNSET COMMENT — native UPDATE via `json_merge_patch`.
     AlterUnsetComment { name: ViewRef, if_exists: bool },
+    /// ALTER ... SET TAG — native UPDATE of the view's tags: each named tag's
+    /// value is replaced, or the tag added.
+    AlterSetTags {
+        name: ViewRef,
+        tags: Vec<crate::model::Tag>,
+        if_exists: bool,
+    },
+    /// ALTER ... UNSET TAG — native UPDATE removing the named view tags.
+    AlterUnsetTags {
+        name: ViewRef,
+        names: Vec<crate::model::TagName>,
+        if_exists: bool,
+    },
     /// Read-side DDL (DESCRIBE / SHOW / SHOW COLUMNS) already lowered to final
     /// `SELECT * FROM <read_side_fn>(...)` SQL that `DuckDB` runs on the caller's
     /// connection unchanged.
@@ -205,7 +219,9 @@ impl RewriteAction {
             | RewriteAction::CreateFromYamlFile { name, .. }
             | RewriteAction::Drop { name, .. }
             | RewriteAction::AlterSetComment { name, .. }
-            | RewriteAction::AlterUnsetComment { name, .. } => vec![name],
+            | RewriteAction::AlterUnsetComment { name, .. }
+            | RewriteAction::AlterSetTags { name, .. }
+            | RewriteAction::AlterUnsetTags { name, .. } => vec![name],
             RewriteAction::AlterRename { name, new_name, .. } => vec![name, new_name],
             RewriteAction::Passthrough(_) => Vec::new(),
         }
@@ -430,8 +446,9 @@ mod tests {
         assert!(result.is_err());
         let err = result.unwrap_err();
         assert!(
-            err.message.contains("Expected 'AS' or 'FROM YAML'"),
-            "Expected 'Expected AS or FROM YAML' error, got: {}",
+            err.message
+                .contains("Expected 'AS', 'TABLES' or 'FROM YAML'"),
+            "Expected 'Expected AS, TABLES or FROM YAML' error, got: {}",
             err.message
         );
     }
@@ -449,13 +466,14 @@ mod tests {
 
     #[test]
     fn test_parse_error_position_paren_body_rejected() {
-        // Non-AS-body syntax returns "Expected 'AS' or 'FROM YAML'" error with position
+        // Non-AS-body syntax returns "Expected 'AS', 'TABLES' or 'FROM YAML'" error with position
         let query = "CREATE SEMANTIC VIEW x (tables := [])";
         let result = plan_create(query);
         assert!(result.is_err());
         let err = result.unwrap_err();
         assert!(
-            err.message.contains("Expected 'AS' or 'FROM YAML'"),
+            err.message
+                .contains("Expected 'AS', 'TABLES' or 'FROM YAML'"),
             "got: {}",
             err.message
         );
@@ -521,8 +539,9 @@ mod tests {
             assert!(result.is_err(), "Paren-body must be rejected: {result:?}");
             let err = result.unwrap_err();
             assert!(
-                err.message.contains("Expected 'AS' or 'FROM YAML'"),
-                "Expected 'Expected AS or FROM YAML' error, got: {}",
+                err.message
+                    .contains("Expected 'AS', 'TABLES' or 'FROM YAML'"),
+                "Expected 'Expected AS, TABLES or FROM YAML' error, got: {}",
                 err.message
             );
         }
@@ -767,7 +786,7 @@ mod tests {
         #[test]
         fn test_build_filter_suffix_like_only() {
             assert_eq!(
-                build_filter_suffix(Some("%rev%"), None, None, None, None),
+                build_filter_suffix(Some("%rev%"), None, None, None, None, None),
                 " WHERE name ILIKE '%rev%'"
             );
         }
@@ -775,7 +794,7 @@ mod tests {
         #[test]
         fn test_build_filter_suffix_starts_with_only() {
             assert_eq!(
-                build_filter_suffix(None, Some("total"), None, None, None),
+                build_filter_suffix(None, Some("total"), None, None, None, None),
                 " WHERE starts_with(name, 'total')"
             );
         }
@@ -783,7 +802,7 @@ mod tests {
         #[test]
         fn test_build_filter_suffix_limit_only() {
             assert_eq!(
-                build_filter_suffix(None, None, Some(5), None, None),
+                build_filter_suffix(None, None, Some(5), None, None, None),
                 " LIMIT 5"
             );
         }
@@ -791,20 +810,20 @@ mod tests {
         #[test]
         fn test_build_filter_suffix_all_three() {
             assert_eq!(
-                build_filter_suffix(Some("%x%"), Some("a"), Some(10), None, None),
+                build_filter_suffix(Some("%x%"), Some("a"), Some(10), None, None, None),
                 " WHERE name ILIKE '%x%' AND starts_with(name, 'a') LIMIT 10"
             );
         }
 
         #[test]
         fn test_build_filter_suffix_none() {
-            assert_eq!(build_filter_suffix(None, None, None, None, None), "");
+            assert_eq!(build_filter_suffix(None, None, None, None, None, None), "");
         }
 
         #[test]
         fn test_build_filter_suffix_reescapes_quotes() {
             assert_eq!(
-                build_filter_suffix(Some("O'Brien"), None, None, None, None),
+                build_filter_suffix(Some("O'Brien"), None, None, None, None, None),
                 " WHERE name ILIKE 'O''Brien'"
             );
         }
@@ -817,6 +836,7 @@ mod tests {
                     None,
                     None,
                     Some(&ScopeName::Named("main".into())),
+                    None,
                     None
                 ),
                 " WHERE lower(schema_name) = lower('main')"
@@ -831,7 +851,8 @@ mod tests {
                     None,
                     None,
                     None,
-                    Some(&ScopeName::Named("memory".into()))
+                    Some(&ScopeName::Named("memory".into())),
+                    None
                 ),
                 " WHERE lower(database_name) = lower('memory')"
             );
@@ -845,6 +866,7 @@ mod tests {
                     None,
                     None,
                     Some(&ScopeName::Named("main".into())),
+                    None,
                     None
                 ),
                 " WHERE name ILIKE '%x%' AND lower(schema_name) = lower('main')"

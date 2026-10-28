@@ -101,7 +101,7 @@ pub(crate) fn changes() -> String {
             .map_or("", |(_, shape)| shape.wire_name());
         let _ = writeln!(out, "RULE\t{definition}\t{shape}");
     }
-    for rule in create::ANY_TOKEN {
+    for rule in create::ANY_TOKEN.iter().chain(write::ANY_TOKEN) {
         let _ = writeln!(out, "ANY_TOKEN\t{rule}");
     }
     for (rule, shape) in &statements {
@@ -309,7 +309,10 @@ mod tests {
             );
             assert!(text.contains(&format!("PREPEND\tDescribeStatement\t{rule}\n")));
         }
-        for rule in super::create::ANY_TOKEN {
+        for rule in super::create::ANY_TOKEN
+            .iter()
+            .chain(super::write::ANY_TOKEN)
+        {
             let at = text.find(&format!("ANY_TOKEN\t{rule}\n")).unwrap();
             let defined = text.find(&format!("RULE\t{rule} <-")).unwrap();
             assert!(defined < at, "{rule} must be defined before its override");

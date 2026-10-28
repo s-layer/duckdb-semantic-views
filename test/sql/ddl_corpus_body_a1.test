@@ -641,10 +641,10 @@ TABLES (
     o AS dcb_orders PRIMARY KEY (id)
 )
 FACTS (
-    o.is_large AS o.amount > 100 LABELS = (FILTER)
+    o.is_large LABELS = (FILTER) AS o.amount > 100
 )
 DIMENSIONS (
-    o.is_domestic AS o.country = 'US' LABELS = (FILTER)
+    o.is_domestic LABELS = (FILTER) AS o.country = 'US'
 )
 METRICS (
     o.revenue AS sum(o.amount)

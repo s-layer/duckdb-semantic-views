@@ -24,15 +24,22 @@ pub(super) const RULES: &str = r"
 SvDrop <- 'DROP' 'SEMANTIC' 'VIEW' SvIfExists? SvViewName
 SvIfExists <- 'IF' 'EXISTS'
 SvAlter <- 'ALTER' 'SEMANTIC' 'VIEW' SvIfExists? SvViewName SvAlterAction
-SvAlterAction <- SvAlterRename / SvAlterSetComment / SvAlterUnsetComment
+SvAlterAction <- SvAlterRename / SvAlterSetComment / SvAlterUnsetComment / SvAlterSetTag / SvAlterUnsetTag
 SvAlterRename <- 'RENAME' 'TO' SvNewName
 SvNewName <- SvNamePart ('.' SvNamePart)*
 SvAlterSetComment <- 'SET' 'COMMENT' '=' StringLiteral
 SvAlterUnsetComment <- 'UNSET' 'COMMENT'
+SvAlterSetTag <- 'SET' 'TAG' SvAlterToken+
+SvAlterUnsetTag <- 'UNSET' 'TAG' SvAlterToken+
+SvAlterToken <- Identifier
 ";
 
 /// The statement rules, each lowered by [`transform`].
 pub(super) const STATEMENTS: &[&str] = &["SvDrop", "SvAlter"];
+
+/// Rules matched by `DuckDB`'s any-token matcher instead of their body: the
+/// tag list of `SET TAG` / `UNSET TAG`, read by the body parser's TAG rules.
+pub(super) const ANY_TOKEN: &[&str] = &["SvAlterToken"];
 
 pub(super) fn transform(rule: &str, tree: &Tree) -> Result<RewriteAction, ParseError> {
     let root = &tree.root;
@@ -77,12 +84,42 @@ pub(super) fn transform(rule: &str, tree: &Tree) -> Result<RewriteAction, ParseE
     if action.find("SvAlterUnsetComment").is_some() {
         return Ok(RewriteAction::AlterUnsetComment { name, if_exists });
     }
+    if let Some(set) = action.find("SvAlterSetTag") {
+        let (text, base) = tag_list(tree, set)?;
+        return Ok(RewriteAction::AlterSetTags {
+            name,
+            tags: crate::body_parser::parse_tag_assignments(&text, base)?,
+            if_exists,
+        });
+    }
+    if let Some(unset) = action.find("SvAlterUnsetTag") {
+        let (text, base) = tag_list(tree, unset)?;
+        return Ok(RewriteAction::AlterUnsetTags {
+            name,
+            names: crate::body_parser::parse_tag_names(&text, base)?,
+            if_exists,
+        });
+    }
     Err(internal(action, "unknown ALTER operation"))
 }
 
 /// The view named by the `rule` node under `parent`, folded by
 /// `parse_view_ref`. `gap` words the error for a name
 /// with whitespace inside it, given the rest of the statement.
+/// The text after `SET TAG` / `UNSET TAG`, rebuilt from its tokens, and the
+/// query offset it starts at.
+fn tag_list(tree: &Tree, clause: &Node) -> Result<(String, usize), ParseError> {
+    let first = clause
+        .find("SvAlterToken")
+        .ok_or_else(|| internal(clause, "missing SvAlterToken"))?;
+    let (Some(clause_at), Some(list_at)) = (clause.offset(), first.offset()) else {
+        return Err(internal(clause, "TAG list without a position"));
+    };
+    let text = tree.text(clause);
+    let list = text.get(list_at - clause_at..).unwrap_or_default();
+    Ok((list.to_string(), list_at))
+}
+
 fn view_ref(
     tree: &Tree,
     parent: &Node,

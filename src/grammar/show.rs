@@ -49,7 +49,8 @@ SvScopeName <- SvNamePart ('.' SvNamePart)*
 SvShowInView <- SvViewName
 SvShowForMetric <- 'FOR' 'METRIC' SvMemberName
 SvShowStartsWith <- 'STARTS' 'WITH' StringLiteral
-SvShowLimit <- 'LIMIT' SvShowLimitValue
+SvShowLimit <- 'LIMIT' SvShowLimitValue SvShowLimitFrom?
+SvShowLimitFrom <- 'FROM' StringLiteral
 SvShowLimitValue <- NumberLiteral / '-' NumberLiteral / ColId / StringLiteral
 SvShowColumns <- 'SHOW' 'COLUMNS' 'IN' 'SEMANTIC' 'VIEW' SvViewName
 SvDescribe <- SvDescribeWord 'SEMANTIC' 'VIEW' SvViewName
@@ -126,6 +127,7 @@ fn transform_show(tree: &Tree) -> Result<String, ParseError> {
         .transpose()?;
 
     let mut limit = None;
+    let mut limit_from = None;
     if let Some(node) = root.find("SvShowLimit") {
         let token: String = node
             .find("SvShowLimitValue")
@@ -136,6 +138,17 @@ fn transform_show(tree: &Tree) -> Result<String, ParseError> {
             position: node.offset(),
         })?;
         limit = Some(n);
+        if let Some(from) = node.find("SvShowLimitFrom") {
+            if !matches!(kind, DdlKind::Show | DdlKind::ShowTerse) {
+                return Err(ParseError {
+                    message: format!(
+                        "LIMIT ... FROM is only valid for SHOW SEMANTIC VIEWS, not SHOW SEMANTIC {entity}"
+                    ),
+                    position: from.offset(),
+                });
+            }
+            limit_from = Some(plain_string(tree, from, QUOTED)?);
+        }
     }
 
     let clauses = ShowClauses {
@@ -146,6 +159,7 @@ fn transform_show(tree: &Tree) -> Result<String, ParseError> {
         for_metric: for_metric.as_deref(),
         starts_with,
         limit,
+        limit_from,
     };
     lower_show(kind, &clauses, root.offset().unwrap_or(0))
 }

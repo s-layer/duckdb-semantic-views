@@ -79,8 +79,8 @@ Concept Mapping
      - ``DESCRIBE`` / ``DESC SEMANTIC VIEW``
      - :ref:`DESCRIBE SEMANTIC VIEW <ref-describe-semantic-view>` (``DESC`` abbreviation also accepted)
    * - List views
-     - ``SHOW SEMANTIC VIEWS``
-     - :ref:`SHOW SEMANTIC VIEWS <ref-show-semantic-views>`
+     - ``SHOW SEMANTIC VIEWS``, with ``LIMIT <rows> FROM '<name>'`` to page through the list
+     - :ref:`SHOW SEMANTIC VIEWS <ref-show-semantic-views>`, ``LIMIT ... FROM`` included
    * - Terse view listing
      - ``SHOW TERSE SEMANTIC VIEWS``
      - :ref:`SHOW TERSE SEMANTIC VIEWS <ref-show-semantic-views>`
@@ -91,11 +91,11 @@ Concept Mapping
      - ``IN SCHEMA`` / ``IN DATABASE``
      - ``IN SCHEMA`` / ``IN DATABASE`` on SHOW commands
    * - Retrieve DDL text
-     - ``GET_DDL('SEMANTIC_VIEW', ...)``
-     - :ref:`GET_DDL('SEMANTIC_VIEW', ...) <ref-get-ddl>`
+     - ``GET_DDL('SEMANTIC_VIEW', ...)`` or ``GET_DDL('SEMANTIC VIEW', ...)``
+     - :ref:`GET_DDL <ref-get-ddl>`, with either spelling of the object type
    * - Alter a view
      - ``ALTER SEMANTIC VIEW``
-     - :ref:`ALTER SEMANTIC VIEW <ref-alter-semantic-view>` (RENAME TO, SET COMMENT, UNSET COMMENT)
+     - :ref:`ALTER SEMANTIC VIEW <ref-alter-semantic-view>` (RENAME TO, SET COMMENT, UNSET COMMENT, SET TAG, UNSET TAG)
    * - Drop a view
      - ``DROP SEMANTIC VIEW``
      - :ref:`DROP SEMANTIC VIEW <ref-drop-semantic-view>`
@@ -122,6 +122,13 @@ The DDL syntax is intentionally close to Snowflake's. The clause order (``TABLES
    accepted as an abbreviation of ``DESCRIBE SEMANTIC VIEW``. See
    :ref:`ref-create-semantic-view`.
 
+   .. versionadded:: 0.18.0
+
+   Snowflake DDL now pastes as written: ``AS`` before ``TABLES`` is optional;
+   ``LABELS = (FILTER)`` may sit between a member's name and its ``AS``
+   (``o.is_large LABELS = (FILTER) AS o.amount > 100``), where Snowflake puts it;
+   and ``GET_DDL`` takes ``'SEMANTIC VIEW'`` as well as ``'SEMANTIC_VIEW'``.
+
 .. tab-set::
    :sync-group: platform
 
@@ -130,7 +137,7 @@ The DDL syntax is intentionally close to Snowflake's. The clause order (``TABLES
 
       .. code-block:: sql
 
-         -- Snowflake has no AS keyword before the body clauses.
+         -- Snowflake writes no AS keyword before the body clauses.
          CREATE SEMANTIC VIEW analytics
          TABLES (
              o AS orders,
@@ -152,6 +159,7 @@ The DDL syntax is intentionally close to Snowflake's. The clause order (``TABLES
 
       .. code-block:: sql
 
+         -- AS is optional: the Snowflake form above also works.
          CREATE SEMANTIC VIEW analytics AS
          TABLES (
              o AS orders    PRIMARY KEY (id),
@@ -567,9 +575,9 @@ Snowflake ``CREATE SEMANTIC VIEW`` features that are commonly asked about, and w
    * - Query-time scalar expressions -- ``SEMANTIC_VIEW( v DIMENSIONS DATE_PART('year', orders.order_date) AS year )``, where a ``DIMENSIONS`` / ``FACTS`` item `may be a scalar expression over dimensions or facts of the same logical table <https://docs.snowflake.com/en/sql-reference/constructs/semantic_view>`_, a ``METRICS`` item may be an expression over metrics, and any item may take ``AS <alias>``
      - **Supported.** An item may be an expression, in the construct and in a ``semantic_view()`` list (``'DATE_PART(''year'', o.order_date) AS year'``), with Snowflake's rules: a ``DIMENSIONS`` or ``FACTS`` expression uses dimensions and facts of one table, and a ``METRICS`` expression uses metrics and aggregates of the dimensions and facts of one table. An expression item is planned as a member of its table, so ``COUNT(DISTINCT ...)``, ratios and per-grain metrics come out right, and the fan-trap checks apply to it. Any item may take ``AS <alias>`` (optional in the construct, as in Snowflake). See :ref:`ref-sv-expression-items`.
    * - Named filters -- ``LABELS = (FILTER)`` on a fact or dimension resolving to ``BOOLEAN``, referenced bare in a query's ``WHERE`` (`Snowflake GA May 2026 <https://docs.snowflake.com/en/user-guide/views-semantic/filters>`_)
-     - **Supported.** ``LABELS = (FILTER)`` is accepted on a fact or dimension entry, in any order among ``COMMENT`` / ``WITH SYNONYMS``, and survives ``GET_DDL``, YAML export, and ``DESCRIBE`` (as a ``LABELS`` property row valued ``["FILTER"]``). Referencing the member bare in the query's ``WHERE`` works via the pre-aggregation predicate above -- a filter is an ordinary boolean member, so the label declares *intent* and drives introspection rather than gating resolution. The ``BOOLEAN`` requirement is enforced by DuckDB's binder at query time, not at ``CREATE``: ``CREATE`` binds the member but does not check its type, so a non-boolean filter raises DuckDB's own type error when queried. Labels other than ``FILTER`` are rejected rather than silently dropped.
+     - **Supported.** ``LABELS = (FILTER)`` is accepted on a fact or dimension entry, between the name and ``AS`` as Snowflake writes it, or after the expression in any order among ``COMMENT`` / ``WITH SYNONYMS``. It survives ``GET_DDL`` (written before ``AS``), YAML export, and ``DESCRIBE`` (as a ``LABELS`` property row valued ``["FILTER"]``), and shows in the ``labels`` column of ``SHOW SEMANTIC DIMENSIONS`` / ``FACTS``, as in Snowflake. Referencing the member bare in the query's ``WHERE`` works via the pre-aggregation predicate above -- a filter is an ordinary boolean member, so the label declares *intent* and drives introspection rather than gating resolution. The ``BOOLEAN`` requirement is enforced by DuckDB's binder at query time, not at ``CREATE``: ``CREATE`` binds the member but does not check its type, so a non-boolean filter raises DuckDB's own type error when queried. Labels other than ``FILTER`` are rejected rather than silently dropped.
    * - Tags -- ``[WITH] TAG (<tag_name> = '<value>', ...)`` on the view, a logical table, a fact, a dimension or a metric
-     - **Supported**, with Snowflake's placement and syntax. Tags are stored with the view and shown as a ``TAGS`` row (a JSON object) in ``DESCRIBE``; they survive ``GET_DDL`` and YAML export, and ``SHOW`` commands omit them, as Snowflake's do. Snowflake requires each tag to exist as a ``CREATE TAG`` object; DuckDB has no tag objects, so the name (up to ``database.schema.tag``) is stored as written. Values are limited to 256 characters, as in Snowflake. See :ref:`Tags <ref-create-tags>`.
+     - **Supported**, with Snowflake's placement and syntax. Tags are stored with the view and shown as a ``TAGS`` row (a JSON object) in ``DESCRIBE``; they survive ``GET_DDL`` and YAML export, and ``SHOW`` commands omit them, as Snowflake's do. ``ALTER SEMANTIC VIEW ... SET TAG`` / ``UNSET TAG`` change the view's own tags, at view level only, as in Snowflake. Snowflake requires each tag to exist as a ``CREATE TAG`` object; DuckDB has no tag objects, so the name (up to ``database.schema.tag``) is stored as written. Values are limited to 256 characters, as in Snowflake. See :ref:`Tags <ref-create-tags>`.
    * - Column-level security
      - Out of scope; DuckDB handles access control
    * - ``ASOF`` / temporal relationships

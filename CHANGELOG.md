@@ -9,7 +9,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-_No unreleased changes yet._
+### Added
+
+- **Snowflake DDL pastes as written.** `CREATE SEMANTIC VIEW sales TABLES (...)` works without `AS` before `TABLES`, as Snowflake writes it, including with `OR REPLACE`, `IF NOT EXISTS` and a view `COMMENT` before `TABLES`. `AS` is still accepted. On a fact or dimension, `LABELS = (FILTER)` may sit between the name and `AS` (`o.is_large LABELS = (FILTER) AS o.amount > 100`), Snowflake's placement; the trailing placement after the expression still works, but not both on one entry. `GET_DDL('SEMANTIC VIEW', ...)`, the spelling in Snowflake's `GET_DDL` reference, is accepted alongside `'SEMANTIC_VIEW'`.
+- **Paging with `SHOW SEMANTIC VIEWS ... LIMIT n FROM '<name>'`.** As in Snowflake, `FROM` returns the views whose name sorts after `'<name>'` (case-sensitive), and `LIMIT` then applies. Pass the last name of one page to get the next. `SHOW TERSE SEMANTIC VIEWS` takes it too; the other `SHOW SEMANTIC` commands reject it, as Snowflake's do.
+- **`ALTER SEMANTIC VIEW ... SET TAG` and `UNSET TAG`.** `ALTER SEMANTIC VIEW [IF EXISTS] sales SET TAG owner = 'finance', tier = 'gold'` adds tags to the view or replaces their values, and `UNSET TAG tier` removes them. Tag names match case-insensitively, and unsetting a tag the view does not carry is not an error. As in Snowflake, `ALTER` changes the view's own tags only. `DESCRIBE` and `GET_DDL` show the change.
+
+### Changed
+
+- **`SHOW SEMANTIC DIMENSIONS` and `SHOW SEMANTIC FACTS` have a `labels` column.** A ninth column, after `comment`, holds the member's labels as a JSON array: `["FILTER"]` for a named filter, `[]` otherwise, as in Snowflake. `SHOW SEMANTIC METRICS` is unchanged. Code that reads these commands by column position, or `SELECT *` into a fixed-width table, needs updating.
+- **`SHOW SEMANTIC DIMENSIONS ... FOR METRIC` has `synonyms` and `comment` columns.** They follow `required`, as in Snowflake: `synonyms` is a JSON array (`[]` when none) and `comment` is an empty string when none is set.
+- **`GET_DDL` writes `LABELS` before `AS`.** A named filter renders as `o.is_large LABELS = (FILTER) AS o.amount > 100`, Snowflake's placement, instead of after the expression. Both forms re-create the same view.
+- **Reworded error for a `CREATE` body that is not recognized.** Since `AS` is optional, it now reads `Expected 'AS', 'TABLES' or 'FROM YAML' after view name. Use: CREATE SEMANTIC VIEW name [AS] TABLES (...) ...`.
 
 ## [0.17.0] - 2026-10-26
 

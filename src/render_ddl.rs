@@ -33,8 +33,8 @@ fn emit_comment(out: &mut String, comment: Option<&str>) {
 
 /// Append ` LABELS = (FILTER)` to `out` when the member is a named filter.
 ///
-/// Emitted after COMMENT / WITH SYNONYMS so the annotation region renders in a
-/// stable order; the parser accepts the clauses in any order, so the round-trip
+/// Emitted between the member's name and `AS`, where Snowflake writes it. The
+/// parser also accepts it among the trailing annotations, so the round-trip
 /// does not depend on this choice.
 fn emit_labels(out: &mut String, is_filter: bool) {
     if is_filter {
@@ -317,11 +317,11 @@ fn emit_facts(out: &mut String, def: &SemanticViewDefinition) {
             out.push_str("PRIVATE ");
         }
         emit_member_name(out, fact.source_table.as_ref(), &fact.name, !private);
+        emit_labels(out, fact.is_filter);
         out.push_str(" AS ");
         out.push_str(&fact.expr);
         emit_comment(out, fact.comment.as_deref());
         emit_synonyms(out, &fact.synonyms);
-        emit_labels(out, fact.is_filter);
         emit_tags(out, &fact.tags);
         if i + 1 < def.facts.len() {
             out.push(',');
@@ -338,11 +338,11 @@ fn emit_dimensions(out: &mut String, def: &SemanticViewDefinition) {
         out.push_str("    ");
         // DIMENSIONS carry no access modifier, so the name is always first.
         emit_member_name(out, dim.source_table.as_ref(), &dim.name, true);
+        emit_labels(out, dim.is_filter);
         out.push_str(" AS ");
         out.push_str(&dim.expr);
         emit_comment(out, dim.comment.as_deref());
         emit_synonyms(out, &dim.synonyms);
-        emit_labels(out, dim.is_filter);
         emit_tags(out, &dim.tags);
         if i + 1 < def.dimensions.len() {
             out.push(',');
@@ -1706,15 +1706,16 @@ mod tests {
         );
         // Anchor each occurrence to its own member so a regression that renders
         // both on one entry (or drops the fact wiring) cannot pass.
+        // Snowflake's placement: between the name and `AS`.
         assert!(
             ddl.contains(&format!(
-                "{} LABELS = (FILTER)",
+                "o.region LABELS = (FILTER) AS {}",
                 def.dimensions[0].expr.clone()
             )),
             "dimension filter must render on the dimension entry: {ddl}"
         );
         assert!(
-            ddl.contains("o.amount > 100 LABELS = (FILTER)"),
+            ddl.contains("o.is_large LABELS = (FILTER) AS o.amount > 100"),
             "fact filter must render on the fact entry: {ddl}"
         );
     }
@@ -1739,7 +1740,10 @@ mod tests {
         });
         let ddl = render_create_ddl("sv", &def).unwrap();
         assert_eq!(ddl.matches("LABELS = (FILTER)").count(), 1, "{ddl}");
-        assert!(ddl.contains("o.amount > 100 LABELS = (FILTER)"), "{ddl}");
+        assert!(
+            ddl.contains("o.flagged LABELS = (FILTER) AS o.amount > 100"),
+            "{ddl}"
+        );
     }
 
     #[test]

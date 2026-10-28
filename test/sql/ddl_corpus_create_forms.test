@@ -311,7 +311,7 @@ CREATE SEMANTIC VIEW s316_paren (tables := [])
 statement error
 CREATE SEMANTIC VIEW v2 SOMETHING_ELSE
 ----
-Expected 'AS' or 'FROM YAML' after view name
+Expected 'AS', 'TABLES' or 'FROM YAML' after view name
 
 # S-318: rewrite.rs::test_trailing_semicolon — a name and `;` but no body [syntax]
 statement error

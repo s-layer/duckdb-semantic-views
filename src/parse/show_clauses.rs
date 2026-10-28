@@ -45,12 +45,16 @@ use crate::sql_lit::SqlLit;
 /// to escape beyond the quote doubling `SqlLit` already does, and no `ESCAPE`
 /// clause whose escape character would itself need escaping. `LIKE` keeps its
 /// pattern semantics — there the wildcards are the point.
+/// `after` is `LIMIT <n> FROM '<name>'`'s cursor: it keeps the rows whose name
+/// sorts after it, `name > '<escaped>'`. Like `STARTS WITH`, the comparison is
+/// case-sensitive, and the string need not be a whole name, as in Snowflake.
 pub(crate) fn build_filter_suffix(
     like_pattern: Option<&str>,
     starts_with: Option<&str>,
     limit: Option<u64>,
     in_schema: Option<&ScopeName>,
     in_database: Option<&ScopeName>,
+    after: Option<&str>,
 ) -> String {
     let mut parts = Vec::new();
     if let Some(pattern) = like_pattern {
@@ -66,6 +70,10 @@ pub(crate) fn build_filter_suffix(
     }
     if let Some(db) = in_database {
         parts.push(db.predicate("database_name", "current_database"));
+    }
+    if let Some(after) = after {
+        let escaped = SqlLit::escape(after);
+        parts.push(format!("name > '{escaped}'"));
     }
     let mut suffix = String::new();
     if !parts.is_empty() {
@@ -134,6 +142,9 @@ pub(crate) struct ShowClauses<'a> {
     pub(crate) for_metric: Option<&'a str>,
     pub(crate) starts_with: Option<String>,
     pub(crate) limit: Option<u64>,
+    /// `LIMIT <n> FROM '<name>'`: list only the views named after `<name>`.
+    /// `SHOW SEMANTIC VIEWS` only, as in Snowflake.
+    pub(crate) limit_from: Option<String>,
 }
 
 /// The error for text left over after a SHOW statement's clauses, with the
@@ -152,9 +163,14 @@ pub(crate) fn show_unexpected_tokens(kind: DdlKind, rest: &str) -> String {
     } else {
         ""
     };
+    let limit_from = if matches!(kind, DdlKind::Show | DdlKind::ShowTerse) {
+        " [FROM '<name>']"
+    } else {
+        ""
+    };
     format!(
         "Unexpected tokens: '{rest}'. \
-         Usage: SHOW SEMANTIC {entity} [LIKE '<pattern>'] [IN {{view_name | ACCOUNT | DATABASE [db] | SCHEMA [[db.]schema]}}]{for_metric} [STARTS WITH '<prefix>'] [LIMIT <n>]"
+         Usage: SHOW SEMANTIC {entity} [LIKE '<pattern>'] [IN {{view_name | ACCOUNT | DATABASE [db] | SCHEMA [[db.]schema]}}]{for_metric} [STARTS WITH '<prefix>'] [LIMIT <n>{limit_from}]"
     )
 }
 
@@ -165,11 +181,11 @@ mod tests {
     #[test]
     fn filter_suffix_escapes_single_quotes() {
         assert_eq!(
-            build_filter_suffix(Some("O'Brien"), None, None, None, None),
+            build_filter_suffix(Some("O'Brien"), None, None, None, None, None),
             " WHERE name ILIKE 'O''Brien'"
         );
         assert_eq!(
-            build_filter_suffix(None, Some("O'Br"), None, None, None),
+            build_filter_suffix(None, Some("O'Br"), None, None, None, None),
             " WHERE starts_with(name, 'O''Br')"
         );
         assert_eq!(
@@ -179,18 +195,31 @@ mod tests {
                 None,
                 Some(&ScopeName::Named("sch'ema".into())),
                 Some(&ScopeName::Named("d'b".into())),
+                None,
             ),
             " WHERE lower(schema_name) = lower('sch''ema') AND lower(database_name) = lower('d''b')"
         );
     }
 
     #[test]
+    fn limit_from_keeps_the_names_after_the_cursor() {
+        assert_eq!(
+            build_filter_suffix(None, Some("v"), Some(3), None, None, Some("v_3")),
+            " WHERE starts_with(name, 'v') AND name > 'v_3' LIMIT 3"
+        );
+        assert_eq!(
+            build_filter_suffix(None, None, Some(1), None, None, Some("O'B")),
+            " WHERE name > 'O''B' LIMIT 1"
+        );
+    }
+
+    #[test]
     fn filter_suffix_plain_values_and_limit_unchanged() {
         assert_eq!(
-            build_filter_suffix(Some("cust%"), None, Some(10), None, None),
+            build_filter_suffix(Some("cust%"), None, Some(10), None, None, None),
             " WHERE name ILIKE 'cust%' LIMIT 10"
         );
-        assert_eq!(build_filter_suffix(None, None, None, None, None), "");
+        assert_eq!(build_filter_suffix(None, None, None, None, None, None), "");
     }
 
     /// IDENT-6 (code-review 2026-08-08): `STARTS WITH` is a **literal** prefix
@@ -206,21 +235,21 @@ mod tests {
     #[test]
     fn starts_with_prefix_is_literal_not_a_like_pattern() {
         assert_eq!(
-            build_filter_suffix(None, Some("a_b"), None, None, None),
+            build_filter_suffix(None, Some("a_b"), None, None, None, None),
             " WHERE starts_with(name, 'a_b')"
         );
         assert_eq!(
-            build_filter_suffix(None, Some("100%"), None, None, None),
+            build_filter_suffix(None, Some("100%"), None, None, None, None),
             " WHERE starts_with(name, '100%')"
         );
         // Quote escaping still happens exactly once.
         assert_eq!(
-            build_filter_suffix(None, Some("O'Br"), None, None, None),
+            build_filter_suffix(None, Some("O'Br"), None, None, None, None),
             " WHERE starts_with(name, 'O''Br')"
         );
         // LIKE is untouched: it is a pattern slot by contract.
         assert_eq!(
-            build_filter_suffix(Some("a_b"), None, None, None, None),
+            build_filter_suffix(Some("a_b"), None, None, None, None, None),
             " WHERE name ILIKE 'a_b'"
         );
     }
@@ -244,7 +273,7 @@ mod tests {
         .expect("fixture rows insert");
 
         let matches = |prefix: &str| -> Vec<String> {
-            let suffix = build_filter_suffix(None, Some(prefix), None, None, None);
+            let suffix = build_filter_suffix(None, Some(prefix), None, None, None, None);
             let sql = format!("SELECT name FROM t{suffix} ORDER BY name");
             let mut stmt = conn.prepare(&sql).expect("emitted predicate is valid SQL");
             let rows = stmt
