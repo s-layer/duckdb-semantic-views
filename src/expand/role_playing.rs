@@ -499,6 +499,23 @@ pub(super) fn find_using_context(
         }
     }
 
+    // Phase 6.3 (Snowflake parity, decided by Anentropic 2026-10-28): EVERY
+    // co-queried metric must name its own path to a role-played table. A metric
+    // with no `USING` used to borrow the role a co-queried metric named, so its
+    // numbers changed with what else was in the query; Snowflake refuses it
+    // ("Multi-path relationship ... is not supported").
+    let every_metric_names_a_role = resolved_mets
+        .iter()
+        .all(|met| names_a_role_for(def, met, &dim_table_lower));
+    if !every_metric_names_a_role && is_role_playing_target(def, &dim_table_lower) {
+        return Err(ExpandError::AmbiguousPath {
+            view_name: view_name.to_string(),
+            dimension_name: dim.name.clone(),
+            dimension_table: dim_table_lower,
+            available_relationships: rels,
+        });
+    }
+
     if using_rels_for_table.len() == 1 {
         // Exactly one USING path disambiguates -> return scoped alias
         let scoped = scoped_join_alias(&dim_table_lower, &using_rels_for_table[0].1);
@@ -520,6 +537,32 @@ pub(super) fn find_using_context(
             available_relationships: rels,
         })
     }
+}
+
+/// Whether `met` names its own path to the role-played table `table`: a base
+/// metric through its `USING`, a derived one through every base metric it is
+/// built from. A metric ON the table needs no path to it.
+fn names_a_role_for(def: &SemanticViewDefinition, met: &crate::model::Metric, table: &str) -> bool {
+    let names_one = |m: &crate::model::Metric| {
+        m.source_table
+            .as_deref()
+            .is_some_and(|t| t.eq_ignore_ascii_case(table))
+            || m.using_relationships.iter().any(|rel| {
+                crate::graph::find_relationship(&def.joins, rel)
+                    .is_some_and(|j| j.table.eq_ignore_ascii_case(table))
+            })
+    };
+    if met.source_table.is_some() {
+        return names_one(met);
+    }
+    let names = collect_transitive_metric_names(met, &def.metrics);
+    def.metrics
+        .iter()
+        .filter(|m| names.contains(&crate::ident::normalize_ident_part(&m.name)))
+        .filter(|m| {
+            m.source_table.is_some() || crate::graph::contains_aggregate_function(&m.expr).is_some()
+        })
+        .all(names_one)
 }
 
 #[cfg(test)]

@@ -401,10 +401,11 @@ useful to keep in mind while you model.
 **A role-played table reached without** ``USING``.
    When one table is reachable through two named relationships -- ``flights``
    referencing ``airports`` once as departure and once as arrival -- a dimension
-   on it means nothing until something says which role is intended. A co-queried
+   on it means nothing until something says which role is intended. Each
    metric's ``USING`` clause supplies that, and per-grain assembly honors it:
-   each grain joins the named relationship under its own scoped alias. Without
-   ``USING`` the query keeps the error rather than picking a relationship by
+   each grain joins its metrics' relationship under its own scoped alias, and
+   metrics with different roles are grouped separately and merged. A metric
+   without ``USING`` keeps the error rather than picking a relationship by
    declaration order, because picking silently is how a departure number ends up
    labeled as an arrival one. Declaring role-playing somewhere in a view does not
    cost the rest of that view its multi-grain queries -- the test is what the

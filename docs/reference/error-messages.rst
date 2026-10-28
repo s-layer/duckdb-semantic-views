@@ -1083,12 +1083,18 @@ Ambiguous dimension path
 .. code-block:: text
 
    semantic view '<view>': dimension '<dim>' is ambiguous -- table '<table>'
-   is reached via multiple relationships: [<rel1>, <rel2>]. Specify a metric
-   with USING to disambiguate, or use a dimension from a non-ambiguous table.
+   is reached via multiple relationships: [<rel1>, <rel2>]. Give every metric
+   in the query a USING that names one of them, or use a dimension from a
+   non-ambiguous table.
 
-**Cause:** A dimension comes from a table reachable via multiple named relationships (role-playing pattern), and no co-queried metric has a ``USING`` clause that selects one path.
+**Cause:** A dimension comes from a table reachable via multiple named relationships (role-playing pattern), and a metric in the query has no ``USING`` clause that selects one path to it (or the query has no metrics).
 
-**Fix:** See :ref:`howto-role-playing`. Add a metric with ``USING (<rel_name>)`` to disambiguate, or use a dimension from a table that is not a role-playing target.
+**Fix:** See :ref:`howto-role-playing`. Give each metric ``USING (<rel_name>)``, for example by writing ``f.departures USING (<rel_name>) AS f.flight_count`` over a plain metric, or use a dimension from a table that is not a role-playing target.
+
+.. versionchanged:: 0.18.0
+
+   Every metric needs its own ``USING``. A metric without one used to take the
+   path of a co-queried metric that had one.
 
 
 Ambiguous fact or metric on a role-playing table

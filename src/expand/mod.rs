@@ -60,6 +60,10 @@ mod tests_per_grain;
 // default-features run (the one that can execute SQL) is what covers this file.
 #[cfg(all(test, not(feature = "extension")))]
 mod tests_phantom_row_guard;
+// Pins NUMBERS (executes the SQL in-memory), so gated like
+// `tests_phantom_row_guard` above.
+#[cfg(all(test, not(feature = "extension")))]
+mod tests_multi_path_using;
 #[cfg(test)]
 mod tests_pkfk_expand;
 #[cfg(test)]

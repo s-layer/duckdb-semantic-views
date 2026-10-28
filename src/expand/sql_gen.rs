@@ -581,6 +581,11 @@ pub fn expand(
     def: &SemanticViewDefinition,
     req: &QueryRequest,
 ) -> Result<String, ExpandError> {
+    // Phase 6.3: a metric written over a same-table metric carries that
+    // metric's aggregate from here on, so every later step sees what it
+    // computes (`graph::same_table_metrics`).
+    let inlined = crate::graph::inline_same_table_metrics(def);
+    let def = &*inlined;
     // The predicate's subqueries become CTEs ahead of the expansion, so that
     // they are uncorrelated (`where_clause::hoist_subqueries`). What is left in
     // the predicate is resolved as before: a `(SELECT * FROM __sv_sqN)` is
@@ -872,6 +877,17 @@ fn expand_unhoisted(
         }
     }
     let resolved_exprs = resolved.exprs;
+
+    // Phase 6.3: off the per-grain path, a dimension on a role-played table
+    // that some metric names no role for is refused below by
+    // `find_using_context`. Asked first, so that refusal names the real reason
+    // rather than a fan trap between metrics the per-grain path would have
+    // separated had every metric named its role.
+    if grain_plan.is_none() {
+        for &dim in &resolved_dims {
+            find_using_context(view_name, def, dim, &resolved_mets)?;
+        }
+    }
 
     // Phase 31: Check for fan traps before generating SQL. In per-grain mode the
     // fence keeps only the metric × dimension check — the other two guard the

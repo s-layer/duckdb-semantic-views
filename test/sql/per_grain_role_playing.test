@@ -101,13 +101,14 @@ BB	1
 # `a`, reachable by both `dep` and `arr`, and no co-queried metric carries USING
 # to say which. A grain CTE would have to pick an edge; picking one silently is
 # the declaration-order-dependent mis-binding the fence exists to prevent, so
-# this still errors until USING context is threaded into the grain CTEs.
+# this still errors. Since Phase 6.3 every metric has to name its own path, as
+# in Snowflake, and the error says so (it used to surface as a fan trap).
 # ============================================================
 
 statement error
 SELECT * FROM SEMANTIC_VIEW(rp_sv DIMENSIONS dep_city METRICS flight_count, fleet_size);
 ----
-fan trap detected
+dimension 'dep_city' is ambiguous
 
 # Cleanup
 statement ok

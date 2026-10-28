@@ -30,6 +30,15 @@
 //!    own grain** (`FROM u`, never through the join) and joined back to the
 //!    child-grain aggregate, so the oracle is a per-grain one. This pins both
 //!    halves — no inflation, and no over-rejection of safe queries.
+//!
+//! Phase 6.3 adds a ROLE-PLAYED table `p`, reached from `t` by two
+//! relationships (`t.p1` and `t.p2`), and three metrics that name their path
+//! with `USING`: `ct_p1` (`count(*)` through `p1`), `sv_p2` (Snowflake's
+//! metric-over-metric form, `t.sv` through `p2`) and the derived `dp` over
+//! both. Grouping by `pcat` on `p` is accepted only when every metric names a
+//! path, and is then oracled as one aggregate per path, outer-merged on the
+//! queried dimensions (a third invariant: otherwise it is refused as
+//! ambiguous).
 
 use proptest::prelude::*;
 use semantic_views::expand::{expand, DimensionName, MetricName, QueryRequest};
@@ -50,6 +59,11 @@ struct Instance {
     u_rows: Vec<(Option<i64>, Option<i64>)>,
     /// Child rows: `(fk, d, v)`.
     t_rows: Vec<(Option<i64>, Option<i64>, Option<i64>)>,
+    /// Phase 6.3: the role-played table's rows, `pcat` for ids `0..n_p`.
+    p_rows: Vec<Option<i64>>,
+    /// Phase 6.3: each child row's two references to `p`, `(p1, p2)`, in the
+    /// order of `t_rows` (a valid id, NULL, or dangling).
+    t_roles: Vec<(Option<i64>, Option<i64>)>,
 }
 
 /// The queryable objects, referenced by these stable names in every case.
@@ -71,7 +85,9 @@ struct Instance {
 /// since its 2026_07 behaviour change: the parent fact `u.w + 1` and the child
 /// fact `t.v + 1`. Each is lowered to a dimension on its fact's table, so it
 /// has to group and merge across grains like `uwd` and `td`.
-const DIMS: [&str; 7] = ["td", "ucat", "uwd", "etd", "eucat", "uw1", "tv1"];
+///
+/// `pcat` (Phase 6.3) is on the role-played table `p`.
+const DIMS: [&str; 8] = ["td", "ucat", "uwd", "etd", "eucat", "uw1", "tv1", "pcat"];
 /// `svf` (PAR-6) is a CHILD-grain metric whose expression reaches a fact
 /// declared on the PARENT: `sum(t.v - u.uw1)` where `uw1 = u.w + 1` lives on
 /// `u`. Before PAR-6 the fact was inlined but `u` was never joined, so this
@@ -92,7 +108,22 @@ const DIMS: [&str; 7] = ["td", "ucat", "uwd", "etd", "eucat", "uw1", "tv1"];
 /// `esw` an aggregate of a parent fact (so a parent-grain metric, like `sw`),
 /// `edsv` an expression over the declared metrics `sv` and `ct`, and `esvf`
 /// an aggregate with a `FILTER` clause, which belongs to its aggregate.
-const METS: [&str; 9] = ["sv", "ct", "sw", "svf", "dsv", "esv", "esw", "edsv", "esvf"];
+///
+/// `ct_p1`, `sv_p2` and `dp` (Phase 6.3) name their path to `p` ([`USING_METS`]).
+const METS: [&str; 12] = [
+    "sv", "ct", "sw", "svf", "dsv", "esv", "esw", "edsv", "esvf", "ct_p1", "sv_p2", "dp",
+];
+
+/// The metrics that name a path to the role-played `p`: `ct_p1` through `p1`,
+/// `sv_p2` (written over the metric `t.sv`) through `p2`, and `dp`, derived
+/// over both.
+const USING_METS: [&str; 3] = ["ct_p1", "sv_p2", "dp"];
+
+/// Whether `name` names a path to `p` (directly or, for `dp`, through every
+/// component).
+fn names_p_path(name: &str) -> bool {
+    USING_METS.contains(&name)
+}
 
 /// The item each pool name is queried with: a declared member's name, or for
 /// the TECH-DEBT #76 entries an expression item named with `AS`.
@@ -318,16 +349,47 @@ fn arb_instance() -> impl Strategy<Value = Instance> {
         ];
         let t_row = (fk_cell, cat_cell.clone(), val_cell.clone()).prop_map(|(fk, d, v)| (fk, d, v));
         let t_rows = prop::collection::vec(t_row, 0..=20);
-        (u_rows, t_rows).prop_map(|(u_rows, t_rows)| Instance { u_rows, t_rows })
+        (u_rows, t_rows, 1usize..=3).prop_flat_map(move |(u_rows, t_rows, n_p)| {
+            let p_rows = prop::collection::vec(cat_cell_for_p(), n_p);
+            let p_ref = prop_oneof![
+                1 => Just(None),
+                4 => (0i64..n_p as i64).prop_map(Some),
+                1 => Just(Some(n_p as i64)),
+            ];
+            let t_roles = prop::collection::vec((p_ref.clone(), p_ref), t_rows.len());
+            (Just(u_rows), Just(t_rows), p_rows, t_roles).prop_map(
+                |(u_rows, t_rows, p_rows, t_roles)| Instance {
+                    u_rows,
+                    t_rows,
+                    p_rows,
+                    t_roles,
+                },
+            )
+        })
     })
+}
+
+/// `p`'s category: NULL or one of three values, so a path can reach a NULL
+/// group key as well as a dangling one.
+fn cat_cell_for_p() -> impl Strategy<Value = Option<i64>> {
+    prop_oneof![
+        1 => Just(None),
+        4 => (0i64..3).prop_map(Some),
+    ]
 }
 
 fn arb_case() -> impl Strategy<Value = Case> {
     arb_instance().prop_flat_map(|inst| {
         let dim_sel =
             prop::sample::subsequence((0..DIMS.len()).collect::<Vec<_>>(), 0..=DIMS.len());
-        let met_sel =
-            prop::sample::subsequence((0..METS.len()).collect::<Vec<_>>(), 0..=METS.len());
+        // Phase 6.3: one case in four picks its metrics from the USING metrics
+        // alone, the only selection a `pcat` grouping is accepted with; drawn
+        // from the whole pool that would almost never happen.
+        let using_idx: Vec<usize> = (0..METS.len()).filter(|&i| names_p_path(METS[i])).collect();
+        let met_sel = prop_oneof![
+            3 => prop::sample::subsequence((0..METS.len()).collect::<Vec<_>>(), 0..=METS.len()),
+            1 => prop::sample::subsequence(using_idx.clone(), 1..=using_idx.len()),
+        ];
         // PBT-6: one case in four keeps the original no-predicate coverage.
         let where_pred = prop_oneof![
             1 => Just(None),
@@ -364,6 +426,16 @@ fn build_def() -> SemanticViewDefinition {
         TableRef {
             alias: "u".to_string(),
             table: "u".to_string(),
+            pk_columns: vec!["id".to_string()],
+            unique_constraints: vec![],
+            comment: None,
+            synonyms: vec![],
+            tags: Vec::new(),
+        },
+        // Phase 6.3: the role-played table, reached from `t` twice.
+        TableRef {
+            alias: "p".to_string(),
+            table: "p".to_string(),
             pk_columns: vec!["id".to_string()],
             unique_constraints: vec![],
             comment: None,
@@ -459,13 +531,28 @@ fn build_def() -> SemanticViewDefinition {
             is_enum: false,
             sample_values: Vec::new(),
         },
+        // Phase 6.3: on the role-played table, so its path comes from the
+        // metrics' USING.
+        Dimension {
+            name: "pcat".to_string(),
+            expr: "p.pcat".to_string(),
+            source_table: Some("p".to_string()),
+            output_type: None,
+            comment: None,
+            synonyms: vec![],
+            is_filter: false,
+            tags: Vec::new(),
+            cortex_search_service: None,
+            is_enum: false,
+            sample_values: Vec::new(),
+        },
     ];
-    let base_metric = |name: &str, expr: &str, source: Option<&str>| Metric {
+    let using_metric = |name: &str, expr: &str, source: Option<&str>, using: &[&str]| Metric {
         name: name.to_string(),
         expr: expr.to_string(),
         source_table: source.map(str::to_string),
         output_type: None,
-        using_relationships: vec![],
+        using_relationships: using.iter().map(|r| (*r).to_string()).collect(),
         comment: None,
         synonyms: vec![],
         access: AccessModifier::Public,
@@ -473,6 +560,8 @@ fn build_def() -> SemanticViewDefinition {
         window_spec: None,
         tags: Vec::new(),
     };
+    let base_metric =
+        |name: &str, expr: &str, source: Option<&str>| using_metric(name, expr, source, &[]);
     let metrics = vec![
         base_metric("sv", "sum(t.v)", Some("t")),
         base_metric("ct", "count(*)", None),
@@ -483,15 +572,33 @@ fn build_def() -> SemanticViewDefinition {
         base_metric("svf", "sum(t.v - u.uw1)", Some("t")),
         // EXP-24: derived (no source_table), referencing `sv` OWN-QUALIFIED.
         base_metric("dsv", "t.sv * 2", None),
+        // Phase 6.3: each names its path to the role-played `p`. `sv_p2` is
+        // written over the metric `t.sv` (Snowflake's documented form), and
+        // `dp` is derived over both, so its components take different paths.
+        using_metric("ct_p1", "count(*)", Some("t"), &["t_p1"]),
+        using_metric("sv_p2", "t.sv", Some("t"), &["t_p2"]),
+        base_metric("dp", "ct_p1 + sv_p2", None),
     ];
-    let joins = vec![Join {
+    let role = |name: &str, fk: &str| Join {
         from_alias: "t".to_string(),
-        table: "u".to_string(),
-        fk_columns: vec!["fk".to_string()],
+        table: "p".to_string(),
+        fk_columns: vec![fk.to_string()],
         ref_columns: vec!["id".to_string()],
-        name: Some("t_u".to_string()),
+        name: Some(name.to_string()),
         cardinality: Cardinality::ManyToOne,
-    }];
+    };
+    let joins = vec![
+        Join {
+            from_alias: "t".to_string(),
+            table: "u".to_string(),
+            fk_columns: vec!["fk".to_string()],
+            ref_columns: vec!["id".to_string()],
+            name: Some("t_u".to_string()),
+            cardinality: Cardinality::ManyToOne,
+        },
+        role("t_p1", "p1"),
+        role("t_p2", "p2"),
+    ];
     SemanticViewDefinition {
         tables,
         dimensions,
@@ -545,7 +652,8 @@ fn make_db(inst: &Instance) -> duckdb::Connection {
     let conn = duckdb::Connection::open_in_memory().expect("in-memory DuckDB");
     conn.execute_batch(
         "CREATE TABLE u (id INTEGER, ucat INTEGER, w INTEGER); \
-         CREATE TABLE t (fk INTEGER, d INTEGER, v INTEGER);",
+         CREATE TABLE p (id INTEGER, pcat INTEGER); \
+         CREATE TABLE t (fk INTEGER, d INTEGER, v INTEGER, p1 INTEGER, p2 INTEGER);",
     )
     .expect("create tables");
 
@@ -565,12 +673,52 @@ fn make_db(inst: &Instance) -> duckdb::Connection {
         let values: Vec<String> = inst
             .t_rows
             .iter()
-            .map(|(fk, d, v)| format!("({},{},{})", cell(fk), cell(d), cell(v)))
+            .zip(&inst.t_roles)
+            .map(|((fk, d, v), (p1, p2))| {
+                format!(
+                    "({},{},{},{},{})",
+                    cell(fk),
+                    cell(d),
+                    cell(v),
+                    cell(p1),
+                    cell(p2)
+                )
+            })
             .collect();
         conn.execute_batch(&format!("INSERT INTO t VALUES {};", values.join(",")))
             .expect("insert t rows");
     }
+    let values: Vec<String> = inst
+        .p_rows
+        .iter()
+        .enumerate()
+        .map(|(i, pcat)| format!("({i},{})", cell(pcat)))
+        .collect();
+    conn.execute_batch(&format!("INSERT INTO p VALUES {};", values.join(",")))
+        .expect("insert p rows");
     conn
+}
+
+/// A queried dimension written out independently over `t LEFT JOIN u` (and,
+/// for `pcat`, `LEFT JOIN p` through the path the grain takes).
+fn child_dim_item(name: &str) -> String {
+    match name {
+        "td" => "t.d AS td".to_string(),
+        "ucat" => "u.ucat AS ucat".to_string(),
+        // TECH-DEBT #54: the fact written out independently. A dangling or
+        // NULL `fk` leaves `u.w` NULL, so the key is NULL -- which the
+        // NULL-safe grouping below has to keep as its own group.
+        "uwd" => "u.w + 1 AS uwd".to_string(),
+        // TECH-DEBT #76: the expression items, written out independently.
+        "etd" => "t.d * 2 + 1 AS etd".to_string(),
+        "eucat" => "coalesce(u.ucat, -1) + (u.w + 1) AS eucat".to_string(),
+        // Facts grouped on in DIMENSIONS, written out independently.
+        "uw1" => "u.w + 1 AS uw1".to_string(),
+        "tv1" => "t.v + 1 AS tv1".to_string(),
+        // Phase 6.3: only in a per-path grain, which joins `p`.
+        "pcat" => "p.pcat AS pcat".to_string(),
+        other => unreachable!("unexpected dim {other}"),
+    }
 }
 
 /// The child-grain (`t`) half of the oracle: the metrics computed over `t`,
@@ -584,21 +732,7 @@ fn child_grain_sql(case: &Case) -> String {
     let dim_items: Vec<String> = case
         .sel_dims
         .iter()
-        .map(|&i| match DIMS[i] {
-            "td" => "t.d AS td".to_string(),
-            "ucat" => "u.ucat AS ucat".to_string(),
-            // TECH-DEBT #54: the fact written out independently. A dangling or
-            // NULL `fk` leaves `u.w` NULL, so the key is NULL -- which the
-            // NULL-safe grouping below has to keep as its own group.
-            "uwd" => "u.w + 1 AS uwd".to_string(),
-            // TECH-DEBT #76: the expression items, written out independently.
-            "etd" => "t.d * 2 + 1 AS etd".to_string(),
-            "eucat" => "coalesce(u.ucat, -1) + (u.w + 1) AS eucat".to_string(),
-            // Facts grouped on in DIMENSIONS, written out independently.
-            "uw1" => "u.w + 1 AS uw1".to_string(),
-            "tv1" => "t.v + 1 AS tv1".to_string(),
-            other => unreachable!("unexpected dim {other}"),
-        })
+        .map(|&i| child_dim_item(DIMS[i]))
         .collect();
     let met_items: Vec<String> = case
         .sel_metrics
@@ -621,6 +755,12 @@ fn child_grain_sql(case: &Case) -> String {
             "esv" => "sum(t.v + 1) - count(t.d) AS esv".to_string(),
             "edsv" => "sum(t.v) + count(*) AS edsv".to_string(),
             "esvf" => "sum(t.v + 1) FILTER (WHERE t.d > 0) AS esvf".to_string(),
+            // Phase 6.3: without `pcat` the path to `p` changes nothing (`p.id`
+            // is unique, so neither LEFT JOIN fans `t`): plain child-grain
+            // aggregates, `sv_p2` being `sv`'s own `sum(t.v)`.
+            "ct_p1" => "count(*) AS ct_p1".to_string(),
+            "sv_p2" => "sum(t.v) AS sv_p2".to_string(),
+            "dp" => "count(*) + sum(t.v) AS dp".to_string(),
             other => unreachable!("unexpected child-grain metric {other}"),
         })
         .collect();
@@ -785,6 +925,81 @@ fn oracle_sql(case: &Case) -> String {
     )
 }
 
+/// Phase 6.3: the oracle for a query grouped by `pcat`, accepted only when
+/// every metric names its path to `p` (`ct_p1` through `p1`, `sv_p2` through
+/// `p2`, `dp` through both). Each path is its own aggregate over `t LEFT JOIN
+/// u LEFT JOIN p ON t.<path> = p.id`, filtered by the predicate first; two
+/// paths are combined by a FULL OUTER JOIN on every queried dimension,
+/// NULL-safely, so a group one path never reaches survives with NULL for that
+/// path's metrics, and `dp` is the sum of its two components (NULL when either
+/// is).
+fn role_oracle_sql(case: &Case) -> String {
+    let dims: Vec<&str> = case.sel_dims.iter().map(|&i| DIMS[i]).collect();
+    let mets: Vec<&str> = case.sel_metrics.iter().map(|&i| METS[i]).collect();
+    let dim_items = dims
+        .iter()
+        .map(|d| child_dim_item(d))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let where_sql = case
+        .where_pred
+        .as_ref()
+        .map_or_else(String::new, |p| format!(" WHERE {}", p.to_raw_sql()));
+    let group_by = (1..=dims.len())
+        .map(|n| n.to_string())
+        .collect::<Vec<_>>()
+        .join(", ");
+    let path = |col: &str, agg: &str| {
+        format!(
+            "SELECT {dim_items}, {agg} AS m FROM t LEFT JOIN u ON t.fk = u.id \
+             LEFT JOIN p ON t.{col} = p.id{where_sql} GROUP BY {group_by}"
+        )
+    };
+    let p1 = mets.iter().any(|m| matches!(*m, "ct_p1" | "dp"));
+    let p2 = mets.iter().any(|m| matches!(*m, "sv_p2" | "dp"));
+    let value = |m: &str| match m {
+        "ct_p1" => "a.m",
+        "sv_p2" => "b.m",
+        "dp" => "a.m + b.m",
+        other => unreachable!("not a USING metric: {other}"),
+    };
+    let met_items = mets.iter().map(|m| format!("{} AS {m}", value(m)));
+    let (keys, from): (Vec<String>, String) = match (p1, p2) {
+        (true, true) => {
+            let on = dims
+                .iter()
+                .map(|d| format!("a.{d} IS NOT DISTINCT FROM b.{d}"))
+                .collect::<Vec<_>>()
+                .join(" AND ");
+            (
+                dims.iter()
+                    .map(|d| format!("COALESCE(a.{d}, b.{d}) AS {d}"))
+                    .collect(),
+                format!(
+                    "({}) a FULL OUTER JOIN ({}) b ON {on}",
+                    path("p1", "count(*)"),
+                    path("p2", "sum(t.v)")
+                ),
+            )
+        }
+        (true, false) => (
+            dims.iter().map(|d| format!("a.{d}")).collect(),
+            format!("({}) a", path("p1", "count(*)")),
+        ),
+        (false, true) => (
+            dims.iter().map(|d| format!("b.{d}")).collect(),
+            format!("({}) b", path("p2", "sum(t.v)")),
+        ),
+        (false, false) => unreachable!("a pcat query is oracled only with a USING metric"),
+    };
+    let items = keys
+        .into_iter()
+        .chain(met_items)
+        .collect::<Vec<_>>()
+        .join(", ");
+    format!("SELECT {items} FROM {from}")
+}
+
 proptest! {
     #![proptest_config(ProptestConfig { cases: 128, ..ProptestConfig::default() })]
 
@@ -827,7 +1042,32 @@ proptest! {
 
         let selects_parent_metric = case.sel_metrics.iter().any(|&i| is_parent_metric(METS[i]));
         let selects_child_dim = case.sel_dims.iter().any(|&i| is_child_dim(DIMS[i]));
+        let selects_pcat = case.sel_dims.iter().any(|&i| DIMS[i] == "pcat");
+        let every_metric_names_p = !case.sel_metrics.is_empty()
+            && case.sel_metrics.iter().all(|&i| names_p_path(METS[i]));
         let result = expand("star", &def, &req);
+
+        if selects_pcat && !every_metric_names_p {
+            // Phase 6.3 (Snowflake parity): `p` is reached two ways, so a
+            // grouping by `pcat` needs every metric to say which way. A metric
+            // without a path (or no metric at all) leaves it ambiguous; a
+            // fan-trap error is as right when the query also fans.
+            match result {
+                Err(e) => {
+                    let msg = e.to_string();
+                    prop_assert!(
+                        msg.contains("ambiguous") || msg.contains("fan trap"),
+                        "pcat without a path for every metric rejected, but not as \
+                         ambiguous: {msg}"
+                    );
+                }
+                Ok(sql) => prop_assert!(
+                    false,
+                    "pcat with a metric that names no path to p must be refused, got SQL:\n{sql}"
+                ),
+            }
+            return Ok(());
+        }
 
         if selects_parent_metric && selects_child_dim {
             // The parent metric grouped by a CHILD dimension stays rejected:
@@ -902,7 +1142,11 @@ proptest! {
             .collect::<Vec<_>>()
             .join(", ");
         let expanded = format!("SELECT {renamed} FROM ({expanded}) ex");
-        let oracle = oracle_sql(&case);
+        let oracle = if selects_pcat {
+            role_oracle_sql(&case)
+        } else {
+            oracle_sql(&case)
+        };
 
         // Canonical projection (output columns sorted by name) so a column-order
         // difference between the two formulations is not a false diff.
@@ -990,6 +1234,13 @@ fn generator_reaches_both_where_clause_branches() {
         ["etd", "eucat", "esv", "esw", "edsv", "esvf", "uw1", "tv1"];
     let mut expression_oracled = [0usize; 8];
     let mut expression_fenced = 0usize;
+    // Phase 6.3: `pcat` both refused and oracled, the oracled cases including
+    // both paths at once and the metric-over-metric `sv_p2`.
+    let mut pcat_refused = 0usize;
+    let mut pcat_oracled = 0usize;
+    let mut pcat_both_paths_oracled = 0usize;
+    let mut pcat_sv_p2_oracled = 0usize;
+    let mut using_without_pcat_oracled = 0usize;
     let mut distinct: HashSet<String> = HashSet::new();
 
     for _ in 0..400 {
@@ -1003,8 +1254,28 @@ fn generator_reaches_both_where_clause_branches() {
         // The two rejection branches of the property, mirrored: everything else
         // falls through to the differential comparison.
         let pred_touches_child = case.where_pred.as_ref().is_some_and(Pred::touches_child);
-        let oracled = !(selects_parent_metric && (selects_child_dim || pred_touches_child));
+        let selects_pcat = case.sel_dims.iter().any(|&i| DIMS[i] == "pcat");
+        let every_metric_names_p =
+            !case.sel_metrics.is_empty() && case.sel_metrics.iter().all(|&i| names_p_path(METS[i]));
+        let pcat_refused_here = selects_pcat && !every_metric_names_p;
+        let oracled = !pcat_refused_here
+            && !(selects_parent_metric && (selects_child_dim || pred_touches_child));
         let has = |name: &str| case.sel_metrics.iter().any(|&i| METS[i] == name);
+        if pcat_refused_here {
+            pcat_refused += 1;
+        }
+        if selects_pcat && oracled {
+            pcat_oracled += 1;
+            if has("dp") || (has("ct_p1") && has("sv_p2")) {
+                pcat_both_paths_oracled += 1;
+            }
+            if has("sv_p2") {
+                pcat_sv_p2_oracled += 1;
+            }
+        }
+        if !selects_pcat && oracled && USING_METS.iter().any(|m| has(m)) {
+            using_without_pcat_oracled += 1;
+        }
         if has("svf") {
             svf_selected += 1;
             if oracled {
@@ -1129,6 +1400,22 @@ fn generator_reaches_both_where_clause_branches() {
         expression_fenced > 0,
         "the parent-grain expression metric `esw` never met a child dimension, \
          so the fan-trap fence is never exercised on an expression item"
+    );
+    assert!(
+        pcat_refused > 0 && pcat_oracled > 0,
+        "the role-played `pcat` must be both refused and oracled \
+         (refused={pcat_refused}, oracled={pcat_oracled})"
+    );
+    assert!(
+        pcat_both_paths_oracled > 0 && pcat_sv_p2_oracled > 0,
+        "no oracled pcat query took both paths ({pcat_both_paths_oracled}) or the \
+         metric-over-metric `sv_p2` ({pcat_sv_p2_oracled}); the per-path outer \
+         merge has no randomized coverage"
+    );
+    assert!(
+        using_without_pcat_oracled > 0,
+        "the USING metrics never reached the oracle without pcat, so that their \
+         path changes nothing there is never checked"
     );
     assert!(
         distinct.len() > 50,

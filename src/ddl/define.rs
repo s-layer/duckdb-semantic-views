@@ -132,6 +132,8 @@ pub fn enrich_definition_for_create(
     crate::graph::validate_facts(&def)?;
     crate::graph::validate_derived_metrics(&def)?;
     crate::graph::validate_using_relationships(&def)?;
+    // Phase 6.3: a metric over a same-table metric names a plain one, acyclically.
+    crate::graph::validate_same_table_metric_refs(&def)?;
     // TECH-DEBT #52 (PAR-3): last of the graph checks, because it needs the
     // fact and metric name sets the earlier ones validated -- a member
     // expression may legitimately reference those across tables, and only a

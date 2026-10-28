@@ -20,7 +20,7 @@ This guide shows how to handle the role-playing dimension pattern, where the sam
 The Problem
 ===========
 
-When the same table appears as the target of multiple relationships, dimensions from that table are ambiguous. The extension cannot determine which join path to use unless a co-queried metric specifies a ``USING`` clause.
+When the same table appears as the target of multiple relationships, dimensions from that table are ambiguous. The extension cannot determine which join path to use unless every metric in the query names one with a ``USING`` clause.
 
 Consider flights with departure and arrival airports:
 
@@ -68,6 +68,21 @@ Declare two named relationships to the same target table. Then use ``USING`` on 
 
 The ``USING (dep_airport)`` clause tells the extension: when this metric is queried alongside a dimension from the ``airports`` table, use the ``dep_airport`` relationship to resolve the join path.
 
+Snowflake's documentation writes the same view with one plain count and a
+metric per role over it. A metric can name another metric on its own table,
+and the referenced aggregate is computed through the referencing metric's
+``USING`` path:
+
+.. code-block:: sql
+
+   METRICS (
+       f.flight_count    AS COUNT(*),
+       f.departure_count USING (dep_airport) AS f.flight_count,
+       f.arrival_count   USING (arr_airport) AS f.flight_count
+   );
+
+Both forms give the same numbers. See :ref:`ref-create-metrics` for the rules.
+
 
 .. _howto-rp-query:
 
@@ -92,6 +107,42 @@ Query with USING Context
        METRICS arrival_count
    ) ORDER BY city;
 
+**Departures and arrivals by city in one query:** each metric is grouped by
+``city`` through its own relationship, and the two results are merged on
+``city``. A city that only one role reaches gets ``NULL`` for the other
+metric:
+
+.. code-block:: sql
+
+   SELECT * FROM SEMANTIC_VIEW(flight_analytics
+       DIMENSIONS city
+       METRICS departure_count, arrival_count
+   ) ORDER BY city;
+
+.. versionadded:: 0.18.0
+
+   Metrics with different ``USING`` paths to the same table can be queried
+   together with a dimension on that table. Before, the query was refused as
+   ambiguous.
+
+**Every metric needs a path:** a metric without ``USING`` cannot say which
+airport a city is, so grouping it by ``city`` is refused, also when another
+metric in the query names a path:
+
+.. code-block:: sql
+
+   -- Refused: flight_count names no relationship to airports.
+   SELECT * FROM SEMANTIC_VIEW(flight_analytics
+       DIMENSIONS city
+       METRICS departure_count, flight_count
+   );
+
+.. versionchanged:: 0.18.0
+
+   A metric without ``USING`` used to borrow the path of a co-queried metric
+   that had one, so its numbers changed with what else was in the query. It is
+   now refused, as in Snowflake.
+
 **Non-ambiguous dimensions:** the ``carrier`` dimension comes from the ``flights`` table (not ``airports``), so it works with any metric without ambiguity:
 
 .. code-block:: sql
@@ -107,7 +158,7 @@ Query with USING Context
 Derived Metrics with Role-Playing
 =================================
 
-Derived metrics that reference USING-annotated metrics inherit the USING context transitively:
+A derived metric cannot have ``USING`` itself, but it can combine metrics that do:
 
 .. code-block:: sql
 
@@ -126,7 +177,15 @@ Derived metrics that reference USING-annotated metrics inherit the USING context
        METRICS total_flights
    ) ORDER BY carrier;
 
-However, querying ``total_flights`` with the ambiguous ``city`` dimension fails. The extension cannot determine which single USING path should resolve ``city``.
+Querying ``total_flights`` by ``city`` works too: each component is grouped by
+``city`` through its own path, and the derived metric is computed from the
+merged components. Where a city is reached by only one path, the other
+component is ``NULL`` and so is the sum.
+
+.. versionchanged:: 0.18.0
+
+   A derived metric over different ``USING`` paths used to be refused with a
+   role-played dimension.
 
 
 .. _howto-rp-facts:
@@ -340,16 +399,20 @@ Troubleshooting
 ===============
 
 **"dimension is ambiguous" error**
-   This occurs when a dimension comes from a role-playing table and no co-queried metric
-   provides a single USING path to disambiguate. Solutions:
+   This occurs when a dimension comes from a role-playing table and some metric in the
+   query (or the query itself, with no metrics) names no ``USING`` path to it. Solutions:
 
-   - Add a metric with ``USING`` that targets the desired relationship.
+   - Give every queried metric a ``USING`` that targets the desired relationship, for
+     example by writing ``f.departures USING (dep_airport) AS f.flight_count`` over the
+     plain metric.
    - Use a dimension from a non-ambiguous table (like the base table).
 
 **Multiple USING paths for the same table**
-   If two co-queried metrics have different USING paths that both target the dimension's
-   table, the extension raises an ambiguity error. Query only one USING-scoped metric at
-   a time alongside the ambiguous dimension.
+   .. versionchanged:: 0.18.0
+
+   Co-queried metrics with different ``USING`` paths to the dimension's table are each
+   grouped through their own path and merged (see :ref:`howto-rp-query`). This used to
+   raise an ambiguity error.
 
 **Dimension on a descendant of a role-playing table**
    .. versionchanged:: 0.11.0
