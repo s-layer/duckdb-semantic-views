@@ -715,10 +715,18 @@ fn arb_oracle_staleness() -> impl Strategy<Value = Option<MaxStaleness>> {
     ]
 }
 
-/// Verified queries YAML accepts: bare, quoted and keyword names (kept apart by
-/// an index suffix), hostile text in every quoted slot.
+/// Verified queries YAML accepts: bare, quoted and keyword names, quoted ones
+/// holding list punctuation or the `AS` keyword (kept apart by an index
+/// suffix), and hostile text in every quoted slot.
 fn arb_oracle_verified_queries() -> impl Strategy<Value = Vec<VerifiedQuery>> {
-    let name = prop::sample::select(vec!["q", "\"Top Q\"", "select"]);
+    let name = prop::sample::select(vec![
+        "q",
+        "\"Top Q\"",
+        "select",
+        "\"a,b\"",
+        "\"q)\"",
+        "\"AS\"",
+    ]);
     let query = (
         name,
         arb_oracle_text(),
@@ -771,8 +779,13 @@ enum MetadataRefusal {
     ShortStaleness,
     StalenessNotAnInterval,
     DuplicateVerifiedQuery,
+    DuplicateVerifiedQueryByQuotes,
     VerifiedQueryNameOfTwoWords,
     VerifiedQueryNameWithCommentMarker,
+    VerifiedQueryNameWithComma,
+    VerifiedQueryNameWithParen,
+    VerifiedQueryNamedAs,
+    QualifiedVerifiedQueryName,
     CortexDatabaseWithoutSchema,
     CortexEmptyPart,
     CortexEmptyColumn,
@@ -786,8 +799,13 @@ fn arb_oracle_metadata_refusal() -> impl Strategy<Value = Option<MetadataRefusal
             R::ShortStaleness,
             R::StalenessNotAnInterval,
             R::DuplicateVerifiedQuery,
+            R::DuplicateVerifiedQueryByQuotes,
             R::VerifiedQueryNameOfTwoWords,
             R::VerifiedQueryNameWithCommentMarker,
+            R::VerifiedQueryNameWithComma,
+            R::VerifiedQueryNameWithParen,
+            R::VerifiedQueryNamedAs,
+            R::QualifiedVerifiedQueryName,
             R::CortexDatabaseWithoutSchema,
             R::CortexEmptyPart,
             R::CortexEmptyColumn,
@@ -818,6 +836,13 @@ fn apply_metadata_refusal(def: &mut SemanticViewDefinition, refusal: MetadataRef
             def.max_staleness = Some(MaxStaleness::Interval("1 fortnight".to_string()));
         }
         R::DuplicateVerifiedQuery => def.verified_queries = vec![query("vq"), query("VQ")],
+        R::DuplicateVerifiedQueryByQuotes => {
+            def.verified_queries = vec![query("vq"), query("\"VQ\"")];
+        }
+        R::VerifiedQueryNameWithComma => def.verified_queries = vec![query("a,b")],
+        R::VerifiedQueryNameWithParen => def.verified_queries = vec![query("q)")],
+        R::VerifiedQueryNamedAs => def.verified_queries = vec![query("as")],
+        R::QualifiedVerifiedQueryName => def.verified_queries = vec![query("db.q")],
         R::VerifiedQueryNameOfTwoWords => def.verified_queries = vec![query("two words")],
         R::VerifiedQueryNameWithCommentMarker => def.verified_queries = vec![query("a--b")],
         R::CortexDatabaseWithoutSchema => {
@@ -1207,7 +1232,7 @@ fn generator_reaches_both_outcomes_on_the_tag_axis() {
 fn generator_reaches_both_outcomes_on_the_metadata_axis() {
     // More samples than the other guards: each refusal shape is one rare draw,
     // and shows only on a definition no earlier check refuses.
-    let defs = sample_defs(8192);
+    let defs = sample_defs(12288);
     let imports = |d: &SemanticViewDefinition| {
         let yaml = yaml_serde::to_string(d).expect("YAML serialize");
         SemanticViewDefinition::from_yaml_with_size_cap(VIEW, &yaml)
@@ -1268,7 +1293,27 @@ fn generator_reaches_both_outcomes_on_the_metadata_axis() {
             "a MAX_STALENESS that is not an interval",
             "is not an interval",
         ),
-        ("a duplicate verified query", "duplicate verified query"),
+        (
+            "a duplicate verified query",
+            "duplicate verified query 'VQ'",
+        ),
+        (
+            "a verified query repeated with quotes",
+            "duplicate verified query '\"VQ\"'",
+        ),
+        (
+            "a verified query name with a comma",
+            "verified query name 'a,b'",
+        ),
+        (
+            "a verified query name with a parenthesis",
+            "verified query name 'q)'",
+        ),
+        ("a verified query named AS", "verified query name 'as'"),
+        (
+            "a qualified verified query name",
+            "verified query name 'db.q'",
+        ),
         (
             "a verified query name of two words",
             "verified query name 'two words",

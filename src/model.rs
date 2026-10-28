@@ -377,15 +377,41 @@ pub struct VerifiedQuery {
     pub sql: String,
 }
 
-/// The first verified query, by index, whose name repeats an earlier one
-/// (compared case-insensitively, quotes and all, as member names are).
+/// The first verified query, by index, whose name repeats an earlier one,
+/// matched as identifiers are: case-insensitively, quoted or not
+/// ([`crate::ident::ident_matches`]).
 #[must_use]
 pub fn duplicate_verified_query(queries: &[VerifiedQuery]) -> Option<usize> {
     queries.iter().enumerate().position(|(i, q)| {
         queries[..i]
             .iter()
-            .any(|p| p.name.eq_ignore_ascii_case(&q.name))
+            .any(|p| crate::ident::ident_matches(&p.name, &q.name))
     })
+}
+
+/// Why `name` cannot name a verified query, or `None`. One rule for the DDL
+/// parser and YAML, so the name `GET_DDL` writes (as stored) always reads back:
+/// one bare identifier other than `AS`, or one double-quoted identifier. As in
+/// Snowflake, the name is never qualified.
+#[must_use]
+pub fn verified_query_name_error(name: &str) -> Option<String> {
+    if name.starts_with('"') {
+        return match crate::ident::parse_qualified_identifier(name) {
+            Ok(parts) if parts.len() == 1 && name.ends_with('"') => None,
+            _ => Some(format!("'{name}' is not one quoted identifier")),
+        };
+    }
+    let bytes = name.as_bytes();
+    if bytes.is_empty()
+        || bytes[0].is_ascii_digit()
+        || !bytes.iter().all(|&b| crate::util::is_ident_continue(b))
+    {
+        return Some(format!("'{name}' is not one identifier; double-quote it"));
+    }
+    if name.eq_ignore_ascii_case("AS") {
+        return Some("'AS' must be double-quoted to be a name".to_string());
+    }
+    None
 }
 
 /// A named SQL column expression used as a dimension.
@@ -1208,17 +1234,18 @@ fn member_expr(kind: &str, name: &str, expr: &str) -> Result<(), String> {
     // parser trims, silently storing a different expression than the one given).
     free_expr_common(kind, &format!("'{name}' has an expression"), expr)?;
     // After `AS`, the keyword grammar ends the expression at the first
-    // depth-0 `COMMENT`, `LABELS` or `WITH SYNONYMS` and reads the rest as
+    // depth-0 annotation keyword (`COMMENT`, `LABELS`, `WITH SYNONYMS`, a tag
+    // or Cortex Analyst clause; see `find_annotation_start`) and reads the rest as
     // the entry's annotations, so an expression holding one renders to DDL
     // that no longer plans (fuzz_create_text, CI run 40184213171). Window
     // arguments are not checked: they sit inside `OVER (…)`, below depth 0.
     if let Some(at) = crate::body_parser::find_annotation_start(expr) {
         let mut words = expr[at..]
-            .split(|c: char| !c.is_ascii_alphabetic())
+            .split(|c: char| !c.is_ascii_alphabetic() && c != '_')
             .filter(|w| !w.is_empty());
         let word = words.next().unwrap_or_default();
-        // `WITH` starts annotations only as `WITH SYNONYMS` or `WITH TAG`;
-        // name both words.
+        // `WITH` starts annotations only as `WITH SYNONYMS`, `WITH TAG` or
+        // `WITH CORTEX`; name both words.
         let keyword = if word.eq_ignore_ascii_case("WITH") {
             format!("{word} {}", words.next().unwrap_or_default())
         } else {
@@ -1495,7 +1522,9 @@ fn validate_yaml_metadata(def: &SemanticViewDefinition) -> Result<(), String> {
         staleness.seconds()?;
     }
     for q in &def.verified_queries {
-        slot_single("verified query", "name", &q.name)?;
+        if let Some(e) = verified_query_name_error(&q.name) {
+            return Err(format!("verified query name '{}' is invalid: {e}", q.name));
+        }
     }
     if let Some(i) = duplicate_verified_query(&def.verified_queries) {
         return Err(format!(
@@ -2046,6 +2075,9 @@ mod tests {
             ("o.d WITH TAG (a = '1')", "'WITH TAG'"),
             ("o.d TAG (a = '1')", "'TAG'"),
             ("o.d WITH SYNONYMS = ('x')", "'WITH SYNONYMS'"),
+            ("o.d SAMPLE_VALUES ('x')", "'SAMPLE_VALUES'"),
+            ("o.d IS_ENUM", "'IS_ENUM'"),
+            ("o.d WITH CORTEX SEARCH SERVICE s", "'WITH CORTEX'"),
         ] {
             let yaml = format!(
                 "{VALID_TABLES}dimensions:\n  - name: d\n    expr: \"{expr}\"\n    source_table: o\n\
@@ -2200,6 +2232,36 @@ mod tests {
                  cortex_search_service: {service: s, schema: sc, database: db}\n")
         );
         SemanticViewDefinition::from_yaml_with_size_cap("v", &ok).expect("well-formed metadata");
+    }
+
+    #[test]
+    fn yaml_verified_query_names_get_ddl_could_not_read_back_are_rejected() {
+        for name in ["'a,b'", "'q)'", "as", "db.q", "'(q'"] {
+            let yaml = format!(
+                "{VALID_TABLES}dimensions:\n  - name: d\n    expr: o.d\n    source_table: o\n\
+                 metrics: []\nverified_queries:\n  - {{name: {name}, question: q, sql: s}}\n"
+            );
+            let e = yaml_err(&yaml);
+            assert!(e.contains("verified query name"), "{name}: {e}");
+        }
+        // Quoted, the same names are fine.
+        let yaml = format!(
+            "{VALID_TABLES}dimensions:\n  - name: d\n    expr: o.d\n    source_table: o\n\
+             metrics: []\nverified_queries:\n  - {{name: '\"a,b\"', question: q, sql: s}}\n  \
+             - {{name: '\"AS\"', question: q, sql: s}}\n"
+        );
+        SemanticViewDefinition::from_yaml_with_size_cap("v", &yaml).expect("quoted names import");
+    }
+
+    #[test]
+    fn yaml_verified_query_names_differing_only_by_quotes_are_duplicates() {
+        let yaml = format!(
+            "{VALID_TABLES}dimensions:\n  - name: d\n    expr: o.d\n    source_table: o\n\
+             metrics: []\nverified_queries:\n  - {{name: q, question: q, sql: s}}\n  \
+             - {{name: '\"Q\"', question: q, sql: s}}\n"
+        );
+        let e = yaml_err(&yaml);
+        assert!(e.contains("duplicate verified query"), "{e}");
     }
 
     #[test]

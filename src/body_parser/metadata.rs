@@ -305,7 +305,7 @@ fn parse_verified_query(entry: &str, base: usize) -> Result<VerifiedQuery, Parse
     if name.is_empty() {
         return Err(err("Missing verified query name before 'AS'.", base));
     }
-    if let Some(reason) = super::scan::ddl_identifier_slot_error(name) {
+    if let Some(reason) = crate::model::verified_query_name_error(name) {
         return Err(err(
             format!("Invalid verified query name '{name}': {reason}."),
             base,
@@ -854,6 +854,63 @@ mod tests {
 
     /// GET_DDL writes every clause back in a form the parser reads to the same
     /// definition.
+    #[test]
+    fn a_verified_query_name_is_one_identifier() {
+        let e = err("DIMENSIONS (o.d AS o.d) AI_VERIFIED_QUERIES (db.q AS (QUESTION 'x' SQL 'y'))");
+        assert!(e.contains("Invalid verified query name 'db.q'"), "{e}");
+    }
+
+    #[test]
+    fn verified_query_names_differing_only_by_quotes_are_duplicates() {
+        let e = err(
+            "DIMENSIONS (o.d AS o.d) AI_VERIFIED_QUERIES (q AS (QUESTION 'x' SQL 'y'), \"Q\" AS (QUESTION 'x' SQL 'y'))",
+        );
+        assert!(e.contains("Duplicate verified query '\"Q\"'"), "{e}");
+    }
+
+    #[test]
+    fn quoted_verified_query_names_render_and_parse_back() {
+        let kb = parse(
+            "DIMENSIONS (o.d AS o.d) AI_VERIFIED_QUERIES (\"a,b\" AS (QUESTION 'x' SQL 'y'), \"q)\" AS (QUESTION 'x' SQL 'y'), \
+             \"AS\" AS (QUESTION 'x' SQL 'y'))",
+        );
+        let def = kb.into_definition();
+        let ddl = crate::render_ddl::render_create_ddl("v", &def).unwrap();
+        let rendered = ddl
+            .strip_prefix("CREATE OR REPLACE SEMANTIC VIEW v ")
+            .unwrap();
+        let back = parse_keyword_body(rendered, 0)
+            .unwrap_or_else(|e| panic!("{ddl}\n{}", e.message))
+            .into_definition();
+        assert_eq!(back.verified_queries, def.verified_queries, "{ddl}");
+    }
+
+    #[test]
+    fn a_clause_after_an_interval_cast_is_still_a_clause() {
+        assert_eq!(
+            expr_of("o.a AS o.x::INTERVAL IS_ENUM WITH SYNONYMS ('a')"),
+            ("o.x::INTERVAL".into(), true)
+        );
+        let kb = parse("DIMENSIONS (o.a AS o.x::INTERVAL SAMPLE_VALUES ('1 day'))");
+        assert_eq!(kb.dimensions[0].expr, "o.x::INTERVAL");
+        assert_eq!(kb.dimensions[0].sample_values, ["1 day"]);
+    }
+
+    #[test]
+    fn unquoted_sample_values_right_after_the_expression_are_refused() {
+        for rest in [
+            "DIMENSIONS (o.d AS o.d SAMPLE_VALUES (1, 2))",
+            "DIMENSIONS (o.d AS o.d SAMPLE_VALUES (E'x'))",
+            "DIMENSIONS (o.d AS o.d SAMPLE_VALUES = (1))",
+        ] {
+            let e = err(rest);
+            assert!(
+                e.contains("Expected a single-quoted string as a sample value"),
+                "{rest}: {e}"
+            );
+        }
+    }
+
     #[test]
     fn rendered_clauses_parse_back_unchanged() {
         let kb = parse(

@@ -386,8 +386,10 @@ fn parse_tag_name(text: &str) -> Result<TagName, String> {
 }
 
 /// Byte offset in `text` where an entry's trailing annotations begin: the
-/// first depth-0, unquoted `COMMENT`, `LABELS`, `WITH SYNONYMS`, `WITH TAG` or
-/// `TAG (` at a word boundary. Everything before it is the entry's expression.
+/// first depth-0, unquoted `COMMENT`, `LABELS`, `WITH SYNONYMS`, `WITH TAG`,
+/// `TAG (`, `WITH CORTEX`, or (after an operand) `SAMPLE_VALUES (` or a
+/// closing `IS_ENUM`, at a word boundary. Everything before it is the entry's
+/// expression.
 ///
 /// Shared with the YAML choke point (`crate::model`), which must refuse an
 /// expression the keyword grammar would split here.
@@ -514,9 +516,10 @@ fn follows_keyword_operator(upper: &str, i: usize) -> bool {
         .bytes()
         .rposition(|b| !is_ident_continuation(b))
         .map_or(0, |p| p + 1);
-    // `o.case` is a column, not the keyword.
-    let qualified = before[..word_start].ends_with('.');
-    !qualified && OPERATORS.contains(&&before[word_start..])
+    // `o.case` is a column and `::INTERVAL` a type, not the keyword.
+    let head = before[..word_start].trim_end();
+    let operand = head.ends_with('.') || head.ends_with("::");
+    !operand && OPERATORS.contains(&&before[word_start..])
 }
 
 /// Whether `rest` (the text after a bare `IS_ENUM`) ends the entry or starts
@@ -543,13 +546,20 @@ fn ends_or_opens_clause(rest: &str) -> bool {
 }
 
 /// Whether `rest` (the text after `SAMPLE_VALUES`) opens its value list:
-/// `[=] (` then a quoted value or `)`.
+/// `[=] (`, where the `(` is set apart by `=` or a space, or opens with a
+/// quoted value or `)`. Only a call written tight, `sample_values(1)`, stays
+/// expression text, so a list with unquoted values gets the clause's error.
 fn opens_sample_values(rest: &str) -> bool {
+    let spaced = rest.starts_with(|c: char| c.is_ascii_whitespace());
     let rest = rest.trim_start();
-    let rest = rest.strip_prefix('=').unwrap_or(rest).trim_start();
-    rest.strip_prefix('(')
-        .map(str::trim_start)
-        .is_some_and(|r| r.starts_with('\'') || r.starts_with(')'))
+    let (eq, rest) = match rest.strip_prefix('=') {
+        Some(r) => (true, r.trim_start()),
+        None => (false, rest),
+    };
+    rest.strip_prefix('(').is_some_and(|r| {
+        let r = r.trim_start();
+        eq || spaced || r.starts_with('\'') || r.starts_with(')')
+    })
 }
 
 /// Separate the SQL expression from trailing COMMENT / WITH SYNONYMS annotations.

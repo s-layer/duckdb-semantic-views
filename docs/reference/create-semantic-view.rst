@@ -226,9 +226,10 @@ Syntax
    - ``AI_VERIFIED_QUERIES (...)`` lists questions with the SQL that answers
      them. Each entry needs ``QUESTION`` and ``SQL``; ``VERIFIED_AT`` (seconds
      since the Unix epoch), ``ONBOARDING_QUESTION`` and ``VERIFIED_BY`` are
-     optional, and the sub-clauses may come in any order. Entry names follow
-     member-name rules and must be unique, compared case-insensitively. The SQL
-     is stored as text and not checked.
+     optional, and the sub-clauses may come in any order. An entry name is one
+     identifier (double-quote a name with other characters, or the name
+     ``AS``) and must be unique, compared case-insensitively whether quoted or
+     not. The SQL is stored as text and not checked.
    - ``COPY GRANTS`` is accepted and ignored: this extension has no grants to
      copy. It is not stored, so ``GET_DDL`` does not write it.
 

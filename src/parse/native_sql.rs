@@ -149,7 +149,7 @@ pub(crate) fn lower_action(action: RewriteAction) -> Result<String, ParseError> 
         // connection. Names carried raw; `SqlLit::escape` at the boundary
         // produces the escaped literal the emission helpers embed (R-1: the
         // escaped-vs-raw distinction is type-enforced, not by convention).
-        // The comment is passed RAW — `rewrite_alter_comment` needs it
+        // The comment is passed RAW — `rewrite_alter_patch` needs it
         // un-escaped to build the JSON patch and escapes the patch itself.
         RewriteAction::Drop { name, if_exists } => rewrite_drop(&name, if_exists)?,
         RewriteAction::AlterRename {
@@ -512,11 +512,11 @@ fn emit_native_create_from_yaml_file(
 // of a naming convention (R-1). The old free `escape_sql_arg` /
 // `unescape_sql_arg` pair was removed: names are escaped exactly once at the
 // `lower_action` boundary via `SqlLit::escape`, and the comment now
-// flows RAW to `rewrite_alter_comment` (no escape→unescape round-trip).
+// flows RAW to `rewrite_alter_patch` (no escape→unescape round-trip).
 
 #[cfg(feature = "extension")]
 // Infallible today, but kept `Result`-returning for symmetry with the fallible
-// `rewrite_*` siblings (e.g. `rewrite_alter_comment`) dispatched through the
+// `rewrite_*` siblings (e.g. `rewrite_alter_patch`) dispatched through the
 // same `?`-chained match in `lower_action`; diverging one signature
 // would fragment that dispatch.
 #[allow(clippy::unnecessary_wraps)]
@@ -760,7 +760,7 @@ fn rewrite_alter_patch(
 
 /// `ALTER SEMANTIC VIEW ... SET TAG` (`set` holds the tags) or `UNSET TAG`
 /// (`unset` holds the names): one UPDATE of the stored definition's view-level
-/// `tags`, like [`rewrite_alter_comment`] in every other respect.
+/// `tags`, like [`rewrite_alter_patch`] in every other respect.
 ///
 /// The new list is the stored one without any tag named in the statement, then
 /// the statement's tags (none for UNSET). Names compare case-insensitively,
@@ -834,7 +834,7 @@ fn rewrite_alter_tags(
     let schema_expr = resolved_schema_expr(&target, &name_escaped, &suggested_name(view));
     let row = row_predicate(&name_escaped, &schema_expr);
     let table_guard = definitions_table_guard_select(&display);
-    // As in `rewrite_alter_comment`: IF EXISTS updates no row on a missing
+    // As in `rewrite_alter_patch`: IF EXISTS updates no row on a missing
     // view, and the plain form is refused by the existence guard first.
     let guard = if if_exists {
         String::new()

@@ -949,7 +949,7 @@ Used within the top-level ``verified_queries`` list. The field names are Snowfla
      - string
      - Yes
      -
-     - Entry name. One identifier, unique in the list (compared case-insensitively).
+     - Entry name. One identifier, written as it would appear in ``AI_VERIFIED_QUERIES``: a name with characters other than letters, digits and ``_`` (or the name ``AS``) must include its double quotes. Unique in the list, compared case-insensitively whether quoted or not.
    * - ``question``
      - string
      - Yes

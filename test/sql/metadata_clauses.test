@@ -277,6 +277,89 @@ $$
 ----
 names a database but no schema
 
+# A verified-query name GET_DDL could not write bare must carry its quotes in
+# YAML, as it would in AI_VERIFIED_QUERIES; quoted, it imports and GET_DDL
+# writes it quoted. Quotes do not make two names differ.
+statement error
+CREATE SEMANTIC VIEW mc_yaml_bad FROM YAML $$
+tables:
+  - alias: o
+    table: mc_orders
+dimensions:
+  - name: region
+    expr: o.region
+    source_table: o
+metrics: []
+verified_queries:
+  - {name: 'a,b', question: a, sql: b}
+$$
+----
+verified query name 'a,b' is invalid
+
+statement error
+CREATE SEMANTIC VIEW mc_yaml_bad FROM YAML $$
+tables:
+  - alias: o
+    table: mc_orders
+dimensions:
+  - name: region
+    expr: o.region
+    source_table: o
+metrics: []
+verified_queries:
+  - {name: q, question: a, sql: b}
+  - {name: '"Q"', question: c, sql: d}
+$$
+----
+duplicate verified query '"Q"'
+
+statement ok
+CREATE SEMANTIC VIEW mc_yaml_vq FROM YAML $$
+tables:
+  - alias: o
+    table: mc_orders
+dimensions:
+  - name: region
+    expr: o.region
+    source_table: o
+metrics: []
+verified_queries:
+  - {name: '"a,b"', question: a, sql: b}
+  - {name: '"AS"', question: c, sql: d}
+$$
+
+query I
+SELECT GET_DDL('SEMANTIC_VIEW', 'mc_yaml_vq') LIKE '%AI_VERIFIED_QUERIES (%"a,b" AS (%"AS" AS (%'
+----
+true
+
+statement ok
+CREATE SEMANTIC VIEW mc_ddl_vq AS
+  TABLES (o AS mc_orders)
+  DIMENSIONS (o.region AS o.region)
+  AI_VERIFIED_QUERIES ("a,b" AS (QUESTION 'a' SQL 'b'), "AS" AS (QUESTION 'c' SQL 'd'))
+
+query TTT rowsort
+SELECT object_name, property, property_value FROM describe_semantic_view('mc_ddl_vq')
+WHERE object_kind = 'AI_VERIFIED_QUERY' AND property = 'QUESTION'
+----
+"AS"	QUESTION	c
+"a,b"	QUESTION	a
+
+statement error
+CREATE SEMANTIC VIEW mc_ddl_vq_bad AS
+  TABLES (o AS mc_orders)
+  DIMENSIONS (o.region AS o.region)
+  AI_VERIFIED_QUERIES (q AS (QUESTION 'a' SQL 'b'), "Q" AS (QUESTION 'c' SQL 'd'))
+----
+Duplicate verified query '"Q"'
+
+statement ok
+DROP SEMANTIC VIEW mc_yaml_vq
+
+statement ok
+DROP SEMANTIC VIEW mc_ddl_vq
+
 # ------------------------------------------------------------------
 # ALTER SEMANTIC VIEW ... SET / UNSET MAX_STALENESS
 # ------------------------------------------------------------------
