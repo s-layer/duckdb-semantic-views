@@ -9,7 +9,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-_No unreleased changes yet._
+### Changed
+
+- **A member is read in the clause it is listed in**, following Snowflake's `2026_07` behaviour change. A query that lists facts in `FACTS` and dimensions in `DIMENSIONS` (`facts := [...]` with `dimensions := [...]`) is now refused with `querying FACTS with DIMENSIONS is not supported`; list the dimensions in `FACTS` instead, where a dimension is read row by row as a column of the fact rows, in the order listed (`FACTS region, net_price`). A fact listed in `DIMENSIONS` is grouped on, like a dimension, so it gives one row per distinct value and can be queried with metrics. In a standard SQL query, a fact in `SELECT` that a `GROUP BY` query neither groups nor aggregates is now refused with `'<fact>' must be passed to an aggregate or appear in GROUP BY`, as in any SQL, rather than read row by row.
+
+### Fixed
+
+- **A fact can be named by its table in `FACTS`.** `FACTS o.amount` (and `facts := ['o.amount']`) failed with an unknown-fact error; a table-qualified fact name now resolves, as a qualified dimension or metric name does.
 
 ## [0.17.0] - 2026-10-26
 

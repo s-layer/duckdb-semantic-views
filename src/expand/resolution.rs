@@ -286,6 +286,27 @@ pub(super) fn find_dimension<'a>(
     }
 }
 
+/// Look up a fact by name, bare or qualified by its table (`o.amount`), with
+/// [`find_dimension`]'s rules: case and quoting are ignored, and a qualifier
+/// that is not the fact's own table finds nothing (SG-14).
+pub(super) fn find_fact<'a>(
+    def: &'a SemanticViewDefinition,
+    name: &str,
+) -> Option<&'a crate::model::Fact> {
+    if let Some(dot_pos) = crate::ident::first_unquoted_dot(name) {
+        let alias = &name[..dot_pos];
+        let bare = &name[dot_pos + 1..];
+        def.facts.iter().find(|f| {
+            crate::ident::ident_matches(&f.name, bare)
+                && source_table_matches(f.source_table.as_deref(), alias, def)
+        })
+    } else {
+        def.facts
+            .iter()
+            .find(|f| crate::ident::ident_matches(&f.name, name))
+    }
+}
+
 /// Canonical match key for a dimension *reference* — bare (`report_date`),
 /// dotted (`o.report_date`), or with quoted parts (`o."order date"`).
 ///

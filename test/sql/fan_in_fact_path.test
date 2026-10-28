@@ -105,7 +105,7 @@ fi_line_items	item_qty	INTEGER	false
 # ============================================================
 
 query TT rowsort
-SELECT * FROM SEMANTIC_VIEW(fi_sv DIMENSIONS customer_country FACTS ship_cost);
+SELECT * FROM SEMANTIC_VIEW(fi_sv FACTS customer_country, ship_cost);
 ----
 FR	6.25
 US	4.50
@@ -118,7 +118,7 @@ US	4.50
 # ============================================================
 
 statement error
-SELECT * FROM SEMANTIC_VIEW(fi_sv DIMENSIONS item_qty FACTS ship_cost);
+SELECT * FROM SEMANTIC_VIEW(fi_sv FACTS item_qty, ship_cost);
 ----
 without crossing a one-to-many relationship
 

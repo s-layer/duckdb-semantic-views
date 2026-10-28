@@ -266,11 +266,11 @@ SELECT "EU", "US" FROM svc_pivoted;
 statement ok
 DROP TABLE svc_pivoted;
 
-# FACTS returns rows unaggregated, and its place among the clauses sets its
-# columns' place too.
+# FACTS returns rows unaggregated, a dimension listed in it included, with the
+# columns in the list's order.
 
 query TT rowsort
-SELECT * FROM SEMANTIC_VIEW(svc_sv FACTS amt DIMENSIONS region);
+SELECT * FROM SEMANTIC_VIEW(svc_sv FACTS amt, region);
 ----
 100.00	EU
 50.00	EU
@@ -294,7 +294,7 @@ SELECT * FROM semantic_view('svc_sv', dimensions := ['region'], metrics := ['rev
 70.00	US
 
 query TT rowsort
-SELECT * FROM semantic_view('svc_sv', dimensions := ['region'], facts := ['amt'], column_order := ['FACTS', 'dimensions']);
+SELECT * FROM semantic_view('svc_sv', facts := ['amt', 'region'], column_order := ['FACTS', 'dimensions']);
 ----
 100.00	EU
 50.00	EU

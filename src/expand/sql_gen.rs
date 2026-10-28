@@ -7,7 +7,7 @@ use super::facts::{
 };
 use super::fan_trap::{check_fan_traps, validate_fact_table_path};
 use super::join_resolver::resolve_joins_pkfk;
-use super::resolution::{find_dimension, find_metric, quote_stored_ident};
+use super::resolution::{find_dimension, find_fact, find_metric, quote_stored_ident};
 use super::role_playing::{
     check_fact_role_playing_path, check_where_clause_role_playing_path, find_using_context,
 };
@@ -46,9 +46,7 @@ trait Resolvable: Sized {
 
 impl Resolvable for Fact {
     fn find<'a>(def: &'a SemanticViewDefinition, name: &str) -> Option<&'a Self> {
-        def.facts
-            .iter()
-            .find(|f| crate::ident::ident_matches(&f.name, name))
+        find_fact(def, name)
     }
     fn is_private(&self) -> bool {
         self.access == AccessModifier::Private
@@ -291,25 +289,81 @@ fn and_phantom_filter(predicate: Option<String>, guard: Option<String>) -> Optio
     }
 }
 
+/// One member of a FACTS list: a fact, or a dimension read row by row.
+enum FactsItem<'a> {
+    Dimension(&'a Dimension),
+    Fact(&'a Fact),
+}
+
+/// Whether a FACTS-list name is a dimension's. Snowflake reads a dimension
+/// listed in FACTS row by row (its `2026_07` behaviour change). A name that is a
+/// fact's, or no member's, is taken as a fact's, so its errors are a fact's.
+fn is_dimension_in_facts(def: &SemanticViewDefinition, name: &str) -> bool {
+    Fact::find(def, name).is_none() && Dimension::find(def, name).is_some()
+}
+
+/// Resolve a FACTS list, in its order: each name to its fact, or to its
+/// dimension (see [`is_dimension_in_facts`]).
+fn resolve_facts_list<'a, N: AsRef<str>>(
+    names: &[N],
+    view_name: &str,
+    def: &'a SemanticViewDefinition,
+) -> Result<Vec<FactsItem<'a>>, ExpandError> {
+    let is_dim: Vec<bool> = names
+        .iter()
+        .map(|n| is_dimension_in_facts(def, n.as_ref()))
+        .collect();
+    let mut dim_names: Vec<&str> = Vec::new();
+    let mut fact_names: Vec<&str> = Vec::new();
+    for (name, &d) in names.iter().zip(&is_dim) {
+        if d { &mut dim_names } else { &mut fact_names }.push(name.as_ref());
+    }
+    let mut facts = resolve_names::<Fact, _>(&fact_names, view_name, def)?.into_iter();
+    let mut dims = resolve_names::<Dimension, _>(&dim_names, view_name, def)?.into_iter();
+    Ok(is_dim
+        .into_iter()
+        .filter_map(|d| {
+            if d {
+                dims.next().map(FactsItem::Dimension)
+            } else {
+                facts.next().map(FactsItem::Fact)
+            }
+        })
+        .collect())
+}
+
 /// Expand a fact query into unaggregated SQL.
 ///
 /// Facts are row-level expressions — the generated SQL has no GROUP BY and no
 /// aggregation. Fact expressions are resolved via `inline_facts` (DAG resolution)
 /// just like metric expansion inlines facts into aggregate expressions.
 ///
-/// Dimensions, when present, add columns to SELECT but do NOT trigger GROUP BY
-/// (unlike metric queries where dims + metrics => GROUP BY).
+/// A dimension listed in FACTS is read row by row too, as Snowflake reads it:
+/// it adds a column but does NOT trigger GROUP BY (unlike a metric query, where
+/// dims + metrics => GROUP BY). The columns come in the list's order.
 #[allow(clippy::too_many_lines)]
 fn expand_facts(
     view_name: &str,
     def: &SemanticViewDefinition,
     req: &QueryRequest,
 ) -> Result<String, ExpandError> {
-    // 1. Validate + resolve requested facts.
-    let resolved_facts = resolve_names::<Fact, _>(&req.facts, view_name, def)?;
-
-    // 2. Resolve requested dimensions (same logic as expand()).
-    let resolved_dims = resolve_names::<Dimension, _>(&req.dimensions, view_name, def)?;
+    // 1-2. Validate + resolve the FACTS list: facts, and dimensions read row
+    // by row.
+    let listed = resolve_facts_list(&req.facts, view_name, def)?;
+    let resolved_facts: Vec<&Fact> = listed
+        .iter()
+        .filter_map(|i| match i {
+            FactsItem::Fact(f) => Some(*f),
+            FactsItem::Dimension(_) => None,
+        })
+        .collect();
+    let resolved_dims: Vec<&Dimension> = listed
+        .iter()
+        .filter_map(|i| match i {
+            FactsItem::Dimension(d) => Some(*d),
+            FactsItem::Fact(_) => None,
+        })
+        .collect();
 
     // 2b. Resolve the pre-aggregation predicate, if any. Done before the path
     // check so the members it references take part in it: Snowflake's
@@ -384,27 +438,23 @@ fn expand_facts(
         cycle_description: e,
     })?;
 
-    // 5. Build the SELECT list (no DISTINCT, no aggregation).
-    let mut items: Vec<SelectItem> = Vec::new();
-
-    // Dimensions first
-    for dim in &resolved_dims {
-        items.push(SelectItem::new(
-            super::facts::inline_dimension_facts(&dim.expr, &def.facts),
-            dim.output_type.clone(),
-            quote_stored_ident(&dim.name),
-        ));
-    }
-
-    // Then facts (inlined expressions, no aggregation)
-    for fact in &resolved_facts {
-        let resolved_expr = inline_facts(&fact.expr, &def.facts, &topo_order);
-        items.push(SelectItem::new(
-            resolved_expr,
-            fact.output_type.clone(),
-            quote_stored_ident(&fact.name),
-        ));
-    }
+    // 5. Build the SELECT list (no DISTINCT, no aggregation), in the FACTS
+    // list's order: facts inlined, dimensions with the facts they name inlined.
+    let items: Vec<SelectItem> = listed
+        .iter()
+        .map(|item| match item {
+            FactsItem::Dimension(dim) => SelectItem::new(
+                super::facts::inline_dimension_facts(&dim.expr, &def.facts),
+                dim.output_type.clone(),
+                quote_stored_ident(&dim.name),
+            ),
+            FactsItem::Fact(fact) => SelectItem::new(
+                inline_facts(&fact.expr, &def.facts, &topo_order),
+                fact.output_type.clone(),
+                quote_stored_ident(&fact.name),
+            ),
+        })
+        .collect();
 
     // 6. JOIN clauses — resolve required joins for dim + fact source tables.
     // Fact queries have no metrics; fact source tables are resolved through
@@ -474,8 +524,11 @@ pub fn output_column_names(
     for m in resolve_names::<Metric, _>(&req.metrics, view_name, def)? {
         names.push(unquoted(&m.name));
     }
-    for f in resolve_names::<Fact, _>(&req.facts, view_name, def)? {
-        names.push(unquoted(&f.name));
+    for item in resolve_facts_list(&req.facts, view_name, def)? {
+        names.push(unquoted(match item {
+            FactsItem::Dimension(d) => &d.name,
+            FactsItem::Fact(f) => &f.name,
+        }));
     }
     Ok(names)
 }
@@ -539,6 +592,16 @@ fn expand_unhoisted(
     // 0. Facts and metrics are mutually exclusive.
     if !req.facts.is_empty() && !req.metrics.is_empty() {
         return Err(ExpandError::FactsMetricsMutualExclusion {
+            view_name: view_name.to_string(),
+        });
+    }
+
+    // 0b. So are facts and dimensions, as in Snowflake since its `2026_07`
+    // behaviour change. A dimension is read row by row in FACTS and a fact is
+    // grouped on in DIMENSIONS instead (`query::expr_items` lowers each to a
+    // member of the clause's kind), so the clause says what the query is.
+    if !req.facts.is_empty() && !req.dimensions.is_empty() {
+        return Err(ExpandError::FactsWithDimensions {
             view_name: view_name.to_string(),
         });
     }

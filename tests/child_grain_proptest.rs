@@ -1043,7 +1043,15 @@ fn check_case(case: &Case) -> Result<(), TestCaseError> {
     // `semantic_view()` renames it.
     let mut renamed = Vec::new();
     let def = if matches!(case.ask, Ask::ChildFacts) {
-        let texts: Vec<String> = FACTS.iter().map(|f| fact_item_text(f)).collect();
+        // The queried dimensions are listed in FACTS too, where Snowflake reads
+        // a dimension row by row (its 2026_07 rule refuses FACTS with
+        // DIMENSIONS), so they go through the lowering with the facts.
+        let texts: Vec<String> = req
+            .dimensions
+            .drain(..)
+            .map(|d| d.as_str().to_string())
+            .chain(FACTS.iter().map(|f| fact_item_text(f)))
+            .collect();
         let items = RequestItems::parse(&[], &[], &texts, &[]).expect("the facts parse");
         let lowered = lower_expression_items("child", &stored, items)
             .unwrap_or_else(|e| panic!("the facts lower: {e:?}"));

@@ -122,7 +122,7 @@ How the Clauses Map
    * - Any other aggregate, such as ``SUM(amount)`` or ``COUNT(DISTINCT customer)``
      - An ad-hoc metric in ``METRICS``, over the dimensions and facts it names. An aggregate must name at least one: ``COUNT(*)`` alone is refused, because nothing says which table's rows it counts. Declare a metric ``AS COUNT(*)`` on that table and pass it to ``AGG``.
    * - A ``SELECT`` item that is neither grouped nor aggregated
-     - A ``FACTS`` item: the query returns one row per row of the fact's table.
+     - A ``FACTS`` item, in a query with no ``GROUP BY``: the query returns one row per row of the fact's table. A grouped query refuses it, as any SQL does.
    * - ``WHERE``
      - The construct's ``WHERE``: it filters rows before the metrics are computed, and may refer only to dimensions and facts.
    * - ``HAVING``
@@ -202,13 +202,13 @@ An aggregate other than ``AGG`` is computed over the dimensions and facts it nam
    │ West   │  450.00 │        300.00 │         1 │
    └────────┴─────────┴───────────────┴───────────┘
 
-A fact in ``SELECT`` that is neither grouped nor aggregated returns row-level values, one row per order here, as ``FACTS amount`` would in the construct (see :ref:`howto-query-facts`):
+A fact in a query with no ``GROUP BY`` returns row-level values, one row per order here, as ``FACTS amount`` would in the construct. In a grouped query, a fact must be grouped on or aggregated, as any column must in SQL. Grouped on, it gives one row per distinct value, which here is one row per order:
 
 .. code-block:: sql
 
    SELECT customer, amount
    FROM analytics
-   GROUP BY customer
+   GROUP BY customer, amount
    ORDER BY customer, amount;
 
 .. code-block:: text
@@ -408,8 +408,11 @@ Troubleshooting
 **dimension 'customer' must appear in GROUP BY**
    Every dimension you select is a grouping key. Add it to ``GROUP BY``, or write ``GROUP BY ALL``.
 
+**'amount' must be passed to an aggregate or appear in GROUP BY**
+   In a grouped query, every ``SELECT`` item is grouped on or aggregated. Either the item is a fact you meant to aggregate (write ``MAX(amount)``) or group by, or its name is misspelled: ``SELECT region, regoin, AGG(revenue) ... GROUP BY region`` gives this error too. Check the name against :ref:`SHOW COLUMNS IN SEMANTIC VIEW <ref-show-columns>`. To read a dimension row by row next to a fact, use the construct's ``FACTS`` (see :ref:`howto-query-facts-dims`).
+
 **cannot combine facts and metrics in the same query**
-   A ``SELECT`` item that is neither grouped nor aggregated is read as a fact, and a query returns either row-level facts or aggregated metrics, not both. Either the item is a fact you meant to aggregate (write ``MAX(amount)``) or group by, or its name is misspelled: ``SELECT region, regoin, AGG(revenue) ...`` gives this error too. Check the name against :ref:`SHOW COLUMNS IN SEMANTIC VIEW <ref-show-columns>`.
+   In a query with no ``GROUP BY``, a ``SELECT`` item that is neither grouped nor aggregated is read as a fact, and a query returns either row-level facts or aggregated metrics, not both. Aggregate the fact, or check its name as above.
 
 **SELECT * is not supported in a query over a semantic view**
    The query form needs the dimensions and metrics named, as in Snowflake. Name them, or use ``SELECT * FROM SEMANTIC_VIEW(...)``, where ``*`` means the items you listed.

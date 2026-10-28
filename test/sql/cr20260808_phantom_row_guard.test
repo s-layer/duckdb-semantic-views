@@ -159,7 +159,7 @@ SELECT liqty FROM SEMANTIC_VIEW(cr0808_sales FACTS liqty) ORDER BY 1;
 # the two real rows and no phantom is manufactured.
 query TI
 SELECT region, liqty
-FROM SEMANTIC_VIEW(cr0808_sales DIMENSIONS region FACTS liqty)
+FROM SEMANTIC_VIEW(cr0808_sales FACTS region, liqty)
 ORDER BY 2;
 ----
 East	2

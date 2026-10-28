@@ -34,6 +34,64 @@ fn test_facts_metrics_mutual_exclusion() {
     );
 }
 
+/// Snowflake's 2026_07 behaviour change: FACTS and DIMENSIONS are not queried
+/// together. A dimension goes in FACTS for one row per source row, a fact in
+/// DIMENSIONS for one row per distinct value.
+#[test]
+fn facts_with_dimensions_is_refused() {
+    let def = orders_view().with_fact("line_total", "quantity * price", "orders");
+    let req = QueryRequest {
+        where_clause: None,
+        facts: vec![FactName::new("line_total")],
+        dimensions: vec![DimensionName::new("region")],
+        metrics: vec![],
+    };
+    let err = expand("test_view", &def, &req).unwrap_err();
+    let msg = err.to_string();
+    assert!(
+        msg.contains("querying FACTS with DIMENSIONS is not supported"),
+        "got: {msg}"
+    );
+}
+
+/// A dimension listed in FACTS is read row by row, in the list's order.
+#[test]
+fn a_dimension_in_facts_is_read_row_by_row() {
+    let def = orders_view().with_fact("line_total", "quantity * price", "orders");
+    let req = QueryRequest {
+        where_clause: None,
+        facts: vec![FactName::new("line_total"), FactName::new("region")],
+        dimensions: vec![],
+        metrics: vec![],
+    };
+    let sql = expand("test_view", &def, &req).unwrap();
+    assert!(!sql.contains("GROUP BY"), "{sql}");
+    let fact_at = sql.find("AS \"line_total\"").unwrap();
+    let dim_at = sql.find("AS \"region\"").unwrap();
+    assert!(fact_at < dim_at, "columns follow the FACTS list: {sql}");
+    assert_eq!(
+        output_column_names("test_view", &def, &req).unwrap(),
+        ["line_total", "region"]
+    );
+}
+
+/// A fact is named by its table too, as a dimension is (`orders.line_total`),
+/// and only by its own table.
+#[test]
+fn a_fact_resolves_by_its_qualified_name() {
+    let def = orders_view().with_fact("line_total", "quantity * price", "orders");
+    let req = |name: &str| QueryRequest {
+        where_clause: None,
+        facts: vec![FactName::new(name)],
+        dimensions: vec![],
+        metrics: vec![],
+    };
+    let sql = expand("test_view", &def, &req("orders.line_total")).unwrap();
+    assert!(sql.contains("AS \"line_total\""), "{sql}");
+    let err = expand("test_view", &def, &req("other.line_total")).unwrap_err();
+    assert!(err.to_string().contains("unknown fact"), "got: {err}");
+}
+
 #[test]
 fn test_empty_request_with_facts_is_not_empty() {
     let def = orders_view().with_fact("line_total", "quantity * price", "orders");

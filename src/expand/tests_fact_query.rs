@@ -35,8 +35,8 @@ fn multi_table_def() -> SemanticViewDefinition {
 fn basic_fact_request() -> QueryRequest {
     QueryRequest {
         where_clause: None,
-        facts: vec![FactName::new("net_price")],
-        dimensions: vec![DimensionName::new("region")],
+        facts: vec![FactName::new("region"), FactName::new("net_price")],
+        dimensions: vec![],
         metrics: vec![],
     }
 }
@@ -225,8 +225,8 @@ fn test_fact_path_violation() {
         .with_pkfk_join("p_to_o", "p", "o", &["order_id"], &["id"]);
     let req = QueryRequest {
         where_clause: None,
-        facts: vec![FactName::new("net_price")],
-        dimensions: vec![DimensionName::new("pay_status")],
+        facts: vec![FactName::new("pay_status"), FactName::new("net_price")],
+        dimensions: vec![],
         metrics: vec![],
     };
     let result = expand("test_view", &def, &req);
@@ -273,8 +273,8 @@ fn fact_with_dimension_across_fan_in_is_allowed() {
     let def = fan_in_def();
     let req = QueryRequest {
         where_clause: None,
-        facts: vec![FactName::new("ship_cost")],
-        dimensions: vec![DimensionName::new("country")],
+        facts: vec![FactName::new("country"), FactName::new("ship_cost")],
+        dimensions: vec![],
         metrics: vec![],
     };
     let result = expand("test_view", &def, &req);
@@ -296,8 +296,8 @@ fn fact_across_fan_in_siblings_still_violates() {
     let def = fan_in_def();
     let req = QueryRequest {
         where_clause: None,
-        facts: vec![FactName::new("line_price")],
-        dimensions: vec![DimensionName::new("carrier")],
+        facts: vec![FactName::new("carrier"), FactName::new("line_price")],
+        dimensions: vec![],
         metrics: vec![],
     };
     let result = expand("test_view", &def, &req);
@@ -317,8 +317,8 @@ fn fact_reaches_a_multi_hop_chain_across_fan_in() {
         .with_pkfk_join("c_to_r", "c", "r", &["region_id"], &["id"]);
     let req = QueryRequest {
         where_clause: None,
-        facts: vec![FactName::new("ship_cost")],
-        dimensions: vec![DimensionName::new("region_name")],
+        facts: vec![FactName::new("region_name"), FactName::new("ship_cost")],
+        dimensions: vec![],
         metrics: vec![],
     };
     let result = expand("test_view", &def, &req);
@@ -341,8 +341,8 @@ fn test_fact_path_valid_linear() {
         .with_pkfk_join("d_to_li", "d", "li", &["line_id"], &["id"]);
     let req = QueryRequest {
         where_clause: None,
-        facts: vec![FactName::new("detail_val")],
-        dimensions: vec![DimensionName::new("region")],
+        facts: vec![FactName::new("region"), FactName::new("detail_val")],
+        dimensions: vec![],
         metrics: vec![],
     };
     let result = expand("test_view", &def, &req);

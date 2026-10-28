@@ -489,6 +489,9 @@ pub enum ExpandError {
     PrivateFact { view_name: String, name: String },
     /// Facts and metrics cannot be combined in the same query.
     FactsMetricsMutualExclusion { view_name: String },
+    /// Facts and dimensions cannot be queried together (Snowflake's `2026_07`
+    /// behaviour change): a dimension goes in FACTS, or a fact in DIMENSIONS.
+    FactsWithDimensions { view_name: String },
     /// A requested fact name does not exist in the view definition.
     UnknownFact {
         view_name: String,
@@ -905,6 +908,14 @@ impl fmt::Display for ExpandError {
                     f,
                     "semantic view '{view_name}': cannot combine facts and metrics in the same query. \
                      Use FACTS or METRICS (facts := [...] or metrics := [...]), not both."
+                )
+            }
+            Self::FactsWithDimensions { view_name } => {
+                write!(
+                    f,
+                    "semantic view '{view_name}': querying FACTS with DIMENSIONS is not supported. \
+                     List the dimensions in FACTS for one row per source row, or the facts in \
+                     DIMENSIONS for one row per distinct value."
                 )
             }
             Self::UnknownFact {

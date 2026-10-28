@@ -168,7 +168,7 @@ fn dimension_with_a_colliding_bare_column_is_ambiguous_in_a_multi_grain_plan() {
 /// Fact (row-level path, base-anchored by design: TECH-DEBT #82).
 #[test]
 fn fact_with_a_colliding_bare_column_is_ambiguous() {
-    assert_ambiguous(outcome(&["region"], &[], &["li_order"]));
+    assert_ambiguous(outcome(&[], &[], &["region", "li_order"]));
 }
 
 // --- Where the home table alone suffices, the bare column binds correctly. --

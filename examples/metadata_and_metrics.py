@@ -169,12 +169,12 @@ print("\nNote: PRIVATE facts/metrics excluded from wildcard expansion")
 print("\n=== Section 6: Queryable FACTS ===")
 
 # balance_change is PRIVATE, so only the public deposit_amount fact is
-# queryable. Facts return unaggregated row-level results.
+# queryable. Facts return unaggregated row-level results, and a dimension
+# listed in FACTS is read row by row alongside them.
 print("\nRow-level fact query (deposits per day per account):")
 for row in con.execute("""
     SELECT * FROM semantic_view('banking',
-        facts := ['deposit_amount'],
-        dimensions := ['region', 'balance_date']
+        facts := ['region', 'balance_date', 'deposit_amount']
     ) ORDER BY region, balance_date
 """).fetchall():
     print(f"  region={row[0]}, date={row[1]}, deposits={row[2]}")

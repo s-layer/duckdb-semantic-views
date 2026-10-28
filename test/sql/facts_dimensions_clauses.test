@@ -1,0 +1,119 @@
+# name: test/sql/facts_dimensions_clauses.test
+# description: Snowflake's 2026_07 rules for the FACTS and DIMENSIONS clauses. They
+# are not queried together, a fact listed in DIMENSIONS is grouped on, and a
+# dimension listed in FACTS is read row by row.
+# group: [sql]
+
+require semantic_views
+
+statement ok
+CREATE TABLE fd_orders (id INTEGER, cid INTEGER, region VARCHAR, amount INTEGER);
+
+statement ok
+INSERT INTO fd_orders VALUES (1, 1, 'East', 10), (2, 1, 'East', 10), (3, 2, 'West', 30), (4, 3, 'West', 5);
+
+statement ok
+CREATE TABLE fd_customers (id INTEGER, name VARCHAR);
+
+statement ok
+INSERT INTO fd_customers VALUES (1, 'ann'), (2, 'bo'), (3, 'cy');
+
+statement ok
+CREATE SEMANTIC VIEW fd AS TABLES (
+    o AS fd_orders PRIMARY KEY (id),
+    c AS fd_customers PRIMARY KEY (id)
+  )
+  RELATIONSHIPS (oc AS o(cid) REFERENCES c)
+  FACTS (o.amt AS o.amount, PRIVATE o.secret AS o.amount * 2, c.cname AS c.name)
+  DIMENSIONS (o.region AS o.region, c.name AS c.name)
+  METRICS (o.n AS COUNT(*), o.rev AS SUM(o.amount));
+
+# --- FACTS with DIMENSIONS is refused ---
+
+statement error
+SELECT * FROM SEMANTIC_VIEW(fd FACTS amt DIMENSIONS region);
+----
+querying FACTS with DIMENSIONS is not supported
+
+statement error
+SELECT * FROM semantic_view('fd', facts := ['amt'], dimensions := ['region']);
+----
+querying FACTS with DIMENSIONS is not supported
+
+# --- A dimension in FACTS is read row by row, in the list's order ---
+
+query TI rowsort
+SELECT * FROM SEMANTIC_VIEW(fd FACTS region, amt)
+----
+East	10
+East	10
+West	30
+West	5
+
+# A dimension on a joined table, with the fact on the base table.
+query IT rowsort
+SELECT * FROM SEMANTIC_VIEW(fd FACTS o.amt, c.name)
+----
+10	ann
+10	ann
+30	bo
+5	cy
+
+query TT
+SELECT column_name, column_type FROM (DESCRIBE SELECT * FROM SEMANTIC_VIEW(fd FACTS region, amt))
+----
+region	VARCHAR
+amt	INTEGER
+
+# --- A fact in DIMENSIONS is grouped on ---
+
+query II rowsort
+SELECT * FROM SEMANTIC_VIEW(fd DIMENSIONS amt METRICS n)
+----
+10	2
+30	1
+5	1
+
+# Alone, it lists the distinct values.
+query I rowsort
+SELECT * FROM SEMANTIC_VIEW(fd DIMENSIONS o.amt)
+----
+10
+30
+5
+
+# With a dimension, a metric, an alias and the table function.
+query TII rowsort
+SELECT * FROM semantic_view('fd', dimensions := ['region', 'amt AS a'], metrics := ['rev'])
+----
+East	10	20
+West	30	30
+West	5	5
+
+query TTI
+SELECT column_name, column_type, NULL FROM (DESCRIBE SELECT * FROM SEMANTIC_VIEW(fd DIMENSIONS region, amt AS a METRICS rev)) LIMIT 2
+----
+region	VARCHAR	NULL
+a	INTEGER	NULL
+
+# A fact on a joined table, grouped on.
+query TI rowsort
+SELECT * FROM SEMANTIC_VIEW(fd DIMENSIONS cname METRICS n)
+----
+ann	2
+bo	1
+cy	1
+
+# A private fact can no more be grouped on than read.
+statement error
+SELECT * FROM SEMANTIC_VIEW(fd DIMENSIONS secret METRICS n);
+----
+secret
+
+# --- Wildcards keep to their own kind ---
+
+query T rowsort
+SELECT * FROM SEMANTIC_VIEW(fd DIMENSIONS o.*)
+----
+East
+West

@@ -150,8 +150,22 @@ SELECT amount * 2 AS dbl FROM ssq ORDER BY 1;
 500.00
 600.00
 
-query TT
+# A grouped query reads no row-level item, as in any SQL (the construct refuses
+# FACTS with DIMENSIONS, Snowflake's 2026_07 rule).
+statement error
 SELECT channel, amount FROM ssq GROUP BY channel ORDER BY 1, 2;
+----
+'amount' must be passed to an aggregate or appear in GROUP BY
+
+# So is a misspelled name, which reads as a fact, next to a metric.
+statement error
+SELECT channel, amuont, AGG(revenue) FROM ssq GROUP BY channel;
+----
+'amuont' must be passed to an aggregate or appear in GROUP BY
+
+# Grouped on, the fact gives one row per value.
+query TT
+SELECT channel, amount FROM ssq GROUP BY channel, amount ORDER BY 1, 2;
 ----
 retail	80.00
 retail	300.00

@@ -333,8 +333,8 @@ fn exp28_facts_query_with_a_base_dimension_has_no_phantom_row() {
     let def = child_def().with_fact("liqty", "li.qty", "li");
     let req = QueryRequest {
         where_clause: None,
-        facts: vec![FactName::new("liqty")],
-        dimensions: vec![DimensionName::new("region")],
+        facts: vec![FactName::new("region"), FactName::new("liqty")],
+        dimensions: vec![],
         metrics: vec![],
     };
     let sql = expand("v", &def, &req).unwrap_or_else(|e| panic!("expand failed: {e}"));
