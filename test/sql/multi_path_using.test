@@ -39,7 +39,8 @@ CREATE SEMANTIC VIEW mpu_v
     f.departures USING (f_dep) AS f.flight_count,
     f.arrivals USING (f_arr) AS flight_count,
     f.avg_seats_out USING (f_dep) AS f.total_seats / f.flight_count,
-    movements AS f.departures + f.arrivals
+    movements AS f.departures + f.arrivals,
+    f.all_departures AS SUM(departures) OVER (PARTITION BY EXCLUDING city)
   );
 
 # Departures and arrivals by city, each through its own relationship.
@@ -80,6 +81,14 @@ query III
 SELECT * FROM semantic_view('mpu_v', metrics := ['departures', 'arrivals', 'flight_count']);
 ----
 4	4	4
+
+# A window metric takes its inner metric's path: every departure city sees
+# all 4 departures, and Gamma, which only has arrivals, is not a group.
+query TI rowsort
+SELECT * FROM semantic_view('mpu_v', dimensions := ['city'], metrics := ['all_departures']);
+----
+Alpha	4
+Beta	4
 
 # A metric with no USING says nothing about which airport a city is, so
 # grouping it by city is refused, also beside a metric that names a path.

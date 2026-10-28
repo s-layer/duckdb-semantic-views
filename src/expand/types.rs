@@ -793,7 +793,9 @@ impl fmt::Display for ExpandError {
                     "semantic view '{view_name}': dimension '{dimension_name}' is ambiguous -- \
                      table '{dimension_table}' is reached via multiple relationships: [{}]. \
                      Give every metric in the query a USING that names one of them, or use a \
-                     dimension from a non-ambiguous table.",
+                     dimension from a non-ambiguous table. If every metric already has one, \
+                     this query cannot be split by path (two window metrics, or metrics \
+                     beside a semi-additive one): query the metrics separately.",
                     available_relationships.join(", ")
                 )
             }

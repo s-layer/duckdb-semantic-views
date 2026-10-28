@@ -584,9 +584,11 @@ per role:
        f.arrivals     USING (arr_airport) AS f.flight_count
    )
 
-A name inside an aggregate call (or the aggregate's ``FILTER``) is still a column:
-``SUM(f.seats)`` sums the column ``seats`` even when a metric named ``seats``
-exists. The referenced metric must be a plain one: ``CREATE`` refuses a reference
+A name inside a call to a built-in aggregate (its arguments, ``FILTER`` and
+``WITHIN GROUP``) is still a column: ``SUM(f.seats)`` sums the column ``seats``
+even when a metric named ``seats`` exists. So is a lambda parameter. A name
+inside a call to an aggregate from an extension or a macro is read like any
+other name, as fact references are. The referenced metric must be a plain one: ``CREATE`` refuses a reference
 to a window metric, a semi-additive metric, or a metric with ``USING`` of its own
 (give the ``USING`` to the metric written over it instead), and a cycle of such
 references. A window metric's expression keeps its own rules.

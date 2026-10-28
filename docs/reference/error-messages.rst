@@ -1085,9 +1085,11 @@ Ambiguous dimension path
    semantic view '<view>': dimension '<dim>' is ambiguous -- table '<table>'
    is reached via multiple relationships: [<rel1>, <rel2>]. Give every metric
    in the query a USING that names one of them, or use a dimension from a
-   non-ambiguous table.
+   non-ambiguous table. If every metric already has one, this query cannot be
+   split by path (two window metrics, or metrics beside a semi-additive one):
+   query the metrics separately.
 
-**Cause:** A dimension comes from a table reachable via multiple named relationships (role-playing pattern), and a metric in the query has no ``USING`` clause that selects one path to it (or the query has no metrics).
+**Cause:** A dimension comes from a table reachable via multiple named relationships (role-playing pattern), and a metric in the query has no ``USING`` clause that selects one path to it (or the query has no metrics). A metric on a table further from the dimension, such as a child of the table that holds the relationships, cannot name a path at all, because a ``USING`` relationship must start at the metric's own table. The same message appears when every metric names a path but they name different ones in a query that is not grouped per path: two window metrics, or metrics beside a semi-additive metric whose ``NON ADDITIVE BY`` dimension is not queried. A window metric names its path through its inner metric.
 
 **Fix:** See :ref:`howto-role-playing`. Give each metric ``USING (<rel_name>)``, for example by writing ``f.departures USING (<rel_name>) AS f.flight_count`` over a plain metric, or use a dimension from a table that is not a role-playing target.
 

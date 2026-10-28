@@ -143,6 +143,17 @@ metric in the query names a path:
    that had one, so its numbers changed with what else was in the query. It is
    now refused, as in Snowflake.
 
+A window metric names its path through its inner metric: a window over
+``departure_count`` is grouped by departure city. Two window metrics over
+different paths cannot be grouped by ``city`` together, and neither can metrics
+on different paths beside a semi-additive metric whose ``NON ADDITIVE BY``
+dimension is not queried; query those metrics separately.
+
+A metric on a table that has no relationship to ``airports``, such as a count
+of flight legs on a ``legs`` table under ``flights``, cannot name a path,
+because a ``USING`` relationship must start at the metric's own table. Grouping
+it by ``city`` is refused, as in Snowflake.
+
 **Non-ambiguous dimensions:** the ``carrier`` dimension comes from the ``flights`` table (not ``airports``), so it works with any metric without ambiguity:
 
 .. code-block:: sql

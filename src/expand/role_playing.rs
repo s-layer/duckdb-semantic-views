@@ -491,6 +491,17 @@ pub(super) fn find_using_context(
         for using_rel in &met.using_relationships {
             note_using(using_rel);
         }
+        // A window metric reads its inner metric through that metric's path.
+        if let Some(inner) = window_inner(def, met) {
+            for using_rel in &inner.using_relationships {
+                note_using(using_rel);
+            }
+            if inner.source_table.is_none() {
+                for using_rel in collect_derived_metric_using(inner, &def.metrics) {
+                    note_using(&using_rel);
+                }
+            }
+        }
         // Also check derived metrics: walk their transitive dependencies
         if met.source_table.is_none() {
             for using_rel in collect_derived_metric_using(met, &def.metrics) {
@@ -539,10 +550,27 @@ pub(super) fn find_using_context(
     }
 }
 
+/// The metric a window metric is computed over, when `met` is one (and that
+/// metric is not itself a window, so a malformed stored row cannot recurse).
+fn window_inner<'a>(
+    def: &'a SemanticViewDefinition,
+    met: &crate::model::Metric,
+) -> Option<&'a crate::model::Metric> {
+    let inner = met.window_spec.as_ref()?.inner_metric.as_str();
+    def.metrics
+        .iter()
+        .find(|m| crate::ident::ident_matches(&m.name, inner))
+        .filter(|m| m.window_spec.is_none())
+}
+
 /// Whether `met` names its own path to the role-played table `table`: a base
-/// metric through its `USING`, a derived one through every base metric it is
-/// built from. A metric ON the table needs no path to it.
+/// metric through its `USING`, a window metric through its inner metric, a
+/// derived one through every base metric it is built from. A metric ON the
+/// table needs no path to it.
 fn names_a_role_for(def: &SemanticViewDefinition, met: &crate::model::Metric, table: &str) -> bool {
+    if let Some(inner) = window_inner(def, met) {
+        return names_a_role_for(def, inner, table);
+    }
     let names_one = |m: &crate::model::Metric| {
         m.source_table
             .as_deref()

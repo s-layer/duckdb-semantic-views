@@ -329,3 +329,105 @@ fn a_chain_of_same_table_references_resolves_through_the_outer_path() {
         table_of(&[&["Alpha", "3"], &["Beta", "1"]])
     );
 }
+
+/// A semi-additive metric written over a plain same-table metric snapshots
+/// like one written with the aggregate itself: the latest flight (4, 40
+/// seats) when its snapshot dimension is not queried.
+#[test]
+fn a_semi_additive_metric_over_a_same_table_metric_snapshots() {
+    let mut def = metric_over_metric_def();
+    def.dimensions.push(dim("fid", "f.flight_id", "f"));
+    let mut latest = metric("latest_seats", "f.total_seats", Some("f"), &[]);
+    latest.non_additive_by = vec![crate::model::NonAdditiveDim {
+        dimension: "fid".to_string(),
+        ..Default::default()
+    }];
+    def.metrics.push(latest);
+    assert_eq!(run(&def, &[], &["latest_seats"]), table_of(&[&["40"]]));
+}
+
+/// Metrics that each name a different path cannot be split per path when the
+/// query also holds an active semi-additive metric (its snapshot group cannot
+/// honour a role, TECH-DEBT #65). The refusal stands, and its advice must not
+/// tell the user to add the `USING` every metric already has.
+#[test]
+fn metrics_naming_different_paths_beside_a_snapshot_are_refused_with_advice_that_fits() {
+    let mut def = flights_def();
+    def.dimensions.push(dim("fid", "f.flight_id", "f"));
+    let mut latest = metric("latest_seats", "SUM(f.seats)", Some("f"), &["dep_airport"]);
+    latest.non_additive_by = vec![crate::model::NonAdditiveDim {
+        dimension: "fid".to_string(),
+        ..Default::default()
+    }];
+    def.metrics.push(latest);
+    let err = expand(
+        "v",
+        &def,
+        &req(&["city"], &["departures", "arrivals", "latest_seats"]),
+    )
+    .unwrap_err();
+    assert!(
+        matches!(err, ExpandError::AmbiguousPath { .. }),
+        "expected AmbiguousPath, got: {err}"
+    );
+    assert!(
+        err.to_string().contains("cannot be split by path"),
+        "the advice must cover metrics that already name a path: {err}"
+    );
+}
+
+/// `flights_def` plus `wd`, a window over `departures` (`USING (dep_airport)`),
+/// and `wa`, the same over `arrivals` (`USING (arr_airport)`).
+fn window_def() -> SemanticViewDefinition {
+    let mut def = flights_def();
+    for (name, inner) in [
+        ("wd", "departures"),
+        ("wa", "arrivals"),
+        ("wf", "flight_count"),
+    ] {
+        def.metrics.push(Metric {
+            name: name.to_string(),
+            expr: format!("SUM({inner})"),
+            source_table: Some("f".to_string()),
+            window_spec: Some(crate::model::WindowSpec {
+                window_function: "SUM".to_string(),
+                inner_metric: inner.to_string(),
+                extra_args: vec![],
+                excluding_dims: vec![],
+                partition_dims: vec![],
+                order_by: vec![],
+                frame_clause: None,
+            }),
+            ..Default::default()
+        });
+    }
+    def
+}
+
+/// A window metric reads its inner metric through that metric's `USING`, so
+/// grouping it by a role-played dimension takes that path: departures per
+/// departure city.
+#[test]
+fn a_window_over_a_using_metric_groups_through_its_path() {
+    assert_eq!(
+        run(&window_def(), &["city"], &["wd"]),
+        table_of(&[&["Alpha", "3"], &["Beta", "1"]])
+    );
+    assert_eq!(
+        run(&window_def(), &["city"], &["wa"]),
+        table_of(&[&["Alpha", "1"], &["Beta", "2"], &["Gamma", "1"]])
+    );
+}
+
+/// A window over a metric with no `USING` names no path, and two windows over
+/// different paths cannot be split per path: both stay refused.
+#[test]
+fn a_window_without_a_path_or_beside_another_path_is_refused() {
+    for mets in [&["wf"][..], &["wd", "wa"][..]] {
+        let err = expand("v", &window_def(), &req(&["city"], mets)).unwrap_err();
+        assert!(
+            matches!(err, ExpandError::AmbiguousPath { .. }),
+            "{mets:?}: expected AmbiguousPath, got: {err}"
+        );
+    }
+}

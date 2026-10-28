@@ -68,7 +68,7 @@ CREATE SEMANTIC VIEW rpu_sv AS
 # `leg_count` cannot: a USING relationship has to start at the metric's own
 # table, and `legs` has no relationship to `airports`. It used to borrow
 # `flight_count`'s role, so its numbers changed with what it was queried
-# beside; it is refused instead, as Snowflake refuses it.
+# beside; it is refused instead, as Snowflake refuses it (TECH-DEBT #65).
 # ============================================================
 
 statement error

@@ -14,7 +14,10 @@
 //! belongs to it) is a column, as it always was. An aggregate over an
 //! aggregate does not run, so no expression that worked before changes
 //! meaning: `SUM(f.seats)` keeps summing the column even beside a metric named
-//! `seats`.
+//! `seats`. The same holds inside an ordered-set aggregate's `WITHIN GROUP
+//! (ORDER BY ...)`, and for a lambda's parameter. An aggregate is one `DuckDB`
+//! ships (the list CREATE checks dimensions against); a name inside a call to
+//! an aggregate from an extension or a macro is matched like any other.
 //!
 //! Expansion inlines each referenced metric's expression in place
 //! ([`inline_same_table_metrics`]), once, ahead of everything else, so every
@@ -29,6 +32,7 @@ use crate::errors::ParseError;
 use crate::expr_tokens::{call_end, scan_function_heads, scan_references_outside_subqueries};
 use crate::ident::normalize_ident_part;
 use crate::model::{Metric, SemanticViewDefinition};
+use crate::query::expr_items::{is_lambda_param, lambda_scopes};
 
 use super::derived_metrics::aggregate_name;
 
@@ -77,6 +81,7 @@ fn same_table_refs(def: &SemanticViewDefinition, idx: usize) -> Vec<MetricRef> {
         .filter(|head| aggregate_name(&head.last_part_key()).is_some())
         .map(|head| (head.start, call_end(expr, head).unwrap_or(expr.len())))
         .collect();
+    let lambdas = lambda_scopes(expr);
     scan_references_outside_subqueries(expr)
         .into_iter()
         .filter(|r| {
@@ -84,6 +89,7 @@ fn same_table_refs(def: &SemanticViewDefinition, idx: usize) -> Vec<MetricRef> {
                 .iter()
                 .any(|&(s, e)| r.start >= s && r.end <= e)
         })
+        .filter(|r| !is_lambda_param(r, &lambdas))
         .filter_map(|r| {
             keys.get(&r.key()).map(|&target| MetricRef {
                 start: r.start,
@@ -94,153 +100,210 @@ fn same_table_refs(def: &SemanticViewDefinition, idx: usize) -> Vec<MetricRef> {
         .collect()
 }
 
+/// How deep a chain of metrics written over metrics may go, as for derived
+/// metrics (`expand::facts`' `MAX_DERIVATION_DEPTH`).
+const MAX_REFERENCE_DEPTH: usize = 64;
+
+/// The longest expression inlining may build. A metric that references
+/// another twice doubles its text at each step of a chain.
+const MAX_INLINED_LEN: usize = 1 << 20;
+
+/// Whether `target` can be inlined as the aggregate it computes: not a window
+/// metric (it yields a value per row), not semi-additive (its `NON ADDITIVE
+/// BY` would be lost), and without `USING` of its own (the path belongs to the
+/// metric written over it, which may name a different one).
+fn refusal(target: &Metric) -> Option<&'static str> {
+    if target.is_window() {
+        Some("is a window metric")
+    } else if !target.non_additive_by.is_empty() {
+        Some("is semi-additive (NON ADDITIVE BY)")
+    } else if !target.using_relationships.is_empty() {
+        Some("has USING of its own; give the USING to the metric written over it instead")
+    } else {
+        None
+    }
+}
+
+/// Why inlining stopped.
+enum Stop {
+    /// `def.metrics[i]` is on a cycle.
+    Cycle(usize),
+    TooDeep,
+    TooLong,
+}
+
 /// Refuse a metric over a same-table metric that cannot be inlined as an
-/// aggregate, and a cycle of such references.
-///
-/// The referenced metric must be a plain one: not a window metric (it yields
-/// a value per row), not semi-additive (its `NON ADDITIVE BY` would be lost),
-/// and without `USING` of its own (the path belongs to the metric written
-/// over it, which may name a different one).
+/// aggregate ([`refusal`]), a cycle of such references, and a chain deeper
+/// than [`MAX_REFERENCE_DEPTH`] or longer, inlined, than [`MAX_INLINED_LEN`].
 ///
 /// # Errors
 ///
-/// A `ParseError` naming both metrics, or the cycle.
+/// A `ParseError` naming both metrics, the cycle or the limit.
 pub fn validate_same_table_metric_refs(def: &SemanticViewDefinition) -> Result<(), ParseError> {
     let refs: Vec<Vec<MetricRef>> = (0..def.metrics.len())
         .map(|i| same_table_refs(def, i))
         .collect();
     for (i, met_refs) in refs.iter().enumerate() {
-        let met = &def.metrics[i].name;
         for r in met_refs {
             let target = &def.metrics[r.target];
-            let why = if target.is_window() {
-                "is a window metric"
-            } else if !target.non_additive_by.is_empty() {
-                "is semi-additive (NON ADDITIVE BY)"
-            } else if !target.using_relationships.is_empty() {
-                "has USING of its own; give the USING to the metric written over it instead"
-            } else {
-                continue;
-            };
-            return Err(ParseError::positionless(format!(
-                "metric '{met}' references metric '{}' on its own table, which {why}. \
-                 A metric can be written over a plain metric on its own table only.",
-                target.name
-            )));
+            if let Some(why) = refusal(target) {
+                return Err(ParseError::positionless(format!(
+                    "metric '{}' references metric '{}' on its own table, which {why}. \
+                     A metric can be written over a plain metric on its own table only.",
+                    def.metrics[i].name, target.name
+                )));
+            }
         }
     }
-    // Depth-first search for a cycle: 0 unvisited, 1 on the stack, 2 done.
-    let mut state = vec![0u8; def.metrics.len()];
-    for start in 0..def.metrics.len() {
-        if let Some(cycle) = find_cycle(start, &refs, &mut state, &mut Vec::new()) {
-            let names: Vec<&str> = cycle
-                .iter()
-                .map(|&i| def.metrics[i].name.as_str())
-                .collect();
-            return Err(ParseError::positionless(format!(
-                "cycle in metrics written over metrics on their own table: [{}]",
-                names.join(", ")
-            )));
+    let mut state = State::new(def.metrics.len());
+    for i in 0..def.metrics.len() {
+        if let Err(stop) = resolve(def, &refs, i, &mut state, 0) {
+            let message = match stop {
+                Stop::Cycle(at) => {
+                    let from = state.stack.iter().position(|&n| n == at).unwrap_or(0);
+                    let names: Vec<&str> = state.stack[from..]
+                        .iter()
+                        .map(|&n| def.metrics[n].name.as_str())
+                        .collect();
+                    format!(
+                        "cycle in metrics written over metrics on their own table: [{}]",
+                        names.join(", ")
+                    )
+                }
+                Stop::TooDeep => format!(
+                    "metric '{}' is written over a chain of metrics more than \
+                     {MAX_REFERENCE_DEPTH} deep",
+                    def.metrics[i].name
+                ),
+                Stop::TooLong => format!(
+                    "metric '{}' is written over metrics whose expressions, inlined, \
+                     exceed {MAX_INLINED_LEN} bytes",
+                    def.metrics[i].name
+                ),
+            };
+            return Err(ParseError::positionless(message));
         }
     }
     Ok(())
 }
 
-fn find_cycle(
-    node: usize,
-    refs: &[Vec<MetricRef>],
-    state: &mut [u8],
-    stack: &mut Vec<usize>,
-) -> Option<Vec<usize>> {
-    match state[node] {
-        2 => return None,
-        1 => {
-            let from = stack.iter().position(|&n| n == node).unwrap_or(0);
-            return Some(stack[from..].to_vec());
-        }
-        _ => {}
-    }
-    state[node] = 1;
-    stack.push(node);
-    for r in &refs[node] {
-        if let Some(cycle) = find_cycle(r.target, refs, state, stack) {
-            return Some(cycle);
-        }
-    }
-    stack.pop();
-    state[node] = 2;
-    None
-}
-
 /// `def` with every same-table metric reference replaced by the referenced
-/// metric's own expression, parenthesized; borrowed unchanged when no metric
-/// has one.
+/// metric's own expression (parenthesized, unless it is the whole expression);
+/// borrowed unchanged when no metric has one.
 ///
-/// A cycle (refused at CREATE, so only reachable from a catalog row written
-/// before that check) leaves the metrics on it as written, and the reference
-/// then fails to bind as the column it reads as.
+/// A catalog row written before CREATE checked these references can hold one
+/// the check refuses ([`refusal`]), a cycle, or a chain past the limits. Such
+/// a reference is left as written, as it was read before, and fails to bind as
+/// the column it reads as rather than losing the referenced metric's
+/// `NON ADDITIVE BY` or path.
 #[must_use]
 pub(crate) fn inline_same_table_metrics(
     def: &SemanticViewDefinition,
 ) -> Cow<'_, SemanticViewDefinition> {
     let refs: Vec<Vec<MetricRef>> = (0..def.metrics.len())
-        .map(|i| same_table_refs(def, i))
+        .map(|i| {
+            same_table_refs(def, i)
+                .into_iter()
+                .filter(|r| refusal(&def.metrics[r.target]).is_none())
+                .collect()
+        })
         .collect();
     if refs.iter().all(Vec::is_empty) {
         return Cow::Borrowed(def);
     }
-    let mut resolved: Vec<Option<String>> = vec![None; def.metrics.len()];
-    let mut on_stack = vec![false; def.metrics.len()];
+    let mut state = State::new(def.metrics.len());
     for i in 0..def.metrics.len() {
-        resolve(def, &refs, i, &mut resolved, &mut on_stack);
+        // A stop leaves the metric (and whatever it was resolving) as written.
+        let _ = resolve(def, &refs, i, &mut state, 0);
+        state.stack.clear();
+        state.on_stack.iter_mut().for_each(|b| *b = false);
     }
     let mut out = def.clone();
-    for (met, expr) in out.metrics.iter_mut().zip(resolved) {
-        if let Some(expr) = expr {
+    for (met, expr) in out.metrics.iter_mut().zip(state.resolved) {
+        if let Some((expr, _)) = expr {
             met.expr = expr;
         }
     }
     Cow::Owned(out)
 }
 
-/// The expression of `def.metrics[i]` with its references inlined, memoized in
-/// `resolved`. `None` while `i` sits on a cycle.
+/// The resolver's working state: each metric's inlined expression once known,
+/// and the chain being resolved.
+struct State {
+    /// Each metric's inlined expression and the height of the chain below it.
+    resolved: Vec<Option<(String, usize)>>,
+    on_stack: Vec<bool>,
+    stack: Vec<usize>,
+}
+
+impl State {
+    fn new(n: usize) -> Self {
+        Self {
+            resolved: vec![None; n],
+            on_stack: vec![false; n],
+            stack: Vec::new(),
+        }
+    }
+}
+
+/// The expression of `def.metrics[i]` with its references inlined, and the
+/// height of the chain of references below it, memoized in `state.resolved`.
+/// `depth` bounds the recursion itself. On a stop, `state.stack` holds the
+/// chain that reached it.
 fn resolve(
     def: &SemanticViewDefinition,
     refs: &[Vec<MetricRef>],
     i: usize,
-    resolved: &mut [Option<String>],
-    on_stack: &mut [bool],
-) -> Option<String> {
-    if let Some(done) = &resolved[i] {
-        return Some(done.clone());
+    state: &mut State,
+    depth: usize,
+) -> Result<(String, usize), Stop> {
+    if let Some(done) = &state.resolved[i] {
+        return Ok(done.clone());
     }
-    if on_stack[i] {
-        return None;
+    if state.on_stack[i] {
+        return Err(Stop::Cycle(i));
     }
-    on_stack[i] = true;
+    if depth > MAX_REFERENCE_DEPTH {
+        return Err(Stop::TooDeep);
+    }
+    state.on_stack[i] = true;
+    state.stack.push(i);
     let expr = &def.metrics[i].expr;
+    let whole =
+        |r: &MetricRef| expr[..r.start].trim().is_empty() && expr[r.end..].trim().is_empty();
     let mut out = String::with_capacity(expr.len());
     let mut copied = 0;
-    let mut complete = true;
+    let mut height = 0;
     for r in &refs[i] {
-        let Some(inner) = resolve(def, refs, r.target, resolved, on_stack) else {
-            complete = false;
-            break;
-        };
+        let (inner, below) = resolve(def, refs, r.target, state, depth + 1)?;
+        height = height.max(below + 1);
+        if height > MAX_REFERENCE_DEPTH {
+            return Err(Stop::TooDeep);
+        }
         out.push_str(&expr[copied..r.start]);
-        out.push('(');
-        out.push_str(&inner);
-        out.push(')');
+        // A reference that is the whole expression needs no parentheses, and
+        // takes none, so a semi-additive metric written over a plain one reads
+        // as the single aggregate call its snapshot expansion parses.
+        if whole(r) {
+            out.push_str(&inner);
+        } else {
+            out.push('(');
+            out.push_str(&inner);
+            out.push(')');
+        }
         copied = r.end;
-    }
-    on_stack[i] = false;
-    if !complete {
-        return None;
+        if out.len() > MAX_INLINED_LEN {
+            return Err(Stop::TooLong);
+        }
     }
     out.push_str(&expr[copied..]);
-    resolved[i] = Some(out.clone());
-    Some(out)
+    if out.len() > MAX_INLINED_LEN {
+        return Err(Stop::TooLong);
+    }
+    state.on_stack[i] = false;
+    state.stack.pop();
+    state.resolved[i] = Some((out.clone(), height));
+    Ok((out, height))
 }
 
 #[cfg(test)]
@@ -287,7 +350,7 @@ mod tests {
             metric("b", "n + 1", &[]),
             metric("c", "\"F\".\"N\" * 2", &[]),
         ]);
-        assert_eq!(inlined(&d, "q"), "(COUNT(*))");
+        assert_eq!(inlined(&d, "q"), "COUNT(*)");
         assert_eq!(inlined(&d, "b"), "(COUNT(*)) + 1");
         assert_eq!(inlined(&d, "c"), "(COUNT(*)) * 2");
     }
@@ -299,6 +362,74 @@ mod tests {
             metric("s", "SUM(f.seats) FILTER (WHERE seats > 0)", &[]),
         ]);
         assert!(matches!(inline_same_table_metrics(&d), Cow::Borrowed(_)));
+    }
+
+    #[test]
+    fn a_reference_in_within_group_or_a_lambda_is_not_a_metric() {
+        let d = def(vec![
+            metric("fare", "SUM(f.fare)", &[]),
+            metric("a", "COUNT(*)", &[]),
+            metric(
+                "median_fare",
+                "PERCENTILE_CONT(0.5) WITHIN GROUP (ORDER BY f.fare)",
+                &[],
+            ),
+            metric(
+                "folded",
+                "list_reduce(array_agg(f.v), lambda a, b: a + b)",
+                &[],
+            ),
+        ]);
+        assert!(matches!(inline_same_table_metrics(&d), Cow::Borrowed(_)));
+    }
+
+    #[test]
+    fn a_whole_expression_reference_takes_no_parentheses() {
+        let mut latest = metric("latest", "f.total", &[]);
+        latest.non_additive_by = vec![NonAdditiveDim::default()];
+        let d = def(vec![metric("total", "SUM(f.bal)", &[]), latest]);
+        assert_eq!(inlined(&d, "latest"), "SUM(f.bal)");
+        assert!(validate_same_table_metric_refs(&d).is_ok());
+    }
+
+    #[test]
+    fn a_stored_reference_the_check_refuses_is_left_as_written() {
+        let mut bal = metric("bal", "SUM(f.x)", &[]);
+        bal.non_additive_by = vec![NonAdditiveDim::default()];
+        let d = def(vec![
+            bal,
+            metric("routed", "COUNT(*)", &["r"]),
+            metric("twice", "f.bal * 2", &[]),
+            metric("via", "f.routed + 1", &[]),
+        ]);
+        assert!(matches!(inline_same_table_metrics(&d), Cow::Borrowed(_)));
+    }
+
+    #[test]
+    fn validation_refuses_a_chain_past_the_depth_limit() {
+        let mut metrics = vec![metric("m0", "COUNT(*)", &[])];
+        for k in 1..=MAX_REFERENCE_DEPTH + 2 {
+            metrics.push(metric(&format!("m{k}"), &format!("f.m{} + 1", k - 1), &[]));
+        }
+        let d = def(metrics);
+        let err = validate_same_table_metric_refs(&d).unwrap_err().message;
+        assert!(err.contains("deep"), "{err}");
+        // Expansion leaves it as written rather than overflowing.
+        let _ = inline_same_table_metrics(&d);
+    }
+
+    #[test]
+    fn validation_refuses_a_chain_that_inlines_too_long() {
+        let mut metrics = vec![metric("m0", "COUNT(*)", &[])];
+        for k in 1..=24 {
+            let prev = format!("f.m{}", k - 1);
+            metrics.push(metric(&format!("m{k}"), &format!("{prev} + {prev}"), &[]));
+        }
+        let d = def(metrics);
+        let err = validate_same_table_metric_refs(&d).unwrap_err().message;
+        assert!(err.contains("exceed"), "{err}");
+        let out = inline_same_table_metrics(&d);
+        assert_eq!(out.metrics[24].expr, "f.m23 + f.m23");
     }
 
     #[test]
@@ -333,7 +464,7 @@ mod tests {
             metric("m", "f.n", &[]),
             metric("q", "f.m * 2", &[]),
         ]);
-        assert_eq!(inlined(&d, "q"), "((COUNT(*))) * 2");
+        assert_eq!(inlined(&d, "q"), "(COUNT(*)) * 2");
 
         let cyc = def(vec![
             metric("a", "f.b + 1", &[]),

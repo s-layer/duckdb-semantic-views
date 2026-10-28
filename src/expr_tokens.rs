@@ -348,9 +348,11 @@ pub(crate) fn call_is_windowed(expr: &str, head: &IdentRef<'_>) -> bool {
 }
 
 /// The offset just past the call that `head` (from [`scan_function_heads`])
-/// opens: past its argument list, and past a `FILTER (…)` clause if one
-/// follows, since that belongs to the aggregate. An `OVER` after it is not
-/// included ([`call_is_windowed`]). `None` when no `(` follows the head.
+/// opens: past its argument list, past an ordered-set aggregate's `WITHIN
+/// GROUP (ORDER BY …)` (where `percentile_cont` and `mode` take the value they
+/// aggregate), and past a `FILTER (…)` clause if one follows, since all of
+/// them belong to the aggregate. An `OVER` after it is not included
+/// ([`call_is_windowed`]). `None` when no `(` follows the head.
 pub(crate) fn call_end(expr: &str, head: &IdentRef<'_>) -> Option<usize> {
     let bytes = expr.as_bytes();
     let open = skip_whitespace_and_comments(bytes, head.end);
@@ -358,6 +360,16 @@ pub(crate) fn call_end(expr: &str, head: &IdentRef<'_>) -> Option<usize> {
         return None;
     }
     let mut end = skip_balanced(bytes, open, b'(', b')');
+    if let Some(within_end) = match_words(
+        bytes,
+        skip_whitespace_and_comments(bytes, end),
+        &["within", "group"],
+    ) {
+        let group_open = skip_whitespace_and_comments(bytes, within_end);
+        if bytes.get(group_open) == Some(&b'(') {
+            end = skip_balanced(bytes, group_open, b'(', b')');
+        }
+    }
     if let Some(filter_end) =
         match_words(bytes, skip_whitespace_and_comments(bytes, end), &["filter"])
     {
@@ -1262,6 +1274,28 @@ mod tests {
         m.insert("cost".to_string(), "(C)");
         // E-2 + #28: mixed-case and quoted references both inline.
         assert_eq!(inline_references("REVENUE - \"Cost\"", &m), "(R) - (C)");
+    }
+
+    #[test]
+    fn call_end_covers_within_group_and_filter_but_not_over() {
+        fn end(e: &str) -> Option<&str> {
+            let heads = scan_function_heads(e);
+            call_end(e, &heads[0]).map(|n| &e[..n])
+        }
+        let e = "percentile_cont(0.5) WITHIN GROUP (ORDER BY f.fare) + 1";
+        assert_eq!(
+            end(e),
+            Some("percentile_cont(0.5) WITHIN GROUP (ORDER BY f.fare)")
+        );
+        let e = "mode() within  group (order by x) FILTER (WHERE y) * 2";
+        assert_eq!(
+            end(e),
+            Some("mode() within  group (order by x) FILTER (WHERE y)")
+        );
+        let e = "sum(x) OVER (PARTITION BY y)";
+        assert_eq!(end(e), Some("sum(x)"));
+        let e = "percentile_disc(0.5) WITHIN GROUP (ORDER BY x) OVER ()";
+        assert!(call_is_windowed(e, &scan_function_heads(e)[0]));
     }
 
     #[test]
