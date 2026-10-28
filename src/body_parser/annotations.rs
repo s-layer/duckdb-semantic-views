@@ -722,6 +722,17 @@ fn parse_annotations(
                 rest = after;
                 continue;
             }
+            if starts_with_keyword(&after_with.to_ascii_uppercase(), "EXTENSION") {
+                // Snowflake's GET_DDL can end with `WITH EXTENSION (CA = '<json>')`,
+                // an undocumented Cortex Analyst export (TECH-DEBT accepted decision 13).
+                return Err(ParseError {
+                    message: "WITH EXTENSION is not supported: it is Snowflake's undocumented \
+                              Cortex Analyst export from GET_DDL. Remove it, and write any sample \
+                              values as SAMPLE_VALUES on their dimensions and facts."
+                        .to_string(),
+                    position: Some(pos_of(after_with)),
+                });
+            }
             if !starts_with_keyword(&after_with.to_ascii_uppercase(), "SYNONYMS") {
                 return Err(ParseError {
                     message: "Expected SYNONYMS, TAG or CORTEX SEARCH SERVICE after WITH keyword."
