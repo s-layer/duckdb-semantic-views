@@ -474,13 +474,15 @@ Both systems allow facts to be queried directly as row-level columns. In Snowfla
 
    -- DuckDB: query facts as row-level columns
    SELECT * FROM SEMANTIC_VIEW(analytics
-       DIMENSIONS region
-       FACTS net_price
+       FACTS region, net_price
    );
 
 .. warning::
 
    In both systems, facts and metrics cannot be combined in the same query. Use ``FACTS`` or ``METRICS``, not both.
+
+.. versionchanged:: 0.18.0
+   Both systems now read a member in the clause it is listed in, following Snowflake's ``2026_07`` behaviour change. A dimension listed in ``FACTS`` is read row by row, a fact listed in ``DIMENSIONS`` is grouped on, and ``FACTS`` with ``DIMENSIONS`` in one query is refused (see :ref:`ref-err-facts-dimensions`).
 
 
 Semi-Additive and Window Metrics

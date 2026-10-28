@@ -237,7 +237,7 @@ def test_facts_non_default_schema(extension_path: Path, ext_dir: str, tmp_path: 
         rows = _scalar(
             conn,
             "SELECT COUNT(*) FROM semantic_view('staging_view', "
-            "dimensions := ['region'], facts := ['net_amount'])",
+            "facts := ['region', 'net_amount'])",
         )
         assert rows == 2, f"expected 2 rows, got {rows}"
     finally:
@@ -510,7 +510,7 @@ def test_attach_facts_path(extension_path: Path, ext_dir: str, tmp_path: Path) -
         rows = _scalar(
             conn,
             "SELECT COUNT(*) FROM semantic_view('attached_view', "
-            "dimensions := ['region'], facts := ['net_amount'])",
+            "facts := ['region', 'net_amount'])",
         )
         assert rows == 2, f"expected 2 rows, got {rows}"
     finally:

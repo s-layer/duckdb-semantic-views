@@ -136,19 +136,27 @@ fn def_fragments_balanced(def: &SemanticViewDefinition) -> bool {
 }
 
 fuzz_target!(|input: FuzzInput| {
-    let req = QueryRequest {
-        dimensions: input.dim_names.into_iter().map(Into::into).collect(),
-        metrics: if input.use_facts {
-            vec![]
-        } else {
-            input.metric_names.into_iter().map(Into::into).collect()
-        },
-        facts: if input.use_facts {
-            input.fact_names.into_iter().map(Into::into).collect()
-        } else {
-            vec![]
-        },
-        where_clause: Some(input.predicate.clone()),
+    // A facts request lists the dimensions in FACTS too: FACTS with DIMENSIONS
+    // is refused (Snowflake's `2026_07` rule), before the facts expansion runs.
+    let req = if input.use_facts {
+        QueryRequest {
+            dimensions: vec![],
+            metrics: vec![],
+            facts: input
+                .dim_names
+                .into_iter()
+                .chain(input.fact_names)
+                .map(Into::into)
+                .collect(),
+            where_clause: Some(input.predicate.clone()),
+        }
+    } else {
+        QueryRequest {
+            dimensions: input.dim_names.into_iter().map(Into::into).collect(),
+            metrics: input.metric_names.into_iter().map(Into::into).collect(),
+            facts: vec![],
+            where_clause: Some(input.predicate.clone()),
+        }
     };
 
     // The predicate is spliced with its comments blanked, so it joins the

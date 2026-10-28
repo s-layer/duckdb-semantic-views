@@ -71,7 +71,7 @@ ORDER BY 1, 2;
 
 # Facts + dimensions: row-level, no GROUP BY
 query III
-FROM SEMANTIC_VIEW(p46f_sales DIMENSIONS o.region, li.product FACTS net_price)
+FROM SEMANTIC_VIEW(p46f_sales FACTS o.region, li.product, net_price)
 ORDER BY 1, 2, 3;
 ----
 EU	Widget	95.00
@@ -81,7 +81,7 @@ US	Widget	90.00
 
 # Verify row count matches line_items table (4 rows, unaggregated)
 query I
-SELECT count(*) FROM SEMANTIC_VIEW(p46f_sales DIMENSIONS o.region FACTS net_price);
+SELECT count(*) FROM SEMANTIC_VIEW(p46f_sales FACTS o.region, net_price);
 ----
 4
 
@@ -128,13 +128,13 @@ DIMENSIONS (
 
 # Fact on li + dim on p = divergent paths (fan from o)
 statement error
-FROM SEMANTIC_VIEW(p46f_fan_test DIMENSIONS pay_status FACTS net_price);
+FROM SEMANTIC_VIEW(p46f_fan_test FACTS pay_status, net_price);
 ----
 incompatible table paths
 
 # Fact on li + dim on o = valid (linear path: o -> li)
 query II
-FROM SEMANTIC_VIEW(p46f_fan_test DIMENSIONS o.region FACTS net_price)
+FROM SEMANTIC_VIEW(p46f_fan_test FACTS o.region, net_price)
 ORDER BY 1, 2;
 ----
 EU	95.00
@@ -173,7 +173,7 @@ DIMENSIONS (
 );
 
 query TTI
-FROM SEMANTIC_VIEW(p46f_two_parents DIMENSIONS region, maker FACTS qty)
+FROM SEMANTIC_VIEW(p46f_two_parents FACTS region, maker, qty)
 ORDER BY 1, 2, 3;
 ----
 EU	Acme	3
@@ -184,7 +184,7 @@ US	Globex	7
 # Without li, the same two tables meet only through it, and each order would
 # come back once per line item: still refused.
 statement error
-FROM SEMANTIC_VIEW(p46f_two_parents DIMENSIONS maker FACTS order_status);
+FROM SEMANTIC_VIEW(p46f_two_parents FACTS maker, order_status);
 ----
 incompatible table paths
 
@@ -226,7 +226,7 @@ ORDER BY 1;
 
 # Verify explain works with facts parameter (at least 1 row in output)
 query I
-SELECT count(*) > 0 FROM explain_semantic_view('p46f_sales', facts := ['net_price'], dimensions := ['o.region']);
+SELECT count(*) > 0 FROM explain_semantic_view('p46f_sales', facts := ['o.region', 'net_price']);
 ----
 true
 
@@ -235,12 +235,12 @@ true
 # The base table (p46f_orders) anchors the FROM; the LEFT JOIN brings in
 # the FACT-bearing line_items table. Both must be qualified.
 query I
-SELECT count(*) > 0 FROM explain_semantic_view('p46f_sales', facts := ['net_price'], dimensions := ['o.region']) WHERE explain_output LIKE '%FROM "memory"."main"."p46f_orders"%';
+SELECT count(*) > 0 FROM explain_semantic_view('p46f_sales', facts := ['o.region', 'net_price']) WHERE explain_output LIKE '%FROM "memory"."main"."p46f_orders"%';
 ----
 true
 
 query I
-SELECT count(*) > 0 FROM explain_semantic_view('p46f_sales', facts := ['net_price'], dimensions := ['o.region']) WHERE explain_output LIKE '%LEFT JOIN "memory"."main"."p46f_line_items"%';
+SELECT count(*) > 0 FROM explain_semantic_view('p46f_sales', facts := ['o.region', 'net_price']) WHERE explain_output LIKE '%LEFT JOIN "memory"."main"."p46f_line_items"%';
 ----
 true
 

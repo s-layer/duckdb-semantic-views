@@ -906,14 +906,14 @@ A :ref:`standard-SQL query <howto-standard-sql>` over a semantic view follows Sn
 
 - A metric named bare in ``SELECT``, ``ORDER BY`` or ``HAVING``. A metric is already aggregated: pass it to ``AGG``. In ``HAVING`` a ``SELECT`` alias that repeats a metric's name still names the metric, so write ``HAVING AGG(revenue) > 400``.
 - A dimension in ``SELECT`` or ``ORDER BY`` that is not grouped. Add it to ``GROUP BY``, or write ``GROUP BY ALL``.
-- An expression mixes an aggregate with a fact or name that is neither grouped nor aggregated, as in ``AGG(revenue) + amount``. Aggregate the fact too, or group by it.
+- A fact or name that is neither grouped nor aggregated, in a query with a ``GROUP BY`` (``SELECT region, amount ... GROUP BY region``) or inside an expression with an aggregate (``AGG(revenue) + amount``). Aggregate the fact, or group by it. A misspelled member name gives this error too.
 - ``HAVING`` over a dimension or fact. Filter those in ``WHERE``, which runs before the metrics are computed.
 - ``AGG`` with more than one argument, or with ``DISTINCT``, ``FILTER`` or ``ORDER BY`` inside it. Pass one metric.
 - ``GROUP BY`` a position past the end of the ``SELECT`` list. Correct the number.
 - ``SELECT *``. Name the dimensions and metrics, or use ``SELECT * FROM SEMANTIC_VIEW(...)``.
 - The rest are refused in the query block that reads the view: a join or ``FROM`` list with other tables, ``PIVOT``, a window function, ``QUALIFY``, grouping sets, sampling, a column alias list (``FROM v AS s(a, b)``), or a qualified reference to a table of an enclosing query. Query the view in a subquery or CTE, then join, window, filter or sample its result.
 
-A ``SELECT`` item that is neither grouped nor aggregated is a fact. Alongside an ``AGG`` it raises :ref:`Cannot combine facts and metrics <ref-err-facts-metrics>`, which is also what a misspelled member name next to an ``AGG`` gives.
+In a query with no ``GROUP BY``, a ``SELECT`` item that is neither grouped nor aggregated is a fact. Alongside an ``AGG`` it raises :ref:`Cannot combine facts and metrics <ref-err-facts-metrics>`, which is also what a misspelled member name next to an ``AGG`` gives there.
 
 A name in ``FROM`` that is a table, a view, a CTE in scope, or a Python DataFrame or relation is read as that, not as a semantic view, and a name that is none of these gets DuckDB's own ``Catalog Error: Table with name ... does not exist!``.
 
@@ -1156,6 +1156,23 @@ Cannot combine facts and metrics
 **Cause:** The query includes both ``FACTS`` and ``METRICS`` (``facts := [...]`` and ``metrics := [...]``). Facts are row-level expressions; metrics are aggregated. These modes are mutually exclusive.
 
 **Fix:** Run two separate queries -- one for facts and one for metrics.
+
+
+.. _ref-err-facts-dimensions:
+
+Cannot query facts with dimensions
+----------------------------------
+
+.. versionadded:: 0.18.0
+
+.. code-block:: text
+
+   semantic view '<view>': querying FACTS with DIMENSIONS is not supported. List the dimensions in FACTS
+   for one row per source row, or the facts in DIMENSIONS for one row per distinct value.
+
+**Cause:** The query lists facts in ``FACTS`` and dimensions in ``DIMENSIONS`` (``facts := [...]`` and ``dimensions := [...]``). As in Snowflake, a query reads members either row by row or grouped, not both.
+
+**Fix:** For one row per source row, move the dimensions into ``FACTS``: a dimension listed there is read row by row. For one row per distinct value, move the facts into ``DIMENSIONS``: a fact listed there is grouped on. See :ref:`howto-query-facts-dims`.
 
 
 Unknown fact

@@ -81,13 +81,13 @@ The table lists the parameters of ``semantic_view()``. The construct's clauses a
      - The name of the semantic view to query. Must match a registered view. The name is folded to lowercase and matched case-insensitively, quoted or not (``'Sales'``, ``'SALES'``, and ``'"sales"'`` all resolve to the same view), following DuckDB's identifier semantics. May carry a ``<schema>.`` (or ``<database>.<schema>.``) qualifier -- ``'analytics.sales'`` -- which pins the schema. An unqualified name resolves through the session's ``search_path``, exactly as an unqualified table reference does: the first schema on the path holding a view of that name wins. A view that is the only one of its name resolves whether or not its schema is on the path, so a single-schema setup needs no ``search_path`` at all (see :ref:`ref-create-semantic-view`).
    * - ``dimensions``
      - VARCHAR[] (named)
-     - Optional list of dimensions to include in the result. Each item names a dimension defined in the semantic view, or is an :ref:`expression <ref-sv-expression-items>`. Supports ``alias.*`` wildcard patterns.
+     - Optional list of dimensions to include in the result. Each item names a dimension defined in the semantic view, or is an :ref:`expression <ref-sv-expression-items>`. A fact listed here is grouped on, like a dimension. Supports ``alias.*`` wildcard patterns.
    * - ``metrics``
      - VARCHAR[] (named)
      - Optional list of metrics to include in the result. Each item names a metric defined in the semantic view, or is an :ref:`expression <ref-sv-expression-items>`. Supports ``alias.*`` wildcard patterns.
    * - ``facts``
      - VARCHAR[] (named)
-     - Optional list of facts to include in the result. Each item names a fact defined in the semantic view, or is an :ref:`expression <ref-sv-expression-items>`. Supports ``alias.*`` wildcard patterns.
+     - Optional list of facts to include in the result. Each item names a fact defined in the semantic view, or is an :ref:`expression <ref-sv-expression-items>`. A dimension listed here is read row by row, like a fact. Cannot be combined with ``dimensions``. Supports ``alias.*`` wildcard patterns.
    * - ``where_clause``
      - VARCHAR (named)
      - Optional predicate applied **before** metrics are aggregated -- the construct's ``WHERE``, as in Snowflake's ``SEMANTIC_VIEW( ... WHERE <predicate> )``. See :ref:`ref-sv-pre-agg-filtering`. An omitted, empty, or whitespace-only value is treated as absent.
@@ -108,6 +108,8 @@ Every argument accepts a prepared-statement parameter (``?`` or ``$1``) in place
 .. warning::
 
    Facts and metrics cannot be combined in the same query. Use ``FACTS`` or ``METRICS`` (``facts := [...]`` or ``metrics := [...]``), not both.
+
+   Nor can ``FACTS`` and ``DIMENSIONS``, as in Snowflake. A dimension listed in ``FACTS`` is read row by row, like a fact; a fact listed in ``DIMENSIONS`` is grouped on, like a dimension. See :ref:`howto-query-facts-dims`.
 
 
 .. _ref-sv-construct:
@@ -243,7 +245,7 @@ Generates ``SELECT <metrics> FROM ...`` with no GROUP BY (returns one row).
    │  270.0000 │  13.500000 │
    └───────────┴────────────┘
 
-Returns one row per source row with the requested fact expressions as columns. No aggregation or GROUP BY is applied. Dimensions can be combined with facts (they appear as columns without triggering grouping).
+Returns one row per source row with the requested fact expressions as columns. No aggregation or GROUP BY is applied. A dimension listed in ``FACTS`` is read row by row too, as a column of the same rows.
 
 
 .. _ref-sv-wildcard:
@@ -619,13 +621,12 @@ The examples on this page use this table and view:
    │ Initech  │ 270.0000 │
    └──────────┴──────────┘
 
-**Facts with dimensions (row-level):**
+**Dimensions read as facts (row-level):**
 
 .. code-block:: sql
 
    SELECT * FROM SEMANTIC_VIEW(shop
-       DIMENSIONS region
-       FACTS net_price
+       FACTS region, net_price
    );
 
 .. code-block:: text

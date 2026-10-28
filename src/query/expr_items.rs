@@ -163,7 +163,8 @@ pub fn lower_expression_items(
         (Group::Facts, &mut items.facts),
     ] {
         for item in list.iter_mut() {
-            if !is_expression(&index, &item.member) {
+            let crossed = crossed_member(&index, group, &item.member);
+            if crossed.is_none() && !is_expression(&index, &item.member) {
                 continue;
             }
             let text = crate::util::blank_sql_comments(&item.member)
@@ -175,7 +176,7 @@ pub fn lower_expression_items(
                 .push((name.clone(), item.member.trim().to_string()));
             *item = Item {
                 member: quote_ident(&name),
-                alias: Some(item.alias.take().unwrap_or(text)),
+                alias: Some(item.alias.take().or(crossed).unwrap_or(text)),
             };
         }
     }
@@ -188,6 +189,38 @@ pub fn lower_expression_items(
         def
     });
     Ok(LoweredItems { def, items, labels })
+}
+
+/// The column name of a fact named in `DIMENSIONS`, or `None` for any other
+/// item.
+///
+/// Snowflake reads a member in the clause it is listed in (its `2026_07`
+/// behaviour change), so a fact in `DIMENSIONS` is grouped on: one row per
+/// distinct value. The name is lowered as the expression item that is the fact
+/// alone, which makes it a dimension, and its column keeps the fact's name.
+/// (A dimension in `FACTS` needs no lowering: the expansion reads it row by
+/// row as it is.)
+fn crossed_member<'a>(index: &MemberIndex<'a>, group: Group, member: &str) -> Option<String> {
+    let text = member.trim();
+    if group != Group::Dimensions || text.ends_with('*') {
+        return None;
+    }
+    let found = index.lookup_key(&normalize_ident_part(text));
+    let fact = |m: &Member<'a>| -> Option<&'a str> {
+        match m {
+            Member::Fact(f) => Some(f.name.as_str()),
+            Member::Dimension(_) | Member::Metric(_) => None,
+        }
+    };
+    if found.iter().any(|m| fact(m).is_none()) {
+        return None;
+    }
+    found.iter().find_map(fact).map(
+        |name| match crate::ident::parse_qualified_identifier(name) {
+            Ok(mut parts) if parts.len() == 1 => parts.pop().unwrap_or_default(),
+            _ => name.to_string(),
+        },
+    )
 }
 
 /// Whether `member` is an expression rather than a name or a wildcard.
@@ -1187,6 +1220,42 @@ mod tests {
         assert_eq!(added.expr, "(\"li\".\"qty\" * 2)");
         assert_eq!(added.source_table.as_deref(), Some("li"));
         assert_eq!(added.access, AccessModifier::Public);
+    }
+
+    /// A fact named in DIMENSIONS is grouped on, as Snowflake allows: it
+    /// becomes a dimension on the fact's table, its column named as the fact.
+    #[test]
+    fn a_fact_in_dimensions_becomes_a_dimension() {
+        for written in ["amount", "o.amount", "\"AMOUNT\""] {
+            let lowered = lower(&[written], &["revenue"], &[]);
+            let added = added_dimension(&lowered);
+            assert_eq!(added.expr, "(\"o\".\"amount\")", "{written}");
+            assert_eq!(added.source_table.as_deref(), Some("o"), "{written}");
+            assert_eq!(
+                lowered.items.dimensions[0].alias.as_deref(),
+                Some("amount"),
+                "{written}"
+            );
+        }
+        let lowered = lower(&["o.amount AS amt"], &[], &[]);
+        assert_eq!(lowered.items.dimensions[0].alias.as_deref(), Some("amt"));
+    }
+
+    /// A dimension named in FACTS is left for the expansion, which reads it
+    /// row by row as it is.
+    #[test]
+    fn a_dimension_in_facts_is_left_as_named() {
+        let lowered = lower(&[], &[], &["c.name", "li.qty"]);
+        assert!(lowered.def.is_none());
+        let members: Vec<_> = lowered.items.facts.iter().map(|i| &i.member).collect();
+        assert_eq!(members, ["c.name", "li.qty"]);
+    }
+
+    /// A private fact cannot be grouped on any more than it can be queried.
+    #[test]
+    fn a_private_fact_in_dimensions_is_refused() {
+        let msg = refused(&["secret"], &[], &[]);
+        assert!(msg.contains("secret"), "{msg}");
     }
 
     #[test]

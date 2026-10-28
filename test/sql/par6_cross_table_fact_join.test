@@ -119,7 +119,7 @@ US	23.00	2.00
 # rule from the one under test here.
 query TT
 SELECT order_id, prod_markup
-FROM SEMANTIC_VIEW(par6_margin DIMENSIONS order_id FACTS prod_markup)
+FROM SEMANTIC_VIEW(par6_margin FACTS order_id, prod_markup)
 ORDER BY order_id;
 ----
 10	7.00

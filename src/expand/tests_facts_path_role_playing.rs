@@ -32,8 +32,8 @@ fn test_facts_path_role_playing_dimension_raises_ambiguous_path() {
     let def = role_playing_facts_def(true);
     let req = QueryRequest {
         where_clause: None,
-        facts: vec![FactName::new("order_note")],
-        dimensions: vec![DimensionName::new("city")],
+        facts: vec![FactName::new("city"), FactName::new("order_note")],
+        dimensions: vec![],
         metrics: vec![],
     };
     let err = expand("orders", &def, &req).unwrap_err();
@@ -140,8 +140,8 @@ fn test_facts_path_single_relationship_dimension_ok() {
     let def = role_playing_facts_def(false);
     let req = QueryRequest {
         where_clause: None,
-        facts: vec![FactName::new("order_note")],
-        dimensions: vec![DimensionName::new("city")],
+        facts: vec![FactName::new("city"), FactName::new("order_note")],
+        dimensions: vec![],
         metrics: vec![],
     };
     let sql = expand("orders", &def, &req).unwrap();
@@ -172,8 +172,8 @@ fn test_facts_path_convergent_parent_dimension_not_ambiguous() {
         .with_pkfk_join("pay_to_o", "pay", "orders", &["order_id"], &["id"]);
     let req = QueryRequest {
         where_clause: None,
-        facts: vec![FactName::new("net_price")],
-        dimensions: vec![DimensionName::new("region")],
+        facts: vec![FactName::new("region"), FactName::new("net_price")],
+        dimensions: vec![],
         metrics: vec![],
     };
     let sql = expand("orders", &def, &req).expect("convergent parent must not raise AmbiguousPath");

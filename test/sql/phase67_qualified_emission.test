@@ -140,12 +140,12 @@ statement ok
 USE memory.main;
 
 query I
-SELECT count(*) > 0 FROM explain_semantic_view('p67_facts.p67_facts_sch', facts := ['net_price'], dimensions := ['product']) WHERE explain_output LIKE '%FROM "memory"."p67_facts"."line_items"%';
+SELECT count(*) > 0 FROM explain_semantic_view('p67_facts.p67_facts_sch', facts := ['product', 'net_price']) WHERE explain_output LIKE '%FROM "memory"."p67_facts"."line_items"%';
 ----
 true
 
 query I
-SELECT count(*) > 0 FROM SEMANTIC_VIEW(p67_facts.p67_facts_sch DIMENSIONS product FACTS net_price);
+SELECT count(*) > 0 FROM SEMANTIC_VIEW(p67_facts.p67_facts_sch FACTS product, net_price);
 ----
 true
 
@@ -169,12 +169,12 @@ FACTS (li.subtotal AS li.price * li.quantity)
 DIMENSIONS (li.product AS li.product);
 
 query I
-SELECT count(*) > 0 FROM explain_semantic_view('p67_facts_db2', facts := ['subtotal'], dimensions := ['product']) WHERE explain_output LIKE '%FROM "db2"."main"."line_items2"%';
+SELECT count(*) > 0 FROM explain_semantic_view('p67_facts_db2', facts := ['product', 'subtotal']) WHERE explain_output LIKE '%FROM "db2"."main"."line_items2"%';
 ----
 true
 
 query I
-SELECT count(*) > 0 FROM SEMANTIC_VIEW(p67_facts_db2 DIMENSIONS product FACTS subtotal);
+SELECT count(*) > 0 FROM SEMANTIC_VIEW(p67_facts_db2 FACTS product, subtotal);
 ----
 true
 
