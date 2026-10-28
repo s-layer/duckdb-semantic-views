@@ -66,17 +66,6 @@ pub unsafe extern "C" fn sv_get_ddl_exec_rust(
     )
 }
 
-/// Body for [`sv_get_ddl_exec_rust`]: validate the object type, resolve the
-/// view, and render its `CREATE OR REPLACE SEMANTIC VIEW` DDL.
-///
-/// # Safety
-///
-/// `type_ptr` / `name_ptr` must each be null or point to the matching number
-/// of readable bytes.
-// The argument list mirrors the FFI boundary above (three ptr/len pairs plus
-// the qualify flag); collapsing it into a struct would only move the same
-// unsafety one hop.
-#[allow(clippy::too_many_arguments)]
 /// Whether `obj_type` names a semantic view: `SEMANTIC_VIEW`, as in
 /// Snowflake's semantic-view guides, or `SEMANTIC VIEW`, as in its `GET_DDL`
 /// reference. Case-insensitive; the two words may be separated by any run of
@@ -93,6 +82,17 @@ fn is_semantic_view_type(obj_type: &str) -> bool {
     )
 }
 
+/// Body for [`sv_get_ddl_exec_rust`]: validate the object type, resolve the
+/// view, and render its `CREATE OR REPLACE SEMANTIC VIEW` DDL.
+///
+/// # Safety
+///
+/// `type_ptr` / `name_ptr` must each be null or point to the matching number
+/// of readable bytes.
+// The argument list mirrors the FFI boundary above (three ptr/len pairs plus
+// the qualify flag); collapsing it into a struct would only move the same
+// unsafety one hop.
+#[allow(clippy::too_many_arguments)]
 #[cfg(feature = "extension")]
 unsafe fn get_ddl(
     type_ptr: *const u8,

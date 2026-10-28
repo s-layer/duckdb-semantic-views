@@ -205,9 +205,14 @@ fn leading_labels(
     entry: &str,
     clause_name: &str,
 ) -> Result<(usize, bool), ParseError> {
+    // The name is one token, so the keyword is looked for after it: an alias
+    // or a name that is itself `labels` is not the keyword.
+    let after_name = cur
+        .token_at_or_after(name_start)
+        .map_or(as_start, |t| t.end);
     let Some(labels) = cur
-        .find_kw("LABELS")
-        .filter(|l| l.start > name_start && l.start < as_start)
+        .find_kw_at_or_after("LABELS", after_name)
+        .filter(|l| l.start < as_start)
     else {
         return Ok((as_start, false));
     };

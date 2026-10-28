@@ -103,9 +103,6 @@ pub(super) fn transform(rule: &str, tree: &Tree) -> Result<RewriteAction, ParseE
     Err(internal(action, "unknown ALTER operation"))
 }
 
-/// The view named by the `rule` node under `parent`, folded by
-/// `parse_view_ref`. `gap` words the error for a name
-/// with whitespace inside it, given the rest of the statement.
 /// The text after `SET TAG` / `UNSET TAG`, rebuilt from its tokens, and the
 /// query offset it starts at.
 fn tag_list(tree: &Tree, clause: &Node) -> Result<(String, usize), ParseError> {
@@ -120,6 +117,9 @@ fn tag_list(tree: &Tree, clause: &Node) -> Result<(String, usize), ParseError> {
     Ok((list.to_string(), list_at))
 }
 
+/// The view named by the `rule` node under `parent`, folded by
+/// `parse_view_ref`. `gap` words the error for a name
+/// with whitespace inside it, given the rest of the statement.
 fn view_ref(
     tree: &Tree,
     parent: &Node,

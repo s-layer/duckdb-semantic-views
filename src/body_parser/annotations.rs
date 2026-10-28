@@ -32,6 +32,19 @@ fn annotation_boundary_before(bytes: &[u8], i: usize) -> bool {
     j == 0 || bytes[j - 1] != b'.'
 }
 
+/// Whether an annotation keyword ending at `end` ends a word that is not a
+/// qualifier: `labels.country` and `comment . x` name a table, not the keyword.
+fn annotation_boundary_after(bytes: &[u8], end: usize) -> bool {
+    if end < bytes.len() && is_ident_continuation(bytes[end]) {
+        return false;
+    }
+    let mut j = end;
+    while j < bytes.len() && bytes[j].is_ascii_whitespace() {
+        j += 1;
+    }
+    j == bytes.len() || bytes[j] != b'.'
+}
+
 /// Trailing metadata annotations parsed from a DDL entry.
 /// Used internally to collect COMMENT, SYNONYMS, LABELS and TAG from entry text.
 #[derive(Debug, Default)]
@@ -181,6 +194,7 @@ fn parse_tag_list(content: &str, base_offset: usize) -> Result<Vec<Tag>, ParseEr
 
 /// The tag list of `ALTER SEMANTIC VIEW ... SET TAG name = 'value', ...`: the
 /// same entries as a `TAG (...)` clause, without the parentheses.
+#[cfg_attr(not(feature = "extension"), allow(dead_code))]
 pub(crate) fn parse_tag_assignments(
     text: &str,
     base_offset: usize,
@@ -190,6 +204,7 @@ pub(crate) fn parse_tag_assignments(
 
 /// The names of `ALTER SEMANTIC VIEW ... UNSET TAG name, ...`. A name may be
 /// listed once.
+#[cfg_attr(not(feature = "extension"), allow(dead_code))]
 pub(crate) fn parse_tag_names(text: &str, base_offset: usize) -> Result<Vec<TagName>, ParseError> {
     let as_tags = |names: &[TagName]| -> Vec<Tag> {
         names
@@ -343,7 +358,7 @@ pub(crate) fn find_annotation_start(text: &str) -> Option<usize> {
                 // Check for COMMENT keyword with word boundaries
                 if i + 7 <= bytes.len() && &upper_bytes[i..i + 7] == b"COMMENT" {
                     let before_ok = annotation_boundary_before(bytes, i);
-                    let after_ok = i + 7 == bytes.len() || !is_ident_continuation(bytes[i + 7]);
+                    let after_ok = annotation_boundary_after(bytes, i + 7);
                     if before_ok && after_ok && annotation_start.is_none() {
                         annotation_start = Some(i);
                     }
@@ -351,7 +366,7 @@ pub(crate) fn find_annotation_start(text: &str) -> Option<usize> {
                 // Check for LABELS keyword (LABELS = (FILTER))
                 if i + 6 <= bytes.len() && &upper_bytes[i..i + 6] == b"LABELS" {
                     let before_ok = annotation_boundary_before(bytes, i);
-                    let after_ok = i + 6 == bytes.len() || !is_ident_continuation(bytes[i + 6]);
+                    let after_ok = annotation_boundary_after(bytes, i + 6);
                     if before_ok && after_ok && annotation_start.is_none() {
                         annotation_start = Some(i);
                     }

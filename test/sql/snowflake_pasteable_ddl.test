@@ -70,7 +70,7 @@ SELECT * FROM SEMANTIC_VIEW(sp_labels DIMENSIONS region METRICS revenue WHERE is
 ----
 East	200
 
-# GET_DDL writes LABELS in Snowflake's place, and the output re-creates the view.
+# GET_DDL writes LABELS in Snowflake's place.
 query II
 SELECT contains(ddl, 'o.is_large LABELS = (FILTER) AS o.amount > 100'),
        contains(ddl, 'o.is_east LABELS = (FILTER) AS o.region = ''East''')
@@ -79,15 +79,60 @@ FROM (SELECT GET_DDL('SEMANTIC_VIEW', 'sp_labels') AS ddl)
 true	true
 
 statement ok
-CREATE TABLE sp_ddl AS SELECT GET_DDL('SEMANTIC_VIEW', 'sp_labels') AS ddl;
-
-statement ok
 DROP SEMANTIC VIEW sp_labels;
 
+# Its output re-creates the view, also where a table alias and a member are
+# named `labels`: the DDL below is GET_DDL's, pinned, and replaying it gives
+# back the same DESCRIBE.
+statement ok
+CREATE SEMANTIC VIEW sp_rt
+  TABLES (labels AS sp_orders PRIMARY KEY (id))
+  FACTS (labels.labels LABELS = (FILTER) AS labels.amount > 100)
+  DIMENSIONS (labels.region AS labels.region COMMENT = 'where', labels.is_east LABELS = (FILTER) AS labels.region = 'East')
+  METRICS (labels.revenue AS SUM(labels.amount));
+
+statement ok
+CREATE TABLE sp_rt_before AS SELECT * FROM describe_semantic_view('sp_rt');
+
 query I
-SELECT count(*) FROM sp_ddl;
+SELECT replace(GET_DDL('SEMANTIC_VIEW', 'sp_rt'), chr(10), ' ') = 'CREATE OR REPLACE SEMANTIC VIEW sp_rt AS TABLES (     labels AS sp_orders PRIMARY KEY (id) ) FACTS (     labels.labels LABELS = (FILTER) AS labels.amount > 100 ) DIMENSIONS (     labels.region AS labels.region COMMENT = ''where'',     labels.is_east LABELS = (FILTER) AS labels.region = ''East'' ) METRICS (     labels.revenue AS SUM(labels.amount) ) '
 ----
-1
+true
+
+statement ok
+DROP SEMANTIC VIEW sp_rt;
+
+statement ok
+CREATE OR REPLACE SEMANTIC VIEW sp_rt AS
+TABLES (
+    labels AS sp_orders PRIMARY KEY (id)
+)
+FACTS (
+    labels.labels LABELS = (FILTER) AS labels.amount > 100
+)
+DIMENSIONS (
+    labels.region AS labels.region COMMENT = 'where',
+    labels.is_east LABELS = (FILTER) AS labels.region = 'East'
+)
+METRICS (
+    labels.revenue AS SUM(labels.amount)
+)
+
+query I
+SELECT count(*) FROM (
+  (SELECT * FROM describe_semantic_view('sp_rt') EXCEPT ALL SELECT * FROM sp_rt_before)
+  UNION ALL
+  (SELECT * FROM sp_rt_before EXCEPT ALL SELECT * FROM describe_semantic_view('sp_rt')))
+----
+0
+
+query I
+SELECT count(*) FROM sp_rt_before WHERE property = 'LABELS'
+----
+2
+
+statement ok
+DROP SEMANTIC VIEW sp_rt;
 
 # LABELS once per entry: before AS or after the expression, not both.
 statement error
@@ -281,6 +326,43 @@ query TTTTT
 SELECT * FROM describe_semantic_view('sp_mt') WHERE property = 'TAGS'
 ----
 DIMENSION	region	sp_orders	TAGS	{"k":"member"}
+
+# Names fold ASCII letters only, as everywhere else a tag name is compared, so
+# "Ä" and "ä" are two tags. A quoted name is shown as written.
+statement ok
+ALTER SEMANTIC VIEW sp_mt SET TAG "Ä" = 'upper'
+
+statement ok
+ALTER SEMANTIC VIEW sp_mt SET TAG "ä" = 'lower'
+
+query TTTTT
+SELECT * FROM describe_semantic_view('sp_mt') WHERE property = 'TAGS' AND object_kind = ''
+----
+(empty)	(empty)	(empty)	TAGS	{"\"Ä\"":"upper","\"ä\"":"lower"}
+
+# A quoted name and a value holding a quote or a backslash are stored as
+# written, and SET replaces them and UNSET removes them by name.
+statement ok
+ALTER SEMANTIC VIEW sp_mt UNSET TAG "Ä", "ä"
+
+statement ok
+ALTER SEMANTIC VIEW sp_mt SET TAG "my tag" = 'it''s', b = 'a\b'
+
+query TTTTT
+SELECT * FROM describe_semantic_view('sp_mt') WHERE property = 'TAGS' AND object_kind = ''
+----
+(empty)	(empty)	(empty)	TAGS	{"\"my tag\"":"it's","b":"a\\b"}
+
+statement ok
+ALTER SEMANTIC VIEW sp_mt SET TAG "MY TAG" = 'x'
+
+statement ok
+ALTER SEMANTIC VIEW sp_mt UNSET TAG B
+
+query TTTTT
+SELECT * FROM describe_semantic_view('sp_mt') WHERE property = 'TAGS' AND object_kind = ''
+----
+(empty)	(empty)	(empty)	TAGS	{"\"MY TAG\"":"x"}
 
 # A missing view is an error, unless IF EXISTS.
 statement error

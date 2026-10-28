@@ -22,6 +22,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **`GET_DDL` writes `LABELS` before `AS`.** A named filter renders as `o.is_large LABELS = (FILTER) AS o.amount > 100`, Snowflake's placement, instead of after the expression. Both forms re-create the same view.
 - **Reworded error for a `CREATE` body that is not recognized.** Since `AS` is optional, it now reads `Expected 'AS', 'TABLES' or 'FROM YAML' after view name. Use: CREATE SEMANTIC VIEW name [AS] TABLES (...) ...`.
 
+### Fixed
+
+- **A table aliased `labels` or `comment` can be read in a member's expression.** `DIMENSIONS (labels.region AS labels.region)` failed because the `labels.` qualifier was taken for the start of a `LABELS = (...)` annotation (and `comment.` for `COMMENT = ...`). A keyword followed by a `.` is now read as a name.
+
 ## [0.17.0] - 2026-10-26
 
 ### Added

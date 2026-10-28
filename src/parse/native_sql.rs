@@ -778,11 +778,17 @@ fn rewrite_alter_tags(
         message: format!("failed to build tag patch: {e}"),
         position: None,
     })?)?;
+    // ASCII-only case folding, as `TagName::key` folds: DuckDB's `lower` would
+    // also fold non-ASCII letters, merging names the model keeps apart.
+    let fold = |e: String| {
+        format!("translate({e}, 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz')")
+    };
     let key = |x: &str| {
         format!(
-            "lower(coalesce({x} ->> '$.name.database', '')) || chr(1) || \
-             lower(coalesce({x} ->> '$.name.schema', '')) || chr(1) || \
-             lower({x} ->> '$.name.tag')"
+            "{} || chr(1) || {} || chr(1) || {}",
+            fold(format!("coalesce({x} ->> '$.name.database', '')")),
+            fold(format!("coalesce({x} ->> '$.name.schema', '')")),
+            fold(format!("({x} ->> '$.name.tag')")),
         )
     };
     let (key_t, key_n) = (key("t"), key("n"));

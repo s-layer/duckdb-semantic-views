@@ -24,7 +24,9 @@ use crate::model::{
 
 use clause_bounds::find_clause_bounds;
 
-pub(crate) use annotations::{find_annotation_start, parse_tag_assignments, parse_tag_names};
+pub(crate) use annotations::find_annotation_start;
+#[cfg_attr(not(feature = "extension"), allow(unused_imports))]
+pub(crate) use annotations::{parse_tag_assignments, parse_tag_names};
 pub(crate) use entries::parse_qualified_entries;
 pub(crate) use materializations::parse_materializations_clause;
 pub(crate) use metrics::{misplaced_metric_clause, parse_metrics_clause};
@@ -886,6 +888,51 @@ mod tests {
         let parsed = parse_keyword_body(body, 0).expect("should parse");
         assert!(parsed.facts[0].is_filter, "fact filter flag lost");
         assert!(parsed.dimensions[0].is_filter, "dimension filter flag lost");
+    }
+
+    // A member or a table alias named `labels` is a name, not the keyword: the
+    // leading `LABELS = (...)` is the first one after the name. GET_DDL writes
+    // this form, so it must read back.
+    #[test]
+    fn leading_labels_after_a_member_named_labels() {
+        let body = "AS TABLES (o AS orders PRIMARY KEY (id)) \
+                    FACTS (o.labels LABELS = (FILTER) AS o.amount > 100) \
+                    DIMENSIONS (o.labels2 AS o.country) \
+                    METRICS (o.revenue AS sum(o.amount))";
+        let parsed = parse_keyword_body(body, 0).expect("member named labels");
+        assert_eq!(parsed.facts[0].name, "labels");
+        assert!(parsed.facts[0].is_filter, "filter flag lost");
+    }
+
+    #[test]
+    fn leading_labels_after_an_alias_named_labels() {
+        let body = "AS TABLES (labels AS orders PRIMARY KEY (id)) \
+                    DIMENSIONS (labels.is_us LABELS = (FILTER) AS labels.country = 'US') \
+                    METRICS (labels.revenue AS sum(labels.amount))";
+        let parsed = parse_keyword_body(body, 0).expect("alias named labels");
+        assert_eq!(parsed.dimensions[0].name, "is_us");
+        assert!(parsed.dimensions[0].is_filter, "filter flag lost");
+    }
+
+    #[test]
+    fn leading_labels_after_an_alias_and_member_named_labels() {
+        let body = "AS TABLES (labels AS orders PRIMARY KEY (id)) \
+                    DIMENSIONS (labels.labels LABELS = (FILTER) AS labels.country = 'US') \
+                    METRICS (labels.revenue AS sum(labels.amount))";
+        let parsed = parse_keyword_body(body, 0).expect("both named labels");
+        assert_eq!(parsed.dimensions[0].name, "labels");
+        assert!(parsed.dimensions[0].is_filter, "filter flag lost");
+    }
+
+    /// An expression that reads a table aliased `comment` is not a COMMENT.
+    #[test]
+    fn an_alias_named_comment_in_an_expression() {
+        let body = "AS TABLES (comment AS orders PRIMARY KEY (id)) \
+                    DIMENSIONS (comment.region AS comment.region COMMENT = 'r') \
+                    METRICS (comment.revenue AS sum(comment.amount))";
+        let parsed = parse_keyword_body(body, 0).expect("alias named comment");
+        assert_eq!(parsed.dimensions[0].expr, "comment.region");
+        assert_eq!(parsed.dimensions[0].comment.as_deref(), Some("r"));
     }
 
     #[test]
