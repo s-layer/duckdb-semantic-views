@@ -254,6 +254,73 @@ FROM semantic_layer._definitions WHERE name = 'coa_v' ORDER BY 1;
 coa_s	none
 main	[{"name":{"tag":"owner"},"value":"ops"}]
 
+# --- A kept materialization's table resolves as it did -------------------
+
+# Run from another schema, a table name without one resolves there, so the
+# materialization would read another table: it is dropped.
+statement ok
+CREATE OR REPLACE SEMANTIC VIEW coa_m
+  TABLES (o AS main.coa_orders PRIMARY KEY (id))
+  DIMENSIONS (o.region AS o.region)
+  METRICS (o.revenue AS SUM(o.amount))
+  MATERIALIZATIONS (by_region AS (TABLE coa_agg, DIMENSIONS (region), METRICS (revenue)));
+
+statement ok
+SET schema = 'coa_s';
+
+statement ok
+CREATE OR ALTER SEMANTIC VIEW main.coa_m
+  TABLES (o AS main.coa_orders PRIMARY KEY (id))
+  DIMENSIONS (o.region AS o.region)
+  METRICS (o.revenue AS SUM(o.amount));
+
+statement ok
+SET schema = 'main';
+
+query I
+SELECT count(*) FROM (SHOW SEMANTIC MATERIALIZATIONS IN coa_m);
+----
+0
+
+query TI
+SELECT * FROM semantic_view('coa_m', dimensions := ['region'], metrics := ['revenue']) ORDER BY 1;
+----
+East	250
+West	200
+
+# A temporary materialization table stays the temporary table it was, though
+# a permanent table of the same name exists.
+statement ok
+CREATE TABLE coa_tmp (region VARCHAR, revenue BIGINT);
+
+statement ok
+INSERT INTO coa_tmp VALUES ('East', 1), ('West', 2);
+
+statement ok
+CREATE TEMP TABLE coa_tmp (region VARCHAR, revenue BIGINT);
+
+statement ok
+INSERT INTO coa_tmp VALUES ('East', 777), ('West', 666);
+
+statement ok
+CREATE OR REPLACE SEMANTIC VIEW coa_m
+  TABLES (o AS main.coa_orders PRIMARY KEY (id))
+  DIMENSIONS (o.region AS o.region)
+  METRICS (o.revenue AS SUM(o.amount))
+  MATERIALIZATIONS (by_region AS (TABLE coa_tmp, DIMENSIONS (region), METRICS (revenue)));
+
+statement ok
+CREATE OR ALTER SEMANTIC VIEW coa_m
+  TABLES (o AS main.coa_orders PRIMARY KEY (id))
+  DIMENSIONS (o.region AS o.region)
+  METRICS (o.revenue AS SUM(o.amount));
+
+query TI
+SELECT * FROM semantic_view('coa_m', dimensions := ['region'], metrics := ['revenue']) ORDER BY 1;
+----
+East	777
+West	666
+
 # --- FROM YAML and FROM YAML FILE ----------------------------------------
 
 statement ok
@@ -450,3 +517,32 @@ statement error
 SELECT * FROM verify_semantic_view_yaml('coa_check', NULL);
 ----
 expected a view name and a YAML definition
+
+# CREATE's single-catalog guard: from an attached database, verify fails as
+# the CREATE would.
+statement ok
+ATTACH ':memory:' AS coa_other;
+
+statement ok
+CREATE TABLE coa_other.main.coa_orders (id INTEGER, region VARCHAR, amount INTEGER);
+
+statement ok
+USE coa_other;
+
+statement error
+SELECT * FROM verify_semantic_view_yaml('coa_check', $$
+tables:
+  - alias: o
+    table: coa_orders
+    pk_columns: [id]
+dimensions:
+  - name: region
+    expr: o.region
+    source_table: o
+metrics: []
+$$);
+----
+the semantic view catalog lives in a different database
+
+statement ok
+USE memory;

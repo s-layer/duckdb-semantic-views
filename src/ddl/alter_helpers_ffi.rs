@@ -454,7 +454,8 @@ metrics:
 /// everything `CREATE SEMANTIC VIEW <view_name> FROM YAML $$<yaml>$$` checks,
 /// the member binding included, with nothing written
 /// ([`crate::ddl::define::yaml_create_definition`], then
-/// [`crate::ddl::read_ffi::check_create_members`]). `database` and `schema`
+/// [`crate::ddl::read_ffi::check_create_members`]), and CREATE's database
+/// guards. `database` and `schema`
 /// are the caller's current ones. On success the buffer holds the schema the
 /// name qualifies, empty for none, for the C++ side to check it exists as
 /// CREATE does. The C++ side runs it in an `SvCallerScope`.
@@ -503,6 +504,17 @@ pub unsafe extern "C" fn sv_verify_yaml_rust(
                     "semantic_views: '{view}' names database '{db}', but semantic views are \
                      single-catalog and this session's database is '{database}'. Manage them \
                      from the database the extension was loaded into."
+                ));
+            }
+            // CREATE's single-catalog guard (`managed_catalog_guard_select`):
+            // the catalog lives in the database new connections start in.
+            let catalog = crate::ddl::read_ffi::caller_definitions(Some(&view.name))?;
+            if catalog.present && !catalog.database.eq_ignore_ascii_case(&database) {
+                return Err(format!(
+                    "semantic_views: semantic-view DDL was issued against database '{database}', \
+                     but the semantic view catalog lives in a different database. Semantic views \
+                     are single-catalog: manage them from the database the extension was loaded \
+                     into, without USE-ing into an attached database."
                 ));
             }
             crate::ddl::read_ffi::check_create_members(&view.name, &json, &database, &schema)?;

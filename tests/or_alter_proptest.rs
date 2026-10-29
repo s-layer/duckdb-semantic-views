@@ -4,7 +4,8 @@
 //! Each case generates a table of random rows, a view over it with a
 //! materialization covering a random choice of its dimensions and metrics, and
 //! a random edit of the view: a member's expression changed, a member dropped,
-//! renamed or added, the table alias changed, or nothing but the comment. The
+//! renamed or added, the table alias changed, the statement run from another
+//! schema (so unqualified names resolve elsewhere), or nothing but the comment. The
 //! materialization's table is filled with what the *old* view answers, so it is
 //! correct before the edit. [`semantic_views::or_alter::merge`] then decides
 //! whether the altered view keeps it.
@@ -40,10 +41,13 @@ enum Edit {
     RenameD1,
     AddMetric,
     TableAlias,
+    /// The statement is run from another schema, so a table name without one
+    /// resolves elsewhere.
+    SessionSchema,
 }
 
 impl Edit {
-    const ALL: [Edit; 12] = [
+    const ALL: [Edit; 13] = [
         Edit::Nothing,
         Edit::Comment,
         Edit::Fact,
@@ -56,6 +60,7 @@ impl Edit {
         Edit::RenameD1,
         Edit::AddMetric,
         Edit::TableAlias,
+        Edit::SessionSchema,
     ];
 
     /// The members whose answer the edit may change.
@@ -66,7 +71,7 @@ impl Edit {
             Edit::D0Expr => &["d0"],
             Edit::D1Expr | Edit::DropD1 | Edit::RenameD1 => &["d1"],
             Edit::M1Agg | Edit::DropM1 => &["m1"],
-            Edit::TableAlias => &["d0", "d1", "m0", "m1"],
+            Edit::TableAlias | Edit::SessionSchema => &["d0", "d1", "m0", "m1"],
         }
     }
 }
@@ -118,7 +123,7 @@ fn body(edit: Option<Edit>) -> String {
         ""
     };
     format!(
-        "TABLES ({a} AS t PRIMARY KEY (id)) FACTS ({a}.fv AS {fact}) DIMENSIONS ({}) \
+        "TABLES ({a} AS main.t PRIMARY KEY (id)) FACTS ({a}.fv AS {fact}) DIMENSIONS ({}) \
          METRICS ({}){comment}",
         dims.join(", "),
         mets.join(", ")
@@ -199,7 +204,11 @@ fn old_and_merged(case: &Case) -> (SemanticViewDefinition, SemanticViewDefinitio
         dimensions: case.mat_dims.iter().map(ToString::to_string).collect(),
         metrics: case.mat_metrics.iter().map(ToString::to_string).collect(),
     }];
-    let merged = merge("v", def(&body(Some(case.edit))), Some(&old));
+    let mut new = def(&body(Some(case.edit)));
+    if case.edit == Edit::SessionSchema {
+        new.resolution_schema_name = Some("s2".to_string());
+    }
+    let merged = merge("v", new, Some(&old));
     (old, merged)
 }
 

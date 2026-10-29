@@ -19,7 +19,7 @@ Syntax
 
 .. code-block:: sqlgrammar
 
-   CREATE [ OR REPLACE | OR ALTER ] SEMANTIC VIEW [ IF NOT EXISTS ] <name>
+   CREATE [ OR REPLACE ] SEMANTIC VIEW [ IF NOT EXISTS ] <name>
        [ COMMENT = '<text>' ]
    [ AS ]
    TABLES (
@@ -274,11 +274,13 @@ Syntax
 
 .. code-block:: sqlgrammar
 
-   CREATE [ OR REPLACE | OR ALTER ] SEMANTIC VIEW [ IF NOT EXISTS ] <name>
+   CREATE [ OR REPLACE ] SEMANTIC VIEW [ IF NOT EXISTS ] <name>
        FROM YAML $$ <yaml_content> $$
 
-   CREATE [ OR REPLACE | OR ALTER ] SEMANTIC VIEW [ IF NOT EXISTS ] <name>
+   CREATE [ OR REPLACE ] SEMANTIC VIEW [ IF NOT EXISTS ] <name>
        FROM YAML FILE '<file_path>'
+
+Each form can be written ``CREATE OR ALTER SEMANTIC VIEW <name> ...`` instead, with no ``IF NOT EXISTS``: see :ref:`ref-create-or-alter`.
 
 The ``FROM YAML`` variant accepts a YAML definition in a dollar-quoted string (``$$...$$`` or ``$tag$...$tag$``). The ``FROM YAML FILE`` variant reads the YAML definition from a file at the given path.
 
@@ -369,7 +371,7 @@ Snowflake's ``CREATE OR ALTER`` grammar has no ``IF NOT EXISTS``, ``COPY GRANTS`
    -- Parser Error: CREATE OR ALTER SEMANTIC VIEW can't set tags, as in Snowflake,
    -- and dimension 'region' has one: an altered view keeps its existing tags. ...
 
-The statement's members are bound as ``CREATE OR REPLACE`` binds them, and a refused ``CREATE OR ALTER`` leaves the view as it was. A view in another schema is a different view: ``CREATE OR ALTER SEMANTIC VIEW staging.sales`` takes nothing from ``main.sales``.
+The statement's members are bound as ``CREATE OR REPLACE`` binds them, and a refused ``CREATE OR ALTER`` leaves the view as it was. A materialization is also dropped when its table would resolve elsewhere: when the statement is run from another schema or database than the view was created from, a table name without a schema means another table. A materialization over a temporary table keeps reading that temporary table. A view in another schema is a different view: ``CREATE OR ALTER SEMANTIC VIEW staging.sales`` takes nothing from ``main.sales``.
 
 .. note::
 

@@ -14,7 +14,9 @@
 //!   leaves the query it answers unchanged: the expansion of its dimensions
 //!   and metrics is the same SQL under the new definition as under the old.
 //!   Snowflake suspends one whose objects changed; with no refresh to resume
-//!   it, this extension drops it.
+//!   it, this extension drops it. Its table must also resolve as it did: the
+//!   statement's session must resolve names in the same database and schema,
+//!   and a table that was a temporary table stays one (`temp_tables`).
 //! - **`created_on`**: the view is altered, not created again.
 //!
 //! The outer `INSERT OR REPLACE` the statement lowers to
@@ -86,15 +88,42 @@ pub fn merge(
     );
     keep_tags(&mut new.facts, &old.facts, |f| &f.name, |f| &mut f.tags);
     keep_tags(&mut new.metrics, &old.metrics, |m| &m.name, |m| &mut m.tags);
-    if new.materializations.is_empty() {
+    if new.materializations.is_empty() && resolves_alike(old, &new) {
         new.materializations = old
             .materializations
             .iter()
             .filter(|mat| answers_the_same(view_name, old, &new, mat))
             .cloned()
             .collect();
+        // The statement's `temp_tables` lists only the tables it names, so a
+        // kept materialization's temporary table is carried over with it.
+        for mat in &new.materializations {
+            if let Some(name) = crate::expand::temp_table_name(&mat.table, old) {
+                if !new
+                    .temp_tables
+                    .iter()
+                    .any(|t| t.eq_ignore_ascii_case(&name))
+                {
+                    new.temp_tables.push(name);
+                }
+            }
+        }
     }
     new
+}
+
+/// Whether a table name written without a database or schema resolves in the
+/// same place under `old` and `new` (`expand::body_qualifier`, from the
+/// session each was written in). When it does not, a materialization's table
+/// is another table, whatever the expansions say.
+fn resolves_alike(old: &SemanticViewDefinition, new: &SemanticViewDefinition) -> bool {
+    let same = |a: Option<&str>, b: Option<&str>| match (a, b) {
+        (Some(a), Some(b)) => a.eq_ignore_ascii_case(b),
+        (a, b) => a == b,
+    };
+    let (old_db, old_schema) = crate::expand::body_qualifier(old);
+    let (new_db, new_schema) = crate::expand::body_qualifier(new);
+    same(old_db, new_db) && same(old_schema, new_schema)
 }
 
 /// Give each object of `new` the tags of the object of `old` with its name.
@@ -154,11 +183,12 @@ fn answers_the_same(
 }
 
 /// The stored keys [`merge`] can change: those of the objects that carry tags,
-/// the materializations and `created_on`.
+/// the materializations, the temporary tables they read and `created_on`.
 #[cfg(feature = "extension")]
 const MERGED_KEYS: &[&str] = &[
     "created_on",
     "tags",
+    "temp_tables",
     "tables",
     "dimensions",
     "facts",
@@ -359,6 +389,45 @@ mod tests {
                 mats(&got)
             );
         }
+    }
+
+    /// A table name without a schema resolves in the session's schema, so a
+    /// statement run from another one would route to another table.
+    #[test]
+    fn a_materialization_is_dropped_when_names_resolve_elsewhere() {
+        let mut old = def(&format!("{BODY} {MAT}"));
+        old.database_name = Some("db".to_string());
+        old.resolution_schema_name = Some("main".to_string());
+        let mut new = def(BODY);
+        new.database_name = Some("db".to_string());
+        new.resolution_schema_name = Some("main".to_string());
+        assert_eq!(mats(&merge("v", new.clone(), Some(&old))), ["by_region"]);
+        new.resolution_schema_name = Some("s2".to_string());
+        assert!(merge("v", new.clone(), Some(&old))
+            .materializations
+            .is_empty());
+        new.resolution_schema_name = Some("main".to_string());
+        new.database_name = Some("other".to_string());
+        assert!(merge("v", new, Some(&old)).materializations.is_empty());
+    }
+
+    /// The statement's own `temp_tables` names only its tables.
+    #[test]
+    fn a_kept_materializations_temporary_table_stays_temporary() {
+        let mut old = def(&format!("{BODY} {MAT}"));
+        // Matched as `DuckDB` matches names; the materialization's spelling is kept.
+        old.temp_tables = vec!["orders".to_string(), "AGG".to_string()];
+        let mut new = def(BODY);
+        new.temp_tables = vec!["orders".to_string()];
+        let got = merge("v", new.clone(), Some(&old));
+        assert_eq!(got.temp_tables, ["orders", "agg"]);
+        // Dropped with its materialization.
+        let got = merge(
+            "v",
+            def(&BODY.replace("SUM(o.amt)", "MAX(o.amt)")),
+            Some(&old),
+        );
+        assert!(got.temp_tables.is_empty(), "{:?}", got.temp_tables);
     }
 
     #[test]
