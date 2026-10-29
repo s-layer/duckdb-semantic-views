@@ -872,13 +872,13 @@ fn sql_value_function(r: &IdentRef<'_>) -> Option<&'static str> {
 /// `DuckDB` refuses the deprecated arrow spelling (`x -> body`) unless a
 /// setting allows it, and reads `->` as the JSON operator otherwise, so a name
 /// beside `->` is never taken for a parameter.
-struct LambdaScope {
+pub(crate) struct LambdaScope {
     params: Vec<String>,
     span: std::ops::Range<usize>,
 }
 
 /// The lambdas in `text`, which has no comments.
-fn lambda_scopes(text: &str) -> Vec<LambdaScope> {
+pub(crate) fn lambda_scopes(text: &str) -> Vec<LambdaScope> {
     let bytes = text.as_bytes();
     let refs = scan_references(text);
     let mut out = Vec::new();
@@ -913,7 +913,7 @@ fn lambda_scopes(text: &str) -> Vec<LambdaScope> {
 
 /// Whether the name or call head `r` starts with a parameter of a lambda it
 /// is inside: `x`, `"x"`, `s.a`, `x.lower()`.
-fn is_lambda_param(r: &IdentRef<'_>, lambdas: &[LambdaScope]) -> bool {
+pub(crate) fn is_lambda_param(r: &IdentRef<'_>, lambdas: &[LambdaScope]) -> bool {
     let first = r.first_part_key();
     lambdas
         .iter()

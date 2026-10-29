@@ -1094,12 +1094,11 @@ fn dimension_on_a_role_playing_target_still_declines_per_grain() {
         &req(&["dep_city"], &["flight_count", "fleet_size"]),
     )
     .expect_err("an unscoped dimension on a role-playing target is still declined");
+    // Since Phase 6.3 the base-anchored path reports the missing role before the
+    // fan trap between the two metrics (it used to report the fan trap).
     assert!(
-        matches!(
-            err,
-            ExpandError::FanTrap { .. } | ExpandError::MetricFanTrap { .. }
-        ),
-        "expected the v0.11.0 fan-trap error, got: {err}"
+        matches!(err, ExpandError::AmbiguousPath { .. }),
+        "expected the ambiguous-path error, got: {err}"
     );
 }
 
@@ -1186,39 +1185,68 @@ fn flights_using_fixture() -> SemanticViewDefinition {
         .with_using_relationship("flight_count", &["dep"])
 }
 
-/// GRAIN-10: a dimension on a role-played table is answerable per-grain when a
-/// co-queried metric's `USING` names which role it means.
+/// `flights_using_fixture` plus `arrival_count`, a base-grain metric whose
+/// `USING` names the OTHER role of `a`.
+fn flights_two_role_fixture() -> SemanticViewDefinition {
+    flights_using_fixture()
+        .with_metric("arrival_count", "COUNT(*)", Some("f"))
+        .with_using_relationship("arrival_count", &["arr"])
+}
+
+/// GRAIN-10, Phase 6.3: each grain group joins the role ITS metrics' `USING`
+/// names and emits the dimension against that scoped alias.
 ///
-/// The base-anchored path already does this (see `probe`-free equivalent in the
-/// single-grain case): it emits `a__dep.city` and joins
-/// `"airports" AS "a__dep" ON "f"."dep_code" = "a__dep"."code"`. Each grain CTE
-/// has to reproduce that shape, choosing the NAMED edge rather than whichever
+/// The base-anchored path does this for one role: it emits `a__dep.city` and
+/// joins `"airports" AS "a__dep" ON "f"."dep_code" = "a__dep"."code"`. Metrics
+/// naming different roles are different groups, so each CTE has to reproduce
+/// that shape for its own role, choosing the NAMED edge rather than whichever
 /// `edge_between` happens to return first.
 #[test]
 fn using_scopes_a_role_played_dimension_in_every_grain_cte() {
-    let def = flights_using_fixture();
+    let def = flights_two_role_fixture();
     let sql = expand(
+        "flights_sv",
+        &def,
+        &req(&["dep_city"], &["flight_count", "arrival_count"]),
+    )
+    .expect("each metric names its role, so each grain CTE can join it unambiguously");
+    assert!(
+        sql.contains("__sv_grain_0") && sql.contains("__sv_grain_1"),
+        "expected one CTE per role, got:\n{sql}"
+    );
+    assert_eq!(
+        sql.matches(r#"AS "a__dep""#).count(),
+        1,
+        "the departure role is joined once, in its own CTE, got:\n{sql}"
+    );
+    assert_eq!(
+        sql.matches(r#"AS "a__arr""#).count(),
+        1,
+        "the arrival role is joined once, in its own CTE, got:\n{sql}"
+    );
+    assert!(
+        sql.contains("a__dep.city") && sql.contains("a__arr.city"),
+        "each CTE emits the dimension against its own scoped alias, got:\n{sql}"
+    );
+}
+
+/// Phase 6.3 (Snowflake parity): a co-queried metric's `USING` no longer lends
+/// its role to a metric that names none. `leg_count` cannot name one at all —
+/// a `USING` relationship must start at the metric's own table — so grouping it
+/// by departure city is refused, where it used to borrow `flight_count`'s role
+/// and change its numbers with its companion.
+#[test]
+fn a_metric_without_a_role_does_not_borrow_a_co_queried_one() {
+    let def = flights_using_fixture();
+    let err = expand(
         "flights_sv",
         &def,
         &req(&["dep_city"], &["flight_count", "leg_count"]),
     )
-    .expect("USING names the role, so the grain CTEs can join it unambiguously");
+    .expect_err("leg_count names no path to the role-played table");
     assert!(
-        sql.contains("__sv_grain_0") && sql.contains("__sv_grain_1"),
-        "expected one CTE per grain, got:\n{sql}"
-    );
-    assert_eq!(
-        sql.matches(r#"AS "a__dep""#).count(),
-        2,
-        "each grain CTE joins the scoped role exactly once, got:\n{sql}"
-    );
-    assert!(
-        sql.contains("a__dep.city"),
-        "the dimension must be emitted against its scoped alias, got:\n{sql}"
-    );
-    assert!(
-        !sql.contains("arr_code"),
-        "the arrival role was not named by USING and must not be joined:\n{sql}"
+        matches!(err, ExpandError::AmbiguousPath { .. }),
+        "expected AmbiguousPath, got: {err}"
     );
 }
 
@@ -1254,12 +1282,16 @@ fn single_grain_role_played_dimension_stays_on_the_base_anchored_path() {
 /// that the role-threading increment does not re-open it in a new shape.
 #[test]
 fn using_does_not_rescue_a_where_clause_on_the_role_played_table() {
-    let def = flights_using_fixture();
+    // Two metrics each naming its own role (Phase 6.3), so the predicate is the
+    // only thing standing between this query and a per-grain answer: without
+    // the fence each grain CTE would join the bare `a` for it by declaration
+    // order.
+    let def = flights_two_role_fixture();
     let req = QueryRequest {
         dimensions: vec![DimensionName::new("dep_city")],
         metrics: vec![
             MetricName::new("flight_count"),
-            MetricName::new("leg_count"),
+            MetricName::new("arrival_count"),
         ],
         facts: vec![],
         where_clause: Some("dep_city = 'London'".to_string()),
@@ -1269,12 +1301,13 @@ fn using_does_not_rescue_a_where_clause_on_the_role_played_table() {
     assert!(
         matches!(
             err,
-            ExpandError::MetricFanTrap { .. }
+            ExpandError::AmbiguousPath { .. }
+                | ExpandError::MetricFanTrap { .. }
                 | ExpandError::FanTrap { .. }
                 | ExpandError::RootGrainFanTrap { .. }
                 | ExpandError::WhereClauseFanTrap { .. }
         ),
-        "expected the base-anchored fence's error, got: {err}"
+        "expected the base-anchored path's error, got: {err}"
     );
 }
 
@@ -1286,23 +1319,31 @@ fn using_does_not_rescue_a_where_clause_on_the_role_played_table() {
 /// on scopes nothing — here `l_to_f` is the ONLY edge from `l` to `f`, so the
 /// grain CTE's join through it is the join `USING` names — and declining kept
 /// the child metric off its home table, so its value depended on its companions
-/// (MM-3). The CTE must still join `f` through that edge and then the role the
-/// co-queried `flight_count` names.
+/// (MM-3). The CTE must still join `f` through that edge.
+///
+/// Grouped by a dimension on `c`, a parent of `f`, rather than on the
+/// role-played `a`: since Phase 6.3 a metric must name its own role to be
+/// grouped by `a`, and `leg_count` cannot (see
+/// `a_metric_without_a_role_does_not_borrow_a_co_queried_one`).
 #[test]
 fn using_naming_a_non_role_played_relationship_is_honoured_per_grain() {
-    let def = flights_using_fixture().with_using_relationship("leg_count", &["l_to_f"]);
+    let def = flights_using_fixture()
+        .with_table("c", "carriers", &["id"])
+        .with_dimension("carrier_name", "c.name", Some("c"))
+        .with_pkfk_join("f_to_c", "f", "c", &["carrier_id"], &["id"])
+        .with_using_relationship("leg_count", &["l_to_f"]);
     let sql = expand(
         "flights_sv",
         &def,
-        &req(&["dep_city"], &["flight_count", "leg_count"]),
+        &req(&["carrier_name"], &["flight_count", "leg_count"]),
     )
     .expect("USING on the only relationship to a table scopes nothing ambiguous");
     assert!(
         sql.contains(
             "FROM \"legs\" AS \"l\"\n    LEFT JOIN \"flights\" AS \"f\" ON \"l\".\"flight_id\" = \"f\".\"id\"\n    \
-             LEFT JOIN \"airports\" AS \"a__dep\""
+             LEFT JOIN \"carriers\" AS \"c\""
         ),
-        "the leg grain must reach the dimension through l_to_f and the named role:\n{sql}"
+        "the leg grain must reach the dimension through l_to_f:\n{sql}"
     );
 }
 
@@ -1313,23 +1354,24 @@ fn using_naming_a_non_role_played_relationship_is_honoured_per_grain() {
 /// relationship names by ASCII-lowercase spelling and so found no role.
 #[test]
 fn using_scopes_a_quoted_relationship_role_in_every_grain_cte() {
-    let mut def = flights_using_fixture();
+    let mut def = flights_two_role_fixture();
     def.joins[0].name = Some("\"Dep\"".to_string());
     let sql = expand(
         "flights_sv",
         &def,
-        &req(&["dep_city"], &["flight_count", "leg_count"]),
+        &req(&["dep_city"], &["flight_count", "arrival_count"]),
     )
     .expect("USING names the quoted role, so the grain CTEs can join it");
     assert_eq!(
         sql.matches(r#"AS "a__dep""#).count(),
-        2,
-        "each grain CTE joins the scoped role exactly once, got:\n{sql}"
+        1,
+        "the departure CTE joins the scoped role exactly once, got:\n{sql}"
     );
     assert!(sql.contains("a__dep.city"), "{sql}");
-    assert!(
-        !sql.contains("arr_code"),
-        "the arrival role was not named by USING and must not be joined:\n{sql}"
+    assert_eq!(
+        sql.matches("dep_code").count(),
+        1,
+        "only the departure CTE joins the departure edge:\n{sql}"
     );
 }
 
@@ -1358,14 +1400,16 @@ fn legacy_quoted_pair_using_does_not_thread_the_other_role_per_grain() {
         );
     }
     let err = result.expect_err("the base-anchored path declines this shape, as before #249");
+    // Since Phase 6.3 `leg_count`, which names no role, is reported first.
     assert!(
         matches!(
             err,
-            ExpandError::MetricFanTrap { .. }
+            ExpandError::AmbiguousPath { .. }
+                | ExpandError::MetricFanTrap { .. }
                 | ExpandError::FanTrap { .. }
                 | ExpandError::RootGrainFanTrap { .. }
         ),
-        "expected the base-anchored fan-trap error, got: {err}"
+        "expected the base-anchored path's error, got: {err}"
     );
 }
 
@@ -1618,6 +1662,9 @@ fn role_played_dimension_with_a_semi_additive_metric_stays_ineligible() {
         .with_metric("flight_count", "COUNT(*)", Some("f"))
         .with_metric("fleet_balance", "SUM(c.fleet)", Some("c"))
         .with_using_relationship("flight_count", &["dep"])
+        // Both metrics name the same role (Phase 6.3 refuses a metric that names
+        // none), so only the snapshot group's blindness to roles is in play.
+        .with_using_relationship("fleet_balance", &["dep"])
         .with_non_additive_by(
             "fleet_balance",
             &[("as_of", SortOrder::Asc, NullsOrder::Last)],

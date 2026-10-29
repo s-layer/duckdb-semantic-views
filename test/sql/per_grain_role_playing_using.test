@@ -59,49 +59,54 @@ CREATE SEMANTIC VIEW rpu_sv AS
   )
   METRICS (
     f.flight_count USING (dep) AS count(*),
+    f.arrival_count USING (arr) AS count(*),
     l.leg_count AS count(l.id)
   );
 
 # ============================================================
-# Test 1: the new capability. Two grains — `flight_count` at the flight grain,
-# `leg_count` at the leg grain — grouped by a dimension on the role-played
-# table, with `USING (dep)` naming the role.
-#
-# This whole query used to error with `fan trap detected`.
-#
-# London departs 2 flights carrying 3 legs; New York departs 1 flight carrying
-# 1 leg. Binding `arr` instead would have produced London 1 and a Paris row.
+# Test 1: every metric names its own path (Phase 6.3, Snowflake parity).
+# `leg_count` cannot: a USING relationship has to start at the metric's own
+# table, and `legs` has no relationship to `airports`. It used to borrow
+# `flight_count`'s role, so its numbers changed with what it was queried
+# beside; it is refused instead, as Snowflake refuses it (TECH-DEBT #65).
+# ============================================================
+
+statement error
+SELECT * FROM SEMANTIC_VIEW(rpu_sv DIMENSIONS dep_city METRICS flight_count, leg_count);
+----
+dimension 'dep_city' is ambiguous
+
+# ============================================================
+# Test 2: two groups, each joining the role its metric names. London departs
+# 2 flights and receives 1; New York departs 1 and receives 1; Paris only
+# receives 1. Binding one role for both would make the columns equal.
 # ============================================================
 
 query TII rowsort
-SELECT * FROM SEMANTIC_VIEW(rpu_sv DIMENSIONS dep_city METRICS flight_count, leg_count);
+SELECT * FROM SEMANTIC_VIEW(rpu_sv DIMENSIONS dep_city METRICS flight_count, arrival_count);
 ----
-London	2	3
+London	2	1
 New York	1	1
+Paris	NULL	1
 
-# ============================================================
-# Test 2: the scoped alias reaches the emitted SQL, in BOTH grain CTEs — the
-# join is on dep_code, and arr_code appears nowhere.
-# ============================================================
+# The scoped aliases reach the emitted SQL, each joined once, on its own edge.
+query I
+SELECT count(*) FROM (
+  SELECT unnest(string_split(explain_output, chr(10))) AS plan
+  FROM (SELECT * FROM explain_semantic_view('rpu_sv', metrics := ['flight_count', 'arrival_count'], dimensions := ['dep_city']))
+    AS t(explain_output)
+) WHERE plan LIKE '%AS "a__dep" ON%dep_code%';
+----
+1
 
 query I
 SELECT count(*) FROM (
   SELECT unnest(string_split(explain_output, chr(10))) AS plan
-  FROM (SELECT * FROM explain_semantic_view('rpu_sv', metrics := ['flight_count', 'leg_count'], dimensions := ['dep_city']))
+  FROM (SELECT * FROM explain_semantic_view('rpu_sv', metrics := ['flight_count', 'arrival_count'], dimensions := ['dep_city']))
     AS t(explain_output)
-) WHERE plan LIKE '%arr_code%';
+) WHERE plan LIKE '%AS "a__arr" ON%arr_code%';
 ----
-0
-
-# ...and the scoped alias IS joined, once per grain CTE.
-query I
-SELECT count(*) FROM (
-  SELECT unnest(string_split(explain_output, chr(10))) AS plan
-  FROM (SELECT * FROM explain_semantic_view('rpu_sv', metrics := ['flight_count', 'leg_count'], dimensions := ['dep_city']))
-    AS t(explain_output)
-) WHERE plan LIKE '%AS "a__dep" ON%';
-----
-2
+1
 
 # ============================================================
 # Test 3: a REGRESSION GUARD, not a new capability. `flight_count` alone sits at

@@ -202,7 +202,8 @@ The same applies to these shapes:
 - A window metric whose inner aggregate is on a non-base table.
 - An active semi-additive metric (``NON ADDITIVE BY`` with its snapshot
   dimension left out of the query).
-- A role-played table, when a metric's ``USING`` names the relationship.
+- A role-played table, when every metric's ``USING`` names a relationship to
+  it (metrics naming different ones are grouped separately and merged).
 
 A dimension group that exists at one grain but not another is kept, with
 ``NULL`` for the metrics that have no rows there. For example, a region with
@@ -213,8 +214,8 @@ single grain instead:
 
 - Two window metrics whose inner aggregates sit at different grains.
 - A role-played dimension together with an active semi-additive metric.
-- A role-played table reached with no ``USING`` to say which relationship is
-  meant.
+- A role-played table reached by a metric with no ``USING`` to say which
+  relationship is meant.
 
 :ref:`explanation-grain-multi` explains how the per-grain results are joined,
 and :ref:`explanation-grain-refused` explains why these three shapes are

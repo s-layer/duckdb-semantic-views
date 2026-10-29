@@ -152,3 +152,4 @@ test/sql/member_tags.test
 test/sql/snowflake_pasteable_ddl.test
 test/sql/facts_dimensions_clauses.test
 test/sql/metadata_clauses.test
+test/sql/multi_path_using.test

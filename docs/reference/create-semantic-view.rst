@@ -568,6 +568,33 @@ A derived metric is an unqualified name (no table alias) whose expression combin
        f.arrivals   USING (arr_airport) AS COUNT(*)
    )
 
+**Metrics over metrics on the same table.** A table-qualified metric's expression
+can name other metrics on its own table, bare or qualified (``f.flight_count`` or
+``flight_count``), as in Snowflake, where an expression "can refer to base table
+columns or other expressions on the same logical table". The referenced metric's
+aggregate is computed as part of the referencing metric, through the
+referencing metric's own ``USING`` path. This is how Snowflake writes one metric
+per role:
+
+.. code-block:: sql
+
+   METRICS (
+       f.flight_count AS COUNT(*),
+       f.departures   USING (dep_airport) AS f.flight_count,
+       f.arrivals     USING (arr_airport) AS f.flight_count
+   )
+
+A name inside a call to a built-in aggregate (its arguments, ``FILTER`` and
+``WITHIN GROUP``) is still a column: ``SUM(f.seats)`` sums the column ``seats``
+even when a metric named ``seats`` exists. So is a lambda parameter. A name
+inside a call to an aggregate from an extension or a macro is read like any
+other name, as fact references are. The referenced metric must be a plain one: ``CREATE`` refuses a reference
+to a window metric, a semi-additive metric, or a metric with ``USING`` of its own
+(give the ``USING`` to the metric written over it instead), and a cycle of such
+references. A window metric's expression keeps its own rules.
+
+.. versionadded:: 0.18.0
+
 **PRIVATE metrics:**
 
 .. code-block:: sql

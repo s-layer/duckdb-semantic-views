@@ -435,12 +435,12 @@ Four boundaries apply:
   ``NON ADDITIVE BY`` dimension declared on *another* logical table, provided the
   reference is qualified (``NON ADDITIVE BY (s.report_date)``); the bare form
   resolves only within the metric's own table. Both forms are accepted here too.
-- Multi-grain queries **reaching a role-played table** are computed when a
-  co-queried metric's ``USING`` names the role: each grain CTE joins that
+- Multi-grain queries **reaching a role-played table** are computed when
+  every metric's ``USING`` names a role: each grain CTE joins its metrics'
   relationship under its scoped alias and groups by the dimension bound to it,
-  as the single-grain path already did. Without ``USING`` the query keeps the
-  fan trap error, since a grain CTE would otherwise choose among the
-  relationship instances by declaration order. This covers only a queried
+  as the single-grain path already did. A metric without ``USING`` makes the
+  query ambiguous, as in Snowflake, since a grain CTE would otherwise choose
+  among the relationship instances by declaration order. This covers only a queried
   dimension's own table -- a :ref:`WHERE <ref-sv-pre-agg-filtering>` member on a role-played table, a
   metric aggregated at one, or a table reachable only *through* one still error.
   A definition that merely *declares* role-playing does not lose per-grain
@@ -462,6 +462,23 @@ Both systems support ``USING`` on metrics to select which relationship path a me
        f.departures USING (dep_airport) AS COUNT(*)
    )
 
+.. versionadded:: 0.18.0
+
+   Snowflake's multi-path behaviour: metrics with different ``USING`` paths to
+   one table can be queried together with a dimension on it. Each metric is
+   grouped through its own path and the results are merged on the queried
+   dimensions, so a group one path never reaches shows ``NULL`` for that
+   path's metrics. A derived metric over such metrics is computed from the
+   merged components. Snowflake's documented form,
+   ``f.departures USING (dep_airport) AS f.flight_count`` over a plain
+   ``f.flight_count AS COUNT(*)``, works too: a metric can name other metrics
+   on its own table.
+
+Both systems refuse a dimension on a role-played table when a metric in the
+query names no path to it. One difference remains: Snowflake also accepts a
+dimension one relationship *beyond* the role-played table (``regions`` reached
+from ``airports``), taking the path from the metric's ``USING``. That is
+refused here as ambiguous for now.
 
 Facts Query Mode
 ----------------

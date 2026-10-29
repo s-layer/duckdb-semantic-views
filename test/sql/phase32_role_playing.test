@@ -79,14 +79,19 @@ AA	2	2
 BA	1	1
 
 # ============================================================
-# Test 3 (JOIN-05): city dimension with derived metric total_flights
-# is ambiguous because total_flights references both USING paths
+# Test 3 (JOIN-05, Phase 6.3 multi-path USING): city with the derived
+# total_flights, whose components take different USING paths. Each
+# component is grouped by city through its own path and the two are
+# merged: every airport has one departure and one arrival here.
+# (Before Phase 6.3 this was refused as ambiguous.)
 # ============================================================
 
-statement error
+query TI rowsort
 SELECT * FROM SEMANTIC_VIEW(p32_flights_view DIMENSIONS city METRICS total_flights);
 ----
-ambiguous
+London	2
+New York	2
+San Francisco	2
 
 # ============================================================
 # Test 4: carrier dimension with derived metric total_flights

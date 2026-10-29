@@ -271,8 +271,9 @@ SELECT 1 FROM ssr;
 specify at least one of DIMENSIONS, METRICS or FACTS
 
 # The role-playing checks hold too. A dimension on a table reached by two
-# relationships resolves through a metric's USING, and is ambiguous otherwise,
-# in GROUP BY and in WHERE alike.
+# relationships resolves through each metric's own USING (Phase 6.3: a derived
+# metric over both paths groups each component through its own), and is
+# ambiguous otherwise, in GROUP BY and in WHERE alike.
 
 statement ok
 CREATE TABLE ssr_airports (code VARCHAR, city VARCHAR);
@@ -300,8 +301,14 @@ SELECT city, AGG(departures) FROM ssr_fl GROUP BY city;
 New York	1
 San Francisco	2
 
-statement error
+query TT rowsort
 SELECT city, AGG(total) FROM ssr_fl GROUP BY city;
+----
+New York	3
+San Francisco	3
+
+statement error
+SELECT city FROM ssr_fl GROUP BY city;
 ----
 dimension 'city' is ambiguous
 

@@ -1407,15 +1407,17 @@ fn arb_rollup_case() -> impl Strategy<Value = RollupCase> {
         prop::option::weighted(0.6, arb_pred(true)),
         any::<bool>(),
         prop::collection::vec(any::<bool>(), BASE_METRICS.len()),
-        // With a role chosen, half the requests also carry one ROLE-LESS metric
-        // (test-coverage review TC3). Grouped by the role-played dimension it
-        // takes the role the `USING` metric gives that dimension — the
-        // per-grain `using_scopes_a_touched_table` branch — which no draw
-        // reached while a role filtered the pool down to its own metrics.
-        prop::option::weighted(0.5, any::<prop::sample::Index>()),
+        // With a role chosen, half the requests also carry one more metric
+        // (test-coverage review TC3): ROLE-LESS when the bool is set, otherwise
+        // one of the OTHER role. Grouped by the role-played dimension, the
+        // role-less one makes the query ambiguous (Phase 6.3, Snowflake parity:
+        // it no longer borrows the `USING` metric's role), and the other-role
+        // one is grouped through its own relationship and outer-merged — the
+        // multi-path case, whose every metric must still roll up.
+        prop::option::weighted(0.5, (any::<prop::sample::Index>(), any::<bool>())),
     )
         .prop_map(
-            |(names, data, grain, role, dim_mask, pred_seed, want_city, met_mask, roleless)| {
+            |(names, data, grain, role, dim_mask, pred_seed, want_city, met_mask, extra)| {
                 let eligible: Vec<usize> = (0..BASE_METRICS.len())
                     .filter(|&i| grain.is_none_or(|g| BASE_METRICS[i].grain == g))
                     .filter(|&i| match role {
@@ -1449,9 +1451,11 @@ fn arb_rollup_case() -> impl Strategy<Value = RollupCase> {
                         both
                     }
                 };
-                if let (Some(_), Some(ix)) = (role, roleless) {
+                if let (Some(r), Some((ix, roleless))) = (role, extra) {
+                    let other = if r == Role::Dep { Role::Arr } else { Role::Dep };
+                    let wanted = if roleless { None } else { Some(other) };
                     let pool: Vec<usize> = (0..BASE_METRICS.len())
-                        .filter(|&i| BASE_METRICS[i].role.is_none())
+                        .filter(|&i| BASE_METRICS[i].role == wanted)
                         .filter(|&i| grain.is_none_or(|g| BASE_METRICS[i].grain == g))
                         .collect();
                     metrics.push(*ix.get(&pool));
@@ -1497,11 +1501,24 @@ fn check_rollup(case: &RollupCase) -> Result<(), String> {
         .map(|&i| names.mets[i].clone())
         .collect();
 
-    let grouped = expand_or_fail(
-        &def,
-        &request(names, &case.dims, &met_names, &[], case.pred.as_ref()),
-        "the grouped query",
-    )?;
+    // Phase 6.3: a metric with no `USING` cannot be grouped by the role-played
+    // dimension, whatever it is queried beside. That refusal is the property
+    // for such a request.
+    let grouped_req = request(names, &case.dims, &met_names, &[], case.pred.as_ref());
+    if case.groups_by_role_played && case.metrics.iter().any(|&i| BASE_METRICS[i].role.is_none()) {
+        return match expand("mm", &def, &grouped_req) {
+            Err(e) if e.to_string().contains("is ambiguous") => Ok(()),
+            Err(e) => Err(format!(
+                "a role-less metric grouped by the role-played dimension was refused, \
+                 but not as ambiguous: {e}"
+            )),
+            Ok(sql) => Err(format!(
+                "a role-less metric grouped by the role-played dimension must be refused, \
+                 got:\n{sql}"
+            )),
+        };
+    }
+    let grouped = expand_or_fail(&def, &grouped_req, "the grouped query")?;
     let total = expand_or_fail(
         &def,
         &request(names, &[], &met_names, &[], case.pred.as_ref()),
@@ -2533,20 +2550,20 @@ fn generator_reaches_the_role_played_root_cells() {
     );
 }
 
-/// TC3 (test-coverage review): a role-scoped roll-up request must sometimes
-/// also carry a role-less metric while grouping by the role-played dimension,
-/// and be accepted, so property (b) reaches the per-grain branch where the
-/// `USING` metric's role scopes a table the role-less metric touches.
+/// TC3 (test-coverage review), revised for Phase 6.3: a role-scoped roll-up
+/// request grouped by the role-played dimension must sometimes carry a metric
+/// of the OTHER role, and be accepted, so property (b) checks that each metric
+/// still rolls up across the per-role outer merge; and must sometimes carry a
+/// role-less metric, so the refusal of a metric without `USING` is checked.
 #[test]
-fn generator_mixes_a_role_less_metric_into_a_role_scoped_request() {
+fn generator_mixes_roles_into_a_role_scoped_request() {
     let rollups = sample(&arb_rollup_case(), 512);
-    let mixed = rollups
+    let by_city: Vec<&RollupCase> = rollups.iter().filter(|c| c.groups_by_role_played).collect();
+    let has =
+        |c: &RollupCase, r: Option<Role>| c.metrics.iter().any(|&i| BASE_METRICS[i].role == r);
+    let both_roles = by_city
         .iter()
-        .filter(|c| {
-            c.groups_by_role_played
-                && c.metrics.iter().any(|&i| BASE_METRICS[i].role.is_none())
-                && c.metrics.iter().any(|&i| BASE_METRICS[i].role.is_some())
-        })
+        .filter(|c| has(c, Some(Role::Dep)) && has(c, Some(Role::Arr)) && !has(c, None))
         .filter(|c| {
             let met_names: Vec<String> =
                 c.metrics.iter().map(|&i| c.names.mets[i].clone()).collect();
@@ -2554,10 +2571,16 @@ fn generator_mixes_a_role_less_metric_into_a_role_scoped_request() {
             expand("mm", &build_def(&c.names, None), &req).is_ok()
         })
         .count();
+    let role_less = by_city.iter().filter(|c| has(c, None)).count();
     assert!(
-        mixed >= 24,
-        "only {mixed}/512 accepted roll-up cases grouped a role-less metric by the role-played \
-         dimension beside a USING metric"
+        both_roles >= 16,
+        "only {both_roles}/512 accepted roll-up cases grouped metrics of both roles by the \
+         role-played dimension"
+    );
+    assert!(
+        role_less >= 16,
+        "only {role_less}/512 roll-up cases grouped a role-less metric by the role-played \
+         dimension, so its refusal is barely checked"
     );
 }
 

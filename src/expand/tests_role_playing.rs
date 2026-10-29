@@ -537,7 +537,10 @@ fn backward_compat_no_using_expands_as_before() {
 }
 
 #[test]
-fn ambiguous_dimension_with_derived_metric_using_both_paths() {
+fn derived_metric_using_both_paths_groups_each_component_through_its_own() {
+    // Phase 6.3: this used to be refused as ambiguous. Each component now names
+    // its own role, so each is grouped through it and the derived metric is
+    // assembled after the outer merge (numbers: `tests_multi_path_using`).
     let def = flights_airports_def();
     let req = QueryRequest {
         where_clause: None,
@@ -545,15 +548,12 @@ fn ambiguous_dimension_with_derived_metric_using_both_paths() {
         dimensions: vec![DimensionName::new("city")],
         metrics: vec![MetricName::new("total_flights")],
     };
-    let result = expand("test_flights", &def, &req);
+    let sql = expand("test_flights", &def, &req).unwrap();
     assert!(
-        result.is_err(),
-        "City dimension must be ambiguous when derived metric uses both paths"
+        sql.contains("a__dep_airport.city") && sql.contains("a__arr_airport.city"),
+        "each component groups by its own role's city: {sql}"
     );
-    match result.unwrap_err() {
-        ExpandError::AmbiguousPath { .. } => {}
-        other => panic!("Expected AmbiguousPath, got: {other}"),
-    }
+    assert!(sql.contains("FULL OUTER JOIN"), "{sql}");
 }
 
 #[test]

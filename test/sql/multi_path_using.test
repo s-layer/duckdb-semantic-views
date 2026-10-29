@@ -1,0 +1,141 @@
+# Multi-path USING (Phase 6.3), after Snowflake's flights example: metrics that
+# reach one role-played table through different relationships, co-queried by a
+# dimension on that table. Each metric is aggregated through its own path and
+# the results are outer-merged on the queried dimensions, so a city with no
+# departures shows a NULL departure count. A metric may be written over another
+# metric on its own table (`f.departures USING (f_dep) AS f.flight_count`),
+# which is how Snowflake documents the feature.
+
+require semantic_views
+
+statement ok
+CREATE TABLE mpu_airports (code VARCHAR, city VARCHAR);
+
+statement ok
+CREATE TABLE mpu_flights (id INTEGER, dep VARCHAR, arr VARCHAR, seats INTEGER);
+
+statement ok
+INSERT INTO mpu_airports VALUES ('A', 'Alpha'), ('B', 'Beta'), ('C', 'Gamma');
+
+statement ok
+INSERT INTO mpu_flights VALUES (1, 'A', 'B', 10), (2, 'A', 'B', 20), (3, 'B', 'A', 30), (4, 'A', 'C', 40);
+
+statement ok
+CREATE SEMANTIC VIEW mpu_v
+  TABLES (
+    f AS mpu_flights PRIMARY KEY (id),
+    a AS mpu_airports PRIMARY KEY (code)
+  )
+  RELATIONSHIPS (
+    f_dep AS f(dep) REFERENCES a,
+    f_arr AS f(arr) REFERENCES a
+  )
+  DIMENSIONS (
+    a.city AS a.city
+  )
+  METRICS (
+    f.flight_count AS COUNT(*),
+    f.total_seats AS SUM(f.seats),
+    f.departures USING (f_dep) AS f.flight_count,
+    f.arrivals USING (f_arr) AS flight_count,
+    f.avg_seats_out USING (f_dep) AS f.total_seats / f.flight_count,
+    movements AS f.departures + f.arrivals,
+    f.all_departures AS SUM(departures) OVER (PARTITION BY EXCLUDING city)
+  );
+
+# Departures and arrivals by city, each through its own relationship.
+query TII rowsort
+SELECT * FROM semantic_view('mpu_v', dimensions := ['city'], metrics := ['departures', 'arrivals']);
+----
+Alpha	3	1
+Beta	1	2
+Gamma	NULL	1
+
+# The same query in the standard-SQL form.
+query TTT rowsort
+SELECT city, AGG(departures), AGG(arrivals) FROM mpu_v GROUP BY city;
+----
+Alpha	3	1
+Beta	1	2
+Gamma	NULL	1
+
+# A derived metric over both paths is assembled after the merge: NULL where
+# one path has no rows.
+query TI rowsort
+SELECT * FROM semantic_view('mpu_v', dimensions := ['city'], metrics := ['movements']);
+----
+Alpha	4
+Beta	3
+Gamma	NULL
+
+# An expression over same-table metrics is computed through the path: Alpha
+# departs 70 seats on 3 flights, Beta 30 on 1, Gamma nothing.
+query TR rowsort
+SELECT city, round(avg_seats_out, 2) FROM semantic_view('mpu_v', dimensions := ['city'], metrics := ['avg_seats_out']);
+----
+Alpha	23.33
+Beta	30.0
+
+# Without a dimension on the role-played table the paths change nothing.
+query III
+SELECT * FROM semantic_view('mpu_v', metrics := ['departures', 'arrivals', 'flight_count']);
+----
+4	4	4
+
+# A window metric takes its inner metric's path: every departure city sees
+# all 4 departures, and Gamma, which only has arrivals, is not a group.
+query TI rowsort
+SELECT * FROM semantic_view('mpu_v', dimensions := ['city'], metrics := ['all_departures']);
+----
+Alpha	4
+Beta	4
+
+# A metric with no USING says nothing about which airport a city is, so
+# grouping it by city is refused, also beside a metric that names a path.
+statement error
+SELECT * FROM semantic_view('mpu_v', dimensions := ['city'], metrics := ['departures', 'flight_count']);
+----
+dimension 'city' is ambiguous
+
+statement error
+SELECT * FROM semantic_view('mpu_v', dimensions := ['city'], metrics := ['flight_count']);
+----
+dimension 'city' is ambiguous
+
+# A reference inside an aggregate call is the column, as it always was, even
+# beside a metric of the same name.
+statement ok
+CREATE SEMANTIC VIEW mpu_col
+  TABLES (f AS mpu_flights PRIMARY KEY (id))
+  METRICS (
+    f.seats AS COUNT(*),
+    f.seat_sum AS SUM(f.seats)
+  );
+
+query II
+SELECT * FROM semantic_view('mpu_col', metrics := ['seats', 'seat_sum']);
+----
+4	100
+
+# The referenced metric has to be a plain one: not with USING of its own.
+statement error
+CREATE SEMANTIC VIEW mpu_bad
+  TABLES (f AS mpu_flights PRIMARY KEY (id), a AS mpu_airports PRIMARY KEY (code))
+  RELATIONSHIPS (f_dep AS f(dep) REFERENCES a, f_arr AS f(arr) REFERENCES a)
+  METRICS (
+    f.n USING (f_arr) AS COUNT(*),
+    f.departures USING (f_dep) AS f.n
+  );
+----
+metric 'departures' references metric 'n' on its own table, which has USING of its own
+
+# Nor a cycle.
+statement error
+CREATE SEMANTIC VIEW mpu_cycle
+  TABLES (f AS mpu_flights PRIMARY KEY (id))
+  METRICS (
+    f.x AS f.y + 1,
+    f.y AS f.x + 1
+  );
+----
+cycle in metrics written over metrics on their own table
