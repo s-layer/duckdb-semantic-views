@@ -441,6 +441,18 @@ mod tests {
         assert!(matches!(inline_same_table_metrics(&d), Cow::Borrowed(_)));
     }
 
+    // fuzz_sql_expand (PR #323 CI): an unterminated quoted identifier is not
+    // a reference, even when it reads as the name of a metric called `"`.
+    // Inlining it there turned `x + "` into `x + ()`.
+    #[test]
+    fn an_unterminated_quoted_identifier_is_not_a_reference() {
+        let d = def(vec![
+            metric("\"", "COUNT(*)", &[]),
+            metric("q", "COUNT(*) + \"", &[]),
+        ]);
+        assert!(matches!(inline_same_table_metrics(&d), Cow::Borrowed(_)));
+    }
+
     #[test]
     fn a_reference_to_another_tables_metric_is_not_inlined() {
         let mut other = metric("n", "COUNT(*)", &[]);
