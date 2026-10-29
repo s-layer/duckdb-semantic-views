@@ -164,7 +164,7 @@ Rows appear in definition order: the view-level comment, ``MAX_STALENESS`` and t
       * - ``COMMENT``
         - The variable's comment text.
 
-   A member that reads a variable reports its ``DATA_TYPE`` as if the variable were a ``NULL`` of the variable's type (or the variable's default, when it has no type).
+   A member that reads a variable reports its ``DATA_TYPE`` as if the variable were its default, or a ``NULL`` of the variable's type when it has no default.
 
 **FACT**
    One block per fact declared in the ``FACTS`` clause:

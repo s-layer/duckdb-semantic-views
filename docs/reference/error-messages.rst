@@ -371,6 +371,8 @@ Variables
 
    variable '<name>' has an invalid default: <reason>
 
+   variable '<name>' has an invalid type: <reason>
+
    metric '<metric>' uses variable '<name>' in its window frame; a variable can't be used in a window frame bound
 
    semantic view '<view>': variable '<name>' has type <type>; a variable can't be a list, array, STRUCT, MAP, UNION, VARIANT or JSON
@@ -383,6 +385,7 @@ Variables
 - Two variables have the same name, compared the way DuckDB compares identifiers (case-insensitively, quoted or not), so ``k`` and ``K`` collide. Rename one.
 - A variable has the name of a fact, dimension or metric (``<kind>`` says which). Rename the variable.
 - The default is not one expression a query can evaluate. ``<reason>`` says why: it is empty, holds a ``;``, holds a subquery, or holds a prepared-statement parameter. Write a single expression. To supply a value at run time, set the variable in the query instead (see :ref:`ref-sv-variables`).
+- The type is not one type. ``<reason>`` says why: its brackets do not nest, or it holds a ``;``, a subquery or a prepared-statement parameter. The type is written into a cast wherever the variable is read, so it can't carry more SQL. Write a single DuckDB type, such as ``DECIMAL(10, 2)``.
 - A window metric's frame bound (``ROWS BETWEEN n PRECEDING AND CURRENT ROW``) names a variable. Write the bound as a number.
 - The variable's type is nested or semi-structured, which Snowflake also refuses. Use a scalar type.
 - ``CREATE`` binds each variable on its own, and DuckDB could not bind this one. The rest of the message is DuckDB's error: usually the type does not exist (``Type with name NOT_A_TYPE does not exist``), or the default reads a column (``Referenced column "amount" was not found``), which a default cannot do. Use an existing type, and read columns in the member expressions instead.
@@ -982,6 +985,8 @@ Variables in a query
 
    Parser Error: a variable's value can't be a query
 
+   Binder Error: semantic_view: variable '<name>' is set to a <type>; a variable can't be a list, array, STRUCT, MAP, UNION, VARIANT or JSON
+
 **Cause and fix**, in the same order:
 
 - The view declares a :ref:`variable <ref-create-variables>` with no default, and the query does not set it. Every query of the view must set such a variable, even one that reads no member that uses it, as in Snowflake. Set it in the construct's ``VARIABLES`` or in ``variables := {...}``. A :ref:`standard-SQL query <howto-standard-sql>` cannot set variables, so query such a view with ``SEMANTIC_VIEW(...)`` instead, or give the variable a default.
@@ -990,6 +995,7 @@ Variables in a query
 - A clause follows ``VARIABLES`` in the construct. Move ``VARIABLES`` to the end, after ``WHERE``.
 - An item in ``VARIABLES`` is not an assignment. Write ``name = value`` or ``name => value``.
 - A value is a ``SEMANTIC_VIEW(...)`` query. A variable's value cannot be a query. A plain subquery as a value, such as ``(SELECT 'x')``, gets DuckDB's own ``Table function cannot contain subqueries``. Compute the value first, and pass it as a value or a prepared-statement parameter.
+- The value is nested or semi-structured, which a variable can't be, even one declared with no type. Pass a scalar value.
 
 
 .. _ref-err-expression-items:

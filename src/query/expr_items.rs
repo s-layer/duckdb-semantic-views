@@ -1006,7 +1006,7 @@ fn follows_an_operand(text: &str, at: usize) -> bool {
 /// parameter of a lambda it is inside. It is left as written, even when a
 /// member has its name. (A field of an expression's value and a named argument
 /// are not scanned as references at all: [`scan_references`].)
-fn is_local_name(text: &str, r: &IdentRef<'_>, lambdas: &[LambdaScope]) -> bool {
+pub(crate) fn is_local_name(text: &str, r: &IdentRef<'_>, lambdas: &[LambdaScope]) -> bool {
     word_before(text, r.start).eq_ignore_ascii_case("collate") || is_lambda_param(r, lambdas)
 }
 
@@ -1014,7 +1014,7 @@ fn is_local_name(text: &str, r: &IdentRef<'_>, lambdas: &[LambdaScope]) -> bool 
 /// name ([`is_local_name`]), is not a column reference: a number, or a keyword
 /// or another word of the expression grammar where the grammar reads it as
 /// one.
-fn is_not_a_column(text: &str, r: &IdentRef<'_>) -> bool {
+pub(crate) fn is_not_a_column(text: &str, r: &IdentRef<'_>) -> bool {
     if r.raw.as_bytes()[0].is_ascii_digit() {
         // `#3` is the third column of the query's tables.
         return !text[..r.start].ends_with('#');

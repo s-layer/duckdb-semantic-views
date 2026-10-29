@@ -1716,8 +1716,27 @@ static std::vector<uint8_t> sv_read_variables(TableFunctionBindInput &input, con
     vector<Value> names;
     auto &children = StructValue::GetChildren(it->second);
     for (idx_t i = 0; i < children.size(); i++) {
-        names.emplace_back(StructType::GetChildName(type, i));
-        params.push_back(children[i]);
+        // As CREATE refuses for a declared type (`variables::unsupported_type`):
+        // a variable with no type or default would otherwise take any value.
+        auto &child_type = StructType::GetChildType(type, i);
+        switch (child_type.id()) {
+        case LogicalTypeId::LIST:
+        case LogicalTypeId::ARRAY:
+        case LogicalTypeId::STRUCT:
+        case LogicalTypeId::MAP:
+        case LogicalTypeId::UNION:
+        case LogicalTypeId::VARIANT:
+            break;
+        default:
+            if (!child_type.IsJSONType()) {
+                names.emplace_back(StructType::GetChildName(type, i));
+                params.push_back(children[i]);
+                continue;
+            }
+        }
+        throw BinderException(std::string(fn_name) + ": variable '" + StructType::GetChildName(type, i) +
+                              "' is set to a " + child_type.ToString() +
+                              "; a variable can't be a list, array, STRUCT, MAP, UNION, VARIANT or JSON");
     }
     return sv_serialise_string_list(Value::LIST(LogicalType::VARCHAR, std::move(names)), "variables");
 }

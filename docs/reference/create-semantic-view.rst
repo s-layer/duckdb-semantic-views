@@ -534,7 +534,8 @@ An unqualified name is the variable, and a qualified name is the column. With a 
 **Validation rules:**
 
 - A variable cannot have the name of a fact, dimension or metric, and two variables cannot share a name.
-- A variable cannot be a list, an array, a ``STRUCT``, ``MAP``, ``UNION``, ``VARIANT`` or ``JSON``. Snowflake likewise refuses ``VARIANT``, ``OBJECT`` and ``ARRAY``.
+- A variable cannot be a list, an array, a ``STRUCT``, ``MAP``, ``UNION``, ``VARIANT`` or ``JSON``. Snowflake likewise refuses ``VARIANT``, ``OBJECT`` and ``ARRAY``. A query can't set a variable to such a value either, even one declared with no type.
+- A type is one type: its brackets must nest, and it cannot hold a subquery, a ``;`` or a prepared-statement parameter.
 - A default is one expression. It cannot hold a subquery, a ``;`` or a prepared-statement parameter.
 - ``CREATE`` binds each variable, as Snowflake checks it at ``CREATE``: the type must exist, and the default, cast to the type, must bind on its own, so it cannot read a column (``k INTEGER DEFAULT amount`` is refused).
 - A variable cannot be used in a window frame bound.
@@ -544,7 +545,7 @@ See :ref:`ref-err-variables` for the messages.
 
 **Introspection:**
 
-:ref:`DESCRIBE SEMANTIC VIEW <ref-describe-semantic-view>` lists each variable in ``VARIABLE`` rows, and :ref:`ref-get-ddl` and the :ref:`YAML form <ref-yaml-format-variable>` write the clause back. To report the type of a member that reads a variable, ``DESCRIBE`` and ``SHOW SEMANTIC DIMENSIONS`` / ``METRICS`` / ``FACTS`` take the variable as a ``NULL`` of its type (or as its default, when it has no type). So ``weighted_sales`` above is ``DOUBLE``, the type of ``SUM(amount * multiplier)`` with a ``DOUBLE`` multiplier.
+:ref:`DESCRIBE SEMANTIC VIEW <ref-describe-semantic-view>` lists each variable in ``VARIABLE`` rows, and :ref:`ref-get-ddl` and the :ref:`YAML form <ref-yaml-format-variable>` write the clause back. To report the type of a member that reads a variable, ``DESCRIBE`` and ``SHOW SEMANTIC DIMENSIONS`` / ``METRICS`` / ``FACTS`` take the variable as its default, as a query that leaves it unset sees it, or as a ``NULL`` of its type when it has no default. So ``weighted_sales`` above is ``DOUBLE``, the type of ``SUM(amount * multiplier)`` with a ``DOUBLE`` multiplier.
 
 
 .. _ref-create-facts:

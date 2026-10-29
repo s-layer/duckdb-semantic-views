@@ -297,12 +297,126 @@ fn a_materialization_over_a_variable_is_not_used() {
     assert_eq!(kept, vec!["plain"]);
 }
 
-/// A probe needs no value: each variable is a NULL of its type.
+/// A probe needs no value: each variable is its default, as `create_probe`
+/// binds it, or a NULL of its type when it has none. A default keeps a member
+/// whose function refuses a NULL constant (`quantile_cont`) bindable.
 #[test]
 fn a_probe_types_a_member_without_a_value() {
-    let def = crate::variables::for_probe(&sales_analysis());
+    let mut def = sales_analysis();
+    def.dimensions.push(Dimension {
+        name: "by_region".to_string(),
+        expr: "region = target_region".to_string(),
+        source_table: Some("sales".to_string()),
+        ..Default::default()
+    });
+    let def = crate::variables::for_probe(&def);
     let dim = &def.dimensions[1].expr;
-    assert!(dim.contains("CAST(NULL AS INTEGER)"), "{dim}");
+    assert!(dim.contains("(CAST((1000) AS INTEGER))"), "{dim}");
     let fact = &def.facts[0].expr;
-    assert!(fact.contains("CAST(NULL AS DOUBLE)"), "{fact}");
+    assert!(fact.contains("(CAST((1.0) AS DOUBLE))"), "{fact}");
+    let no_default = &def.dimensions[2].expr;
+    assert!(
+        no_default.contains("(CAST(NULL AS VARCHAR))"),
+        "{no_default}"
+    );
+}
+
+/// A derived metric reads a variable like any metric: CREATE's derived-metric
+/// check knows the variable's name, and the expansion takes the query's value.
+#[test]
+fn a_derived_metric_reads_a_variable() {
+    let mut def = sales_analysis();
+    def.metrics.push(Metric {
+        name: "scaled".to_string(),
+        expr: "total_sales * multiplier".to_string(),
+        ..Default::default()
+    });
+    crate::graph::validate_derived_metrics(&def).expect("CREATE accepts the derived metric");
+    let rows = run(
+        &def,
+        &[("target_region", "''"), ("multiplier", "3")],
+        &["region"],
+        &["scaled"],
+        None,
+    )
+    .unwrap();
+    assert_eq!(
+        rows,
+        vec![
+            vec!["Text(\"East\")", "Double(10500.0)"],
+            vec!["Text(\"West\")", "Double(10500.0)"],
+        ]
+    );
+}
+
+/// The variables `x` and `last`, bound as a query that sets neither.
+fn bound_x_and_last() -> crate::variables::Bound {
+    let mut def = sales_analysis();
+    def.variables.push(var("x", Some("INTEGER"), Some("1")));
+    def.variables.push(var("last", Some("INTEGER"), Some("2")));
+    bind(
+        "v",
+        def,
+        Values::Query {
+            names: &["target_region".to_string()],
+            first_slot: 1,
+        },
+    )
+    .unwrap()
+}
+
+/// A lambda's parameter is not the variable of the same name.
+#[test]
+fn a_lambda_parameter_is_not_the_variable() {
+    let out = bound_x_and_last().apply("len(list_filter([1, 2], lambda x: x > 1)) + x");
+    assert_eq!(
+        out,
+        "len(list_filter([1, 2], lambda x: x > 1)) + (CAST((1) AS INTEGER))"
+    );
+}
+
+/// A keyword is not the variable of the same name.
+#[test]
+fn a_keyword_is_not_the_variable() {
+    let out = bound_x_and_last().apply("first(region ORDER BY region NULLS LAST) || last");
+    assert_eq!(
+        out,
+        "first(region ORDER BY region NULLS LAST) || (CAST((2) AS INTEGER))"
+    );
+}
+
+/// A quote inside a comment does not hide the names after it.
+#[test]
+fn a_comment_does_not_hide_a_variable() {
+    let out = bound_x_and_last().apply("-- don't\nregion > x");
+    assert!(out.ends_with("\nregion > (CAST((1) AS INTEGER))"), "{out}");
+}
+
+/// A variable's type is one type: it can't close the cast it is written into
+/// and carry a subquery past the rule defaults follow (the YAML form takes
+/// the type as written).
+#[test]
+fn a_type_is_one_type() {
+    let mut failures = Vec::new();
+    for (t, want) in [
+        (
+            "INTEGER) + (SELECT max(x) FROM other",
+            "its brackets do not nest",
+        ),
+        ("INTEGER) + (1", "its brackets do not nest"),
+        ("DECIMAL(10, 2) + (SELECT 1)", "holds a subquery"),
+        ("INTEGER; DROP TABLE t", "holds a ';'"),
+    ] {
+        let mut def = sales_analysis();
+        def.variables.push(var("k", Some(t), Some("1")));
+        match crate::variables::validate(&def) {
+            Err(e) if e.contains("variable 'k' has an invalid type") && e.contains(want) => {}
+            other => failures.push(format!("{t}: {other:?}")),
+        }
+    }
+    assert!(failures.is_empty(), "{failures:#?}");
+    let mut def = sales_analysis();
+    def.variables
+        .push(var("k", Some("DECIMAL(10, 2)"), Some("1")));
+    crate::variables::validate(&def).expect("a type with arguments");
 }

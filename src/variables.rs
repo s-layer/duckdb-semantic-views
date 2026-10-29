@@ -88,6 +88,12 @@ pub fn validate_parts(
         if v.data_type.as_deref().is_some_and(|t| t.trim().is_empty()) {
             return Err(format!("variable '{}' has an empty type", v.name));
         }
+        if let Some(reason) = v.data_type.as_deref().and_then(type_error) {
+            return Err(format!(
+                "variable '{}' has an invalid type: {reason}",
+                v.name
+            ));
+        }
         if let Some(default) = &v.default {
             if let Some(reason) = default_error(default) {
                 return Err(format!(
@@ -145,6 +151,46 @@ fn default_error(default: &str) -> Option<String> {
     None
 }
 
+/// Why `data_type` cannot be a variable's type, if it cannot: it is written
+/// into `CAST((...) AS <type>)` wherever the variable is read, so it must be
+/// one type, not text that closes the cast and carries more SQL past the
+/// rules a default follows.
+fn type_error(data_type: &str) -> Option<String> {
+    if crate::expr_tokens::has_statement_separator(data_type) {
+        return Some("it holds a ';'".to_string());
+    }
+    if !brackets_nest(data_type) {
+        return Some("its brackets do not nest".to_string());
+    }
+    if !crate::expr_tokens::subquery_spans(data_type).is_empty() {
+        return Some("it holds a subquery".to_string());
+    }
+    if let Some((_, p)) = crate::expr_tokens::find_parameters(data_type).first() {
+        return Some(format!("it holds the prepared statement parameter {p}"));
+    }
+    None
+}
+
+/// Whether the brackets of `text`, outside its quotes and comments, nest.
+fn brackets_nest(text: &str) -> bool {
+    let text = crate::util::blank_sql_comments(text);
+    let mut depth = 0usize;
+    let mut quote: Option<u8> = None;
+    for b in text.bytes() {
+        match (quote, b) {
+            (Some(q), _) if b == q => quote = None,
+            (None, b'\'' | b'"') => quote = Some(b),
+            (None, b'(' | b'[') => depth += 1,
+            (None, b')' | b']') => match depth.checked_sub(1) {
+                Some(d) => depth = d,
+                None => return false,
+            },
+            _ => {}
+        }
+    }
+    depth == 0 && quote.is_none()
+}
+
 /// One `VARIABLES` entry as `GET_DDL` writes it:
 /// `name [type] [DEFAULT expr] [COMMENT '...']`.
 #[must_use]
@@ -176,8 +222,8 @@ pub enum Values<'a> {
         first_slot: usize,
     },
     /// A probe of the members' types (CREATE, SHOW, DESCRIBE): each variable
-    /// is a NULL of its type, or its default when it has no type, so no
-    /// value is needed.
+    /// is its default, as a query that leaves it unset sees it, or a NULL of
+    /// its type when it has none, so no value is needed.
     Probe,
 }
 
@@ -215,12 +261,22 @@ fn apply(expr: &str, text: &HashMap<String, String>) -> String {
     if text.is_empty() {
         return expr.to_string();
     }
+    // The scanner reads comment-blanked text: a quote inside a comment would
+    // otherwise open a string and hide the names after it.
+    let expr = crate::util::blank_sql_comments(expr);
     let map: HashMap<String, &str> = text.iter().map(|(k, v)| (k.clone(), v.as_str())).collect();
-    let refs: Vec<_> = crate::expr_tokens::scan_references(expr)
+    // A lambda's parameter and a word the grammar reads as a keyword (`NULLS
+    // LAST`) are not the variable of the same name.
+    let lambdas = crate::query::expr_items::lambda_scopes(&expr);
+    let refs: Vec<_> = crate::expr_tokens::scan_references(&expr)
         .into_iter()
-        .filter(crate::expr_tokens::IdentRef::is_bare)
+        .filter(|r| {
+            r.is_bare()
+                && !crate::query::expr_items::is_local_name(&expr, r, &lambdas)
+                && !crate::query::expr_items::is_not_a_column(&expr, r)
+        })
         .collect();
-    crate::expr_tokens::splice_references(expr, refs, &map)
+    crate::expr_tokens::splice_references(&expr, refs, &map)
 }
 
 /// `def` with each variable written into the member expressions that use it,
@@ -271,8 +327,8 @@ pub fn bind(
             continue;
         }
         let value = match (values, &v.default, &v.data_type) {
-            (Values::Probe, _, Some(t)) => format!("(CAST(NULL AS {t}))"),
             (_, Some(d), t) => typed(d, t.as_deref()),
+            (Values::Probe, None, Some(t)) => format!("(CAST(NULL AS {t}))"),
             (Values::Probe, None, None) => "(NULL)".to_string(),
             (Values::Query { .. }, None, _) => {
                 return Err(format!(

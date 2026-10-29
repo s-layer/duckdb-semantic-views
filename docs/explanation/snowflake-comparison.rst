@@ -369,7 +369,7 @@ is always the type a query returns for that member:
   are typed as ``semantic_view()`` reads them there: the command runs in your
   session and transaction.
 - **PRIVATE members** are typed too, though they cannot be queried directly.
-- **Members that read a variable** are typed with the variable taken as a ``NULL`` of its type, or as its default when it has no type, so no value is needed. ``SUM(amount * multiplier)`` with a ``DOUBLE`` multiplier is ``DOUBLE``. See :ref:`ref-create-variables`.
+- **Members that read a variable** are typed with the variable taken as its default, or as a ``NULL`` of its type when it has no default, so no value is needed. ``SUM(amount * multiplier)`` with a ``DOUBLE`` multiplier is ``DOUBLE``. See :ref:`ref-create-variables`.
 - **Role-played members** -- on a table that several relationships point at -- are
   typed too, although querying one needs a metric whose ``USING`` names the role. The
   type is the same whichever role is used.

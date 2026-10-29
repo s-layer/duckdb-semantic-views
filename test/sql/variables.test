@@ -115,6 +115,58 @@ EXECUTE var_p('East', 0.5);
 ----
 1750.0
 
+# A derived metric reads a variable like any metric.
+
+statement ok
+CREATE SEMANTIC VIEW var_sv_derived
+  TABLES (sales AS var_sales PRIMARY KEY (sale_id))
+  VARIABLES (multiplier DOUBLE DEFAULT 1.0)
+  DIMENSIONS (sales.region AS region)
+  METRICS (sales.total_sales AS SUM(amount), scaled AS total_sales * multiplier);
+
+query TR
+SELECT * FROM SEMANTIC_VIEW(var_sv_derived DIMENSIONS region METRICS scaled VARIABLES multiplier = 3)
+ORDER BY ALL;
+----
+East	10500.0
+West	10500.0
+
+# CREATE types a member with each variable's default, as a query that leaves
+# it unset sees it, so a function that refuses a NULL constant still binds.
+
+statement ok
+CREATE SEMANTIC VIEW var_sv_quantile
+  TABLES (sales AS var_sales PRIMARY KEY (sale_id))
+  VARIABLES (p DOUBLE DEFAULT 0.5)
+  METRICS (sales.q AS quantile_cont(amount, p));
+
+query RR
+SELECT * FROM SEMANTIC_VIEW(var_sv_quantile METRICS q), SEMANTIC_VIEW(var_sv_quantile METRICS q VARIABLES p = 1);
+----
+1750.0	3000.0
+
+# A lambda's parameter is not the variable of the same name, and a quote in a
+# comment does not hide a variable after it.
+
+statement ok
+CREATE SEMANTIC VIEW var_sv_lambda
+  TABLES (sales AS var_sales PRIMARY KEY (sale_id))
+  VARIABLES (x INTEGER DEFAULT 2000)
+  DIMENSIONS (sales.region AS region)
+  METRICS (sales.n AS SUM(len(list_filter([amount], lambda x: x > 0))), sales.big AS COUNT(*) FILTER (WHERE amount > x));
+
+query TII
+SELECT * FROM SEMANTIC_VIEW(var_sv_lambda DIMENSIONS region METRICS n, big) ORDER BY ALL;
+----
+East	2	1
+West	2	1
+
+query I
+SELECT * FROM semantic_view('var_sv_lambda', metrics := ['n'],
+  where_clause := '-- don''t' || chr(10) || 'amount > x', variables := {'x': 2600});
+----
+1
+
 # --- what a query must and can't set ---------------------------------------------
 
 # A variable with no default must be set, even when no member the query asks
@@ -139,6 +191,30 @@ statement error
 SELECT * FROM semantic_view('var_sv', metrics := ['total_sales'], variables := row(1));
 ----
 variables must be a struct of values by name
+
+# A value can't be nested, even for a variable with no type to cast it to.
+
+statement ok
+CREATE SEMANTIC VIEW var_sv_untyped
+  TABLES (sales AS var_sales PRIMARY KEY (sale_id))
+  VARIABLES (v)
+  DIMENSIONS (sales.region AS region)
+  METRICS (sales.n AS COUNT(*) FILTER (WHERE amount > v));
+
+statement error
+SELECT * FROM semantic_view('var_sv_untyped', metrics := ['n'], variables := {'v': [1, 2]});
+----
+variable 'v' is set to a INTEGER[]; a variable can't be a list, array, STRUCT, MAP, UNION, VARIANT or JSON
+
+statement error
+SELECT * FROM SEMANTIC_VIEW(var_sv_untyped METRICS n VARIABLES v = {'a': 1});
+----
+variable 'v' is set to a STRUCT(a INTEGER)
+
+query I
+SELECT * FROM SEMANTIC_VIEW(var_sv_untyped METRICS n VARIABLES v = 999);
+----
+3
 
 statement error
 SELECT * FROM SEMANTIC_VIEW(var_sv METRICS total_sales VARIABLES target_region = '' WHERE region = 'x');
@@ -368,6 +444,27 @@ metrics:
 $$;
 ----
 variable 'multiplier' holds a SQL comment marker, which CREATE would drop
+
+# A type is one type: it can't close the cast it is written into.
+
+statement error
+CREATE SEMANTIC VIEW var_bad FROM YAML $$
+tables:
+- alias: sales
+  table: var_sales
+  pk_columns: [sale_id]
+variables:
+- name: k
+  data_type: INTEGER) + (SELECT max(amount) FROM var_sales
+  default: '1'
+dimensions: []
+metrics:
+- name: n
+  expr: SUM(amount * k)
+  source_table: sales
+$$;
+----
+variable 'k' has an invalid type: its brackets do not nest
 
 # --- what CREATE refuses ---------------------------------------------------------
 
