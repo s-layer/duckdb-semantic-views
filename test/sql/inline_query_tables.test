@@ -104,8 +104,9 @@ SELECT contains(READ_YAML_FROM_SEMANTIC_VIEW('iq_sv'), 'definition: SELECT * FRO
 ----
 true
 
-# The YAML form keeps a comment in the query, so a trailing line comment must
-# not swallow the parenthesis the expansion closes it with.
+# A `|` block scalar ends in a line break, which the YAML form trims, as the DDL
+# parser trims the query between its parentheses: the stored query is the one
+# GET_DDL -> CREATE stores again.
 
 statement ok
 CREATE SEMANTIC VIEW iq_sv_yaml FROM YAML $$
@@ -116,7 +117,7 @@ tables:
 - alias: paid
   definition: |
     SELECT * FROM iq_orders
-    WHERE amount > 0 -- refunds are left out
+    WHERE amount > 0
   pk_columns: [id]
 joins:
 - name: o_paid
@@ -134,6 +135,12 @@ query I
 SELECT * FROM SEMANTIC_VIEW(iq_sv_yaml METRICS paid.paid_revenue);
 ----
 24
+
+query I
+SELECT property_value = 'SELECT * FROM iq_orders' || chr(10) || 'WHERE amount > 0'
+FROM (DESCRIBE SEMANTIC VIEW iq_sv_yaml) WHERE object_name = 'paid' AND property = 'DEFINITION';
+----
+true
 
 # --- name resolution -------------------------------------------------------------
 
@@ -205,6 +212,28 @@ SELECT * FROM SEMANTIC_VIEW(iq_ltv DIMENSIONS ltv.tier METRICS c.customers) ORDE
 high	1
 low	3
 
+# --- a query that reads its own view ----------------------------------------------
+
+# CREATE binds the query against the view it replaces, so a view whose query
+# reads the view itself is stored. Querying it then recurses, and DuckDB's
+# binder stops the recursion with an error: no crash (TECH-DEBT #62, QRY-1).
+
+statement ok
+CREATE SEMANTIC VIEW iq_self TABLES (o AS iq_orders PRIMARY KEY (id)) METRICS (o.m AS SUM(o.amount));
+
+statement ok
+CREATE OR REPLACE SEMANTIC VIEW iq_self
+  TABLES (t AS (SELECT 1 AS id, m FROM semantic_view('iq_self', metrics := ['m'])) PRIMARY KEY (id))
+  METRICS (t.m AS SUM(t.m));
+
+statement error
+SELECT * FROM semantic_view('iq_self', metrics := ['m']);
+----
+Max expression depth limit
+
+statement ok
+DROP SEMANTIC VIEW iq_self;
+
 # --- refusals --------------------------------------------------------------------
 
 # The alias is required.
@@ -274,3 +303,22 @@ metrics:
 $$;
 ----
 table 't' has both a table name and a definition; give one
+
+# A comment would not survive GET_DDL -> CREATE, which blanks comments before
+# the query is parsed.
+
+statement error
+CREATE SEMANTIC VIEW iq_bad FROM YAML $$
+tables:
+- alias: t
+  definition: |
+    SELECT 1 AS id -- a note
+  pk_columns: [id]
+dimensions: []
+metrics:
+- name: n
+  expr: COUNT(*)
+  source_table: t
+$$;
+----
+table 't' has an invalid inline query: it holds a SQL comment

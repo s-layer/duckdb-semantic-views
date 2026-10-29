@@ -241,8 +241,10 @@ fn an_aggregating_inline_query_table_is_a_dimension_source() {
     );
 }
 
-/// The query goes on lines of its own, so a trailing line comment in it (the
-/// YAML form keeps comments) cannot swallow the closing parenthesis.
+/// Neither CREATE path stores a comment in a query (the DDL front door blanks
+/// them and the YAML form refuses them), but the expansion does not lean on
+/// that: the query goes on lines of its own, so a trailing line comment could
+/// not swallow the closing parenthesis.
 #[test]
 fn a_trailing_line_comment_in_the_query_stays_inside_it() {
     let def = paid_orders_def("SELECT * FROM orders WHERE amount > 0 -- refunds are left out");

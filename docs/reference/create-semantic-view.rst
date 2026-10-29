@@ -399,7 +399,7 @@ Members on the table read the query's output columns (``customer_info.c_first_na
 - Table names in the query resolve as they would in a view body: in the schema the view was created in, whatever schema the querying session is in, and never as a CTE of the querying statement.
 - The query is one query. It cannot hold a ``;`` or a prepared-statement parameter (``$1``, ``?``).
 - ``DESCRIBE SEMANTIC VIEW`` shows the query in a ``DEFINITION`` row in place of the ``BASE_TABLE_*`` rows, and names the table by its alias. ``GET_DDL`` writes the query back in its parentheses. In YAML the table has ``definition:`` in place of ``table:`` (see :ref:`ref-yaml-format`).
-- In the DDL form, comments in the query are not kept: like the rest of the ``CREATE`` text, they are blanked before the query is stored. The YAML form keeps them.
+- Comments in the query are not kept. In the DDL form they are blanked before the query is stored, like the rest of the ``CREATE`` text. The YAML form refuses a ``definition`` with a comment in it, and stores the query without the line break a ``|`` block ends in.
 
 
 .. _ref-create-relationships:

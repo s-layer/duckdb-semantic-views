@@ -288,17 +288,6 @@ fn emit_entry_initial_name(name: &str, entry_initial: bool) -> String {
     emit_alias(name)
 }
 
-/// An inline-query table's query in its parentheses (Phase 6.4). A query with
-/// a comment in it goes on lines of its own, so a trailing `--` comment cannot
-/// swallow the `)`.
-fn emit_inline_query(query: &str) -> String {
-    if crate::util::blank_sql_comments(query) == query {
-        format!("({query})")
-    } else {
-        format!("(\n{query}\n    )")
-    }
-}
-
 /// Emit TABLES clause entries.
 fn emit_tables(out: &mut String, def: &SemanticViewDefinition) {
     out.push_str("TABLES (\n");
@@ -307,7 +296,13 @@ fn emit_tables(out: &mut String, def: &SemanticViewDefinition) {
         out.push_str(&emit_alias(&table.alias));
         out.push_str(" AS ");
         match &table.definition {
-            Some(query) => out.push_str(&emit_inline_query(query)),
+            // An inline-query table (Phase 6.4). The query holds no comment
+            // (`validate_ddl_representable`), so it is written as stored.
+            Some(query) => {
+                out.push('(');
+                out.push_str(query);
+                out.push(')');
+            }
             None => out.push_str(&emit_table(&table.table)),
         }
         if !table.pk_columns.is_empty() {
@@ -1203,7 +1198,7 @@ mod tests {
         use crate::body_parser::parse_keyword_body;
         for query in [
             "SELECT * FROM customer JOIN addr ON customer.id = addr.cid",
-            "SELECT 1 AS id -- a trailing comment",
+            "SELECT 1 AS id\nWHERE true",
         ] {
             let mut def = minimal_def();
             def.tables.push(TableRef {
@@ -1214,17 +1209,10 @@ mod tests {
                 ..Default::default()
             });
             let ddl = render_create_ddl("rt", &def).unwrap();
-            if query.contains("--") {
-                assert!(
-                    ddl.contains(&format!("ci AS (\n{query}\n    ) PRIMARY KEY (id)")),
-                    "{ddl}"
-                );
-            } else {
-                assert!(
-                    ddl.contains(&format!("ci AS ({query}) PRIMARY KEY (id)")),
-                    "{ddl}"
-                );
-            }
+            assert!(
+                ddl.contains(&format!("ci AS ({query}) PRIMARY KEY (id)")),
+                "{ddl}"
+            );
             let as_pos = ddl.find(" AS\n").unwrap();
             let body = format!("AS {}", &ddl[as_pos + 4..]);
             let kb = parse_keyword_body(&body, 0).expect("Round-trip parse should succeed");

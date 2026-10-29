@@ -341,9 +341,9 @@ Tables defined by a query
 
    table '<alias>' has both a table name and a definition; give one
 
-**Cause:** A :ref:`table defined by a query <ref-create-inline-query>` needs an alias, and its query must stay one query inside the parentheses every expansion reads it through. ``<reason>`` says what is wrong: the query is empty, a comment, string or quoted name in it is never closed, its brackets do not nest, it holds a ``;``, or it holds a prepared-statement parameter (``$1``, ``?``), which has no value inside the view's definition. The last two forms come from ``FROM YAML``, where the table has ``definition:``, and where a table cannot have both ``table:`` and ``definition:``.
+**Cause:** A :ref:`table defined by a query <ref-create-inline-query>` needs an alias, and its query must stay one query inside the parentheses every expansion reads it through. ``<reason>`` says what is wrong: the query is empty, a comment, string or quoted name in it is never closed, its brackets do not nest, it holds a ``;``, or it holds a prepared-statement parameter (``$1``, ``?``), which has no value inside the view's definition. The last two forms come from ``FROM YAML``, where the table has ``definition:``. There the query also cannot hold a comment, which ``CREATE`` from the view's ``GET_DDL`` would drop, and a table cannot have both ``table:`` and ``definition:``.
 
-**Fix:** Give the query an alias, and write it as one complete query. Move a parameter into the ``WHERE`` clause of a ``SEMANTIC_VIEW(...)`` query.
+**Fix:** Give the query an alias, and write it as one complete query. Remove a comment from a YAML ``definition``. Move a parameter into the ``WHERE`` clause of a ``SEMANTIC_VIEW(...)`` query.
 
 .. code-block:: sql
 

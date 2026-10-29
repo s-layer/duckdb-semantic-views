@@ -241,7 +241,7 @@ pub fn qualify_and_quote_table_ref(table: &str, def: &SemanticViewDefinition) ->
 /// What a `FROM` or `JOIN` reads for a `TABLES` entry: its physical table,
 /// qualified by [`qualify_and_quote_table_ref`], or the query of an
 /// inline-query table in parentheses (Phase 6.4). The query goes on lines of
-/// its own, so a trailing `--` comment in it cannot reach the `)`. Its table
+/// its own, so nothing at its end can reach the `)`. Its table
 /// names are left as written: the shim's `SvTablePinner` walks the subquery and
 /// resolves them in the stamped schema, as it does a member's subquery.
 #[must_use]

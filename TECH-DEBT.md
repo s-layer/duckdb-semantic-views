@@ -965,9 +965,9 @@ Areas where test coverage is reduced compared to ideal, with justification.
 ### 62. ❌ Query-path robustness: bind-time recursion and existence-check ordering (QRY-1/QRY-2) — OPEN
 
 - **Origin:** code review 2026-08-06 (QRY-1/QRY-2), re-confirmed unfixed 2026-08-08.
-- **QRY-1:** the bind-time `LIMIT 0` probe (`src/query/table_function.rs:243-256`) runs on a fresh connection per level (`cpp/src/shim.cpp:2759,2834`), so a SQL view that has been replaced to select from a semantic view that reads it back recurses at bind time with no depth counter. Constructible, and the failure mode is stack exhaustion rather than a diagnostic. Finishing it means threading a depth/visited-set through the bind context, or refusing to re-enter the bind path re-entrantly.
+- **QRY-1 — RESOLVED by TECH-DEBT #42:** the bind-time `LIMIT 0` probe ran on a fresh connection per level, so a SQL view replaced to select from a semantic view that reads it back recursed at bind time with no depth counter, to stack exhaustion. Since #42 the expansion is bound inside the caller's query, with no probe, so DuckDB's binder sees the whole chain: that shape now fails with DuckDB's "infinite recursion detected" error for the SQL view, and an inline-query table that reads its own view (Phase 6.4, `CREATE OR REPLACE` binds it against the view it replaces) fails with its `max_expression_depth` error (checked 2026-10-29; the second is pinned in `test/sql/inline_query_tables.test`).
 - **QRY-2:** `EmptyRequest` is checked before the view is looked up (`table_function.rs:170-172`, `explain.rs:167-171`), so `semantic_view('does_not_exist')` reports the empty-request error rather than the missing view — the less useful of the two diagnostics. Finishing it is a reordering plus a test.
-- **Coverage:** none for either.
+- **Coverage:** QRY-1's inline-query shape, in `test/sql/inline_query_tables.test`; none for QRY-2.
 
 ### 63. ❌ FFI/wire defence-in-depth residues (FF-12/FF-13/FF-14) — OPEN
 

@@ -993,8 +993,19 @@ impl SemanticViewDefinition {
     /// Returns an error if the YAML is syntactically invalid or missing
     /// required fields. The `name` parameter appears in the error message.
     pub fn from_yaml(name: &str, yaml: &str) -> Result<Self, String> {
-        let def: Self = yaml_serde::from_str(yaml)
+        let mut def: Self = yaml_serde::from_str(yaml)
             .map_err(|e| format!("invalid YAML definition for semantic view '{name}': {e}"))?;
+        // An inline query is usually a `|` block scalar, which ends in a line
+        // break. The DDL parser trims the query it reads between the
+        // parentheses, so the YAML form stores it trimmed as well.
+        for t in &mut def.tables {
+            if let Some(query) = &mut t.definition {
+                let trimmed = query.trim();
+                if trimmed.len() != query.len() {
+                    *query = trimmed.to_string();
+                }
+            }
+        }
         Ok(def)
     }
 
@@ -1144,7 +1155,23 @@ fn validate_yaml_tables(def: &SemanticViewDefinition) -> Result<(), String> {
                 ));
             }
             (Some(query), true) => {
-                if let Some(reason) = crate::body_parser::inline_query_error(query) {
+                // Beyond the parser's own checks, the query must come back
+                // from GET_DDL -> CREATE as the same text: the parser trims
+                // it, and the front door blanks comments before parsing.
+                let reason = crate::body_parser::inline_query_error(query).or_else(|| {
+                    if query.trim() != query {
+                        Some("it has surrounding whitespace".to_string())
+                    } else if crate::util::blank_sql_comments(query) != *query {
+                        Some(
+                            "it holds a SQL comment, which CREATE would drop from \
+                             the stored query"
+                                .to_string(),
+                        )
+                    } else {
+                        None
+                    }
+                });
+                if let Some(reason) = reason {
                     return Err(format!(
                         "table '{}' has an invalid inline query: {reason}",
                         t.alias
@@ -2031,6 +2058,57 @@ mod tests {
                 "{query}: {e}"
             );
         }
+    }
+
+    #[test]
+    fn yaml_inline_query_block_scalar_is_stored_trimmed() {
+        // A `|` block scalar ends in a line break. The DDL parser trims the
+        // query it reads between the parentheses, so the YAML form stores it
+        // trimmed too, or GET_DDL -> CREATE would store a different text.
+        let yaml = "tables:\n  - alias: o\n    definition: |\n      SELECT 1 AS id\n      \
+                    WHERE true\n\
+                    dimensions: []\n\
+                    metrics:\n  - name: total\n    expr: count(*)\n    source_table: o\n";
+        let def = SemanticViewDefinition::from_yaml_with_size_cap("v", yaml).unwrap();
+        assert_eq!(
+            def.tables[0].definition.as_deref(),
+            Some("SELECT 1 AS id\nWHERE true")
+        );
+    }
+
+    #[test]
+    fn yaml_inline_query_with_a_comment_is_rejected() {
+        // The DDL front door blanks comments before the query is parsed, so a
+        // comment kept by YAML would not survive GET_DDL -> CREATE.
+        let accepted: Vec<&str> = ["'SELECT 1 AS id -- note'", "'SELECT /* note */ 1 AS id'"]
+            .into_iter()
+            .filter(|query| {
+                let yaml = format!(
+                    "tables:\n  - alias: o\n    definition: {query}\n\
+                     dimensions: []\n\
+                     metrics:\n  - name: total\n    expr: count(*)\n    source_table: o\n"
+                );
+                !SemanticViewDefinition::from_yaml_with_size_cap("v", &yaml)
+                    .is_err_and(|e| e.contains("invalid inline query") && e.contains("comment"))
+            })
+            .collect();
+        assert!(accepted.is_empty(), "not refused: {accepted:?}");
+    }
+
+    #[test]
+    fn inline_query_with_surrounding_whitespace_is_not_representable() {
+        // A definition built in code skips the YAML load's trim; the DDL
+        // parser would trim it on the way back in.
+        let mut def = SemanticViewDefinition::from_yaml_with_size_cap(
+            "v",
+            "tables:\n  - alias: o\n    definition: SELECT 1 AS id\n\
+             dimensions: []\n\
+             metrics:\n  - name: total\n    expr: count(*)\n    source_table: o\n",
+        )
+        .unwrap();
+        def.tables[0].definition = Some("SELECT 1 AS id\n".to_string());
+        let e = validate_ddl_representable(&def).unwrap_err();
+        assert!(e.contains("surrounding whitespace"), "{e}");
     }
 
     #[test]
