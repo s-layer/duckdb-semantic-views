@@ -17,7 +17,7 @@
 //! `cargo test`.
 
 #[cfg(feature = "extension")]
-use super::RewriteAction;
+use super::{CreateMode, RewriteAction};
 #[cfg(feature = "extension")]
 use crate::catalog::writes::{
     create_target_schema_expr, current_database_guard_select, definitions_table_guard_select,
@@ -127,9 +127,7 @@ pub(crate) fn lower_action(action: RewriteAction) -> Result<String, ParseError> 
         // CREATE from an in-memory definition — hand the definition straight to
         // the shared emission path. AR-2: no JSON serialize → re-parse →
         // deserialize round-trip; the `SemanticViewDefinition` flows structurally.
-        RewriteAction::Create { name, def, mode } => {
-            emit_native_create_sql(&name, *def, mode.or_replace(), mode.if_not_exists())?
-        }
+        RewriteAction::Create { name, def, mode } => emit_native_create_sql(&name, *def, mode)?,
         // CREATE FROM YAML FILE — emit the INSERT that selects from the
         // `__sv_compute_create_from_yaml` helper TF (which reads the file at
         // execution). AR-2: no `\x01`-delimited sentinel string.
@@ -138,13 +136,7 @@ pub(crate) fn lower_action(action: RewriteAction) -> Result<String, ParseError> 
             name,
             comment,
             mode,
-        } => emit_native_create_from_yaml_file(
-            &file_path,
-            &name,
-            &comment,
-            mode.or_replace(),
-            mode.if_not_exists(),
-        )?,
+        } => emit_native_create_from_yaml_file(&file_path, &name, &comment, mode)?,
         // DROP / ALTER: pure-SQL race-guard + native DML on the caller's
         // connection. Names carried raw; `SqlLit::escape` at the boundary
         // produces the escaped literal the emission helpers embed (R-1: the
@@ -263,8 +255,7 @@ fn temp_tables_expr(definition: &str) -> String {
 fn emit_native_create_sql(
     view: &ViewRef,
     def: crate::model::SemanticViewDefinition,
-    or_replace: bool,
-    if_not_exists: bool,
+    mode: CreateMode,
 ) -> Result<String, ParseError> {
     // Defensive validation — `view` arrives already normalised (every part
     // case-folded) from validate_create_body via the `RewriteAction::Create` it
@@ -334,63 +325,21 @@ fn emit_native_create_sql(
     let helper_from = format!(
         "FROM __sv_check_create('{enriched_escaped}', '{}', {})",
         SqlLit::escape(name),
-        check_skip_args(&schema_target, !or_replace)
+        check_skip_args(&schema_target, mode.skips_if_present())
     );
 
     // The generated SQL runs on the caller's connection, so its EXISTS
-    // subqueries see in-flight INSERTs from the same transaction. Three
-    // shapes:
-    //   - OR REPLACE: straight INSERT OR REPLACE, no guard needed.
-    //   - IF NOT EXISTS: INSERT OR IGNORE absorbs same-snapshot duplicates
-    //     (the same-txn duplicate path, mirroring the SELECT WHERE 1=0
-    //     fast path on committed-state hits). It does *not* paper over
-    //     a cross-connection committer race: two transactions that each
-    //     see no row will both INSERT, and DuckDB's PK constraint raises
-    //     a write-write conflict on the second commit. That matches plain
-    //     CREATE concurrency semantics — see TECH-DEBT item 23.
-    //   - Plain CREATE: CASE+error() raises the friendly "already exists"
-    //     message before the INSERT can fire, replacing what would
-    //     otherwise be a generic PK constraint violation. Phase 65: the
-    //     parser-side `ctx.catalog.exists` pre-check above is the
-    //     committed-state fast path; the CASE inside the INSERT is the
-    //     same-transaction guard.
-    //
-    // All three write `(schema_name, name, definition)`; the conflict target
-    // is the `(schema_name, name)` primary key, so OR REPLACE / OR IGNORE act
-    // within the target schema only and a same-named view in another schema is
-    // left alone.
+    // subqueries see in-flight INSERTs from the same transaction (one shape
+    // per mode: `create_insert`).
     let occupied = row_predicate(&name_escaped, &schema_expr);
-    let sql = if or_replace {
-        format!(
-            "INSERT OR REPLACE INTO {DEFINITIONS_TABLE} (schema_name, name, definition) \
-             SELECT {schema_expr}, '{name_escaped}', {metadata_patched_definition} \
-             {helper_from} \
-             RETURNING name AS view_name"
-        )
-    } else if if_not_exists {
-        format!(
-            "INSERT OR IGNORE INTO {DEFINITIONS_TABLE} (schema_name, name, definition) \
-             SELECT {schema_expr}, '{name_escaped}', {metadata_patched_definition} \
-             {helper_from} \
-             RETURNING name AS view_name"
-        )
-    } else {
-        format!(
-            "INSERT INTO {DEFINITIONS_TABLE} (schema_name, name, definition) \
-             SELECT \
-               {schema_expr}, \
-               CASE WHEN EXISTS (SELECT 1 FROM {DEFINITIONS_TABLE} \
-                                 WHERE {occupied}) \
-                    THEN error('semantic view ''{name_escaped}'' already exists; \
-                                use CREATE OR REPLACE SEMANTIC VIEW to overwrite') \
-                    ELSE '{name_escaped}' \
-               END, \
-               {metadata_patched_definition} \
-             {helper_from} \
-             RETURNING name AS view_name"
-        )
-    };
-    Ok(sql)
+    Ok(create_insert(
+        mode,
+        &schema_expr,
+        &name_escaped,
+        &metadata_patched_definition,
+        &helper_from,
+        &occupied,
+    ))
 }
 
 /// Read the FROM YAML FILE sentinel produced by `rewrite_ddl_yaml_file_body`
@@ -413,12 +362,11 @@ fn emit_native_create_from_yaml_file(
     file_path: &str,
     view: &ViewRef,
     comment: &str,
-    or_replace: bool,
-    if_not_exists: bool,
+    mode: CreateMode,
 ) -> Result<String, ParseError> {
     // Phase 65.1 Plan 07 (IN-04 D-24): `kind` is not threaded into the helper
-    // TF — the outer INSERT shape (OR IGNORE / OR REPLACE / plain) already
-    // encodes the ON CONFLICT behaviour, chosen from `or_replace`/`if_not_exists`.
+    // TF — the outer INSERT shape (`create_insert`) already encodes the ON
+    // CONFLICT behaviour, chosen from `mode`.
 
     // Defensive validation of the name (matches emit_native_create_sql):
     // only the NAME slot is re-checked, and re-quoted first so the pass is a
@@ -464,32 +412,71 @@ fn emit_native_create_from_yaml_file(
     let helper_from = format!(
         "FROM __sv_compute_create_from_yaml('{path_escaped}', \
             '{name_escaped}', '{comment_escaped}', {})",
-        check_skip_args(&schema_target, !or_replace)
+        check_skip_args(&schema_target, mode.skips_if_present())
     );
 
-    // Three INSERT shapes mirror the inline CREATE path
-    // (emit_native_create_sql):
-    //   OR REPLACE     : INSERT OR REPLACE -- no friendly-error guard needed.
-    //   IF NOT EXISTS  : INSERT OR IGNORE absorbs same-snapshot duplicates.
-    //   Plain          : CASE+error guard inside SELECT raises the friendly
-    //                    "already exists" message before the INSERT can fire
-    //                    (Phase 60 race-guard pattern carried forward).
-    let sql = if or_replace {
-        format!(
+    // The INSERT shapes are the inline CREATE path's (`create_insert`).
+    Ok(create_insert(
+        mode,
+        &schema_expr,
+        &name_escaped,
+        &metadata_patched,
+        &helper_from,
+        &occupied,
+    ))
+}
+
+/// The INSERT a CREATE lowers to, one shape per mode. `definition` is the SQL
+/// for the definition to store, read `FROM` `helper_from`; `occupied` is the
+/// predicate of the row the view would take.
+///
+/// - OR REPLACE: straight INSERT OR REPLACE, no guard needed.
+/// - OR ALTER: INSERT OR REPLACE of the definition merged with the row it
+///   replaces, if any, by the `__sv_or_alter` scalar (`crate::or_alter`).
+/// - IF NOT EXISTS: INSERT OR IGNORE absorbs same-snapshot duplicates (the
+///   same-txn duplicate path, mirroring the SELECT WHERE 1=0 fast path on
+///   committed-state hits). It does *not* paper over a cross-connection
+///   committer race: two transactions that each see no row will both INSERT,
+///   and `DuckDB`'s PK constraint raises a write-write conflict on the second
+///   commit. That matches plain CREATE concurrency semantics — see TECH-DEBT
+///   item 23.
+/// - Plain: a CASE+error guard inside the SELECT raises the friendly "already
+///   exists" message before the INSERT can fire, replacing what would
+///   otherwise be a generic PK constraint violation.
+///
+/// Each writes `(schema_name, name, definition)`; the conflict target is the
+/// `(schema_name, name)` primary key, so OR REPLACE / OR IGNORE act within the
+/// target schema only and a same-named view in another schema is left alone.
+#[cfg(feature = "extension")]
+fn create_insert(
+    mode: CreateMode,
+    schema_expr: &str,
+    name_escaped: &SqlLit,
+    definition: &str,
+    helper_from: &str,
+    occupied: &str,
+) -> String {
+    match mode {
+        CreateMode::OrReplace => format!(
             "INSERT OR REPLACE INTO {DEFINITIONS_TABLE} (schema_name, name, definition) \
-             SELECT {schema_expr}, '{name_escaped}', {metadata_patched} \
+             SELECT {schema_expr}, '{name_escaped}', {definition} \
              {helper_from} \
              RETURNING name AS view_name"
-        )
-    } else if if_not_exists {
-        format!(
+        ),
+        CreateMode::OrAlter => format!(
+            "INSERT OR REPLACE INTO {DEFINITIONS_TABLE} (schema_name, name, definition) \
+             SELECT {schema_expr}, '{name_escaped}', \
+               __sv_or_alter({definition}, '{name_escaped}', {schema_expr}) \
+             {helper_from} \
+             RETURNING name AS view_name"
+        ),
+        CreateMode::IfNotExists => format!(
             "INSERT OR IGNORE INTO {DEFINITIONS_TABLE} (schema_name, name, definition) \
-             SELECT {schema_expr}, '{name_escaped}', {metadata_patched} \
+             SELECT {schema_expr}, '{name_escaped}', {definition} \
              {helper_from} \
              RETURNING name AS view_name"
-        )
-    } else {
-        format!(
+        ),
+        CreateMode::Create => format!(
             "INSERT INTO {DEFINITIONS_TABLE} (schema_name, name, definition) \
              SELECT \
                {schema_expr}, \
@@ -499,12 +486,11 @@ fn emit_native_create_from_yaml_file(
                                 use CREATE OR REPLACE SEMANTIC VIEW to overwrite') \
                     ELSE '{name_escaped}' \
                END, \
-               {metadata_patched} \
+               {definition} \
              {helper_from} \
              RETURNING name AS view_name"
-        )
-    };
-    Ok(sql)
+        ),
+    }
 }
 
 // SQL-string escaping is handled by the `SqlLit` newtype (`crate::sql_lit`),

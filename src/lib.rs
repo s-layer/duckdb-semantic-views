@@ -18,6 +18,7 @@ pub mod parse;
 // `query/mod.rs`, while `query::wire` — the pure wire-format/SQL-shape
 // helpers — compiles under default features so it is covered by `cargo test`
 // / clippy / coverage (TC-8).
+pub mod or_alter;
 pub mod query;
 pub mod render_ddl;
 pub mod render_yaml;
@@ -437,6 +438,8 @@ mod extension {
             sv_register_show_semantic_materializations_all
         ),
         ("get_ddl", sv_register_get_ddl),
+        // CREATE OR ALTER's merge with the view it alters (`or_alter`).
+        ("__sv_or_alter", sv_register_or_alter),
         (
             "read_yaml_from_semantic_view",
             sv_register_read_yaml_from_semantic_view

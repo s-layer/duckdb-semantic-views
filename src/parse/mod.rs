@@ -45,6 +45,7 @@ pub use rewrite::{plan_create, CreateMode, RewriteAction, ViewProperty};
 pub enum DdlKind {
     Create,
     CreateOrReplace,
+    CreateOrAlter,
     CreateIfNotExists,
     Drop,
     DropIfExists,

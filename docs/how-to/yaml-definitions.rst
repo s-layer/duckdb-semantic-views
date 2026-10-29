@@ -63,7 +63,7 @@ The YAML body is enclosed in ``$$`` dollar-quote delimiters. Tagged dollar-quoti
        source_table: o
    $yaml$;
 
-Both ``CREATE OR REPLACE`` and ``CREATE IF NOT EXISTS`` variants work with ``FROM YAML``:
+The ``CREATE OR REPLACE``, ``CREATE OR ALTER`` and ``CREATE IF NOT EXISTS`` variants all work with ``FROM YAML``:
 
 .. code-block:: duckdb-sql
 
@@ -71,9 +71,26 @@ Both ``CREATE OR REPLACE`` and ``CREATE IF NOT EXISTS`` variants work with ``FRO
    ...
    $$;
 
+   CREATE OR ALTER SEMANTIC VIEW order_metrics FROM YAML $$
+   ...
+   $$;
+
    CREATE SEMANTIC VIEW IF NOT EXISTS order_metrics FROM YAML $$
    ...
    $$;
+
+``CREATE OR ALTER`` suits a YAML file you keep in version control and load on every deploy: the view comes to match the file, and keeps its creation time, its tags and the materializations the change leaves valid. The YAML can't carry ``tags:`` then. See :ref:`ref-create-or-alter`.
+
+To check a definition without creating anything, pass it to ``verify_semantic_view_yaml``. It runs every check the ``CREATE`` would, including binding each member, and fails with the ``CREATE``'s error if one fails:
+
+.. code-block:: duckdb-sql
+
+   SELECT * FROM verify_semantic_view_yaml('order_metrics', $$
+   ...
+   $$);
+   -- YAML file is valid for creating a semantic view. No object has been created yet.
+
+See :ref:`verify_semantic_view_yaml <ref-create-verify-yaml>`.
 
 
 .. _howto-yaml-import-file:

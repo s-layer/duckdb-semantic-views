@@ -19,7 +19,7 @@ Syntax
 
 .. code-block:: sqlgrammar
 
-   CREATE [ OR REPLACE ] SEMANTIC VIEW [ IF NOT EXISTS ] <name>
+   CREATE [ OR REPLACE | OR ALTER ] SEMANTIC VIEW [ IF NOT EXISTS ] <name>
        [ COMMENT = '<text>' ]
    [ AS ]
    TABLES (
@@ -274,13 +274,52 @@ Syntax
 
 .. code-block:: sqlgrammar
 
-   CREATE [ OR REPLACE ] SEMANTIC VIEW [ IF NOT EXISTS ] <name>
+   CREATE [ OR REPLACE | OR ALTER ] SEMANTIC VIEW [ IF NOT EXISTS ] <name>
        FROM YAML $$ <yaml_content> $$
 
-   CREATE [ OR REPLACE ] SEMANTIC VIEW [ IF NOT EXISTS ] <name>
+   CREATE [ OR REPLACE | OR ALTER ] SEMANTIC VIEW [ IF NOT EXISTS ] <name>
        FROM YAML FILE '<file_path>'
 
 The ``FROM YAML`` variant accepts a YAML definition in a dollar-quoted string (``$$...$$`` or ``$tag$...$tag$``). The ``FROM YAML FILE`` variant reads the YAML definition from a file at the given path.
+
+.. _ref-create-verify-yaml:
+
+**Checking YAML without creating a view:**
+
+.. versionadded:: 0.18.0
+
+.. code-block:: sqlgrammar
+
+   SELECT * FROM verify_semantic_view_yaml( '<name>', '<yaml_content>' )
+
+``verify_semantic_view_yaml`` runs every check ``CREATE SEMANTIC VIEW <name> FROM YAML`` runs, including binding each member against its tables, and creates nothing. It is this extension's form of the ``verify_only`` argument of Snowflake's ``SYSTEM$CREATE_SEMANTIC_VIEW_FROM_YAML``, and on success returns one row with Snowflake's message:
+
+.. code-block:: duckdb-sql
+
+   SELECT * FROM verify_semantic_view_yaml('order_metrics', $$
+   tables:
+     - alias: o
+       table: orders
+       pk_columns: [id]
+   dimensions:
+     - name: region
+       expr: o.region
+       source_table: o
+   metrics:
+     - name: revenue
+       expr: SUM(o.amount)
+       source_table: o
+   $$);
+
+.. code-block:: text
+
+   ┌──────────────────────────────────────────────────────────────────────────────────┐
+   │                                      status                                      │
+   ├──────────────────────────────────────────────────────────────────────────────────┤
+   │ YAML file is valid for creating a semantic view. No object has been created yet. │
+   └──────────────────────────────────────────────────────────────────────────────────┘
+
+A definition the ``CREATE`` would refuse fails with the error the ``CREATE`` would raise. The name may be schema-qualified, and the schema must exist. Whether a view of that name already exists is not checked. Snowflake's other argument, ``create_or_alter``, is :ref:`CREATE OR ALTER SEMANTIC VIEW <ref-create-or-alter>` ``... FROM YAML``.
 
 
 .. _ref-create-variants:
@@ -297,7 +336,40 @@ Statement Variants
 ``CREATE SEMANTIC VIEW IF NOT EXISTS <name> [AS] TABLES ...``
    Creates a new semantic view only if no view with the same name exists. If a view with the name already exists, the statement succeeds silently without modifying it.
 
-All three variants work with both the keyword body (with or without ``AS``) and the ``FROM YAML`` / ``FROM YAML FILE`` body.
+``CREATE OR ALTER SEMANTIC VIEW <name> [AS] TABLES ...``
+   Creates the view if it does not exist. If it does, alters it in place to match the statement, keeping its creation time, its tags and the materializations the change leaves valid. See :ref:`ref-create-or-alter`.
+
+All four variants work with both the keyword body (with or without ``AS``) and the ``FROM YAML`` / ``FROM YAML FILE`` body.
+
+.. _ref-create-or-alter:
+
+CREATE OR ALTER
+---------------
+
+.. versionadded:: 0.18.0
+
+As in Snowflake, ``CREATE OR ALTER SEMANTIC VIEW`` makes an existing view match the statement. Run the same statement again and nothing changes, so a deployment script can hold the view's whole definition and run it every time.
+
+A clause or property the statement leaves out is unset. With no ``COMMENT``, the view loses its comment. A table, fact, dimension or metric the statement no longer lists is removed, and a renamed one is removed and added under its new name.
+
+What the statement can't state is kept:
+
+- **The creation time.** ``created_on`` in :ref:`SHOW SEMANTIC VIEWS <ref-show-semantic-views>` stays the original one.
+- **Tags.** The view's own tags, and the tags of each table, fact, dimension and metric the statement keeps by name, carry over. Change them with :ref:`ALTER SEMANTIC VIEW ... SET TAG <ref-alter-semantic-view>`, or give every tag anew with ``CREATE OR REPLACE``.
+- **Materializations**, when the statement has no ``MATERIALIZATIONS`` clause. A materialization is kept while the change leaves the query it answers the same, and dropped when it changes a member the materialization covers, or anything such a member reads (a fact, a table, a variable's default). A query never reads a table whose numbers the change made stale. A ``MATERIALIZATIONS`` clause in the statement replaces the view's materializations with the ones it lists.
+
+Snowflake's ``CREATE OR ALTER`` grammar has no ``IF NOT EXISTS``, ``COPY GRANTS`` or tags, so all three are refused here:
+
+.. code-block:: sql
+
+   CREATE OR ALTER SEMANTIC VIEW sales
+     TABLES (o AS orders PRIMARY KEY (id))
+     DIMENSIONS (o.region AS o.region WITH TAG (owner = 'ops'))
+     METRICS (o.revenue AS SUM(o.amount));
+   -- Parser Error: CREATE OR ALTER SEMANTIC VIEW can't set tags, as in Snowflake,
+   -- and dimension 'region' has one: an altered view keeps its existing tags. ...
+
+The statement's members are bound as ``CREATE OR REPLACE`` binds them, and a refused ``CREATE OR ALTER`` leaves the view as it was. A view in another schema is a different view: ``CREATE OR ALTER SEMANTIC VIEW staging.sales`` takes nothing from ``main.sales``.
 
 .. note::
 

@@ -96,6 +96,12 @@ Concept Mapping
    * - Retrieve DDL text
      - ``GET_DDL('SEMANTIC_VIEW', ...)`` or ``GET_DDL('SEMANTIC VIEW', ...)``
      - :ref:`GET_DDL <ref-get-ddl>`, with either spelling of the object type
+   * - Create or alter in place
+     - ``CREATE OR ALTER SEMANTIC VIEW``
+     - :ref:`CREATE OR ALTER SEMANTIC VIEW <ref-create-or-alter>`, keeping the creation time, tags and still-valid materializations
+   * - Check YAML without creating
+     - ``SYSTEM$CREATE_SEMANTIC_VIEW_FROM_YAML`` with ``verify_only`` set to ``TRUE``
+     - :ref:`verify_semantic_view_yaml() <ref-create-verify-yaml>`
    * - Alter a view
      - ``ALTER SEMANTIC VIEW``
      - :ref:`ALTER SEMANTIC VIEW <ref-alter-semantic-view>` (RENAME TO, SET and UNSET of COMMENT and MAX_STALENESS, SET TAG, UNSET TAG)
@@ -608,7 +614,7 @@ Snowflake ``CREATE SEMANTIC VIEW`` features that are commonly asked about, and w
      - Out of scope; DuckDB handles access control
    * - ``ASOF`` / temporal relationships
      - Not planned; standard equi-joins cover most use cases
-   * - ``CREATE OR ALTER``, ``LABELS`` values other than ``FILTER``, and the ``COPILOT`` clauses
+   * - ``LABELS`` values other than ``FILTER``, and the ``COPILOT`` clauses
      - Not planned; these are Snowflake-catalog or Cortex-specific and have no DuckDB equivalent
 
 

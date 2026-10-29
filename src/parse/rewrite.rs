@@ -65,6 +65,7 @@ fn read_function_name(kind: DdlKind) -> &'static str {
         DdlKind::ShowMaterializations => "show_semantic_materializations",
         DdlKind::Create
         | DdlKind::CreateOrReplace
+        | DdlKind::CreateOrAlter
         | DdlKind::CreateIfNotExists
         | DdlKind::Drop
         | DdlKind::DropIfExists
@@ -269,11 +270,14 @@ impl RewriteAction {
     }
 }
 
-/// CREATE conflict mode, mirroring the three `DdlKind` CREATE variants.
+/// CREATE conflict mode, mirroring the four `DdlKind` CREATE variants.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CreateMode {
     Create,
     OrReplace,
+    /// `CREATE OR ALTER` (Phase 6.6): replaces the definition in place,
+    /// keeping what the statement can't state (see `crate::or_alter`).
+    OrAlter,
     IfNotExists,
 }
 
@@ -282,19 +286,18 @@ impl CreateMode {
         match kind {
             DdlKind::Create => CreateMode::Create,
             DdlKind::CreateOrReplace => CreateMode::OrReplace,
+            DdlKind::CreateOrAlter => CreateMode::OrAlter,
             DdlKind::CreateIfNotExists => CreateMode::IfNotExists,
             _ => unreachable!("CreateMode::from_kind called with non-CREATE kind"),
         }
     }
     // Consumed by `lower_action` (extension-only) when choosing the
     // INSERT shape; unused under `cargo test`'s bundled build.
+    /// Whether a view already in the target schema skips the CREATE helper's
+    /// member check: it does unless the statement writes over that view.
     #[cfg_attr(not(feature = "extension"), allow(dead_code))]
-    pub(crate) fn or_replace(self) -> bool {
-        matches!(self, CreateMode::OrReplace)
-    }
-    #[cfg_attr(not(feature = "extension"), allow(dead_code))]
-    pub(crate) fn if_not_exists(self) -> bool {
-        matches!(self, CreateMode::IfNotExists)
+    pub(crate) fn skips_if_present(self) -> bool {
+        matches!(self, CreateMode::Create | CreateMode::IfNotExists)
     }
 }
 
@@ -1090,6 +1093,101 @@ $$"#;
                 ..
             }
         ));
+    }
+
+    // ===================================================================
+    // Phase 6.6: CREATE OR ALTER, and what Snowflake's grammar refuses there
+    // ===================================================================
+
+    const OR_ALTER_BODY: &str =
+        "TABLES (o AS orders PRIMARY KEY (id)) DIMENSIONS (o.region AS o.region)";
+
+    #[test]
+    fn create_or_alter_plans_in_or_alter_mode_for_every_body() {
+        let yaml = "$$\ntables:\n  - alias: o\n    table: orders\n    pk_columns: [id]\n\
+                    dimensions:\n  - name: region\n    expr: o.region\n    source_table: o\n\
+                    metrics: []\n$$";
+        for sql in [
+            format!("CREATE OR ALTER SEMANTIC VIEW v AS {OR_ALTER_BODY}"),
+            format!("create or alter semantic view s.v {OR_ALTER_BODY} COMMENT = 'c'"),
+            format!("CREATE OR ALTER SEMANTIC VIEW v FROM YAML {yaml}"),
+        ] {
+            let action = plan(&sql);
+            assert!(
+                matches!(
+                    action,
+                    RewriteAction::Create {
+                        mode: CreateMode::OrAlter,
+                        ..
+                    }
+                ),
+                "{sql}: {action:?}"
+            );
+        }
+        let action = plan("CREATE OR ALTER SEMANTIC VIEW v FROM YAML FILE '/tmp/v.yaml'");
+        assert!(
+            matches!(
+                action,
+                RewriteAction::CreateFromYamlFile {
+                    mode: CreateMode::OrAlter,
+                    ..
+                }
+            ),
+            "{action:?}"
+        );
+    }
+
+    fn or_alter_error(sql: &str) -> String {
+        plan_create(sql).expect_err(sql).message
+    }
+
+    #[test]
+    fn create_or_alter_refuses_if_not_exists() {
+        let e = or_alter_error(&format!(
+            "CREATE OR ALTER SEMANTIC VIEW IF NOT EXISTS v {OR_ALTER_BODY}"
+        ));
+        assert!(
+            e.starts_with("IF NOT EXISTS can't be used with CREATE OR ALTER"),
+            "{e}"
+        );
+    }
+
+    #[test]
+    fn create_or_alter_refuses_copy_grants() {
+        let e = or_alter_error(&format!(
+            "CREATE OR ALTER SEMANTIC VIEW v {OR_ALTER_BODY} COPY GRANTS"
+        ));
+        assert!(
+            e.starts_with("COPY GRANTS can't be used with CREATE OR ALTER"),
+            "{e}"
+        );
+        // Elsewhere it stays the no-op it was.
+        plan(&format!(
+            "CREATE OR REPLACE SEMANTIC VIEW v {OR_ALTER_BODY} COPY GRANTS"
+        ));
+    }
+
+    #[test]
+    fn create_or_alter_refuses_tags_in_the_body_and_in_yaml() {
+        for sql in [
+            format!("CREATE OR ALTER SEMANTIC VIEW v {OR_ALTER_BODY} WITH TAG (k = 'v')"),
+            "CREATE OR ALTER SEMANTIC VIEW v TABLES (o AS orders PRIMARY KEY (id)) \
+             DIMENSIONS (o.region AS o.region WITH TAG (k = 'v'))"
+                .to_string(),
+            "CREATE OR ALTER SEMANTIC VIEW v FROM YAML $$\ntables:\n  - alias: o\n    \
+             table: orders\n    pk_columns: [id]\n    tags:\n      - name: {tag: k}\n        \
+             value: v\ndimensions:\n  - name: region\n    expr: o.region\n    \
+             source_table: o\nmetrics: []\n$$"
+                .to_string(),
+        ] {
+            let e = or_alter_error(&sql);
+            assert!(
+                e.starts_with("CREATE OR ALTER SEMANTIC VIEW can't set tags"),
+                "{sql}: {e}"
+            );
+            // The same body is fine under CREATE OR REPLACE.
+            plan(&sql.replacen("OR ALTER", "OR REPLACE", 1));
+        }
     }
 
     #[test]

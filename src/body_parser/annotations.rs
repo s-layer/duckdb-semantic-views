@@ -75,6 +75,9 @@ pub(super) struct ViewClauses {
     pub(super) ai_sql_generation: Option<String>,
     pub(super) ai_question_categorization: Option<String>,
     pub(super) verified_queries: Vec<VerifiedQuery>,
+    /// `COPY GRANTS` was written: a no-op here, which `CREATE OR ALTER`
+    /// refuses as Snowflake's grammar does.
+    pub(super) copy_grants: bool,
 }
 
 impl ParsedAnnotations {
@@ -654,7 +657,6 @@ fn parse_annotations(
     let mut cortex_search_service: Option<CortexSearchService> = None;
     let mut view = ViewClauses::default();
     let mut verified_seen = false;
-    let mut copy_grants = false;
     let mut rest = annotation_text;
     let duplicate = |what: &str, at: &str| ParseError {
         message: format!("Duplicate {what} annotation."),
@@ -834,13 +836,13 @@ fn parse_annotations(
             verified_seen = true;
             rest = after;
         } else if scope == Scope::View && starts_with_keyword(&rest_upper, "COPY") {
-            if copy_grants {
+            if view.copy_grants {
                 return Err(duplicate("COPY GRANTS", rest));
             }
             // A no-op: this extension has no grants to copy.
             let after_kw = &rest["COPY".len()..];
             rest = super::metadata::parse_copy_grants(after_kw, pos_of(after_kw))?;
-            copy_grants = true;
+            view.copy_grants = true;
         } else {
             let expected = match scope {
                 Scope::Member => {
