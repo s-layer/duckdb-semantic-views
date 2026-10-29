@@ -64,6 +64,9 @@ mod tests_phantom_row_guard;
 // `tests_phantom_row_guard` above.
 #[cfg(all(test, not(feature = "extension")))]
 mod tests_multi_path_using;
+// Pins NUMBERS (executes the SQL in-memory), so gated the same way.
+#[cfg(all(test, not(feature = "extension")))]
+mod tests_inline_query;
 #[cfg(test)]
 mod tests_pkfk_expand;
 #[cfg(test)]
@@ -81,7 +84,7 @@ mod tests_semi_additive_dependency;
 // structs re-exported for R-9).
 pub use resolution::{
     body_qualifier, qualify_and_quote_table_ref, quote_ident, quote_ident_if_needed,
-    quote_stored_ident, quote_table_ref, temp_table_candidates, temp_table_name,
+    quote_stored_ident, quote_table_ref, table_source, temp_table_candidates, temp_table_name,
 };
 pub use sql_gen::{expand, output_column_names};
 pub use types::{

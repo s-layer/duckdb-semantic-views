@@ -601,6 +601,7 @@ mod tests {
             TableRef {
                 alias: alias.to_string(),
                 table: alias.to_string(),
+                definition: None,
                 pk_columns: pk.iter().map(|s| (*s).to_string()).collect(),
                 unique_constraints: unique
                     .iter()

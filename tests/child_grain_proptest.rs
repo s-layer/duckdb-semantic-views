@@ -596,6 +596,7 @@ fn build_def() -> SemanticViewDefinition {
         TableRef {
             alias: "o".to_string(),
             table: "o".to_string(),
+            definition: None,
             pk_columns: vec!["id".to_string()],
             unique_constraints: vec![],
             comment: None,
@@ -605,6 +606,7 @@ fn build_def() -> SemanticViewDefinition {
         TableRef {
             alias: "li".to_string(),
             table: "li".to_string(),
+            definition: None,
             pk_columns: vec!["id".to_string()],
             unique_constraints: vec![],
             comment: None,
@@ -615,6 +617,7 @@ fn build_def() -> SemanticViewDefinition {
         TableRef {
             alias: "lid".to_string(),
             table: "lid".to_string(),
+            definition: None,
             pk_columns: vec!["id".to_string()],
             unique_constraints: vec![],
             comment: None,

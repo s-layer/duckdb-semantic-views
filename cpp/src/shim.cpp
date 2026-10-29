@@ -2831,7 +2831,9 @@ static void sv_relocate(QueryNode &node, QueryLocation location) {
 // current schema. A view looks in the temporary schema, then its own schema,
 // then its database's default schema, ahead of the session's search path
 // (`Binder::GetSearchPath`); so does this, for a table (a member subquery's
-// `FROM`), a function or macro, a table function, and a type a cast names. The
+// `FROM`, or one an inline-query table's query reads, which the expansion
+// emits as a `FROM` subquery), a function or macro, a table function, and a
+// type a cast names. The
 // `TABLES` entries arrive qualified already (`expand::qualify_and_quote_table_ref`,
 // with a table that was temporary at CREATE as `temp.main`); a two-part name is
 // looked up in the stamp's database first, as `TABLES` entries written that way

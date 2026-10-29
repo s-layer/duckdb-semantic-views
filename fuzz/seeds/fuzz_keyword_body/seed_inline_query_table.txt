@@ -1,0 +1,1 @@
+AS TABLES (o AS orders PRIMARY KEY (id), ci AS (SELECT * FROM customer JOIN addr ON customer.id = addr.cid WHERE note <> ')') PRIMARY KEY (id) WITH SYNONYMS ('customer_details') COMMENT = 'Customers') RELATIONSHIPS (o_ci AS o(cust_id) REFERENCES ci) DIMENSIONS (ci.city AS ci.city) METRICS (o.total AS SUM(o.amount))

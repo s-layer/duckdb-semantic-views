@@ -351,7 +351,7 @@ pub fn first_unbound_member(
         }
         let sql = format!(
             "SELECT * FROM {} LIMIT 0",
-            crate::expand::qualify_and_quote_table_ref(&table.table, &def)
+            crate::expand::table_source(table, &def)
         );
         match (prober.probe)(&sql) {
             Ok(_) => {}

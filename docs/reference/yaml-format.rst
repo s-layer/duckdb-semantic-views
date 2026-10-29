@@ -63,6 +63,11 @@ A YAML definition covering all supported features:
        comment: Order transactions
        synonyms:
          - order_facts
+     - alias: paid
+       definition: |
+         SELECT * FROM orders WHERE amount > 0
+       pk_columns:
+         - id
      - alias: c
        table: customers
        pk_columns:
@@ -247,7 +252,7 @@ Top-Level Keys
 Table
 =====
 
-Each entry in the ``tables`` list declares a physical table with an alias. The first table is the **base table** (root of the relationship graph).
+Each entry in the ``tables`` list declares a physical table, or a table defined by a query, with an alias. The first table is the **base table** (root of the relationship graph).
 
 .. list-table::
    :header-rows: 1
@@ -265,9 +270,16 @@ Each entry in the ``tables`` list declares a physical table with an alias. The f
      - Short name used to reference this table in all other sections.
    * - ``table``
      - string
-     - Yes
+     - One of these two
      -
      - Physical table name. Supports catalog-qualified names (``catalog.schema.table``).
+   * - ``definition``
+     - string
+     - One of these two
+     -
+     - The query of a table :ref:`defined by a query <ref-create-inline-query>`, without its parentheses. It must be one query: its brackets nest, nothing in it is left open, and it holds no ``;`` and no prepared-statement parameter.
+
+       .. versionadded:: 0.18.0
    * - ``pk_columns``
      - list of string
      - No

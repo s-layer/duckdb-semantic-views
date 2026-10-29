@@ -14,6 +14,7 @@ fn simple_definition() -> SemanticViewDefinition {
         tables: vec![semantic_views::model::TableRef {
             alias: "orders".to_string(),
             table: "orders".to_string(),
+            definition: None,
             pk_columns: vec![],
             unique_constraints: vec![],
             comment: None,
@@ -132,6 +133,7 @@ fn joined_definition() -> SemanticViewDefinition {
             semantic_views::model::TableRef {
                 alias: "orders".to_string(),
                 table: "orders".to_string(),
+                definition: None,
                 pk_columns: vec![],
                 unique_constraints: vec![],
                 comment: None,
@@ -141,6 +143,7 @@ fn joined_definition() -> SemanticViewDefinition {
             semantic_views::model::TableRef {
                 alias: "customers".to_string(),
                 table: "customers".to_string(),
+                definition: None,
                 pk_columns: vec!["id".to_string()],
                 unique_constraints: vec![],
                 comment: None,
@@ -150,6 +153,7 @@ fn joined_definition() -> SemanticViewDefinition {
             semantic_views::model::TableRef {
                 alias: "products".to_string(),
                 table: "products".to_string(),
+                definition: None,
                 pk_columns: vec!["id".to_string()],
                 unique_constraints: vec![],
                 comment: None,

@@ -167,7 +167,13 @@ pub fn temp_table_name(table: &str, def: &SemanticViewDefinition) -> Option<Stri
 #[must_use]
 pub fn temp_table_candidates(def: &SemanticViewDefinition) -> Vec<String> {
     let mut names: Vec<String> = Vec::new();
-    let tables = def.tables.iter().map(|t| t.table.as_str());
+    // An inline-query table names no table of its own; the pinner resolves
+    // the ones its query reads.
+    let tables = def
+        .tables
+        .iter()
+        .filter(|t| t.definition.is_none())
+        .map(|t| t.table.as_str());
     let materialized = def.materializations.iter().map(|m| m.table.as_str());
     for name in tables.chain(materialized).filter_map(temp_reachable_name) {
         if !names.iter().any(|n| n.eq_ignore_ascii_case(&name)) {
@@ -230,6 +236,20 @@ pub fn qualify_and_quote_table_ref(table: &str, def: &SemanticViewDefinition) ->
     };
     parts.push(last);
     parts.join(".")
+}
+
+/// What a `FROM` or `JOIN` reads for a `TABLES` entry: its physical table,
+/// qualified by [`qualify_and_quote_table_ref`], or the query of an
+/// inline-query table in parentheses (Phase 6.4). The query goes on lines of
+/// its own, so a trailing `--` comment in it cannot reach the `)`. Its table
+/// names are left as written: the shim's `SvTablePinner` walks the subquery and
+/// resolves them in the stamped schema, as it does a member's subquery.
+#[must_use]
+pub fn table_source(table: &crate::model::TableRef, def: &SemanticViewDefinition) -> String {
+    match &table.definition {
+        Some(query) => format!("(\n{query}\n)"),
+        None => qualify_and_quote_table_ref(&table.table, def),
+    }
 }
 
 /// True when a qualified request's table part matches an item's declared

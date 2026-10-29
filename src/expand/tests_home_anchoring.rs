@@ -27,6 +27,7 @@ fn table(alias: &str, pk: &[&str]) -> TableRef {
     TableRef {
         alias: alias.to_string(),
         table: format!("d1_{alias}"),
+        definition: None,
         pk_columns: pk.iter().map(ToString::to_string).collect(),
         unique_constraints: vec![],
         comment: None,

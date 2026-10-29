@@ -640,6 +640,7 @@ fn build_def(s: &Schema) -> SemanticViewDefinition {
         tables: vec![TableRef {
             alias: "t".to_string(),
             table: "t".to_string(),
+            definition: None,
             pk_columns: vec![],
             unique_constraints: vec![],
             comment: None,

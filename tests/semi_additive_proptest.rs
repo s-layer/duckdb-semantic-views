@@ -334,6 +334,7 @@ fn build_def(order: SortOrder, na: NaKey, unit: &str) -> SemanticViewDefinition 
     let tables = vec![TableRef {
         alias: "s".to_string(),
         table: "s".to_string(),
+        definition: None,
         pk_columns: vec![],
         unique_constraints: vec![],
         comment: None,
@@ -1319,6 +1320,7 @@ fn role_def(order: SortOrder) -> SemanticViewDefinition {
     let table = |alias: &str| TableRef {
         alias: alias.to_string(),
         table: format!("rp_{alias}"),
+        definition: None,
         pk_columns: vec!["id".to_string()],
         unique_constraints: vec![],
         comment: None,

@@ -306,7 +306,7 @@ Members that do not bind
 
    semantic view '<view>': <kind> '<name>' does not bind: <DuckDB error>
 
-**Cause:** ``CREATE`` binds each dimension, fact and metric in a query of its own against the view's tables, as Snowflake compiles each expression at ``CREATE``. DuckDB cannot bind the member the message names: its expression refers to a column, table or function that does not exist, has a syntax error, or passes an argument DuckDB rejects. The rest of the message is DuckDB's own error. ``PRIVATE`` members are bound too, and every ``CREATE`` form is checked: ``OR REPLACE``, ``IF NOT EXISTS``, ``FROM YAML`` and ``FROM YAML FILE``. When every member binds, each table in ``TABLES`` is resolved as well; ``<kind>`` is then ``table`` and ``<name>`` the table's alias, for a table that does not exist even if no member reads it.
+**Cause:** ``CREATE`` binds each dimension, fact and metric in a query of its own against the view's tables, as Snowflake compiles each expression at ``CREATE``. DuckDB cannot bind the member the message names: its expression refers to a column, table or function that does not exist, has a syntax error, or passes an argument DuckDB rejects. The rest of the message is DuckDB's own error. ``PRIVATE`` members are bound too, and every ``CREATE`` form is checked: ``OR REPLACE``, ``IF NOT EXISTS``, ``FROM YAML`` and ``FROM YAML FILE``. When every member binds, each table in ``TABLES`` is resolved as well; ``<kind>`` is then ``table`` and ``<name>`` the table's alias, for a table that does not exist even if no member reads it, or a :ref:`table defined by a query <ref-create-inline-query>` whose query DuckDB cannot bind.
 
 **Fix:** Correct the expression, or create the missing table, column or function before the view.
 
@@ -322,6 +322,36 @@ Members that do not bind
    DIMENSIONS (
        o.week AS date_trunc('week', o.ordered_at)
    )
+
+
+.. _ref-err-inline-query:
+
+Tables defined by a query
+-------------------------
+
+.. versionadded:: 0.18.0
+
+.. code-block:: text
+
+   An inline query in TABLES needs an alias: write 'alias AS (<query>)'.
+
+   Invalid inline query for table '<alias>': <reason>.
+
+   table '<alias>' has an invalid inline query: <reason>
+
+   table '<alias>' has both a table name and a definition; give one
+
+**Cause:** A :ref:`table defined by a query <ref-create-inline-query>` needs an alias, and its query must stay one query inside the parentheses every expansion reads it through. ``<reason>`` says what is wrong: the query is empty, a comment, string or quoted name in it is never closed, its brackets do not nest, it holds a ``;``, or it holds a prepared-statement parameter (``$1``, ``?``), which has no value inside the view's definition. The last two forms come from ``FROM YAML``, where the table has ``definition:``, and where a table cannot have both ``table:`` and ``definition:``.
+
+**Fix:** Give the query an alias, and write it as one complete query. Move a parameter into the ``WHERE`` clause of a ``SEMANTIC_VIEW(...)`` query.
+
+.. code-block:: sql
+
+   -- This will fail: "An inline query in TABLES needs an alias"
+   TABLES ((SELECT * FROM orders WHERE amount > 0) PRIMARY KEY (id))
+
+   -- Fix
+   TABLES (paid AS (SELECT * FROM orders WHERE amount > 0) PRIMARY KEY (id))
 
 
 Graph validation errors

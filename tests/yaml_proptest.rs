@@ -155,6 +155,7 @@ fn arb_table_ref() -> impl Strategy<Value = TableRef> {
     )
         .prop_map(
             |(alias, table, pk_columns, unique_constraints, comment, synonyms, tags)| TableRef {
+                definition: None,
                 alias,
                 table,
                 pk_columns,

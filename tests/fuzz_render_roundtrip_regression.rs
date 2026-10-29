@@ -29,6 +29,7 @@ fn ci_crash_input_no_longer_breaks_the_fixpoint() {
         tables: vec![TableRef {
             alias: "emanti\0\0\0\0".into(),
             table: "ew ".into(),
+            definition: None,
             pk_columns: vec!["end trur".into()],
             unique_constraints: vec![vec![]],
             comment: Some(String::new()),

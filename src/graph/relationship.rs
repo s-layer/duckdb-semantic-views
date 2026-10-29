@@ -1417,6 +1417,7 @@ mod tests {
             tables: vec![TableRef {
                 alias: "o".to_string(),
                 table: "orders".to_string(),
+                definition: None,
                 pk_columns: vec![],
                 unique_constraints: vec![],
                 comment: None,
@@ -1671,6 +1672,7 @@ mod tests {
                     TableRef {
                         alias: "o".to_string(),
                         table: "orders".to_string(),
+                        definition: None,
                         pk_columns: vec!["id".to_string()],
                         unique_constraints: vec![],
                         comment: None,
@@ -1680,6 +1682,7 @@ mod tests {
                     TableRef {
                         alias: "c".to_string(),
                         table: "customers".to_string(),
+                        definition: None,
                         pk_columns: vec!["id".to_string()],
                         unique_constraints: vec![],
                         comment: None,
@@ -1709,6 +1712,7 @@ mod tests {
                     TableRef {
                         alias: "o".to_string(),
                         table: "orders".to_string(),
+                        definition: None,
                         pk_columns: vec!["id".to_string()],
                         unique_constraints: vec![],
                         comment: None,
@@ -1718,6 +1722,7 @@ mod tests {
                     TableRef {
                         alias: "c".to_string(),
                         table: "customers".to_string(),
+                        definition: None,
                         pk_columns: vec!["id".to_string()],
                         unique_constraints: vec![vec!["email".to_string()]],
                         comment: None,
@@ -1747,6 +1752,7 @@ mod tests {
                     TableRef {
                         alias: "o".to_string(),
                         table: "orders".to_string(),
+                        definition: None,
                         pk_columns: vec!["id".to_string()],
                         unique_constraints: vec![],
                         comment: None,
@@ -1756,6 +1762,7 @@ mod tests {
                     TableRef {
                         alias: "c".to_string(),
                         table: "customers".to_string(),
+                        definition: None,
                         pk_columns: vec!["id".to_string()],
                         unique_constraints: vec![vec!["email".to_string()]],
                         comment: None,
@@ -1789,6 +1796,7 @@ mod tests {
                     TableRef {
                         alias: "o".to_string(),
                         table: "orders".to_string(),
+                        definition: None,
                         pk_columns: vec!["id".to_string()],
                         unique_constraints: vec![],
                         comment: None,
@@ -1798,6 +1806,7 @@ mod tests {
                     TableRef {
                         alias: "c".to_string(),
                         table: "customers".to_string(),
+                        definition: None,
                         pk_columns: vec!["id".to_string(), "email".to_string()],
                         unique_constraints: vec![],
                         comment: None,
@@ -1829,6 +1838,7 @@ mod tests {
                     TableRef {
                         alias: "o".to_string(),
                         table: "orders".to_string(),
+                        definition: None,
                         pk_columns: vec!["id".to_string()],
                         unique_constraints: vec![],
                         comment: None,
@@ -1838,6 +1848,7 @@ mod tests {
                     TableRef {
                         alias: "c".to_string(),
                         table: "customers".to_string(),
+                        definition: None,
                         pk_columns: vec!["ID".to_string()],
                         unique_constraints: vec![],
                         comment: None,
@@ -1868,6 +1879,7 @@ mod tests {
                     TableRef {
                         alias: "o".to_string(),
                         table: "orders".to_string(),
+                        definition: None,
                         pk_columns: vec!["id".to_string()],
                         unique_constraints: vec![],
                         comment: None,
@@ -1877,6 +1889,7 @@ mod tests {
                     TableRef {
                         alias: "c".to_string(),
                         table: "customers".to_string(),
+                        definition: None,
                         pk_columns: vec!["id".to_string()],
                         unique_constraints: vec![],
                         comment: None,
