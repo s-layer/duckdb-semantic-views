@@ -27,8 +27,12 @@ fn flights_db() -> duckdb::Connection {
         "CREATE TABLE flights (flight_id INTEGER, departure_code VARCHAR,
                                arrival_code VARCHAR, carrier VARCHAR, seats INTEGER);
          CREATE TABLE airports (airport_code VARCHAR, city VARCHAR, region_id INTEGER);
-         CREATE TABLE regions (region_id INTEGER, region_name VARCHAR);
-         INSERT INTO regions VALUES (1, 'North'), (2, 'South');
+         CREATE TABLE regions (region_id INTEGER, region_name VARCHAR, country_id INTEGER);
+         INSERT INTO regions VALUES (1, 'North', 10), (2, 'South', 20);
+         CREATE TABLE countries (country_id INTEGER, country_name VARCHAR);
+         INSERT INTO countries VALUES (10, 'Norland'), (20, 'Sudland');
+         CREATE TABLE carriers (carrier_code VARCHAR, carrier_name VARCHAR);
+         INSERT INTO carriers VALUES ('c1', 'One Air'), ('c2', 'Two Air');
          INSERT INTO airports VALUES ('A', 'Alpha', 1), ('B', 'Beta', 1), ('C', 'Gamma', 2);
          INSERT INTO flights VALUES (1, 'A', 'B', 'c1', 10), (2, 'A', 'B', 'c1', 20),
                                     (3, 'B', 'A', 'c2', 30), (4, 'A', 'C', 'c2', 40);",
@@ -559,4 +563,111 @@ fn a_metric_over_a_fact_past_the_role_played_table_is_refused() {
             "{dims:?}: {err}"
         );
     }
+}
+
+/// `regions_def` plus `k` (countries), two relationships past the role-played
+/// airports: `r(country_id) REFERENCES k`. North is in Norland, South in Sudland.
+fn countries_def() -> SemanticViewDefinition {
+    let mut def = regions_def();
+    def.tables.push(table("k", "countries", "country_id"));
+    def.dimensions.push(dim("country", "k.country_name", "k"));
+    def.joins
+        .push(rel("region_country", "r", "k", "country_id", "country_id"));
+    def
+}
+
+/// A chain of two hops follows the metric's path the whole way: `k__arr_airport`
+/// joined off `r__arr_airport`, joined off `a__arr_airport`.
+#[test]
+fn a_dimension_two_hops_past_the_role_played_table_follows_the_metrics_path() {
+    let def = countries_def();
+    assert_eq!(
+        run(&def, &["country"], &["departures"]),
+        table_of(&[&["Norland", "4"]])
+    );
+    assert_eq!(
+        run(&def, &["country"], &["arrivals"]),
+        table_of(&[&["Norland", "3"], &["Sudland", "1"]])
+    );
+    assert_eq!(
+        run(&def, &["country"], &["departures", "arrivals", "movements"]),
+        table_of(&[
+            &["Norland", "4", "3", "7"],
+            &["Sudland", "NULL", "1", "NULL"]
+        ])
+    );
+    assert_eq!(
+        run(&def, &["country", "region", "city"], &["wa"]),
+        table_of(&[
+            &["Norland", "North", "Alpha", "1"],
+            &["Norland", "North", "Beta", "2"],
+            &["Sudland", "South", "Gamma", "1"],
+        ])
+    );
+    let mut latest = metric(
+        "latest_arr_seats",
+        "SUM(f.seats)",
+        Some("f"),
+        &["arr_airport"],
+    );
+    latest.non_additive_by = vec![crate::model::NonAdditiveDim {
+        dimension: "country".to_string(),
+        ..Default::default()
+    }];
+    let mut def = def;
+    def.metrics.push(latest);
+    // c1 arrives only in Norland (30); c2 in Norland (30) and Sudland (40),
+    // and the latest snapshot (descending) is Sudland.
+    assert_eq!(
+        run(&def, &["carrier"], &["latest_arr_seats"]),
+        table_of(&[&["c1", "30"], &["c2", "40"]])
+    );
+}
+
+/// A snapshot anchored at its metric's own table (the view's root is
+/// carriers, so the snapshot CTE is re-anchored at flights) still joins the
+/// region chain its ordering needs, off the metric's airport.
+#[test]
+fn a_re_anchored_snapshot_over_a_region_joins_it_through_the_metrics_path() {
+    let mut def = countries_def();
+    def.tables.insert(0, table("c", "carriers", "carrier_code"));
+    def.dimensions
+        .push(dim("carrier_name", "c.carrier_name", "c"));
+    def.joins
+        .push(rel("flight_carrier", "f", "c", "carrier", "carrier_code"));
+    let mut latest = metric(
+        "latest_dep_seats",
+        "SUM(f.seats)",
+        Some("f"),
+        &["dep_airport"],
+    );
+    latest.non_additive_by = vec![crate::model::NonAdditiveDim {
+        dimension: "region".to_string(),
+        ..Default::default()
+    }];
+    def.metrics.push(latest);
+    assert_eq!(
+        run(&def, &["carrier_name"], &["latest_dep_seats"]),
+        table_of(&[&["One Air", "30"], &["Two Air", "70"]])
+    );
+    assert_eq!(
+        run(&def, &["carrier_name", "region"], &["latest_dep_seats"]),
+        table_of(&[&["One Air", "North", "30"], &["Two Air", "North", "70"]])
+    );
+    // Two hops on the arrival path: Two Air's latest country is Sudland (40).
+    let mut by_country = metric(
+        "latest_arr_seats",
+        "SUM(f.seats)",
+        Some("f"),
+        &["arr_airport"],
+    );
+    by_country.non_additive_by = vec![crate::model::NonAdditiveDim {
+        dimension: "country".to_string(),
+        ..Default::default()
+    }];
+    def.metrics.push(by_country);
+    assert_eq!(
+        run(&def, &["carrier_name"], &["latest_arr_seats"]),
+        table_of(&[&["One Air", "30"], &["Two Air", "40"]])
+    );
 }

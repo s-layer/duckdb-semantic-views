@@ -1105,11 +1105,15 @@ A dimension on a table reached only *through* the role-playing table, such as
 
    semantic view '<view>': dimension '<dim>' is ambiguous -- its table '<table>'
    is reachable only through the role-playing table '<rp_table>', which is
-   joined via multiple relationships: [<rel1>, <rel2>]. Give every metric in
-   the query a USING that names one of them, ...
+   joined via multiple relationships: [<rel1>, <rel2>]. Query it with metrics
+   that each name one of them in their USING (a metric on '<rp_table>' itself
+   cannot), ...
 
-It has the same causes and fixes. When every metric names a path, the region
-follows it: ``departures`` by region groups by the departure airport's region.
+It has the same causes and fixes. The dimension takes its path from the
+metrics, so a query with no metrics, or with a metric declared on the
+role-playing table (whose ``USING`` cannot start there), has no path to give
+it. When every metric names a path, the region follows it: ``departures`` by
+region groups by the departure airport's region.
 
 .. versionchanged:: 0.18.0
 

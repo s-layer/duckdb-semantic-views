@@ -286,15 +286,17 @@ pub(super) fn build_snapshot_block(
         Some(a) => {
             let mut needs =
                 super::per_grain::anchor_needs(def, resolved_mets, &dims, &na_dim_sources);
-            push_scoped_na_joins(def, &na_groups, &mut needs.scoped);
-            super::per_grain::anchor_joins(
+            let chains = push_scoped_na_joins(def, &na_groups, &mut needs.scoped);
+            let mut joins = super::per_grain::anchor_joins(
                 def,
                 a,
                 &dims,
                 &needs.bare,
                 &std::collections::HashMap::new(),
                 &needs.scoped,
-            )
+            );
+            joins.extend(chains);
+            joins
         }
         None => resolve_joins_pkfk(def, &join_dims, resolved_mets, &na_dim_sources),
     };
@@ -337,26 +339,72 @@ pub(super) fn build_snapshot_block(
 /// The base-anchored resolver joins it by threading the metric's `USING`.
 /// Declining the anchor instead ranked the base table's rows, and a base row
 /// with none of the metric's rows took part in the snapshot.
+///
+/// Phase 6.3b: an NA dim on a table reached only THROUGH the role-played table
+/// (`r__r_bal`) needs that role's instance plus the chain onward, each hop
+/// joined under the role's scoped alias off the one before. The role's edge
+/// goes into `scoped`; the chain is returned, to be emitted after it.
 fn push_scoped_na_joins<'a>(
     def: &'a SemanticViewDefinition,
     na_groups: &[NaGroup],
     scoped: &mut Vec<&'a crate::model::Join>,
-) {
+) -> Vec<super::join_resolver::ResolvedJoin<'a>> {
+    let mut chains: Vec<super::join_resolver::ResolvedJoin<'a>> = Vec::new();
     for alias in na_groups
         .iter()
         .flat_map(|g| g.na_dim_scoped.iter().flatten())
     {
-        let edge = def.joins.iter().find(|j| {
-            j.name
-                .as_deref()
-                .is_some_and(|rel| super::join_resolver::scoped_join_alias(&j.table, rel) == *alias)
-        });
-        if let Some(edge) = edge {
-            if !scoped.iter().any(|j| std::ptr::eq(*j, edge)) {
-                scoped.push(edge);
+        let Some((edge, rel, chain)) = scoped_na_path(def, alias) else {
+            continue;
+        };
+        if !scoped.iter().any(|j| std::ptr::eq(*j, edge)) {
+            scoped.push(edge);
+        }
+        for hop in chain {
+            let emit = super::join_resolver::scoped_join_alias(&hop.table, rel);
+            if chains.iter().any(|rj| rj.emit_alias == emit) {
+                continue;
+            }
+            chains.push(super::join_resolver::ResolvedJoin {
+                emit_alias: emit,
+                bare_alias: hop.table.to_ascii_lowercase(),
+                join: hop,
+                scoped: true,
+                from_emit: Some(super::join_resolver::scoped_join_alias(
+                    &hop.from_alias,
+                    rel,
+                )),
+            });
+        }
+    }
+    chains
+}
+
+/// The relationship a scoped NA-dim alias names, its name, and the chain of
+/// edges from its target down to the dim's table (empty when the dim is on the
+/// role-played table itself).
+fn scoped_na_path<'a>(
+    def: &'a SemanticViewDefinition,
+    alias: &str,
+) -> Option<(&'a crate::model::Join, &'a str, Vec<&'a crate::model::Join>)> {
+    for edge in &def.joins {
+        let Some(rel) = edge.name.as_deref() else {
+            continue;
+        };
+        if super::join_resolver::scoped_join_alias(&edge.table, rel) == alias {
+            return Some((edge, rel, Vec::new()));
+        }
+        for t in &def.tables {
+            if super::join_resolver::scoped_join_alias(&t.alias, rel) == alias {
+                if let Some(chain) =
+                    super::role_playing::descendant_chain(def, &edge.table, &t.alias)
+                {
+                    return Some((edge, rel, chain));
+                }
             }
         }
     }
+    None
 }
 
 pub(super) fn expand_semi_additive(

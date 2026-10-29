@@ -426,10 +426,17 @@ pub(super) fn check_member_fact_role_playing_path(
 /// If so, looks at co-queried metrics' `using_relationships` to determine which
 /// relationship (and thus which scoped alias) to use for the dimension.
 ///
+/// A dimension on a table reached only THROUGH a role-played table, by a
+/// single chain of relationships (`descendant_chain`), takes the role the same
+/// way and is scoped as `{table}__{rel}` (Phase 6.3b).
+///
 /// Returns:
 /// - `Ok(None)` if the dimension's table is not a role-playing table (single or no relationship)
-/// - `Ok(Some(scoped_alias))` if exactly one USING path disambiguates
-/// - `Err(ExpandError::AmbiguousPath)` if ambiguous with no single USING context
+///   and is not reached through one
+/// - `Ok(Some(scoped_alias))` if exactly one USING path disambiguates: `a__dep` for the
+///   role-played table, `r__dep` for a table past it
+/// - `Err(ExpandError::AmbiguousPath)` if ambiguous with no single USING context, or
+///   `Err(ExpandError::AmbiguousDescendantPath)` for a table past it
 pub(super) fn find_using_context(
     view_name: &str,
     def: &SemanticViewDefinition,

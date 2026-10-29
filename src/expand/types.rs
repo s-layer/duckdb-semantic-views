@@ -811,10 +811,11 @@ impl fmt::Display for ExpandError {
                     "semantic view '{view_name}': dimension '{dimension_name}' is ambiguous -- \
                      its table '{dimension_table}' is reachable only through the role-playing \
                      table '{role_playing_table}', which is joined via multiple relationships: \
-                     [{}]. Give every metric in the query a USING that names one of them, or use \
-                     a dimension from a non-ambiguous table. If every metric already has one, \
-                     this query cannot be split by path (two window metrics, or metrics \
-                     beside a semi-additive one): query the metrics separately.",
+                     [{}]. Query it with metrics that each name one of them in their USING (a \
+                     metric on '{role_playing_table}' itself cannot), or use a dimension from a \
+                     non-ambiguous table. If every metric already has one, this query cannot be \
+                     split by path (two window metrics, or metrics beside a semi-additive one): \
+                     query the metrics separately.",
                     available_relationships.join(", ")
                 )
             }

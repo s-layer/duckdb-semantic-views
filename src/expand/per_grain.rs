@@ -800,12 +800,11 @@ fn role_playing_affects_query(
         return true;
     }
 
-    // A queried dimension's table may be rescued, but only when the ambiguous
-    // table is the dimension's OWN table and a co-queried metric's `USING`
-    // named its role. A table reached only THROUGH a role-played ancestor is
-    // never rescued: `find_using_context` rejects that case outright, because a
-    // descendant cannot be scoped by a co-queried metric's `USING`, so it
-    // yields no role here either.
+    // A queried dimension's table may be rescued when the ambiguous table is
+    // the dimension's OWN table and every metric's `USING` named its role.
+    // Phase 6.3b: so may a table reached only THROUGH the role-played one by a
+    // single chain (`descendant_chain`); `find_using_context` scopes it to the
+    // same role and `dimension_role` scopes every chain table with it.
     //
     // Phase 6.3: the role is resolved per metric, not across the query, so
     // metrics naming DIFFERENT relationships to the table are each rescued and
