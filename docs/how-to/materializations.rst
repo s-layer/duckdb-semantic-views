@@ -67,7 +67,7 @@ Then declare a semantic view with a materialization pointing to that table:
        )
    );
 
-The ``MATERIALIZATIONS`` clause must appear after all other clauses. The clause order is: ``TABLES``, ``RELATIONSHIPS``, ``FACTS``, ``DIMENSIONS``, ``METRICS``, ``MATERIALIZATIONS``.
+The ``MATERIALIZATIONS`` clause must appear after all other clauses. The clause order is: ``TABLES``, ``RELATIONSHIPS``, ``VARIABLES``, ``FACTS``, ``DIMENSIONS``, ``METRICS``, ``MATERIALIZATIONS``.
 
 .. tip::
 
@@ -158,6 +158,10 @@ Two kinds of metrics are **always excluded** from materialization routing, even 
 - **Window metrics** (declared with ``OVER``): Their values depend on the dimensions in each query, so one pre-computed table cannot serve them.
 
 When a query includes any semi-additive or window metric, the extension skips all materializations and falls back to standard expansion, regardless of whether a matching materialization exists.
+
+A materialization is also skipped when it covers a member that reads a :ref:`view variable <ref-create-variables>`, directly or through another member, since its table was computed with values the query may not have. Unlike the two cases above, this skips only that materialization: the view's other materializations still route.
+
+.. versionadded:: 0.18.0
 
 .. code-block:: sql
 
@@ -291,6 +295,7 @@ Troubleshooting
    - Use :ref:`explain_semantic_view() <ref-explain-semantic-view>` to check the ``-- Materialization:`` line.
    - Verify the dimension and metric sets in the query **exactly match** the materialization declaration (supersets and subsets do not match).
    - Check whether any metric in the query is semi-additive (``NON ADDITIVE BY``) or a window metric (``OVER``). These are always excluded from routing.
+   - Check whether the materialization covers a member that reads a variable. Such a materialization is never used.
 
 **Materialization table has wrong column names**
    The materialization table must have columns named to match the dimension and metric names declared in the semantic view. If the pre-aggregated table uses different column names, the extension cannot select from it correctly.

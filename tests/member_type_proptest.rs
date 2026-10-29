@@ -279,6 +279,7 @@ fn build_def(case: &Case) -> SemanticViewDefinition {
         });
     }
     SemanticViewDefinition {
+        variables: Vec::new(),
         max_staleness: None,
         module_custom_instructions: Default::default(),
         verified_queries: Vec::new(),

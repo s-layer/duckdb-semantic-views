@@ -95,6 +95,7 @@ unsafe fn describe_view_rows(
     push_tags_row(&mut internal, "", "", "", &def.tags);
     collect_table_rows(&def, &mut internal);
     collect_relationship_rows(&def, &alias_map, &mut internal);
+    collect_variable_rows(&def, &mut internal);
     collect_fact_rows(&def, &base_table, &alias_map, &types, &mut internal);
     collect_dimension_rows(&def, &base_table, &alias_map, &types, &mut internal);
     collect_metric_rows(&def, &base_table, &alias_map, &types, &mut internal);
@@ -210,6 +211,34 @@ fn push_member_metadata_rows(
             push("CORTEX_SEARCH_SERVICE_SCHEMA_NAME", schema.clone());
         }
         push("CORTEX_SEARCH_SERVICE_NAME", c.service.clone());
+    }
+}
+
+/// Collect the `VARIABLE` rows (Phase 6.5): `DATA_TYPE`, `DEFAULT_VALUE` and
+/// `COMMENT`, each when set, the properties Snowflake's `SEMANTIC_VARIABLES`
+/// view reports. A variable with none of them still gets a row, an empty
+/// `DATA_TYPE`, so that it is listed.
+fn collect_variable_rows(def: &SemanticViewDefinition, rows: &mut Vec<DescribeRow>) {
+    for v in &def.variables {
+        let mut props: Vec<(&str, String)> = Vec::new();
+        if v.data_type.is_some() || (v.default.is_none() && v.comment.is_none()) {
+            props.push(("DATA_TYPE", v.data_type.clone().unwrap_or_default()));
+        }
+        if let Some(d) = &v.default {
+            props.push(("DEFAULT_VALUE", d.clone()));
+        }
+        if let Some(c) = &v.comment {
+            props.push(("COMMENT", c.clone()));
+        }
+        for (property, property_value) in props {
+            rows.push(DescribeRow {
+                object_kind: "VARIABLE".to_string(),
+                object_name: v.name.clone(),
+                parent_entity: String::new(),
+                property: property.to_string(),
+                property_value,
+            });
+        }
     }
 }
 

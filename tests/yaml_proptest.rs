@@ -2,7 +2,7 @@ use proptest::prelude::*;
 use semantic_views::model::{
     AccessModifier, Cardinality, CortexSearchService, CustomInstructions, Dimension, Fact, Join,
     Materialization, MaxStaleness, Metric, NonAdditiveDim, NullsOrder, SemanticViewDefinition,
-    SortOrder, TableRef, Tag, TagName, VerifiedQuery, WindowOrderBy, WindowSpec,
+    SortOrder, TableRef, Tag, TagName, Variable, VerifiedQuery, WindowOrderBy, WindowSpec,
 };
 
 // ---------------------------------------------------------------------------
@@ -425,6 +425,7 @@ fn arb_definition() -> impl Strategy<Value = SemanticViewDefinition> {
                 verified_queries,
             )| {
                 SemanticViewDefinition {
+                    variables: Vec::new(),
                     tables,
                     dimensions,
                     metrics,
@@ -904,6 +905,7 @@ fn arb_oracle_def() -> impl Strategy<Value = SemanticViewDefinition> {
             2 => Just(None),
             1 => arb_inline_query().prop_map(Some),
         ],
+        arb_oracle_variables(),
     )
         .prop_map(
             |(
@@ -918,7 +920,14 @@ fn arb_oracle_def() -> impl Strategy<Value = SemanticViewDefinition> {
                 verified_queries,
                 refusal,
                 inline_query,
+                (variables, collide),
             )| {
+                def.variables = variables;
+                if collide {
+                    if let Some(v) = def.variables.first_mut() {
+                        v.name = def.dimensions[0].name.clone();
+                    }
+                }
                 if let Some(query) = inline_query {
                     def.tables[0].table = String::new();
                     def.tables[0].definition = Some(query);
@@ -965,6 +974,57 @@ fn arb_inline_query() -> impl Strategy<Value = String> {
         ],
     )
         .prop_map(|(body, lead, tail)| format!("{lead}{body}{tail}"))
+}
+
+/// Variables (Phase 6.5) as YAML may carry them: a type or default with the
+/// line break a `|` block ends in (stored trimmed), a comment (which the
+/// front door would blank on replay), a `DEFAULT` inside a string (which the
+/// entry parser must not split at) or outside one (which it would), and a
+/// comment with a quote in it. Refused and accepted shapes are both
+/// generated on purpose. With `collide`, the first takes the dimension's
+/// name, which a variable can't have.
+fn arb_oracle_variables() -> impl Strategy<Value = (Vec<Variable>, bool)> {
+    let one = (
+        prop_oneof![
+            3 => Just(None),
+            2 => Just(Some("INTEGER")),
+            1 => Just(Some("DECIMAL(10, 2)")),
+            1 => Just(Some("TIMESTAMP WITH TIME ZONE")),
+            1 => Just(Some("DOUBLE\n")),
+            1 => Just(Some("INT -- note")),
+        ],
+        prop_oneof![
+            4 => Just(None),
+            3 => Just(Some("1")),
+            1 => Just(Some("coalesce('DEFAULT', 'COMMENT x')")),
+            1 => Just(Some("upper('a') || 'b'\n")),
+            1 => Just(Some("1 /* note */")),
+            1 => Just(Some("1 DEFAULT 2")),
+            1 => Just(Some("'it''s'")),
+        ],
+        prop_oneof![Just(None), Just(Some("plain")), Just(Some("it's"))],
+    );
+    (
+        prop_oneof![
+            3 => Just(Vec::new()),
+            1 => prop::collection::vec(one, 1..=2),
+        ],
+        prop::bool::weighted(0.1),
+    )
+        .prop_map(|(vars, collide)| {
+            let names = ["min_amount", "\"Rate X\""];
+            let vars = vars
+                .into_iter()
+                .zip(names)
+                .map(|((data_type, default, comment), name)| Variable {
+                    name: name.to_string(),
+                    data_type: data_type.map(str::to_string),
+                    default: default.map(str::to_string),
+                    comment: comment.map(str::to_string),
+                })
+                .collect();
+            (vars, collide)
+        })
 }
 
 /// A definition anchored at one table `o`, with one dimension, one base metric
@@ -1140,6 +1200,9 @@ proptest! {
         ))?;
 
         prop_assert_eq!(&replayed.tables, &imported.tables, "tables drift\n{}", ddl);
+        prop_assert_eq!(
+            &replayed.variables, &imported.variables, "variables drift\n{}", ddl
+        );
         prop_assert_eq!(&replayed.joins, &imported.joins, "relationships drift\n{}", ddl);
         prop_assert_eq!(&replayed.facts, &imported.facts, "facts drift\n{}", ddl);
         prop_assert_eq!(
@@ -1485,6 +1548,50 @@ fn generator_reaches_both_outcomes_on_the_inline_query_axis() {
     assert!(
         with_query.iter().any(|(q, ok)| *ok && q.contains("'--'")),
         "no query with comment markers inside a string was imported"
+    );
+}
+
+#[test]
+fn generator_reaches_both_outcomes_on_the_variables_axis() {
+    let imports = |d: &SemanticViewDefinition| {
+        let yaml = yaml_serde::to_string(d).expect("YAML serialize");
+        SemanticViewDefinition::from_yaml_with_size_cap(VIEW, &yaml).is_ok()
+    };
+    let defs = sample_defs(512);
+    let with: Vec<(&SemanticViewDefinition, bool)> = defs
+        .iter()
+        .filter(|d| !d.variables.is_empty())
+        .map(|d| (d, imports(d)))
+        .collect();
+    let any = |ok: bool, pick: &dyn Fn(&Variable) -> bool| {
+        with.iter()
+            .any(|(d, imported)| *imported == ok && d.variables.iter().any(pick))
+    };
+    let default_is = |v: &Variable, f: &dyn Fn(&str) -> bool| v.default.as_deref().is_some_and(f);
+    assert!(
+        any(true, &|v| default_is(v, &|d| d.ends_with('\n'))),
+        "no default with a trailing line break was imported"
+    );
+    assert!(
+        any(true, &|v| default_is(v, &|d| d.contains("'DEFAULT'"))),
+        "no default with DEFAULT inside a string was imported"
+    );
+    assert!(
+        any(false, &|v| default_is(v, &|d| d.contains("/*"))),
+        "no default with a comment was refused"
+    );
+    assert!(
+        any(false, &|v| default_is(v, &|d| d == "1 DEFAULT 2")),
+        "no default with a DEFAULT of its own was refused"
+    );
+    assert!(
+        any(true, &|v| v.comment.as_deref() == Some("it's")),
+        "no comment with a quote was imported"
+    );
+    assert!(
+        with.iter().any(|(d, imported)| !*imported
+            && d.variables.iter().any(|v| v.name == d.dimensions[0].name)),
+        "no variable with a dimension's name was refused"
     );
 }
 

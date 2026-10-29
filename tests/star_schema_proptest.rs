@@ -759,6 +759,7 @@ fn build_def() -> SemanticViewDefinition {
         },
     ];
     SemanticViewDefinition {
+        variables: Vec::new(),
         tables,
         dimensions,
         metrics,
@@ -1217,7 +1218,7 @@ proptest! {
         )
         .expect("the pool's items parse");
         let stored = with_inline_tables(build_def(), &case.inline);
-        let lowered = lower_expression_items("star", &stored, items)
+        let lowered = lower_expression_items("star", &stored, items, &Default::default())
             .unwrap_or_else(|e| panic!("the pool's expression items lower: {e:?}"));
         let def = lowered.def.clone().unwrap_or(stored);
         let req = QueryRequest {

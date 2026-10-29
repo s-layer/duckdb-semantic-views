@@ -10,6 +10,7 @@ use crate::model::{Cardinality, Dimension, Join, Metric, SemanticViewDefinition,
 
 fn fan_trap_three_table_def() -> SemanticViewDefinition {
     SemanticViewDefinition {
+        variables: Vec::new(),
         tables: vec![
             TableRef {
                 alias: "o".to_string(),
@@ -140,6 +141,7 @@ fn fan_trap_many_to_one_safe() {
 #[test]
 fn fan_trap_one_to_one_safe() {
     let def = SemanticViewDefinition {
+        variables: Vec::new(),
         tables: vec![
             TableRef {
                 alias: "o".to_string(),
@@ -420,6 +422,7 @@ fn cyclic_relationships_are_rejected_by_expand() {
 /// the ROOT grain, and its `NON ADDITIVE BY` dimension on the child.
 fn semi_additive_na_dim_fans_def() -> SemanticViewDefinition {
     SemanticViewDefinition {
+        variables: Vec::new(),
         tables: vec![
             TableRef {
                 alias: "o".to_string(),
@@ -631,6 +634,7 @@ fn semi_additive_na_dim_fan_trap_reports_declared_table_spelling() {
 /// `p` — the shape whose grain the fence must see through the reference.
 fn window_inner_ref_def(inner_ref: &str) -> SemanticViewDefinition {
     SemanticViewDefinition {
+        variables: Vec::new(),
         tables: vec![
             TableRef {
                 alias: "b".to_string(),

@@ -23,6 +23,7 @@ pub mod render_ddl;
 pub mod render_yaml;
 pub(crate) mod sql_lit;
 pub mod util;
+pub mod variables;
 
 /// The `DuckDB` C API version this extension declares to the loader, passed to
 /// `duckdb_rs_extension_api_init` at load time.

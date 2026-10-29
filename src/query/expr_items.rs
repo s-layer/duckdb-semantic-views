@@ -39,6 +39,7 @@ use crate::expr_tokens::{
 };
 use crate::ident::normalize_ident_part;
 use crate::model::{AccessModifier, Dimension, Fact, Metric, SemanticViewDefinition};
+use crate::variables::Substitution;
 
 use super::items::{Group, Item, RequestItems};
 
@@ -143,10 +144,14 @@ pub enum ItemError {
 ///
 /// [`ItemError::Invalid`] for an expression item that breaks the rules above,
 /// and [`ItemError::Expand`] for one that names a private fact or metric.
+///
+/// An expression item reads the view's variables too: `variables` writes in
+/// their values, as it does in the query's `where_clause` (Phase 6.5).
 pub fn lower_expression_items(
     view_name: &str,
     def: &SemanticViewDefinition,
     mut items: RequestItems,
+    variables: &Substitution,
 ) -> Result<LoweredItems, ItemError> {
     let index = MemberIndex::new(def);
     let mut lowering = Lowering {
@@ -170,7 +175,12 @@ pub fn lower_expression_items(
             let text = crate::util::blank_sql_comments(&item.member)
                 .trim()
                 .to_string();
-            let name = lowering.lower(group, &text)?;
+            let lowered = if crossed.is_none() {
+                variables.apply(&text)
+            } else {
+                text.clone()
+            };
+            let name = lowering.lower(group, &lowered)?;
             lowering
                 .labels
                 .push((name.clone(), item.member.trim().to_string()));
@@ -996,7 +1006,7 @@ fn follows_an_operand(text: &str, at: usize) -> bool {
 /// parameter of a lambda it is inside. It is left as written, even when a
 /// member has its name. (A field of an expression's value and a named argument
 /// are not scanned as references at all: [`scan_references`].)
-fn is_local_name(text: &str, r: &IdentRef<'_>, lambdas: &[LambdaScope]) -> bool {
+pub(crate) fn is_local_name(text: &str, r: &IdentRef<'_>, lambdas: &[LambdaScope]) -> bool {
     word_before(text, r.start).eq_ignore_ascii_case("collate") || is_lambda_param(r, lambdas)
 }
 
@@ -1004,7 +1014,7 @@ fn is_local_name(text: &str, r: &IdentRef<'_>, lambdas: &[LambdaScope]) -> bool 
 /// name ([`is_local_name`]), is not a column reference: a number, or a keyword
 /// or another word of the expression grammar where the grammar reads it as
 /// one.
-fn is_not_a_column(text: &str, r: &IdentRef<'_>) -> bool {
+pub(crate) fn is_not_a_column(text: &str, r: &IdentRef<'_>) -> bool {
     if r.raw.as_bytes()[0].is_ascii_digit() {
         // `#3` is the third column of the query's tables.
         return !text[..r.start].ends_with('#');
@@ -1137,11 +1147,22 @@ mod tests {
     }
 
     fn lower(dimensions: &[&str], metrics: &[&str], facts: &[&str]) -> LoweredItems {
-        lower_expression_items("v", &def(), items(dimensions, metrics, facts)).unwrap()
+        lower_expression_items(
+            "v",
+            &def(),
+            items(dimensions, metrics, facts),
+            &Substitution::default(),
+        )
+        .unwrap()
     }
 
     fn refused(dimensions: &[&str], metrics: &[&str], facts: &[&str]) -> String {
-        match lower_expression_items("v", &def(), items(dimensions, metrics, facts)) {
+        match lower_expression_items(
+            "v",
+            &def(),
+            items(dimensions, metrics, facts),
+            &Substitution::default(),
+        ) {
             Err(ItemError::Invalid(message)) => message,
             Err(ItemError::Expand(e)) => e.to_string(),
             Ok(lowered) => panic!("accepted: {lowered:?}"),
@@ -1364,7 +1385,7 @@ mod tests {
                 "metric" => (&[], &one, &[]),
                 _ => (&[], &[], &one),
             };
-            match lower_expression_items("v", &def(), items(d, m, f)) {
+            match lower_expression_items("v", &def(), items(d, m, f), &Substitution::default()) {
                 Err(ItemError::Invalid(msg)) if msg.contains(want) => {}
                 Err(e) => accepted.push(format!("{group} {text}: {e:?}")),
                 Ok(_) => accepted.push(format!("{group} {text}: accepted")),
@@ -1458,7 +1479,7 @@ mod tests {
         ]
         .into_iter()
         .filter_map(|d| {
-            lower_expression_items("v", &def(), items(&[d], &[], &[]))
+            lower_expression_items("v", &def(), items(&[d], &[], &[]), &Substitution::default())
                 .err()
                 .map(|e| format!("{d}: {e:?}"))
         })
@@ -1472,7 +1493,7 @@ mod tests {
         texts
             .iter()
             .map(|t| {
-                lower_expression_items("v", &def(), items(&[t], &[], &[]))
+                lower_expression_items("v", &def(), items(&[t], &[], &[]), &Substitution::default())
                     .map(|l| added_dimension(&l).expr.clone())
                     .map_err(|e| format!("{e:?}"))
             })
@@ -1577,16 +1598,26 @@ mod tests {
             "amount * 2 /* tier */",
             "amount * 2 -- tier\n",
         ] {
-            lower_expression_items("v", &def(), items(&[dimension], &[], &[]))
-                .unwrap_or_else(|e| panic!("{dimension}: {e:?}"));
+            lower_expression_items(
+                "v",
+                &def(),
+                items(&[dimension], &[], &[]),
+                &Substitution::default(),
+            )
+            .unwrap_or_else(|e| panic!("{dimension}: {e:?}"));
         }
         for metric in [
             "string_agg(region, ',' ORDER BY region DESC NULLS LAST)",
             "count(DISTINCT region)",
             "count(amount) FILTER (WHERE region = 'EU')",
         ] {
-            lower_expression_items("v", &def(), items(&[], &[metric], &[]))
-                .unwrap_or_else(|e| panic!("{metric}: {e:?}"));
+            lower_expression_items(
+                "v",
+                &def(),
+                items(&[], &[metric], &[]),
+                &Substitution::default(),
+            )
+            .unwrap_or_else(|e| panic!("{metric}: {e:?}"));
         }
     }
 
@@ -1790,6 +1821,57 @@ mod tests {
         );
     }
 
+    /// An expression item reads a view variable as the query's
+    /// `where_clause` does (Phase 6.5): the query's value is written in, so
+    /// the bare name is not refused as an unknown member.
+    #[test]
+    fn an_expression_item_reads_a_variable() {
+        let mut def = def();
+        def.variables.push(crate::model::Variable {
+            name: "k".to_string(),
+            data_type: Some("INTEGER".to_string()),
+            default: Some("2".to_string()),
+            comment: None,
+        });
+        let unbound = lower_expression_items(
+            "v",
+            &def,
+            items(&["upper(region) || k"], &[], &[]),
+            &Substitution::default(),
+        );
+        assert!(
+            matches!(&unbound, Err(ItemError::Invalid(m)) if m.contains("'k'")),
+            "{unbound:?}"
+        );
+        let names = vec!["k".to_string()];
+        let bound = crate::variables::bind(
+            "v",
+            def,
+            crate::variables::Values::Query {
+                names: &names,
+                first_slot: 3,
+            },
+        )
+        .unwrap();
+        let lowered = lower_expression_items(
+            "v",
+            &bound.def,
+            items(&["upper(region) || k"], &[], &[]),
+            &bound.substitution,
+        )
+        .unwrap();
+        let expr = &added_dimension(&lowered).expr;
+        assert!(
+            expr.contains("|| (CAST((__sv_param(3)) AS INTEGER))"),
+            "{expr}"
+        );
+        // The column keeps the name the query wrote.
+        assert_eq!(
+            lowered.items.dimensions[0].alias.as_deref(),
+            Some("upper(region) || k")
+        );
+    }
+
     #[test]
     fn an_added_member_takes_a_name_no_member_has() {
         let mut def = def();
@@ -1798,6 +1880,7 @@ mod tests {
             "v",
             &def,
             items(&["upper(region)", "lower(region)"], &[], &[]),
+            &Substitution::default(),
         )
         .unwrap();
         let names: Vec<_> = lowered.labels.iter().map(|(n, _)| n.as_str()).collect();
@@ -1824,6 +1907,7 @@ mod tests {
             "v",
             &def,
             items(&["upper(o.addr.city)", "addr.zip"], &[], &["li.size.w * 2"]),
+            &Substitution::default(),
         )
         .unwrap();
         let added = lowered.def.as_ref().unwrap();

@@ -9,6 +9,7 @@ use crate::model::{AccessModifier, Dimension, Metric, SemanticViewDefinition};
 
 fn make_def_with_private_metric() -> SemanticViewDefinition {
     SemanticViewDefinition {
+        variables: Vec::new(),
         tables: vec![],
         dimensions: vec![Dimension {
             name: "region".to_string(),
@@ -46,6 +47,7 @@ fn make_def_with_private_metric() -> SemanticViewDefinition {
 
 fn make_def_with_private_and_derived() -> SemanticViewDefinition {
     SemanticViewDefinition {
+        variables: Vec::new(),
         tables: vec![],
         dimensions: vec![Dimension {
             name: "region".to_string(),

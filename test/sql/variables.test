@@ -1,0 +1,549 @@
+# View variables (Phase 6.5): a VARIABLES clause declares named values the
+# member expressions read, each with an optional type, default and comment, as
+# Snowflake allows. A query sets them with VARIABLES name = value (or
+# name => value) in SEMANTIC_VIEW(...), or with variables := {...} in the
+# table function; a variable it leaves unset takes its default. An unqualified
+# name is the variable, a qualified one the column.
+
+require semantic_views
+
+statement ok
+CREATE TABLE var_sales (sale_id INTEGER, region VARCHAR, amount INTEGER);
+
+statement ok
+INSERT INTO var_sales VALUES (1, 'West', 1000), (2, 'West', 2500), (3, 'East', 500), (4, 'East', 3000);
+
+# --- Snowflake's documented example ----------------------------------------------
+
+statement ok
+CREATE SEMANTIC VIEW var_sv
+  TABLES (sales AS var_sales PRIMARY KEY (sale_id))
+  VARIABLES (
+    min_amount INTEGER DEFAULT 1000,
+    multiplier DOUBLE := 1.0,
+    target_region VARCHAR COMMENT 'the region to report on'
+  )
+  FACTS (sales.adjusted_amount AS amount * multiplier)
+  DIMENSIONS (
+    sales.region AS region,
+    sales.sale_category AS CASE WHEN amount >= min_amount THEN 'HIGH' ELSE 'LOW' END
+  )
+  METRICS (
+    sales.total_sales AS SUM(amount),
+    sales.weighted_sales AS SUM(amount * multiplier),
+    sales.adjusted_total AS SUM(sales.adjusted_amount)
+  );
+
+# West's 1000 sale is LOW and its 2500 sale HIGH against 2000, each weighted by
+# 1.5; target_region is read only by the query's WHERE.
+
+query TTR
+SELECT * FROM SEMANTIC_VIEW(
+  var_sv
+  DIMENSIONS region, sale_category
+  METRICS weighted_sales
+  WHERE region = target_region
+  VARIABLES min_amount = 2000, target_region => 'West', multiplier = 1.5
+) ORDER BY ALL;
+----
+West	HIGH	3750.0
+West	LOW	1500.0
+
+# A variable left unset takes its default: min_amount 1000, multiplier 1.0.
+
+query TRI
+SELECT * FROM SEMANTIC_VIEW(
+  var_sv DIMENSIONS sale_category METRICS weighted_sales, total_sales
+  WHERE region = target_region VARIABLES target_region = 'East'
+) ORDER BY ALL;
+----
+HIGH	3000.0	3000
+LOW	500.0	500
+
+# A metric over a fact that reads a variable takes the query's value.
+
+query TR
+SELECT * FROM SEMANTIC_VIEW(
+  var_sv DIMENSIONS region METRICS adjusted_total VARIABLES target_region = '', multiplier = 2
+) ORDER BY ALL;
+----
+East	7000.0
+West	7000.0
+
+# The table function takes the values as a struct by name.
+
+query TR
+SELECT * FROM semantic_view('var_sv', dimensions := ['region'], metrics := ['weighted_sales'],
+  variables := {'target_region': '', 'multiplier': 3}) ORDER BY ALL;
+----
+East	10500.0
+West	10500.0
+
+# An expression item reads the variables too.
+
+query TR
+SELECT * FROM SEMANTIC_VIEW(
+  var_sv DIMENSIONS region METRICS total_sales * multiplier AS w
+  VARIABLES target_region = '', multiplier = 2
+) ORDER BY ALL;
+----
+East	7000.0
+West	7000.0
+
+query TI
+SELECT * FROM SEMANTIC_VIEW(
+  var_sv DIMENSIONS upper(region) || target_region AS r METRICS total_sales
+  VARIABLES target_region = '-x'
+) ORDER BY ALL;
+----
+EAST-x	3500
+WEST-x	3500
+
+# A value can be a prepared statement parameter, after the WHERE's own.
+
+statement ok
+PREPARE var_p AS SELECT * FROM SEMANTIC_VIEW(var_sv METRICS weighted_sales
+  WHERE region = $1 VARIABLES target_region = '', multiplier = $2);
+
+query R
+EXECUTE var_p('West', 3);
+----
+10500.0
+
+query R
+EXECUTE var_p('East', 0.5);
+----
+1750.0
+
+# A derived metric reads a variable like any metric.
+
+statement ok
+CREATE SEMANTIC VIEW var_sv_derived
+  TABLES (sales AS var_sales PRIMARY KEY (sale_id))
+  VARIABLES (multiplier DOUBLE DEFAULT 1.0)
+  DIMENSIONS (sales.region AS region)
+  METRICS (sales.total_sales AS SUM(amount), scaled AS total_sales * multiplier);
+
+query TR
+SELECT * FROM SEMANTIC_VIEW(var_sv_derived DIMENSIONS region METRICS scaled VARIABLES multiplier = 3)
+ORDER BY ALL;
+----
+East	10500.0
+West	10500.0
+
+# CREATE types a member with each variable's default, as a query that leaves
+# it unset sees it, so a function that refuses a NULL constant still binds.
+
+statement ok
+CREATE SEMANTIC VIEW var_sv_quantile
+  TABLES (sales AS var_sales PRIMARY KEY (sale_id))
+  VARIABLES (p DOUBLE DEFAULT 0.5)
+  METRICS (sales.q AS quantile_cont(amount, p));
+
+query RR
+SELECT * FROM SEMANTIC_VIEW(var_sv_quantile METRICS q), SEMANTIC_VIEW(var_sv_quantile METRICS q VARIABLES p = 1);
+----
+1750.0	3000.0
+
+# A lambda's parameter is not the variable of the same name, and a quote in a
+# comment does not hide a variable after it.
+
+statement ok
+CREATE SEMANTIC VIEW var_sv_lambda
+  TABLES (sales AS var_sales PRIMARY KEY (sale_id))
+  VARIABLES (x INTEGER DEFAULT 2000)
+  DIMENSIONS (sales.region AS region)
+  METRICS (sales.n AS SUM(len(list_filter([amount], lambda x: x > 0))), sales.big AS COUNT(*) FILTER (WHERE amount > x));
+
+query TII
+SELECT * FROM SEMANTIC_VIEW(var_sv_lambda DIMENSIONS region METRICS n, big) ORDER BY ALL;
+----
+East	2	1
+West	2	1
+
+query I
+SELECT * FROM semantic_view('var_sv_lambda', metrics := ['n'],
+  where_clause := '-- don''t' || chr(10) || 'amount > x', variables := {'x': 2600});
+----
+1
+
+# --- what a query must and can't set ---------------------------------------------
+
+# A variable with no default must be set, even when no member the query asks
+# for reads it, as in Snowflake.
+
+statement error
+SELECT * FROM SEMANTIC_VIEW(var_sv DIMENSIONS region METRICS total_sales);
+----
+variable 'target_region' has no default, so the query must set it: VARIABLES target_region = <value>
+
+statement error
+SELECT * FROM semantic_view('var_sv', dimensions := ['region'], metrics := ['total_sales']);
+----
+variable 'target_region' has no default
+
+statement error
+SELECT * FROM SEMANTIC_VIEW(var_sv METRICS total_sales VARIABLES target_region = '', multipler = 2);
+----
+semantic view 'var_sv' has no variable 'multipler'. Did you mean 'multiplier'?
+
+statement error
+SELECT * FROM semantic_view('var_sv', metrics := ['total_sales'], variables := row(1));
+----
+variables must be a struct of values by name
+
+# A value can't be nested, even for a variable with no type to cast it to.
+
+statement ok
+CREATE SEMANTIC VIEW var_sv_untyped
+  TABLES (sales AS var_sales PRIMARY KEY (sale_id))
+  VARIABLES (v)
+  DIMENSIONS (sales.region AS region)
+  METRICS (sales.n AS COUNT(*) FILTER (WHERE amount > v));
+
+statement error
+SELECT * FROM semantic_view('var_sv_untyped', metrics := ['n'], variables := {'v': [1, 2]});
+----
+variable 'v' is set to a INTEGER[]; a variable can't be a list, array, STRUCT, MAP, UNION, VARIANT or JSON
+
+statement error
+SELECT * FROM SEMANTIC_VIEW(var_sv_untyped METRICS n VARIABLES v = {'a': 1});
+----
+variable 'v' is set to a STRUCT(a INTEGER)
+
+query I
+SELECT * FROM SEMANTIC_VIEW(var_sv_untyped METRICS n VARIABLES v = 999);
+----
+3
+
+statement error
+SELECT * FROM SEMANTIC_VIEW(var_sv METRICS total_sales VARIABLES target_region = '' WHERE region = 'x');
+----
+VARIABLES comes last in SEMANTIC_VIEW(...)
+
+statement error
+SELECT * FROM SEMANTIC_VIEW(var_sv METRICS total_sales VARIABLES 'x');
+----
+expected 'name = value' in VARIABLES
+
+# A value is a value, not a query.
+
+statement error
+SELECT * FROM SEMANTIC_VIEW(var_sv METRICS total_sales VARIABLES target_region = (SELECT 'x'));
+----
+Table function cannot contain subqueries
+
+statement error
+SELECT * FROM SEMANTIC_VIEW(var_sv METRICS total_sales
+  VARIABLES target_region = (SELECT * FROM SEMANTIC_VIEW(var_sv METRICS total_sales)));
+----
+a variable's value can't be a query
+
+# The standard-SQL form has no VARIABLES: defaults apply, and a view with a
+# variable that has none can't be read that way.
+
+statement error
+SELECT region, AGG(total_sales) FROM var_sv GROUP BY ALL;
+----
+variable 'target_region' has no default
+
+statement ok
+CREATE SEMANTIC VIEW var_sv_std
+  TABLES (sales AS var_sales PRIMARY KEY (sale_id))
+  VARIABLES (min_amount INTEGER DEFAULT 1000)
+  DIMENSIONS (sales.region AS region, sales.big AS amount >= min_amount)
+  METRICS (sales.total_sales AS SUM(amount));
+
+query TTI
+SELECT region, big, AGG(total_sales) FROM var_sv_std GROUP BY ALL ORDER BY ALL;
+----
+East	false	500
+East	true	3000
+West	true	3500
+
+# A default is evaluated by each query, not at CREATE.
+
+statement ok
+CREATE SEMANTIC VIEW var_sv_today
+  TABLES (sales AS var_sales PRIMARY KEY (sale_id))
+  VARIABLES (as_of DATE DEFAULT current_date)
+  DIMENSIONS (sales.on_as_of AS as_of = current_date)
+  METRICS (sales.n AS COUNT(*));
+
+query TI
+SELECT * FROM SEMANTIC_VIEW(var_sv_today DIMENSIONS on_as_of METRICS n);
+----
+true	4
+
+query TI
+SELECT * FROM SEMANTIC_VIEW(var_sv_today DIMENSIONS on_as_of METRICS n VARIABLES as_of = DATE '2000-01-01');
+----
+false	4
+
+# --- an unqualified name is the variable, a qualified one the column ------------
+
+statement ok
+CREATE SEMANTIC VIEW var_sv_shadow
+  TABLES (sales AS var_sales PRIMARY KEY (sale_id))
+  VARIABLES (amount INTEGER DEFAULT 1)
+  METRICS (sales.mixed AS SUM(sales.amount * amount));
+
+query I
+SELECT * FROM SEMANTIC_VIEW(var_sv_shadow METRICS mixed);
+----
+7000
+
+query I
+SELECT * FROM SEMANTIC_VIEW(var_sv_shadow METRICS mixed VARIABLES amount = 10);
+----
+70000
+
+# --- a materialization over a member that reads a variable is not used ----------
+
+# Its table was computed with values the query may not have. The tables'
+# numbers are wrong on purpose, so a routed query shows them.
+
+statement ok
+CREATE TABLE var_mat_weighted (region VARCHAR, weighted_sales DOUBLE);
+
+statement ok
+INSERT INTO var_mat_weighted VALUES ('East', 999), ('West', 999);
+
+statement ok
+CREATE TABLE var_mat_total (region VARCHAR, total_sales BIGINT);
+
+statement ok
+INSERT INTO var_mat_total VALUES ('East', 111), ('West', 111);
+
+statement ok
+CREATE SEMANTIC VIEW var_sv_mat
+  TABLES (sales AS var_sales PRIMARY KEY (sale_id))
+  VARIABLES (multiplier DOUBLE DEFAULT 1.0)
+  FACTS (sales.adjusted_amount AS amount * multiplier)
+  DIMENSIONS (sales.region AS region)
+  METRICS (
+    sales.total_sales AS SUM(amount),
+    sales.adjusted_total AS SUM(sales.adjusted_amount)
+  )
+  MATERIALIZATIONS (
+    by_region_weighted AS (TABLE var_mat_weighted, DIMENSIONS (region), METRICS (adjusted_total)),
+    by_region_total AS (TABLE var_mat_total, DIMENSIONS (region), METRICS (total_sales))
+  );
+
+query TR
+SELECT * FROM SEMANTIC_VIEW(var_sv_mat DIMENSIONS region METRICS adjusted_total VARIABLES multiplier = 2)
+ORDER BY ALL;
+----
+East	7000.0
+West	7000.0
+
+# A member that reads no variable is still routed.
+
+query TI
+SELECT * FROM SEMANTIC_VIEW(var_sv_mat DIMENSIONS region METRICS total_sales) ORDER BY ALL;
+----
+East	111
+West	111
+
+# --- introspection ---------------------------------------------------------------
+
+query TTTT
+SELECT object_kind, object_name, property, property_value
+FROM (DESCRIBE SEMANTIC VIEW var_sv) WHERE object_kind = 'VARIABLE';
+----
+VARIABLE	min_amount	DATA_TYPE	INTEGER
+VARIABLE	min_amount	DEFAULT_VALUE	1000
+VARIABLE	multiplier	DATA_TYPE	DOUBLE
+VARIABLE	multiplier	DEFAULT_VALUE	1.0
+VARIABLE	target_region	DATA_TYPE	VARCHAR
+VARIABLE	target_region	COMMENT	the region to report on
+
+# A member reading a variable is typed with the variable's type.
+
+query TT
+SELECT name, data_type FROM (SHOW SEMANTIC DIMENSIONS IN var_sv) ORDER BY name;
+----
+region	VARCHAR
+sale_category	VARCHAR
+
+query TT
+SELECT name, data_type FROM (SHOW SEMANTIC METRICS IN var_sv) ORDER BY name;
+----
+adjusted_total	DOUBLE
+total_sales	HUGEINT
+weighted_sales	DOUBLE
+
+# GET_DDL writes the clause back, a := default as DEFAULT, and the DDL it
+# writes creates the same view.
+
+query I
+SELECT contains(GET_DDL('SEMANTIC_VIEW', 'var_sv'),
+  'VARIABLES (' || chr(10) || '    min_amount INTEGER DEFAULT 1000,' || chr(10)
+  || '    multiplier DOUBLE DEFAULT 1.0,' || chr(10)
+  || '    target_region VARCHAR COMMENT ''the region to report on''' || chr(10) || ')');
+----
+true
+
+# The YAML export carries the variables and re-imports to the same view. A `|`
+# block scalar ends in a line break, which the YAML form trims.
+
+query I
+SELECT contains(READ_YAML_FROM_SEMANTIC_VIEW('var_sv'), 'variables:');
+----
+true
+
+statement ok
+CREATE SEMANTIC VIEW var_sv_yaml FROM YAML $$
+tables:
+- alias: sales
+  table: var_sales
+  pk_columns: [sale_id]
+variables:
+- name: multiplier
+  data_type: DOUBLE
+  default: |
+    2.0
+dimensions:
+- name: region
+  expr: region
+  source_table: sales
+metrics:
+- name: weighted_sales
+  expr: SUM(amount * multiplier)
+  source_table: sales
+$$;
+
+query TR
+SELECT * FROM SEMANTIC_VIEW(var_sv_yaml DIMENSIONS region METRICS weighted_sales) ORDER BY ALL;
+----
+East	7000.0
+West	7000.0
+
+query T
+SELECT property_value FROM (DESCRIBE SEMANTIC VIEW var_sv_yaml)
+WHERE object_kind = 'VARIABLE' AND property = 'DEFAULT_VALUE';
+----
+2.0
+
+# A comment would not survive GET_DDL -> CREATE, which blanks comments.
+
+statement error
+CREATE SEMANTIC VIEW var_bad FROM YAML $$
+tables:
+- alias: sales
+  table: var_sales
+  pk_columns: [sale_id]
+variables:
+- name: multiplier
+  default: 2 -- a note
+dimensions: []
+metrics:
+- name: n
+  expr: COUNT(*)
+  source_table: sales
+$$;
+----
+variable 'multiplier' holds a SQL comment marker, which CREATE would drop
+
+# A type is one type: it can't close the cast it is written into.
+
+statement error
+CREATE SEMANTIC VIEW var_bad FROM YAML $$
+tables:
+- alias: sales
+  table: var_sales
+  pk_columns: [sale_id]
+variables:
+- name: k
+  data_type: INTEGER) + (SELECT max(amount) FROM var_sales
+  default: '1'
+dimensions: []
+metrics:
+- name: n
+  expr: SUM(amount * k)
+  source_table: sales
+$$;
+----
+variable 'k' has an invalid type: its brackets do not nest
+
+# --- what CREATE refuses ---------------------------------------------------------
+
+statement error
+CREATE SEMANTIC VIEW var_bad TABLES (sales AS var_sales PRIMARY KEY (sale_id))
+  VARIABLES (region VARCHAR DEFAULT 'x')
+  DIMENSIONS (sales.region AS region) METRICS (sales.n AS COUNT(*));
+----
+variable 'region' has the name of a dimension; a variable can't share a name with a fact, dimension or metric
+
+statement error
+CREATE SEMANTIC VIEW var_bad TABLES (sales AS var_sales PRIMARY KEY (sale_id))
+  VARIABLES (k INTEGER DEFAULT 1, K INTEGER DEFAULT 2)
+  METRICS (sales.n AS SUM(amount * k));
+----
+variable 'K' is declared twice
+
+statement error
+CREATE SEMANTIC VIEW var_bad TABLES (sales AS var_sales PRIMARY KEY (sale_id))
+  VARIABLES (ks INTEGER[] DEFAULT [1])
+  METRICS (sales.n AS COUNT(*));
+----
+variable 'ks' has type INTEGER[]; a variable can't be a list, array, STRUCT, MAP, UNION, VARIANT or JSON
+
+statement error
+CREATE SEMANTIC VIEW var_bad TABLES (sales AS var_sales PRIMARY KEY (sale_id))
+  VARIABLES (k NOT_A_TYPE)
+  METRICS (sales.n AS COUNT(*));
+----
+variable 'k' does not bind: Catalog Error: Type with name NOT_A_TYPE does not exist
+
+statement error
+CREATE SEMANTIC VIEW var_bad TABLES (sales AS var_sales PRIMARY KEY (sale_id))
+  VARIABLES (k INTEGER DEFAULT amount)
+  METRICS (sales.n AS COUNT(*));
+----
+variable 'k' does not bind: Binder Error: Referenced column "amount" was not found
+
+statement error
+CREATE SEMANTIC VIEW var_bad TABLES (sales AS var_sales PRIMARY KEY (sale_id))
+  VARIABLES (k INTEGER DEFAULT (SELECT 1))
+  METRICS (sales.n AS COUNT(*));
+----
+variable 'k' has an invalid default
+
+statement error
+CREATE SEMANTIC VIEW var_bad TABLES (sales AS var_sales PRIMARY KEY (sale_id))
+  VARIABLES (n INTEGER DEFAULT 1)
+  DIMENSIONS (sales.region AS region)
+  METRICS (sales.c AS COUNT(*), sales.w AS SUM(c) OVER (PARTITION BY region
+    ORDER BY region ROWS BETWEEN n PRECEDING AND CURRENT ROW));
+----
+metric 'w' uses variable 'n' in its window frame; a variable can't be used in a window frame bound
+
+statement error
+CREATE SEMANTIC VIEW var_bad TABLES (sales AS var_sales PRIMARY KEY (sale_id))
+  FACTS (sales.f AS amount)
+  VARIABLES (k INTEGER DEFAULT 1)
+  METRICS (sales.n AS COUNT(*));
+----
+Clause 'VARIABLES' appears out of order; clauses must appear as: TABLES, RELATIONSHIPS (optional), VARIABLES (optional), FACTS (optional)
+
+statement error
+CREATE SEMANTIC VIEW var_bad TABLES (sales AS var_sales PRIMARY KEY (sale_id))
+  VARIABLES ()
+  METRICS (sales.n AS COUNT(*));
+----
+VARIABLES needs at least one variable
+
+# --- explain ---------------------------------------------------------------------
+
+# A value the query sets is shown as the parameter it becomes, after the
+# where_clause's own; a default is written in.
+
+query I
+SELECT contains(string_agg(explain_output, chr(10)), 'SUM(amount * (CAST(($2) AS DOUBLE)))')
+  AND contains(string_agg(explain_output, chr(10)), 'WHERE (region) = (CAST(($1) AS VARCHAR))')
+  AND contains(string_agg(explain_output, chr(10)), 'amount >= (CAST((1000) AS INTEGER))')
+FROM explain_semantic_view('var_sv', dimensions := ['sale_category'], metrics := ['weighted_sales'],
+  where_clause := 'region = target_region', variables := {'target_region': 'x', 'multiplier': 2});
+----
+true

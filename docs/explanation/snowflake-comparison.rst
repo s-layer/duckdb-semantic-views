@@ -48,6 +48,9 @@ Concept Mapping
    * - Metrics (measures)
      - ``METRICS`` clause
      - ``METRICS`` clause
+   * - View variables
+     - ``VARIABLES`` clause, set per query with ``VARIABLES name = value`` in ``SEMANTIC_VIEW(...)``
+     - The same ``VARIABLES`` clause and query clause, plus ``variables := {...}`` in ``semantic_view()`` (see :ref:`ref-create-variables`)
    * - Reusable row-level expressions
      - ``FACTS`` clause
      - ``FACTS`` clause (queryable with ``FACTS`` in ``SEMANTIC_VIEW(...)``)
@@ -106,7 +109,7 @@ Concept Mapping
 Syntax Alignment
 ================
 
-The DDL syntax is intentionally close to Snowflake's. The clause order (``TABLES``, ``RELATIONSHIPS``, ``FACTS``, ``DIMENSIONS``, ``METRICS``) matches Snowflake, and the entry syntax within each clause follows the same pattern.
+The DDL syntax is intentionally close to Snowflake's. The clause order (``TABLES``, ``RELATIONSHIPS``, ``VARIABLES``, ``FACTS``, ``DIMENSIONS``, ``METRICS``) matches Snowflake, and the entry syntax within each clause follows the same pattern.
 
 .. note::
 
@@ -366,6 +369,7 @@ is always the type a query returns for that member:
   are typed as ``semantic_view()`` reads them there: the command runs in your
   session and transaction.
 - **PRIVATE members** are typed too, though they cannot be queried directly.
+- **Members that read a variable** are typed with the variable taken as its default, or as a ``NULL`` of its type when it has no default, so no value is needed. ``SUM(amount * multiplier)`` with a ``DOUBLE`` multiplier is ``DOUBLE``. See :ref:`ref-create-variables`.
 - **Role-played members** -- on a table that several relationships point at -- are
   typed too, although querying one needs a metric whose ``USING`` names the role. The
   type is the same whichever role is used.
@@ -598,6 +602,8 @@ Snowflake ``CREATE SEMANTIC VIEW`` features that are commonly asked about, and w
      - **Supported**, with Snowflake's placement and syntax. Tags are stored with the view and shown as a ``TAGS`` row (a JSON object) in ``DESCRIBE``; they survive ``GET_DDL`` and YAML export, and ``SHOW`` commands omit them, as Snowflake's do. ``ALTER SEMANTIC VIEW ... SET TAG`` / ``UNSET TAG`` change the view's own tags, at view level only, as in Snowflake. Snowflake requires each tag to exist as a ``CREATE TAG`` object; DuckDB has no tag objects, so the name (up to ``database.schema.tag``) is stored as written. Values are limited to 256 characters, as in Snowflake. See :ref:`Tags <ref-create-tags>`.
    * - Cortex Analyst metadata -- ``SAMPLE_VALUES`` and ``WITH CORTEX SEARCH SERVICE`` on members, ``IS_ENUM`` on dimensions, and ``MAX_STALENESS``, ``AI_SQL_GENERATION``, ``AI_QUESTION_CATEGORIZATION``, ``AI_VERIFIED_QUERIES`` and ``COPY GRANTS`` on the view
      - **Accepted and stored**, with Snowflake's syntax, so Snowflake DDL pastes as written. None of it changes a query: there is no Cortex Analyst to read it, no search service to call, and no automatic refresh for ``MAX_STALENESS`` to bound. The clauses show in ``DESCRIBE`` with Snowflake's ``CUSTOM_INSTRUCTIONS`` and ``AI_VERIFIED_QUERY`` rows and survive ``GET_DDL`` and YAML export. ``MAX_STALENESS`` takes whole seconds, as Snowflake's ``CREATE`` reference writes it, and also the ``'1 hour'`` form its materializations guide uses; ``ALTER ... SET`` / ``UNSET MAX_STALENESS`` work. ``COPY GRANTS`` is accepted and ignored, as DuckDB has no grants on these views. Snowflake's ``GET_DDL`` can write sample values set outside the DDL as a trailing ``WITH EXTENSION (CA = '<json>')`` clause. That clause is not part of Snowflake's ``CREATE`` syntax and its JSON is undocumented, so it is not planned: it is refused with an error that names it, and the values can be restated as ``SAMPLE_VALUES``. See :ref:`Cortex Analyst metadata <ref-create-cortex-metadata>`.
+   * - View variables -- ``VARIABLES (min_amount INTEGER DEFAULT 1000, ...)`` in ``CREATE``, read by bare name in member expressions, and set per query with ``VARIABLES min_amount = 2000`` as the last clause of ``SEMANTIC_VIEW(...)``
+     - **Supported**, with Snowflake's rules: an entry is ``name [type] [{DEFAULT | :=} <expr>] [COMMENT '...']``, an unqualified name is the variable and a qualified one the column, a default is evaluated by each query, and a variable with no default must be set by every query of the view. Members, the query's ``WHERE`` and expression items read variables, and a window frame bound cannot. ``semantic_view()`` takes the values as ``variables := {'min_amount': 2000}``, and a value can be a prepared-statement parameter. DuckDB names the refused types differently: a variable cannot be a list, array, ``STRUCT``, ``MAP``, ``UNION``, ``VARIANT`` or ``JSON``, the counterparts of Snowflake's ``VARIANT``, ``OBJECT`` and ``ARRAY``. A standard-SQL query over the view cannot set variables, so defaults apply. A materialization covering a member that reads a variable is not used for routing. ``DESCRIBE`` shows ``VARIABLE`` rows, and ``GET_DDL`` and the YAML export write the variables back. See :ref:`ref-create-variables` and :ref:`ref-sv-variables`.
    * - Column-level security
      - Out of scope; DuckDB handles access control
    * - ``ASOF`` / temporal relationships
@@ -615,6 +621,6 @@ Snowflake's `YAML-based semantic view definition <https://docs.snowflake.com/en/
 
 - ``time_dimensions`` with granularity controls (the SQL DDL uses regular dimensions with ``date_trunc()``)
 
-DuckDB Semantic Views supports YAML definition import (``FROM YAML``) and export (:ref:`READ_YAML_FROM_SEMANTIC_VIEW() <ref-read-yaml>`), but these use the extension's own YAML schema -- not Snowflake's Cortex Analyst YAML spec. Where the SQL DDL carries Cortex Analyst metadata, the YAML uses Snowflake's field names for it (``sample_values``, ``is_enum``, ``cortex_search_service``, ``max_staleness``, ``module_custom_instructions``, ``verified_queries``); see :ref:`ref-yaml-format`. The DuckDB YAML format is a serialization of the same model used by the SQL DDL (tables, relationships, facts, dimensions, metrics, materializations). It is designed for version control, migration, and sharing -- not for AI prompt tuning. Comparisons against Snowflake YAML-spec-only features remain not applicable.
+DuckDB Semantic Views supports YAML definition import (``FROM YAML``) and export (:ref:`READ_YAML_FROM_SEMANTIC_VIEW() <ref-read-yaml>`), but these use the extension's own YAML schema -- not Snowflake's Cortex Analyst YAML spec. Where the SQL DDL carries Cortex Analyst metadata, the YAML uses Snowflake's field names for it (``sample_values``, ``is_enum``, ``cortex_search_service``, ``max_staleness``, ``module_custom_instructions``, ``verified_queries``); see :ref:`ref-yaml-format`. The DuckDB YAML format is a serialization of the same model used by the SQL DDL (tables, relationships, variables, facts, dimensions, metrics, materializations). It is designed for version control, migration, and sharing -- not for AI prompt tuning. Comparisons against Snowflake YAML-spec-only features remain not applicable.
 
 See :ref:`howto-yaml-definitions` for the DuckDB YAML workflow.

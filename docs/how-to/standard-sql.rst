@@ -396,6 +396,8 @@ These follow Snowflake's rules for the query form, and each is refused with an e
 
 A name that is a table, a view, a CTE in scope or a Python DataFrame or relation is not a semantic view here: those keep their usual meaning, and so do DuckDB's own errors for statements that read no semantic view.
 
+This form has no way to set the view's :ref:`variables <ref-create-variables>`, so each takes its default. A view with a variable that has no default cannot be queried this way: the query fails with ``variable '<name>' has no default``. Use :ref:`SEMANTIC_VIEW(...) <ref-sv-variables>` with a ``VARIABLES`` clause for such a view.
+
 
 .. _howto-standard-sql-troubleshooting:
 

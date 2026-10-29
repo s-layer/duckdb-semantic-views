@@ -1,0 +1,23 @@
+tables:
+  - alias: s
+    table: sales
+    pk_columns:
+      - sale_id
+variables:
+  - name: min_amount
+    data_type: INTEGER
+    default: |
+      1000
+  - name: multiplier
+    data_type: DOUBLE
+    default: 1.0
+    comment: it's the weight
+  - name: target_region
+dimensions:
+  - name: cat
+    expr: CASE WHEN amount >= min_amount THEN 'HIGH' ELSE 'LOW' END
+    source_table: s
+metrics:
+  - name: w
+    expr: SUM(amount * multiplier)
+    source_table: s

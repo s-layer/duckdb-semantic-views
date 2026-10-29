@@ -1,5 +1,5 @@
 .. meta::
-   :description: Syntax reference for querying a semantic view with the SEMANTIC_VIEW(...) construct or the semantic_view() table function: clauses, parameters, expression items, filters and output
+   :description: Syntax reference for querying a semantic view with the SEMANTIC_VIEW(...) construct or the semantic_view() table function: clauses, parameters, expression items, filters, variables and output
 
 .. _ref-semantic-view-function:
 
@@ -39,9 +39,10 @@ Syntax
        [ METRICS <item> [, ...] ]
        [ FACTS <item> [, ...] ]
        [ WHERE <predicate> ]
+       [ VARIABLES <var_name> { = | => } <value> [, ...] ]
    )
 
-where each ``<item>`` is ``<member_name> [ [AS] <alias> ]``, ``<expression> [ [AS] <alias> ]`` or ``<table_alias>.*``. The view name and the items are identifiers, not strings, and no comma follows the view name. The clauses can come in any order, each at most once, and the order you write them in is the order of the columns. See :ref:`ref-sv-construct`.
+where each ``<item>`` is ``<member_name> [ [AS] <alias> ]``, ``<expression> [ [AS] <alias> ]`` or ``<table_alias>.*``. The view name and the items are identifiers, not strings, and no comma follows the view name. The clauses can come in any order, each at most once, and the order you write them in is the order of the columns. ``VARIABLES`` is the exception: it comes last. See :ref:`ref-sv-construct`.
 
 **The semantic_view() table function:**
 
@@ -54,12 +55,13 @@ where each ``<item>`` is ``<member_name> [ [AS] <alias> ]``, ``<expression> [ [A
        [ facts := [ '<item>' [, ...] ] , ]
        [ where_clause := '<predicate>' , ]
        [ params := row( <value> [, ...] ) , ]
+       [ variables := { '<var_name>': <value> [, ...] } , ]
        [ column_order := [ '<list_name>' [, ...] ] ]
    )
 
 Each item in ``dimensions``, ``metrics`` or ``facts`` is a string holding ``<member_name>`` or ``<expression>``, either one optionally followed by ``AS <alias>``, or ``<table_alias>.*``.
 
-Each clause of the construct is the function parameter of the same name, and ``WHERE`` is ``where_clause``. ``DIMENSIONS region METRICS revenue WHERE ordered_at >= DATE '2024-01-01'`` is ``dimensions := ['region'], metrics := ['revenue'], where_clause := 'ordered_at >= DATE ''2024-01-01'''``, and writing ``METRICS`` before ``DIMENSIONS`` is ``column_order := ['metrics', 'dimensions']``. See :ref:`ref-sv-expression-items` for what an expression item may hold.
+Each clause of the construct is the function parameter of the same name, and ``WHERE`` is ``where_clause``. ``DIMENSIONS region METRICS revenue WHERE ordered_at >= DATE '2024-01-01'`` is ``dimensions := ['region'], metrics := ['revenue'], where_clause := 'ordered_at >= DATE ''2024-01-01'''``, and writing ``METRICS`` before ``DIMENSIONS`` is ``column_order := ['metrics', 'dimensions']``. ``VARIABLES min_amount = 2000, target_region => 'West'`` is ``variables := {'min_amount': 2000, 'target_region': 'West'}``. See :ref:`ref-sv-expression-items` for what an expression item may hold.
 
 
 .. _ref-sv-params:
@@ -67,7 +69,7 @@ Each clause of the construct is the function parameter of the same name, and ``W
 Parameters
 ==========
 
-The table lists the parameters of ``semantic_view()``. The construct's clauses are the parameters of the same name, with ``WHERE`` for ``where_clause``, and its view name is the same name written as an identifier (``shop``, ``analytics.sales``) instead of a string. The construct has no ``params`` or ``column_order``: its ``WHERE`` takes prepared-statement parameters directly (see :ref:`ref-sv-construct`), and the order of its clauses sets the order of the columns.
+The table lists the parameters of ``semantic_view()``. The construct's clauses are the parameters of the same name, with ``WHERE`` for ``where_clause`` and ``VARIABLES`` for ``variables``, and its view name is the same name written as an identifier (``shop``, ``analytics.sales``) instead of a string. The construct has no ``params`` or ``column_order``: its ``WHERE`` takes prepared-statement parameters directly (see :ref:`ref-sv-construct`), and the order of its clauses sets the order of the columns.
 
 .. list-table::
    :header-rows: 1
@@ -94,6 +96,11 @@ The table lists the parameters of ``semantic_view()``. The construct's clauses a
    * - ``params``
      - row (named)
      - Optional values for ``where_clause``, which refers to them as ``$1``, ``$2``, ... in order. Each is put in the predicate as a value of its own type, never as SQL text. See :ref:`values from params <ref-sv-where-params>`.
+   * - ``variables``
+     - STRUCT (named)
+     - Optional values for the view's :ref:`variables <ref-create-variables>`, by name: ``{'min_amount': 2000, 'target_region': 'West'}``. It must be a struct with named fields. A variable left out takes its default. See :ref:`ref-sv-variables`.
+
+       .. versionadded:: 0.18.0
    * - ``column_order``
      - VARCHAR[] (named)
      - Optional order of the lists' columns in the result, as list names: ``'dimensions'``, ``'metrics'`` and ``'facts'``, matched case-insensitively. A list you leave out follows in the default order, dimensions, then metrics, then facts. Naming a list twice, or something that is not a list, is an error. See :ref:`ref-sv-output`.
@@ -103,7 +110,7 @@ The table lists the parameters of ``semantic_view()``. The construct's clauses a
 
 At least one of ``dimensions``, ``metrics``, or ``facts`` (in the construct, ``DIMENSIONS``, ``METRICS`` or ``FACTS``) must be specified. A filter alone is not a query.
 
-Every argument accepts a prepared-statement parameter (``?`` or ``$1``) in place of a literal, including the view name, the three lists, ``where_clause`` and the values in ``params``. A parameter written *inside* the ``where_clause`` text is not one: pass the value in ``params`` instead (see :ref:`values from params <ref-sv-where-params>`).
+Every argument accepts a prepared-statement parameter (``?`` or ``$1``) in place of a literal, including the view name, the three lists, ``where_clause`` and the values in ``params`` and ``variables``. A parameter written *inside* the ``where_clause`` text is not one: pass the value in ``params`` instead (see :ref:`values from params <ref-sv-where-params>`).
 
 .. warning::
 
@@ -119,7 +126,7 @@ The ``SEMANTIC_VIEW(...)`` Construct
 
 Snowflake queries a semantic view with ``SEMANTIC_VIEW(...)`` in ``FROM``, and so can you. The view name and the items are written as identifiers, so a name with a space or a reserved word is double-quoted (``"Total Revenue"``, ``"order"``), and ``AS`` before an alias is optional. ``WHERE`` takes one predicate and filters the rows the metrics aggregate (see :ref:`ref-sv-pre-agg-filtering`).
 
-The clauses can come in any order, each at most once, and the order you write them in is the order of the columns:
+The clauses can come in any order, each at most once, and the order you write them in is the order of the columns. The one exception is ``VARIABLES``, which comes last (see :ref:`ref-sv-variables`):
 
 .. code-block:: sql
 
@@ -157,7 +164,7 @@ A prepared statement's parameter (``?``, ``$1`` or ``$name``) in the construct's
 
    EXECUTE by_region(DATE '2024-01-01', 'East');
 
-It lowers to ``where_clause := 'ordered_at >= $1 AND region = $2'`` with the parameters in ``params``, so each value reaches the predicate as a value, never as SQL text. A parameter anywhere else in the construct is refused.
+It lowers to ``where_clause := 'ordered_at >= $1 AND region = $2'`` with the parameters in ``params``, so each value reaches the predicate as a value, never as SQL text. A value in ``VARIABLES`` can be a parameter too (see :ref:`ref-sv-variables`). A parameter anywhere else in the construct is refused.
 
 .. versionadded:: 0.16.0
 
@@ -345,7 +352,7 @@ What an expression may use depends on its list:
 
 A member is named in an expression as it is as an item: by its name, or qualified by its table, where a member declared without a table is on the base table. A field of a ``STRUCT`` dimension or fact is read from it, so ``upper(o.address.city)``, or the item ``address.city``, is the field ``city`` of the dimension ``address``.
 
-An expression reads only the view's members. Any other name is refused, so an item cannot read a column of a table the query joins that the view does not declare, such as the column under a ``PRIVATE`` fact. Keywords, numbers, a lambda's parameters (``lambda x: x * 2``), named arguments and collations are not names of this kind. A positional reference (``#2``), ``COLUMNS(...)`` and a method call (``x.abs()``; write ``abs(x)``) are refused with them. ``current_date`` and the other functions SQL calls without parentheses are called as functions, never read as a column of the same name. The ``WHERE`` clause differs: it can still filter on such a column (see :ref:`ref-sv-filtering`).
+An expression reads only the view's members and its :ref:`variables <ref-sv-variables>`. Any other name is refused, so an item cannot read a column of a table the query joins that the view does not declare, such as the column under a ``PRIVATE`` fact. Keywords, numbers, a lambda's parameters (``lambda x: x * 2``), named arguments and collations are not names of this kind. A positional reference (``#2``), ``COLUMNS(...)`` and a method call (``x.abs()``; write ``abs(x)``) are refused with them. ``current_date`` and the other functions SQL calls without parentheses are called as functions, never read as a column of the same name. The ``WHERE`` clause differs: it can still filter on such a column (see :ref:`ref-sv-filtering`).
 
 This is a check of the expression as written, not access control, which DuckDB does not have: the body of a macro the expression calls is not checked.
 
@@ -435,7 +442,7 @@ Each value goes into the predicate as a constant of its own type, never as SQL t
 
 The parameter is spelled ``where_clause`` rather than ``where`` because DuckDB reserves ``where`` in named-parameter position -- ``where := '...'`` is a parse error before the extension is consulted.
 
-**What the predicate may name.** Declared dimensions and facts, referenced by their logical names; each is substituted to its expression, wrapped in parentheses so a member that binds looser than its surrounding context keeps its grouping. Members declared :ref:`LABELS = (FILTER) <howto-annotations-filters>` are the intended case, but any dimension or fact works -- the label records intent and does not gate resolution. Naming a **metric** is rejected, matching Snowflake: the filter runs before aggregation, so an aggregate has no value yet.
+**What the predicate may name.** Declared dimensions and facts, referenced by their logical names; each is substituted to its expression, wrapped in parentheses so a member that binds looser than its surrounding context keeps its grouping. Members declared :ref:`LABELS = (FILTER) <howto-annotations-filters>` are the intended case, but any dimension or fact works -- the label records intent and does not gate resolution. Naming a **metric** is rejected, matching Snowflake: the filter runs before aggregation, so an aggregate has no value yet. The bare name of one of the view's :ref:`variables <ref-sv-variables>` is the variable's value, as in ``WHERE region = target_region``.
 
 A name that is not a declared dimension or fact is left as written. It binds only if it is a column of a table the query already reads (``price`` or ``o.price`` on a single-table view, for example); it does not cause a join, so a column of any other table fails with DuckDB's ``Referenced column ... not found`` binder error. Declare the column as a dimension or fact to make it reachable.
 
@@ -454,6 +461,86 @@ An omitted, empty, or whitespace-only ``where_clause`` is treated as absent. The
 .. warning::
 
    The predicate is SQL that runs with the caller's privileges, and it may contain anything a ``WHERE`` clause can, including subqueries over other tables. Never build it from request input. In the construct, bind each user-supplied value as a ``?`` parameter. With ``semantic_view()``, passing the predicate as a prepared-statement parameter (``where_clause := ?``) saves you quoting the string, but it does **not** make untrusted text safe. Write the predicate yourself and pass each user-supplied value in ``params``, where it is a value and never SQL (see :ref:`values from params <ref-sv-where-params>`), and prefer predicates made of :ref:`named filters <howto-annotations-filters>` that you declared, so that user input chooses which filter applies rather than supplying SQL.
+
+
+.. _ref-sv-variables:
+
+Variables
+=========
+
+.. versionadded:: 0.18.0
+
+When a view declares :ref:`VARIABLES <ref-create-variables>`, each query can give them values. In the construct, set them in a ``VARIABLES`` clause, which comes last, after ``WHERE``; ``name = value`` and ``name => value`` mean the same. In ``semantic_view()``, pass them by name in the ``variables`` struct. These examples query the ``sales_analysis`` view from :ref:`ref-create-variables`:
+
+.. code-block:: duckdb-sql
+
+   SELECT * FROM SEMANTIC_VIEW(
+       sales_analysis
+       DIMENSIONS region
+       METRICS weighted_sales
+       VARIABLES target_region = '', multiplier = 3
+   ) ORDER BY ALL;
+
+   -- the same query with semantic_view()
+   SELECT * FROM semantic_view('sales_analysis',
+       dimensions := ['region'],
+       metrics := ['weighted_sales'],
+       variables := {'target_region': '', 'multiplier': 3}
+   ) ORDER BY ALL;
+
+.. code-block:: text
+
+   ┌────────┬────────────────┐
+   │ region │ weighted_sales │
+   ├────────┼────────────────┤
+   │ East   │        10500.0 │
+   │ West   │        10500.0 │
+   └────────┴────────────────┘
+
+``target_region`` has no default, so the query sets it even though ``weighted_sales`` does not read it. ``min_amount`` is left unset and takes its default.
+
+- **Unset variables.** A variable the query leaves unset takes its default, which the query evaluates. A variable with no default must be set by every query of the view, even one that reads no member that uses it, as in Snowflake.
+- **Unknown names.** Setting a variable the view does not declare is an error, which suggests the closest declared name.
+- **Values.** A value is cast to the variable's type, when it has one, and reaches the query as a value, never as SQL text. A value can be any expression a table function argument can hold, such as ``DATE '2000-01-01'``, but not a query: ``VARIABLES target_region = (SELECT ...)`` is refused.
+- **Where variables are read.** Members read them, and so do the query's ``WHERE`` and its :ref:`expression items <ref-sv-expression-items>`, by bare name. A qualified name is a column, never a variable.
+- **Materializations.** A materialization that covers a member reading a variable is not used, whatever values the query sets, because its table was computed with values the query may not have. Other materializations still route. See :ref:`ref-create-materializations`.
+- **Standard SQL.** A :ref:`standard-SQL query <howto-standard-sql>` over the view cannot set variables, so each takes its default, and a view with a variable that has no default cannot be queried that way.
+
+An expression item reads a variable like a member does:
+
+.. code-block:: sql
+
+   SELECT * FROM SEMANTIC_VIEW(
+       sales_analysis
+       DIMENSIONS region
+       METRICS total_sales * multiplier AS w
+       VARIABLES target_region = '', multiplier = 2
+   ) ORDER BY ALL;
+
+.. code-block:: text
+
+   ┌────────┬────────┐
+   │ region │   w    │
+   ├────────┼────────┤
+   │ East   │ 7000.0 │
+   │ West   │ 7000.0 │
+   └────────┴────────┘
+
+A value can be a prepared-statement parameter, numbered with the statement's other parameters. ``VARIABLES`` comes after ``WHERE``, so its parameters come after the ones in ``WHERE``:
+
+.. code-block:: sql
+
+   PREPARE weighted AS
+   SELECT * FROM SEMANTIC_VIEW(sales_analysis
+       METRICS weighted_sales
+       WHERE region = ?
+       VARIABLES target_region = '', multiplier = ?
+   );
+
+   EXECUTE weighted('West', 3);   -- 10500.0
+   EXECUTE weighted('East', 0.5); -- 1750.0
+
+To see how a query's variables reach the generated SQL, pass the same ``variables`` to :ref:`explain_semantic_view() <ref-explain-semantic-view>`.
 
 
 .. _ref-sv-ordering:

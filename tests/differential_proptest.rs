@@ -55,10 +55,11 @@ use semantic_views::expand::{
     expand, output_column_names, DimensionName, MetricName, QueryRequest,
 };
 use semantic_views::model::{
-    AccessModifier, Dimension, Fact, Metric, SemanticViewDefinition, TableRef,
+    AccessModifier, Dimension, Fact, Metric, SemanticViewDefinition, TableRef, Variable,
 };
 use semantic_views::query::items::{aliases_for, Group, OutputColumns, RequestItems};
 use semantic_views::query::wire::build_projected_sql;
+use semantic_views::variables::{bind, Values};
 
 /// Comparison operators used by generated predicates.
 #[derive(Debug, Clone, Copy)]
@@ -440,6 +441,32 @@ struct Schema {
     rows: Vec<Vec<Option<i64>>>,
 }
 
+/// A view variable `k` (Phase 6.5) and where the case uses it. The table has a
+/// column `k` too, so `t.k` is the column and a bare `k` the variable, as in
+/// Snowflake.
+#[derive(Debug, Clone)]
+struct VarCase {
+    /// The value the query sets, or `None` to take the default.
+    set: Option<i64>,
+    default: i64,
+    /// Declared `INTEGER` (the value is cast), or untyped.
+    typed: bool,
+    /// Metric `m0` becomes `sum(t.k + k)`.
+    in_metric: bool,
+    /// The predicate gains `AND d{i} <op> k`.
+    in_where: Option<(usize, CmpOp)>,
+}
+
+impl VarCase {
+    /// The value the variable takes in the query.
+    fn value(&self) -> i64 {
+        self.set.unwrap_or(self.default)
+    }
+}
+
+/// `m0`'s expression when it uses the variable.
+const VAR_METRIC: &str = "sum(t.k + k)";
+
 /// A full test case: a schema plus the non-empty subset of dims and metrics to
 /// query (indices into the schema's dimension list / `metric_aggs`), and the
 /// optional pre-aggregation predicate (PBT-6). `None` keeps the original
@@ -455,9 +482,44 @@ struct Case {
     /// are renamed with an alias.
     order: [Group; 3],
     aliased: Vec<bool>,
+    var: Option<VarCase>,
 }
 
 impl Case {
+    /// The `where_clause` the request carries: the generated predicate, and
+    /// the variable's comparison when the case has one.
+    fn where_member_sql(&self) -> Option<String> {
+        let var = self
+            .var
+            .as_ref()
+            .and_then(|v| v.in_where)
+            .map(|(i, op)| format!("d{i} {} k", op.to_sql()));
+        match (self.where_pred.as_ref().map(Pred::to_member_sql), var) {
+            (Some(p), Some(v)) => Some(format!("({p} AND {v})")),
+            (p, v) => p.or(v),
+        }
+    }
+
+    /// The oracle's `WHERE`: raw columns, and the variable as its value.
+    fn where_raw_sql(&self) -> Option<String> {
+        let var = self.var.as_ref().and_then(|v| {
+            v.in_where
+                .map(|(i, op)| format!("(d{i} {} ({}))", op.to_sql(), v.value()))
+        });
+        match (self.where_pred.as_ref().map(Pred::to_raw_sql), var) {
+            (Some(p), Some(v)) => Some(format!("({p} AND {v})")),
+            (p, v) => p.or(v),
+        }
+    }
+
+    /// Metric `m{i}` as the oracle writes it.
+    fn metric_raw_sql(&self, i: usize) -> String {
+        match &self.var {
+            Some(v) if v.in_metric && i == 0 => format!("sum(t.k + ({}))", v.value()),
+            _ => self.schema.metric_aggs[i].to_sql(),
+        }
+    }
+
     /// Each selected member's output name: `x_<member>` when aliased.
     fn output_names(&self) -> Vec<String> {
         self.sel_dims
@@ -559,13 +621,31 @@ fn arb_case() -> impl Strategy<Value = Case> {
             1 => Just(([Group::Dimensions, Group::Metrics, Group::Facts], 0u8)),
             1 => (arb_order(), any::<u8>()),
         ];
-        (Just(schema), dim_sel, met_sel, where_pred, layout)
+        // Phase 6.5: a variable one case in two, set by the query or left to
+        // its default, used by a metric, by the predicate, or both.
+        let var = prop_oneof![
+            1 => Just(None),
+            1 => (
+                prop::option::of(-1i64..=3),
+                -1i64..=3,
+                any::<bool>(),
+                any::<bool>(),
+                prop::option::of((0..nd, arb_cmp_op())),
+            )
+                .prop_filter("the variable is used", |(_, _, _, m, w)| *m || w.is_some())
+                .prop_map(|(set, default, typed, in_metric, in_where)| {
+                    Some(VarCase { set, default, typed, in_metric, in_where })
+                }),
+        ];
+        (Just(schema), dim_sel, met_sel, where_pred, layout, var)
             .prop_filter(
                 "at least one of dimensions/metrics must be selected",
-                |(_, sel_dims, sel_metrics, _, _)| !sel_dims.is_empty() || !sel_metrics.is_empty(),
+                |(_, sel_dims, sel_metrics, _, _, _)| {
+                    !sel_dims.is_empty() || !sel_metrics.is_empty()
+                },
             )
             .prop_map(
-                |(schema, sel_dims, sel_metrics, where_pred, (order, mask))| {
+                |(schema, sel_dims, sel_metrics, where_pred, (order, mask), var)| {
                     let aliased = (0..sel_dims.len() + sel_metrics.len())
                         .map(|k| mask & (1 << k) != 0)
                         .collect();
@@ -576,6 +656,7 @@ fn arb_case() -> impl Strategy<Value = Case> {
                         where_pred,
                         order,
                         aliased,
+                        var,
                     }
                 },
             )
@@ -637,6 +718,7 @@ fn build_def(s: &Schema) -> SemanticViewDefinition {
         })
         .collect();
     SemanticViewDefinition {
+        variables: Vec::new(),
         tables: vec![TableRef {
             alias: "t".to_string(),
             table: "t".to_string(),
@@ -708,7 +790,24 @@ fn make_db(s: &Schema) -> duckdb::Connection {
         conn.execute_batch(&format!("INSERT INTO t VALUES {};", values.join(",")))
             .expect("insert rows");
     }
+    // A column named like the variable (Phase 6.5): `t.k` reads it.
+    conn.execute_batch("ALTER TABLE t ADD COLUMN k INTEGER; UPDATE t SET k = coalesce(d0, 7);")
+        .expect("add column k");
     conn
+}
+
+/// `def` with variable `k` declared, and `m0` using it, as `var` says.
+fn with_variable(mut def: SemanticViewDefinition, var: &VarCase) -> SemanticViewDefinition {
+    def.variables = vec![Variable {
+        name: "k".to_string(),
+        data_type: var.typed.then(|| "INTEGER".to_string()),
+        default: Some(var.default.to_string()),
+        comment: None,
+    }];
+    if var.in_metric {
+        def.metrics[0].expr = VAR_METRIC.to_string();
+    }
+    def
 }
 
 proptest! {
@@ -720,6 +819,10 @@ proptest! {
     #[test]
     fn expansion_matches_handwritten_group_by(case in arb_case()) {
         let def = build_def(&case.schema);
+        let def = match &case.var {
+            Some(v) => with_variable(def, v),
+            None => def,
+        };
 
         // The request as `semantic_view()` receives it: item text (`d0 AS
         // x_d0`) and `column_order` entries, parsed by the code it uses.
@@ -756,8 +859,25 @@ proptest! {
         let dim_members = RequestItems::members(&items.dimensions);
         let met_members = RequestItems::members(&items.metrics);
 
+        // The variable the query sets is a value of `params` after the
+        // predicate's own, and is written into the members and the predicate
+        // as `semantic_view()` writes it (`variables::bind`).
+        let param_values = case.where_pred.as_ref().map(Pred::params).unwrap_or_default();
+        let set: Vec<String> = case
+            .var
+            .as_ref()
+            .and_then(|v| v.set)
+            .map(|_| vec!["k".to_string()])
+            .unwrap_or_default();
+        let bound = bind(
+            "t_diff",
+            def,
+            Values::Query { names: &set, first_slot: param_values.len() + 1 },
+        )
+        .expect("the variable binds");
+        let def = bound.def.clone();
         let req = QueryRequest {
-            where_clause: case.where_pred.as_ref().map(Pred::to_member_sql),
+            where_clause: case.where_member_sql().map(|w| bound.apply(&w)),
             dimensions: dim_members.iter().map(DimensionName::new).collect(),
             metrics: met_members.iter().map(MetricName::new).collect(),
             // PIN: the row-level FACTS path is oracled by child_grain_proptest (below-base grain) and metamorphic_proptest; this harness oracles single-table aggregation. TECH-DEBT #66
@@ -782,7 +902,8 @@ proptest! {
         // literals; the C++ walk that does it in the extension
         // (`sv_bind_params`) is covered by `semantic_view_parameters.test`,
         // since a `cargo test` binary cannot load the extension.
-        let param_values = case.where_pred.as_ref().map(Pred::params).unwrap_or_default();
+        let mut param_values = param_values;
+        param_values.extend(case.var.as_ref().and_then(|v| v.set));
         let expanded = bind_params(&expanded, &param_values);
         let params = || duckdb::params_from_iter(std::iter::empty::<i64>());
 
@@ -838,7 +959,7 @@ proptest! {
             .sel_metrics
             .iter()
             .zip(&outputs[n_dims..])
-            .map(|(i, out)| format!("{} AS {out}", case.schema.metric_aggs[*i].to_sql()))
+            .map(|(i, out)| format!("{} AS {out}", case.metric_raw_sql(*i)))
             .collect();
         let select_items = dim_items
             .iter()
@@ -856,9 +977,8 @@ proptest! {
         // result would be a different (and, for an unselected member, an
         // inexpressible) query.
         let where_sql = case
-            .where_pred
-            .as_ref()
-            .map_or_else(String::new, |p| format!(" WHERE {}", p.to_raw_sql()));
+            .where_raw_sql()
+            .map_or_else(String::new, |p| format!(" WHERE {p}"));
         let oracle = if case.sel_dims.is_empty() {
             format!("SELECT {select_items} FROM t{where_sql}")
         } else {
@@ -933,6 +1053,12 @@ fn generator_varies_the_predicate_and_exercises_filter_members() {
     let mut default_layout = 0usize;
     let mut reordered = 0usize;
     let mut aliased = 0usize;
+    let mut var_set = 0usize;
+    let mut var_default = 0usize;
+    let mut var_in_metric = 0usize;
+    let mut var_in_where = 0usize;
+    let mut var_typed = 0usize;
+    let mut var_untyped = 0usize;
 
     for _ in 0..300 {
         let case = arb_case()
@@ -986,6 +1112,24 @@ fn generator_varies_the_predicate_and_exercises_filter_members() {
                 distinct.insert(sql);
             }
         }
+        if let Some(v) = &case.var {
+            if v.set.is_some() {
+                var_set += 1;
+            } else {
+                var_default += 1;
+            }
+            if v.in_metric && case.sel_metrics.contains(&0) {
+                var_in_metric += 1;
+            }
+            if v.in_where.is_some() {
+                var_in_where += 1;
+            }
+            if v.typed {
+                var_typed += 1;
+            } else {
+                var_untyped += 1;
+            }
+        }
     }
 
     assert!(
@@ -1030,6 +1174,18 @@ fn generator_varies_the_predicate_and_exercises_filter_members() {
         compound > 0,
         "generator never produced a compound predicate -- precedence around a \
          spliced member expression is untested"
+    );
+    assert!(
+        var_set > 0
+            && var_default > 0
+            && var_in_metric > 0
+            && var_in_where > 0
+            && var_typed > 0
+            && var_untyped > 0,
+        "generator never varied the view variable (set {var_set}, default \
+         {var_default}, in a selected metric {var_in_metric}, in the predicate \
+         {var_in_where}, typed {var_typed}, untyped {var_untyped}) -- VARIABLES is \
+         untested"
     );
     assert!(
         default_layout > 0 && reordered > 0 && aliased > 0,

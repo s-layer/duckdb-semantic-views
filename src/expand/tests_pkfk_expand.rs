@@ -10,6 +10,7 @@ use crate::model::{Dimension, Join, Metric, SemanticViewDefinition, TableRef};
 /// Helper: build a 2-table PK/FK definition (orders -> customers).
 fn pkfk_two_table_def() -> SemanticViewDefinition {
     SemanticViewDefinition {
+        variables: Vec::new(),
         tables: vec![
             TableRef {
                 alias: "o".to_string(),
@@ -70,6 +71,7 @@ fn pkfk_two_table_def() -> SemanticViewDefinition {
 /// Helper: build a 3-table PK/FK definition (li -> o -> c).
 fn pkfk_three_table_def() -> SemanticViewDefinition {
     SemanticViewDefinition {
+        variables: Vec::new(),
         tables: vec![
             TableRef {
                 alias: "li".to_string(),
@@ -160,6 +162,7 @@ fn test_pkfk_on_clause_simple() {
 #[test]
 fn test_pkfk_on_clause_composite() {
     let def = SemanticViewDefinition {
+        variables: Vec::new(),
         tables: vec![
             TableRef {
                 alias: "a".to_string(),

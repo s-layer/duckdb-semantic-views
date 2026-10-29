@@ -158,8 +158,13 @@ pub fn validate_derived_metrics(def: &SemanticViewDefinition) -> Result<(), Pars
         .copied()
         .map(ToString::to_string)
         .collect();
-    check_derived_metric_references(&derived, &all_metric_names, &all_metric_names_display)
-        .map_err(ParseError::positionless)?;
+    check_derived_metric_references(
+        &derived,
+        &def.variables,
+        &all_metric_names,
+        &all_metric_names_display,
+    )
+    .map_err(ParseError::positionless)?;
 
     // 4. Check for cycles in derived metric dependency graph
     let derived_name_strs: Vec<&str> = derived.iter().map(|m| m.name.as_str()).collect();
@@ -204,13 +209,20 @@ fn check_no_aggregates_in_derived(derived: &[&crate::model::Metric]) -> Result<(
 /// spaces or dots (E-2 / E-3).
 fn check_derived_metric_references(
     derived: &[&crate::model::Metric],
+    variables: &[crate::model::Variable],
     all_metric_names: &[&str],
     all_metric_names_display: &[String],
 ) -> Result<(), String> {
-    let known: HashSet<String> = all_metric_names
+    let mut known: HashSet<String> = all_metric_names
         .iter()
         .map(|n| crate::ident::normalize_ident_part(n))
         .collect();
+    // A view variable is read by bare name too (Phase 6.5).
+    known.extend(
+        variables
+            .iter()
+            .map(|v| crate::ident::normalize_ident_part(&v.name)),
+    );
     for met in derived {
         for r in crate::expr_tokens::scan_references(&met.expr) {
             if !r.is_bare() {

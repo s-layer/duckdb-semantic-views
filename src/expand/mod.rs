@@ -67,6 +67,7 @@ mod tests_multi_path_using;
 // Pins NUMBERS (executes the SQL in-memory), so gated the same way.
 #[cfg(all(test, not(feature = "extension")))]
 mod tests_inline_query;
+// Pins NUMBERS (executes the SQL in-memory), so gated the same way.
 #[cfg(test)]
 mod tests_pkfk_expand;
 #[cfg(test)]
@@ -79,6 +80,8 @@ mod tests_qualified_refs;
 mod tests_role_playing;
 #[cfg(test)]
 mod tests_semi_additive_dependency;
+#[cfg(all(test, not(feature = "extension")))]
+mod tests_variables;
 
 // Public API (the pre-split expand.rs surface, plus the boxed fan-trap detail
 // structs re-exported for R-9).
@@ -100,5 +103,7 @@ pub(crate) use materialization::find_routing_materialization_name;
 // The shim's isolated bind of `semantic_view()` (`query::table_function`).
 #[cfg(feature = "extension")]
 pub(crate) use where_clause::{check_params_supplied, show_params, where_fence};
+// What a query's variable values are written as (`crate::variables`).
+pub(crate) use where_clause::PARAM_FUNCTION;
 // Read-side member-type probe (TECH-DEBT #51, `query::member_types`).
 pub(crate) use window::window_required_dimensions;

@@ -750,6 +750,7 @@ fn build_def() -> SemanticViewDefinition {
         },
     ];
     SemanticViewDefinition {
+        variables: Vec::new(),
         max_staleness: None,
         module_custom_instructions: Default::default(),
         verified_queries: Vec::new(),
@@ -1103,7 +1104,7 @@ fn check_case(case: &Case) -> Result<(), TestCaseError> {
             .chain(FACTS.iter().map(|f| fact_item_text(f)))
             .collect();
         let items = RequestItems::parse(&[], &[], &texts, &[]).expect("the facts parse");
-        let lowered = lower_expression_items("child", &stored, items)
+        let lowered = lower_expression_items("child", &stored, items, &Default::default())
             .unwrap_or_else(|e| panic!("the facts lower: {e:?}"));
         req.facts = lowered
             .items

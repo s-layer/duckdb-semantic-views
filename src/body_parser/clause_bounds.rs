@@ -37,6 +37,7 @@ fn char_at(text: &str, i: usize) -> Option<char> {
 const CLAUSE_KEYWORDS: &[&str] = &[
     "tables",
     "relationships",
+    "variables",
     "facts",
     "dimensions",
     "metrics",
@@ -44,12 +45,13 @@ const CLAUSE_KEYWORDS: &[&str] = &[
 ];
 
 /// Clause ordering — TABLES must be first, then RELATIONSHIPS (optional),
-/// FACTS (optional), DIMENSIONS (optional),
+/// VARIABLES (optional), FACTS (optional), DIMENSIONS (optional),
 /// METRICS (optional), MATERIALIZATIONS (optional).
 /// At least one of DIMENSIONS or METRICS is required.
 const CLAUSE_ORDER: &[&str] = &[
     "tables",
     "relationships",
+    "variables",
     "facts",
     "dimensions",
     "metrics",
@@ -117,7 +119,7 @@ pub(super) fn find_clause_bounds<'a>(
             return Err(cur.err(
                 kw_tok.start,
                 format!(
-                    "Unexpected character '{first}' in AS body; expected a clause keyword (TABLES, RELATIONSHIPS, FACTS, DIMENSIONS, METRICS, MATERIALIZATIONS).",
+                    "Unexpected character '{first}' in AS body; expected a clause keyword (TABLES, RELATIONSHIPS, VARIABLES, FACTS, DIMENSIONS, METRICS, MATERIALIZATIONS).",
                 ),
             ));
         }
@@ -135,7 +137,7 @@ pub(super) fn find_clause_bounds<'a>(
                 format!("Unknown clause keyword '{word}'; did you mean '{sug_upper}'?")
             } else {
                 format!(
-                    "Unknown clause keyword '{word}'; expected one of TABLES, RELATIONSHIPS, FACTS, DIMENSIONS, METRICS, MATERIALIZATIONS.",
+                    "Unknown clause keyword '{word}'; expected one of TABLES, RELATIONSHIPS, VARIABLES, FACTS, DIMENSIONS, METRICS, MATERIALIZATIONS.",
                 )
             };
             return Err(cur.err(kw_tok.start, msg));
@@ -248,7 +250,7 @@ pub(super) fn find_clause_bounds<'a>(
             let kw_upper = bound.keyword.to_ascii_uppercase();
             return Err(ParseError {
                 message: format!(
-                    "Clause '{kw_upper}' appears out of order; clauses must appear as: TABLES, RELATIONSHIPS (optional), FACTS (optional), DIMENSIONS (optional), METRICS (optional), MATERIALIZATIONS (optional).",
+                    "Clause '{kw_upper}' appears out of order; clauses must appear as: TABLES, RELATIONSHIPS (optional), VARIABLES (optional), FACTS (optional), DIMENSIONS (optional), METRICS (optional), MATERIALIZATIONS (optional).",
                 ),
                 // T-7 (code-review 2026-07-11): point the caret at the
                 // out-of-order clause keyword instead of dropping the position.

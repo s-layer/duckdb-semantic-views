@@ -26,6 +26,9 @@ YAML keys differ from the SQL clause names in some cases:
    * - ``RELATIONSHIPS``
      - ``joins``
      - Different name -- YAML uses ``joins``
+   * - ``VARIABLES``
+     - ``variables``
+     - A list of ``{name, data_type, default, comment}`` entries. See `Variable`_
    * - ``FACTS``
      - ``facts``
      -
@@ -80,6 +83,12 @@ A YAML definition covering all supported features:
          - customer_id
        name: order_customer
        cardinality: ManyToOne
+
+   variables:
+     - name: min_amount
+       data_type: DECIMAL(10,2)
+       default: '100'
+       comment: Smallest order counted as large
 
    facts:
      - name: net_price
@@ -219,6 +228,12 @@ Top-Level Keys
      - list of `Fact`_
      - No
      - Named row-level expressions (no aggregates).
+   * - ``variables``
+     - list of `Variable`_
+     - No
+     - View variables that member expressions and queries read. Maps to the SQL ``VARIABLES`` clause.
+
+       .. versionadded:: 0.18.0
    * - ``materializations``
      - list of `Materialization`_
      - No
@@ -703,6 +718,65 @@ Each entry in the ``joins`` list declares a FK/PK relationship between tables. T
        ref_columns:
          - airport_code
        name: dep_airport
+
+
+.. _ref-yaml-format-variable:
+
+Variable
+========
+
+.. versionadded:: 0.18.0
+
+Each entry in the ``variables`` list declares a view variable. This maps to the SQL ``VARIABLES`` clause; see :ref:`ref-create-variables` for what a variable does and the rules it follows.
+
+.. list-table::
+   :header-rows: 1
+   :widths: 22 18 12 10 38
+
+   * - Field
+     - Type
+     - Required
+     - Default
+     - Description
+   * - ``name``
+     - string
+     - Yes
+     -
+     - Variable name: one identifier. It cannot be the name of a fact, dimension, metric or other variable.
+   * - ``data_type``
+     - string
+     - No
+     - null
+     - A DuckDB type that each value is cast to (``INTEGER``, ``DECIMAL(10,2)``).
+   * - ``default``
+     - string
+     - No
+     - null
+     - The default expression, used when a query does not set the variable (``'1000'``, ``current_date``). Each query evaluates it.
+   * - ``comment``
+     - string
+     - No
+     - null
+     - Human-readable description.
+
+.. code-block:: yaml
+
+   variables:
+     - name: min_amount
+       data_type: INTEGER
+       default: '1000'
+     - name: multiplier
+       data_type: DOUBLE
+       default: |
+         1.0
+     - name: target_region
+       data_type: VARCHAR
+       comment: the region to report on
+
+``data_type`` and ``default`` are stored trimmed, so a ``|`` block scalar, which ends in a line break, stores ``1.0``. Because an export has to re-create the same view through ``GET_DDL``, ``CREATE SEMANTIC VIEW ... FROM YAML`` also refuses an entry that the SQL form could not write back:
+
+- a ``data_type`` or ``default`` holding a SQL comment marker (``--`` or ``/*``), which ``CREATE`` would drop: ``default: 2 -- a note`` is refused;
+- a ``data_type`` or ``default`` holding a ``DEFAULT``, ``:=`` or ``COMMENT`` of its own outside brackets, which would read back as a different variable.
 
 
 .. _ref-yaml-format-materialization:

@@ -289,6 +289,7 @@ extern "C" {
         const uint8_t *where_ptr, size_t where_len,
         size_t param_count,
         const uint8_t *order_ptr, size_t order_len,
+        const uint8_t *vars_ptr, size_t vars_len,
         char **out_ptr, size_t *out_len,
         char *error_buf, size_t error_buf_len);
 
@@ -307,6 +308,7 @@ extern "C" {
         const uint8_t *where_ptr, size_t where_len,
         size_t param_count,
         const uint8_t *order_ptr, size_t order_len,
+        const uint8_t *vars_ptr, size_t vars_len,
         uint8_t fence,
         char **out_ptr, size_t *out_len,
         char *error_buf, size_t error_buf_len);
@@ -620,6 +622,11 @@ static std::vector<std::pair<std::string, LogicalType>> sv_semantic_named_params
         // keeps its own type (TECH-DEBT #105). The SEMANTIC_VIEW(...) construct
         // passes a prepared statement's parameters here.
         {"params", LogicalType::ANY},
+        // The view's variables this query sets, by name: a struct,
+        // `variables := {'min_amount': 2000}`, Snowflake's `VARIABLES
+        // min_amount = 2000` (Phase 6.5). Each value goes into `params` after
+        // where_clause's own (`sv_read_variables`).
+        {"variables", LogicalType::ANY},
         // The order the item lists' columns come out in, e.g. ['metrics',
         // 'dimensions']: Snowflake's SEMANTIC_VIEW(...) sets column order by
         // the order its clauses are written in, and the construct lowers to
@@ -1686,6 +1693,54 @@ static vector<Value> sv_read_params(TableFunctionBindInput &input, const char *f
     return StructValue::GetChildren(it->second);
 }
 
+static std::vector<uint8_t> sv_serialise_string_list(const Value &list_val,
+                                                     const char *param_name);
+
+// The variables a query sets (`variables := {'name': value, ...}`): their names
+// in the varchar-list wire format, for the Rust side, which refers to the value
+// of the i-th as `__sv_param(<where_clause's values> + i)`. Each value is
+// appended to `params` for `sv_bind_params` to put in place, so a value is
+// never SQL text. Absent or NULL sets none.
+static std::vector<uint8_t> sv_read_variables(TableFunctionBindInput &input, const char *fn_name,
+                                              vector<Value> &params) {
+    auto it = input.named_parameters.find("variables");
+    if (it == input.named_parameters.end() || it->second.IsNull()) {
+        return {};
+    }
+    auto &type = it->second.type();
+    if (!StructType::IsStruct(type) || StructType::IsUnnamed(type)) {
+        throw BinderException("%s: variables must be a struct of values by name, e.g. "
+                              "variables := {'min_amount': 2000}, not %s",
+                              fn_name, type.ToString());
+    }
+    vector<Value> names;
+    auto &children = StructValue::GetChildren(it->second);
+    for (idx_t i = 0; i < children.size(); i++) {
+        // As CREATE refuses for a declared type (`variables::unsupported_type`):
+        // a variable with no type or default would otherwise take any value.
+        auto &child_type = StructType::GetChildType(type, i);
+        switch (child_type.id()) {
+        case LogicalTypeId::LIST:
+        case LogicalTypeId::ARRAY:
+        case LogicalTypeId::STRUCT:
+        case LogicalTypeId::MAP:
+        case LogicalTypeId::UNION:
+        case LogicalTypeId::VARIANT:
+            break;
+        default:
+            if (!child_type.IsJSONType()) {
+                names.emplace_back(StructType::GetChildName(type, i));
+                params.push_back(children[i]);
+                continue;
+            }
+        }
+        throw BinderException(std::string(fn_name) + ": variable '" + StructType::GetChildName(type, i) +
+                              "' is set to a " + child_type.ToString() +
+                              "; a variable can't be a list, array, STRUCT, MAP, UNION, VARIANT or JSON");
+    }
+    return sv_serialise_string_list(Value::LIST(LogicalType::VARCHAR, std::move(names)), "variables");
+}
+
 // Put each value of `params` in place of the predicate's parameter that
 // refers to it in the parsed expansion, as a constant of the value's own type:
 // a value is never SQL text. The Rust side lets only `$1`, `$2`, ... through
@@ -2707,6 +2762,8 @@ static unique_ptr<FunctionData> sv_explain_semantic_view_bind(
         where_clause = it_w->second.GetValue<std::string>();
     }
     auto params = sv_read_params(input, "explain_semantic_view");
+    idx_t where_params = params.size();
+    std::vector<uint8_t> vars_buf = sv_read_variables(input, "explain_semantic_view", params);
     std::vector<uint8_t> sp_buf = sv_search_path_payload(context, input);
 
     // The EXPLAIN of the expanded query plans the view's tables in the caller's
@@ -2726,8 +2783,9 @@ static unique_ptr<FunctionData> sv_explain_semantic_view_bind(
         facts_buf.empty()   ? nullptr : facts_buf.data(),   facts_buf.size(),
         where_clause.empty() ? nullptr : reinterpret_cast<const uint8_t *>(where_clause.data()),
         where_clause.size(),
-        params.size(),
+        where_params,
         order_buf.empty()   ? nullptr : order_buf.data(),   order_buf.size(),
+        vars_buf.empty()    ? nullptr : vars_buf.data(),    vars_buf.size(),
         &payload.ptr, &payload.len,
         error_buf, sizeof(error_buf));
     caller.ThrowIfCancelled();
@@ -3331,6 +3389,8 @@ static unique_ptr<TableRef> sv_semantic_view_bind_replace(
         where_clause = it_w->second.GetValue<std::string>();
     }
     auto params = sv_read_params(input, "semantic_view");
+    idx_t where_params = params.size();
+    std::vector<uint8_t> vars_buf = sv_read_variables(input, "semantic_view", params);
     std::vector<uint8_t> sp_buf = sv_search_path_payload(context, input);
 
     // The catalog read runs in the caller's transaction; a cancelled caller
@@ -3353,8 +3413,9 @@ static unique_ptr<TableRef> sv_semantic_view_bind_replace(
             where_clause.empty() ? nullptr
                                  : reinterpret_cast<const uint8_t *>(where_clause.data()),
             where_clause.size(),
-            params.size(),
+            where_params,
             order_buf.empty()   ? nullptr : order_buf.data(),   order_buf.size(),
+            vars_buf.empty()    ? nullptr : vars_buf.data(),    vars_buf.size(),
             fence ? 1 : 0,
             &payload.ptr, &payload.len,
             error_buf, sizeof(error_buf));

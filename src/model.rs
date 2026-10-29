@@ -675,6 +675,31 @@ pub struct Materialization {
     pub metrics: Vec<String>,
 }
 
+/// A view-level variable (Snowflake's `VARIABLES` clause, Phase 6.5):
+/// `name [data_type] [{DEFAULT | :=} default] [COMMENT '...']`.
+///
+/// A fact, dimension or metric expression, and a query's `where_clause`, may
+/// refer to it by its unqualified name. A query sets it (`VARIABLES name =
+/// value` in `SEMANTIC_VIEW(...)`, `variables := {'name': value}` for
+/// `semantic_view()`), or else its default applies; a variable with neither
+/// fails the query.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "arbitrary", derive(arbitrary::Arbitrary))]
+pub struct Variable {
+    /// The name, as written (a quoted name keeps its quotes, like a member's).
+    pub name: String,
+    /// The type a value is cast to, in `DuckDB`'s spelling; `None` keeps the
+    /// value's own type.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub data_type: Option<String>,
+    /// The expression used when a query does not set the variable, evaluated
+    /// in each query that uses it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub default: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub comment: Option<String>,
+}
+
 /// A named raw SQL column expression — a pre-aggregation fact, scoped to a table alias.
 /// Added in Phase 11 for the FACTS clause of CREATE SEMANTIC VIEW.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -845,6 +870,9 @@ pub struct SemanticViewDefinition {
     pub joins: Vec<Join>,
     #[serde(default)]
     pub facts: Vec<Fact>,
+    /// The `VARIABLES` clause (Phase 6.5), in the order written.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub variables: Vec<Variable>,
     /// Named materializations mapping pre-aggregated tables to covered dims/metrics.
     /// Old stored JSON without this field deserializes with empty Vec.
     /// Not serialized when empty to preserve backward-compatible JSON.
@@ -982,6 +1010,13 @@ impl SemanticViewDefinition {
     }
 }
 
+fn trim_in_place(text: &mut String) {
+    let trimmed = text.trim();
+    if trimmed.len() != text.len() {
+        *text = trimmed.to_string();
+    }
+}
+
 impl SemanticViewDefinition {
     /// Maximum YAML input size (1 MiB). Sanity guard against oversized input.
     /// This is NOT a security boundary -- creating semantic views is a
@@ -1000,10 +1035,13 @@ impl SemanticViewDefinition {
         // parentheses, so the YAML form stores it trimmed as well.
         for t in &mut def.tables {
             if let Some(query) = &mut t.definition {
-                let trimmed = query.trim();
-                if trimmed.len() != query.len() {
-                    *query = trimmed.to_string();
-                }
+                trim_in_place(query);
+            }
+        }
+        // A variable's type and default, likewise.
+        for v in &mut def.variables {
+            for text in v.data_type.iter_mut().chain(v.default.iter_mut()) {
+                trim_in_place(text);
             }
         }
         Ok(def)
@@ -1187,6 +1225,34 @@ fn validate_yaml_tables(def: &SemanticViewDefinition) -> Result<(), String> {
             for c in uc {
                 slot_column("table", "UNIQUE column", c)?;
             }
+        }
+    }
+    Ok(())
+}
+
+/// A variable (Phase 6.5) is held to [`crate::variables::validate`], and its
+/// entry must read back from `GET_DDL` as written: the DDL parser splits an
+/// entry at a depth-0 `DEFAULT`, `:=` or `COMMENT`, so a type or default that
+/// holds one would come back as a different variable, and the front door
+/// blanks comments before parsing.
+fn validate_yaml_variables(def: &SemanticViewDefinition) -> Result<(), String> {
+    crate::variables::validate(def)?;
+    for v in &def.variables {
+        let entry = crate::variables::render_entry(v);
+        if crate::util::blank_sql_comments(&entry) != entry {
+            return Err(format!(
+                "variable '{}' holds a SQL comment marker, which CREATE would drop",
+                v.name
+            ));
+        }
+        let back = crate::body_parser::parse_variable_entry(&entry, 0);
+        if !matches!(&back, Ok(b) if b == v) {
+            return Err(format!(
+                "variable '{}' does not read back from GET_DDL as written ('{entry}'); a \
+                 type or default can't hold surrounding whitespace, or a DEFAULT, := or \
+                 COMMENT of its own outside brackets",
+                v.name
+            ));
         }
     }
     Ok(())
@@ -1668,6 +1734,7 @@ pub fn validate_ddl_representable(def: &SemanticViewDefinition) -> Result<(), St
     validate_yaml_materializations(def)?;
     validate_yaml_tags(def)?;
     validate_yaml_metadata(def)?;
+    validate_yaml_variables(def)?;
     // MODEL-1 (code-review 2026-08-08): the semantic cross-reference checks —
     // NON ADDITIVE BY, a window metric's dimensions and inner metric,
     // materialization names and references — lived only in
@@ -3106,6 +3173,7 @@ mod tests {
         #[test]
         fn semantic_view_definition_with_tables_roundtrip() {
             let def = SemanticViewDefinition {
+                variables: Vec::new(),
                 tables: vec![TableRef {
                     alias: "o".to_string(),
                     table: "orders".to_string(),

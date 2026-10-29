@@ -14,6 +14,13 @@
 //! stores the `semantic_view()` call, which expands against the semantic view's
 //! definition each time it is queried.
 //!
+//! `VARIABLES name = value, ...` (Snowflake's last sub-clause, Phase 6.5)
+//! lowers to `variables := {'name': value, ...}`, after `params`: a value is
+//! SQL of the statement, not text, so a parameter in it stays a parameter of
+//! the statement, in its place among them. `name => value` is the same.
+//! `name = value` also matches the rule for an equality, so in any other
+//! clause the part is the expression it reads as.
+//!
 //! A prepared statement's parameter in `WHERE` is one of the statement's
 //! parameters (TECH-DEBT #105). The predicate goes to `where_clause` as text,
 //! so there it becomes `$1`, `$2`, ..., and the parameter itself goes, in that
@@ -37,10 +44,12 @@ use crate::sql_lit::SqlLit;
 /// like one must be quoted (`"facts".x`), as in Snowflake.
 pub(super) const RULES: &str = r"
 SvSemanticView <- 'SEMANTIC_VIEW' '(' SvViewName SvQueryPart* ')' SvQueryTableAlias?
-SvQueryPart <- SvQueryWord / SvQueryComma / SvQueryAlias / SvQueryExpr
-SvQueryWord <- 'DIMENSIONS' / 'METRICS' / 'FACTS' / 'WHERE'
+SvQueryPart <- SvQueryWord / SvQueryComma / SvQueryAlias / SvQueryVariable / SvQueryExpr
+SvQueryWord <- 'DIMENSIONS' / 'METRICS' / 'FACTS' / 'WHERE' / 'VARIABLES'
 SvQueryComma <- ','
 SvQueryAlias <- 'AS' ColLabelOrString
+SvQueryVariable <- ColId SvQueryAssign Expression
+SvQueryAssign <- '=>' / '='
 SvQueryExpr <- Expression
 SvQueryTableAlias <- TableAlias
 ";
@@ -52,7 +61,8 @@ pub(super) const TABLE_REFS: &[&str] = &["SvSemanticView"];
 /// The clauses, in the default column order.
 const CLAUSES: [&str; 3] = ["DIMENSIONS", "METRICS", "FACTS"];
 
-/// One part of the body, classified.
+/// One part of the body, classified. A `name = value` part is an `Expr` in
+/// every clause but `VARIABLES`, which reads its node's parts.
 enum Part<'a> {
     Word(String, &'a Node),
     Comma(&'a Node),
@@ -137,12 +147,15 @@ fn lower(
             .join(", ");
         if clause.word == "WHERE" {
             args.push(format!("where_clause := {items}"));
+        } else if clause.word == "VARIABLES" {
+            // After `params`, below.
         } else {
             args.push(format!("{} := [{items}]", clause.word.to_ascii_lowercase()));
             order.push(clause.word.as_str());
         }
     }
     let rank = |w: &str| CLAUSES.iter().position(|c| *c == w);
+    let variables = clauses.iter().find(|c| c.word == "VARIABLES");
     if order.windows(2).any(|w| rank(w[0]) > rank(w[1])) {
         let names = order
             .iter()
@@ -153,6 +166,9 @@ fn lower(
     }
     if !params.row.is_empty() {
         args.push(format!("params := row({})", params.row.join(", ")));
+    }
+    if let Some(clause) = variables {
+        args.push(format!("variables := {{{}}}", clause.items.join(", ")));
     }
 
     let alias = table_alias(root)
@@ -168,7 +184,13 @@ fn lower(
 fn classify<'a>(tree: &Tree, part: &'a Node) -> Result<Part<'a>, ParseError> {
     let node = first_of(
         part,
-        &["SvQueryWord", "SvQueryComma", "SvQueryAlias", "SvQueryExpr"],
+        &[
+            "SvQueryWord",
+            "SvQueryComma",
+            "SvQueryAlias",
+            "SvQueryVariable",
+            "SvQueryExpr",
+        ],
     )
     .ok_or_else(|| internal(part, "unknown part"))?;
     if node.rule.eq_ignore_ascii_case("SvQueryWord") {
@@ -265,6 +287,14 @@ fn group<'a>(
                         format!("{word} given twice in SEMANTIC_VIEW(...)"),
                     ));
                 }
+                // Its values are parameters of the statement after the
+                // predicate's, so it comes last, as in Snowflake.
+                if clauses.iter().any(|c| c.word == "VARIABLES") {
+                    return Err(error_at(
+                        Some(node),
+                        format!("VARIABLES comes last in SEMANTIC_VIEW(...), after {word}"),
+                    ));
+                }
                 clauses.push(Clause {
                     word: word.clone(),
                     at: node,
@@ -325,10 +355,12 @@ fn extend<'a>(
         }),
         // An item is one expression with at most one alias, and a predicate
         // one expression.
-        Some(ItemParts { expr, alias: None }) if word != "WHERE" => Ok(ItemParts {
-            expr,
-            alias: Some((node, !is_alias)),
-        }),
+        Some(ItemParts { expr, alias: None }) if word != "WHERE" && word != "VARIABLES" => {
+            Ok(ItemParts {
+                expr,
+                alias: Some((node, !is_alias)),
+            })
+        }
         Some(_) => {
             // A comma can't follow the predicate either: WHERE takes one.
             let expected = if word == "WHERE" {
@@ -360,6 +392,9 @@ fn item_text(
     if word == "WHERE" {
         return Ok(clean(&lower_inside(tree, item.expr, params)?));
     }
+    if word == "VARIABLES" {
+        return variable_item(tree, item.expr, params);
+    }
     let parts = std::iter::once(item.expr).chain(item.alias.map(|(a, _)| a));
     if let Some(at) = parts
         .flat_map(|n| inner_parts(n).into_iter())
@@ -378,6 +413,61 @@ fn item_text(
         Some((alias, true)) => format!("{expr} AS {}", clean(&tree.text(alias))),
         Some((alias, false)) => format!("{expr} {}", clean(&tree.text(alias))),
     })
+}
+
+/// A `VARIABLES` item, `name = value`, as a field of the `variables` struct:
+/// `'name': value`. The value is SQL of the statement, so a parameter in it is
+/// taken as the text around the construct refers to it; a construct in it is
+/// a query, which a variable's value can't be, as in Snowflake.
+fn variable_item(tree: &Tree, node: &Node, params: &mut Params<'_>) -> Result<String, ParseError> {
+    if !node.rule.eq_ignore_ascii_case("SvQueryVariable") {
+        return Err(error_at(
+            Some(node),
+            format!(
+                "expected 'name = value' in VARIABLES, got: {}",
+                clean(&tree.text(node))
+            ),
+        ));
+    }
+    // The name is the text before the `=` or `=>`, the value the text after.
+    let (Some((at, len)), Some((assign_at, assign_len))) = (
+        node.span,
+        first_of(node, &["SvQueryAssign"]).and_then(|a| a.span),
+    ) else {
+        return Err(internal(node, "malformed variable item"));
+    };
+    let whole = tree.text(node);
+    let (Some(name), Some(value)) = (
+        whole.get(..assign_at - at),
+        whole.get(assign_at + assign_len - at..len),
+    ) else {
+        return Err(internal(node, "malformed variable item"));
+    };
+    let mut text = value.to_string();
+    let start = assign_at + assign_len;
+    let mut replacements = Vec::new();
+    for (inner, is_construct) in inner_parts(node) {
+        if is_construct {
+            return Err(error_at(
+                Some(inner),
+                "a variable's value can't be a query".to_string(),
+            ));
+        }
+        let range = inner
+            .span
+            .and_then(|(o, l)| o.checked_sub(start).map(|at| at..at + l))
+            .filter(|r| text.get(r.clone()).is_some())
+            .ok_or_else(|| internal(inner, "parameter outside its expression"))?;
+        replacements.push((range, (params.around)()));
+    }
+    for (range, lowered) in replacements.into_iter().rev() {
+        text.replace_range(range, &lowered);
+    }
+    Ok(format!(
+        "'{}': {}",
+        SqlLit::escape(&clean(name)),
+        clean(&text)
+    ))
 }
 
 /// `node`'s text with each construct inside it lowered, and each parameter
@@ -436,8 +526,8 @@ fn expected_clause(tree: &Tree, node: &Node) -> ParseError {
     error_at(
         Some(node),
         format!(
-            "expected DIMENSIONS, METRICS, FACTS or WHERE after the view name in \
-             SEMANTIC_VIEW(...), got: {}",
+            "expected DIMENSIONS, METRICS, FACTS, WHERE or VARIABLES after the view name \
+             in SEMANTIC_VIEW(...), got: {}",
             clean(&tree.text(node))
         ),
     )
@@ -722,8 +812,8 @@ mod tests {
         let (message, _) = error(sql, &[(E, "o.region")]);
         assert_eq!(
             message,
-            "expected DIMENSIONS, METRICS, FACTS or WHERE after the view name in \
-             SEMANTIC_VIEW(...), got: o.region"
+            "expected DIMENSIONS, METRICS, FACTS, WHERE or VARIABLES after the view name \
+             in SEMANTIC_VIEW(...), got: o.region"
         );
     }
 

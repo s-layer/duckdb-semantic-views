@@ -805,7 +805,7 @@ pub(crate) fn inline_references_outside_subqueries(
     splice_references(expr, scan_references_outside_subqueries(expr), replacements)
 }
 
-fn splice_references(
+pub(crate) fn splice_references(
     expr: &str,
     refs: Vec<IdentRef<'_>>,
     replacements: &HashMap<String, &str>,

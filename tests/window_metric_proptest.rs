@@ -358,6 +358,7 @@ fn build_def(func: WFunc, mode: &PartMode) -> SemanticViewDefinition {
         tags: Vec::new(),
     }];
     SemanticViewDefinition {
+        variables: Vec::new(),
         max_staleness: None,
         module_custom_instructions: Default::default(),
         verified_queries: Vec::new(),

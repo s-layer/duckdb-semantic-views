@@ -700,6 +700,18 @@ pub fn render_create_ddl_qualified(
     if !def.joins.is_empty() {
         emit_relationships(&mut out, def);
     }
+    if !def.variables.is_empty() {
+        out.push_str("VARIABLES (\n");
+        for (i, v) in def.variables.iter().enumerate() {
+            out.push_str("    ");
+            out.push_str(&crate::variables::render_entry(v));
+            if i + 1 < def.variables.len() {
+                out.push(',');
+            }
+            out.push('\n');
+        }
+        out.push_str(")\n");
+    }
     if !def.facts.is_empty() {
         emit_facts(&mut out, def);
     }

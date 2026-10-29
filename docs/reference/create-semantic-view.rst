@@ -1,5 +1,5 @@
 .. meta::
-   :description: Full syntax and parameter reference for CREATE SEMANTIC VIEW, covering TABLES, RELATIONSHIPS, FACTS, DIMENSIONS, METRICS, and MATERIALIZATIONS clauses, plus FROM YAML and FROM YAML FILE variants
+   :description: Full syntax and parameter reference for CREATE SEMANTIC VIEW, covering TABLES, RELATIONSHIPS, VARIABLES, FACTS, DIMENSIONS, METRICS, and MATERIALIZATIONS clauses, plus FROM YAML and FROM YAML FILE variants
 
 .. _ref-create-semantic-view:
 
@@ -7,7 +7,7 @@
 CREATE SEMANTIC VIEW
 ======================
 
-Creates a semantic view definition, registering dimensions, metrics, relationships, facts, and materializations for on-demand query expansion.
+Creates a semantic view definition, registering dimensions, metrics, relationships, variables, facts, and materializations for on-demand query expansion.
 
 
 .. _ref-create-syntax:
@@ -34,6 +34,11 @@ Syntax
    [ RELATIONSHIPS (
        <rel_name> AS <from_alias>( <fk_column> [, <fk_column> ...] )
            REFERENCES <to_alias> [( <ref_column> [, <ref_column> ...] )]
+       [, ... ]
+   ) ]
+   [ VARIABLES (
+       <var_name> [ <data_type> ] [ { DEFAULT | := } <default_expression> ]
+           [ COMMENT [ = ] '<text>' ]
        [, ... ]
    ) ]
    [ FACTS (
@@ -337,7 +342,7 @@ All three variants work with both the keyword body (with or without ``AS``) and 
 Clauses
 =======
 
-Clauses must appear in the following order: ``TABLES``, ``RELATIONSHIPS``, ``FACTS``, ``DIMENSIONS``, ``METRICS``, ``MATERIALIZATIONS``. ``TABLES`` is required. At least one of ``DIMENSIONS`` or ``METRICS`` is required. All other clauses are optional.
+Clauses must appear in the following order: ``TABLES``, ``RELATIONSHIPS``, ``VARIABLES``, ``FACTS``, ``DIMENSIONS``, ``METRICS``, ``MATERIALIZATIONS``. ``TABLES`` is required. At least one of ``DIMENSIONS`` or ``METRICS`` is required. All other clauses are optional.
 
 
 .. _ref-create-tables:
@@ -451,6 +456,96 @@ Cardinality is used for :ref:`fan trap detection <howto-fan-traps>`.
    Relationship names are now matched the way DuckDB matches identifiers, and
    quoted relationship names work on role-playing relationships. Views stored
    by earlier versions keep loading.
+
+
+.. _ref-create-variables:
+
+VARIABLES
+---------
+
+.. versionadded:: 0.18.0
+
+Declares named values that member expressions read, as in Snowflake. Each query can set a variable to a value of its own, and a variable the query leaves unset takes its default. Use one for a threshold, a rate or a reporting date that changes from one question to the next, so that one view answers all of them.
+
+This is Snowflake's example, over a ``sales_data`` table holding the sales ``(1, 'West', 1000)``, ``(2, 'West', 2500)``, ``(3, 'East', 500)`` and ``(4, 'East', 3000)`` as ``(sale_id, region, amount)``:
+
+.. code-block:: sql
+
+   CREATE SEMANTIC VIEW sales_analysis
+     TABLES (sales AS sales_data PRIMARY KEY (sale_id))
+     VARIABLES (
+       min_amount INTEGER DEFAULT 1000,
+       multiplier DOUBLE := 1.0,
+       target_region VARCHAR COMMENT 'the region to report on'
+     )
+     FACTS (sales.adjusted_amount AS amount * multiplier)
+     DIMENSIONS (
+       sales.region AS region,
+       sales.sale_category AS CASE WHEN amount >= min_amount THEN 'HIGH' ELSE 'LOW' END
+     )
+     METRICS (
+       sales.total_sales AS SUM(amount),
+       sales.weighted_sales AS SUM(amount * multiplier),
+       sales.adjusted_total AS SUM(sales.adjusted_amount)
+     );
+
+A query sets the variables in a ``VARIABLES`` clause at the end of :ref:`SEMANTIC_VIEW(...) <ref-sv-variables>`, or in the ``variables`` parameter of ``semantic_view()``:
+
+.. code-block:: sql
+
+   SELECT * FROM SEMANTIC_VIEW(
+     sales_analysis
+     DIMENSIONS region, sale_category
+     METRICS weighted_sales
+     WHERE region = target_region
+     VARIABLES min_amount = 2000, target_region => 'West', multiplier = 1.5
+   ) ORDER BY ALL;
+
+.. code-block:: text
+
+   ┌────────┬───────────────┬────────────────┐
+   │ region │ sale_category │ weighted_sales │
+   ├────────┼───────────────┼────────────────┤
+   │ West   │ HIGH          │         3750.0 │
+   │ West   │ LOW           │         1500.0 │
+   └────────┴───────────────┴────────────────┘
+
+Against ``min_amount = 2000``, West's 2500 sale is ``HIGH`` and its 1000 sale ``LOW``, and each is weighted by 1.5. Only the query's ``WHERE`` reads ``target_region``.
+
+**Parameters:**
+
+- ``<var_name>``, the variable's name: one identifier, with no table alias. Names are compared the way DuckDB compares identifiers, case-insensitively whether quoted or not.
+- ``<data_type>``, optional. A DuckDB type. Every value the variable takes, whether a query sets it or it comes from the default, is cast to this type. Without a type, a value keeps its own type.
+- ``DEFAULT <default_expression>``, optional. The value used when a query does not set the variable. It is an expression that each query evaluates, not a value fixed at ``CREATE``, so ``as_of DATE DEFAULT current_date`` is the date of the query. ``:=`` is a synonym for ``DEFAULT``; ``GET_DDL`` writes ``DEFAULT``.
+- ``COMMENT [=] '<text>'``, optional. A description. It comes last in the entry.
+
+**Where a variable can be read:**
+
+A variable is read by its bare name in a fact, dimension or metric expression (derived metrics and a window metric's arguments and ``ORDER BY`` included), in a query's ``WHERE`` (``where_clause``), and in a query's :ref:`expression items <ref-sv-expression-items>`. It cannot be used in a window frame bound such as ``ROWS BETWEEN n PRECEDING AND CURRENT ROW``, and keys and relationships name columns, not variables.
+
+An unqualified name is the variable, and a qualified name is the column. With a variable named ``amount``, ``SUM(sales.amount * amount)`` multiplies the column by the variable. So a variable named like a column changes what an unqualified reference to that column means in every member; qualify the column to keep reading it.
+
+**Defaults and required variables:**
+
+- A variable without a default must be set by every query of the view, as in Snowflake, even a query that asks for no member that reads it. Otherwise the query fails with ``variable '<name>' has no default, so the query must set it``.
+- A query in :ref:`standard SQL <howto-standard-sql>` (``SELECT ... FROM sales_analysis GROUP BY ...``) cannot set variables. Every variable takes its default, so a view with a variable that has no default cannot be queried that way.
+- A materialization that covers a member reading a variable, directly or through another member, is not used for routing, since its table was computed with values the query may not have. Other materializations of the view still route. See :ref:`ref-create-materializations`.
+
+**Validation rules:**
+
+- A variable cannot have the name of a fact, dimension or metric, and two variables cannot share a name.
+- A variable cannot be a list, an array, a ``STRUCT``, ``MAP``, ``UNION``, ``VARIANT`` or ``JSON``. Snowflake likewise refuses ``VARIANT``, ``OBJECT`` and ``ARRAY``. A query can't set a variable to such a value either, even one declared with no type.
+- A type is one type: its brackets must nest, and it cannot hold a subquery, a ``;`` or a prepared-statement parameter.
+- A default is one expression. It cannot hold a subquery, a ``;`` or a prepared-statement parameter.
+- ``CREATE`` binds each variable, as Snowflake checks it at ``CREATE``: the type must exist, and the default, cast to the type, must bind on its own, so it cannot read a column (``k INTEGER DEFAULT amount`` is refused).
+- A variable cannot be used in a window frame bound.
+- ``VARIABLES ()`` with no entries is refused.
+
+See :ref:`ref-err-variables` for the messages.
+
+**Introspection:**
+
+:ref:`DESCRIBE SEMANTIC VIEW <ref-describe-semantic-view>` lists each variable in ``VARIABLE`` rows, and :ref:`ref-get-ddl` and the :ref:`YAML form <ref-yaml-format-variable>` write the clause back. To report the type of a member that reads a variable, ``DESCRIBE`` and ``SHOW SEMANTIC DIMENSIONS`` / ``METRICS`` / ``FACTS`` take the variable as its default, as a query that leaves it unset sees it, or as a ``NULL`` of its type when it has no default. So ``weighted_sales`` above is ``DOUBLE``, the type of ``SUM(amount * multiplier)`` with a ``DOUBLE`` multiplier.
 
 
 .. _ref-create-facts:
@@ -746,6 +841,7 @@ At least one of ``DIMENSIONS`` or ``METRICS`` must be specified in each material
 - Routing uses **exact match**: both the dimension set and metric set must exactly equal the query's requested sets (case-insensitive comparison).
 - Materializations are scanned in **definition order**; the **first match wins**.
 - Semi-additive metrics (``NON ADDITIVE BY``) and window metrics (``OVER``) are **always excluded** from routing.
+- A materialization that covers a member reading a :ref:`variable <ref-create-variables>`, directly or through another member, is never used: its table was computed with values the query may not have. Other materializations still route.
 - When no match is found, the extension falls back to standard expansion.
 
 See :ref:`howto-materializations` for a detailed guide.

@@ -52,10 +52,11 @@ Parameters
 Output
 ======
 
-Returns a single VARCHAR value containing the full ``CREATE OR REPLACE SEMANTIC VIEW`` DDL statement. The DDL includes all clauses (TABLES, RELATIONSHIPS, FACTS, DIMENSIONS, METRICS, MATERIALIZATIONS) with all annotations (COMMENT, WITH SYNONYMS, LABELS, WITH TAG, PRIVATE, NON ADDITIVE BY, OVER). View-level tags are written on their own line after the last clause. The ``MATERIALIZATIONS`` clause is included only when the view has materializations declared; it is omitted for views without materializations.
+Returns a single VARCHAR value containing the full ``CREATE OR REPLACE SEMANTIC VIEW`` DDL statement. The DDL includes all clauses (TABLES, RELATIONSHIPS, VARIABLES, FACTS, DIMENSIONS, METRICS, MATERIALIZATIONS) with all annotations (COMMENT, WITH SYNONYMS, LABELS, WITH TAG, PRIVATE, NON ADDITIVE BY, OVER). View-level tags are written on their own line after the last clause. The ``MATERIALIZATIONS`` clause is included only when the view has materializations declared; it is omitted for views without materializations.
 
 The rendered DDL re-parses to the same definition. In particular:
 
+- A :ref:`VARIABLES <ref-create-variables>` entry is written as ``name [type] [DEFAULT <expr>] [COMMENT '...']``, one per line. A default declared with ``:=`` is written with ``DEFAULT``. The clause is omitted for a view without variables.
 - A named filter's ``LABELS = (FILTER)`` is written between the member's name and its ``AS`` (``o.is_large LABELS = (FILTER) AS o.amount > 100``), where Snowflake writes it.
 - A relationship declared against a ``UNIQUE`` key (rather than the primary key) renders its ``REFERENCES <target>(<columns>)`` column list, so re-parsing keeps the join wired to the unique key instead of silently falling back to the primary key.
 - A view name that needs quoting (embedded whitespace or non-ASCII characters) is quoted in the rendered ``CREATE OR REPLACE SEMANTIC VIEW`` header. (Mixed-case names are never quoted for case: names fold to lowercase -- see :ref:`ref-create-semantic-view`.)

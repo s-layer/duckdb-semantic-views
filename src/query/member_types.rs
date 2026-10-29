@@ -396,7 +396,9 @@ fn member_request(def: &SemanticViewDefinition, kind: &str, name: &str) -> Reque
 /// A copy of `def` in which no member is PRIVATE, so every member can be
 /// requested by a probe. It is never stored or queried.
 fn public_copy(def: &SemanticViewDefinition) -> SemanticViewDefinition {
-    let mut def = def.clone();
+    // A member that uses a variable is typed with the variable a NULL of its
+    // type (Phase 6.5): its type does not depend on the value.
+    let mut def = crate::variables::for_probe(def);
     for m in &mut def.metrics {
         m.access = AccessModifier::Public;
     }
@@ -632,6 +634,7 @@ mod tests {
         crate::graph::infer_cardinality(&kb.tables, &mut kb.relationships)
             .unwrap_or_else(|e| panic!("cardinality: {}", e.message));
         SemanticViewDefinition {
+            variables: Vec::new(),
             tables: kb.tables,
             dimensions: kb.dimensions,
             metrics: kb.metrics,

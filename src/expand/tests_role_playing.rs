@@ -10,6 +10,7 @@ use crate::model::{Cardinality, Dimension, Join, Metric, SemanticViewDefinition,
 
 fn flights_airports_def() -> SemanticViewDefinition {
     SemanticViewDefinition {
+        variables: Vec::new(),
         tables: vec![
             TableRef {
                 alias: "f".to_string(),
@@ -373,6 +374,7 @@ fn base_table_dimension_works_unchanged() {
 #[test]
 fn fan_trap_detection_works_with_using_paths() {
     let def = SemanticViewDefinition {
+        variables: Vec::new(),
         tables: vec![
             TableRef {
                 alias: "f".to_string(),
@@ -458,6 +460,7 @@ fn derived_metric_with_two_using_resolves_both_joins() {
 #[test]
 fn metric_using_from_base_table_no_unnecessary_join() {
     let def = SemanticViewDefinition {
+        variables: Vec::new(),
         tables: vec![TableRef {
             alias: "o".to_string(),
             table: "orders".to_string(),
@@ -506,6 +509,7 @@ fn metric_using_from_base_table_no_unnecessary_join() {
 #[test]
 fn backward_compat_no_using_expands_as_before() {
     let def = SemanticViewDefinition {
+        variables: Vec::new(),
         tables: vec![
             TableRef {
                 alias: "o".to_string(),
