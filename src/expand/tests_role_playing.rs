@@ -129,20 +129,53 @@ fn flights_airports_regions_def() -> SemanticViewDefinition {
 }
 
 #[test]
-fn descendant_of_role_playing_table_errors_ambiguous() {
-    // EXP-4 (code-review 2026-07-18): `region_name` is on `r`, a descendant of
-    // the role-playing table `a` (flights reach `a` via BOTH dep_airport and
-    // arr_airport). `r` therefore hangs off whichever airport instance the
-    // join resolver picks first (departure), regardless of the queried metric's
-    // USING -- a silent, declaration-order-dependent wrong grouping. Reaching a
-    // table only through a role-playing table is ambiguous and must error, just
-    // as a dimension directly on `a` does.
+fn descendant_of_role_playing_table_follows_the_metrics_path() {
+    // EXP-4 (code-review 2026-07-18) made a dimension on `r`, a descendant of
+    // the role-playing table `a`, an error: a bare walk hung `r` off whichever
+    // airport instance was declared first. Phase 6.3b follows Snowflake's
+    // transitive hop instead: `arrival_count USING (arr_airport)` names the
+    // airport instance, and `r` is joined off THAT instance under its own
+    // scoped alias, never bare.
     let def = flights_airports_regions_def();
     let req = QueryRequest {
         where_clause: None,
         facts: vec![],
         dimensions: vec![DimensionName::new("region_name")],
         metrics: vec![MetricName::new("arrival_count")],
+    };
+    let sql = expand("test_flights", &def, &req).unwrap();
+    assert!(
+        sql.contains(
+            r#"LEFT JOIN "regions" AS "r__arr_airport" ON "a__arr_airport"."region_id" = "r__arr_airport"."region_id""#
+        ),
+        "regions must be joined off the arrival airport: {sql}"
+    );
+    assert!(
+        sql.contains("r__arr_airport.region_name"),
+        "the dimension must read the scoped instance: {sql}"
+    );
+    assert!(
+        !sql.contains(r#"AS "r" "#) && !sql.contains(r#""a"."region_id""#),
+        "no bare regions or airports join may appear: {sql}"
+    );
+}
+
+#[test]
+fn descendant_of_role_playing_table_without_a_path_errors_ambiguous() {
+    // A metric with no USING names no airport instance, so the region it would
+    // be grouped by is still ambiguous.
+    let mut def = flights_airports_regions_def();
+    def.metrics.push(Metric {
+        name: "flight_rows".to_string(),
+        expr: "COUNT(*)".to_string(),
+        source_table: Some("f".to_string()),
+        ..Default::default()
+    });
+    let req = QueryRequest {
+        where_clause: None,
+        facts: vec![],
+        dimensions: vec![DimensionName::new("region_name")],
+        metrics: vec![MetricName::new("flight_rows")],
     };
     let err = expand("test_flights", &def, &req).unwrap_err();
     match err {

@@ -424,11 +424,11 @@ pub enum ExpandError {
         available_relationships: Vec<String>,
     },
     /// A dimension whose table is reached *only through* a role-playing table
-    /// (a descendant of it) — the role cannot be inferred and, unlike a
-    /// dimension directly on the role-playing table, cannot be scoped by a
-    /// co-queried metric's USING (EXP-4, code-review 2026-07-18). Reached one
-    /// hop past the `AmbiguousPath` case, this previously bound silently to the
-    /// first-declared relationship.
+    /// (a descendant of it), queried without a single role: some metric names
+    /// no path to the role-playing table, or the metrics name several in a query
+    /// that cannot be split by path (EXP-4, code-review 2026-07-18). Since
+    /// Phase 6.3b a single role is followed onward, as Snowflake does; before
+    /// EXP-4 this bound silently to the first-declared relationship.
     AmbiguousDescendantPath {
         view_name: String,
         dimension_name: String,
@@ -811,9 +811,10 @@ impl fmt::Display for ExpandError {
                     "semantic view '{view_name}': dimension '{dimension_name}' is ambiguous -- \
                      its table '{dimension_table}' is reachable only through the role-playing \
                      table '{role_playing_table}', which is joined via multiple relationships: \
-                     [{}]. The role cannot be inferred for a descendant table; query a dimension \
-                     directly on '{role_playing_table}' with a metric USING one of those \
-                     relationships, or give the target table a distinct alias per role.",
+                     [{}]. Give every metric in the query a USING that names one of them, or use \
+                     a dimension from a non-ambiguous table. If every metric already has one, \
+                     this query cannot be split by path (two window metrics, or metrics \
+                     beside a semi-additive one): query the metrics separately.",
                     available_relationships.join(", ")
                 )
             }

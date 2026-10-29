@@ -143,6 +143,11 @@ metric in the query names a path:
    that had one, so its numbers changed with what else was in the query. It is
    now refused, as in Snowflake.
 
+A dimension one relationship further on follows the same path. If
+``airports`` references a ``regions`` table, ``departure_count`` by a region
+dimension groups by the departure airport's region, and ``departure_count,
+arrival_count`` by region merges the two per region, as by city.
+
 A window metric names its path through its inner metric: a window over
 ``departure_count`` is grouped by departure city. Two window metrics over
 different paths cannot be grouped by ``city`` together, and neither can metrics
@@ -426,16 +431,17 @@ Troubleshooting
    raise an ambiguity error.
 
 **Dimension on a descendant of a role-playing table**
-   .. versionchanged:: 0.11.0
+   .. versionchanged:: 0.18.0
 
    A dimension on a table reached *through* a role-playing table -- for
    example ``region_name`` on ``regions`` where ``airports`` references
-   ``regions`` -- is ambiguous, because which role's rows it groups by depends
-   on which role you traversed. Such a query is now rejected (previously it
-   silently used the first-declared relationship). Unlike a dimension directly
-   on the role-playing table, a descendant **cannot** be disambiguated by a
-   metric's ``USING``: give the target a distinct alias per role, or query it
-   through a non-role-playing table.
+   ``regions`` -- follows the path each metric's ``USING`` names, as in
+   Snowflake: ``departure_count`` by ``region_name`` groups by the departure
+   airport's region, and ``departure_count, arrival_count`` by ``region_name``
+   merges the two per region. A metric with no ``USING`` is refused as
+   ambiguous, as it is for a dimension directly on ``airports``. Since 0.11.0
+   and until 0.18.0 every such query was refused; before 0.11.0 it silently
+   used the first-declared relationship.
 
 **Facts on a role-playing table**
    .. versionchanged:: 0.11.0

@@ -53,7 +53,7 @@ pub(super) fn rewrite_to_scoped_alias(expr: &str, table: &str, scoped: &str) -> 
 /// `from_alias.fk = to_alias.pk` pairs, joined by ` AND `.
 /// Uses `join.from_alias` for the FROM side and `join.table` for the TO side.
 pub(super) fn synthesize_on_clause(join: &Join, tables: &[TableRef]) -> String {
-    on_clause(join, tables, &quote_stored_ident(&join.table))
+    on_clause(join, tables, None, &quote_stored_ident(&join.table))
 }
 
 /// Synthesize an ON clause with a potentially scoped alias on the PK (target) side.
@@ -68,16 +68,20 @@ pub(super) fn synthesize_on_clause(join: &Join, tables: &[TableRef]) -> String {
 pub(super) fn synthesize_on_clause_scoped(
     join: &Join,
     tables: &[TableRef],
+    from_alias: Option<&str>,
     to_alias: &str,
 ) -> String {
-    on_clause(join, tables, &quote_ident(to_alias))
+    on_clause(join, tables, from_alias, &quote_ident(to_alias))
 }
 
 /// The ON clause of `join` with `to_sql`, an already-quoted alias, on the
-/// referenced side. Stored aliases and key columns keep any quotes they were
-/// written with, so each is stripped and quoted once ([`quote_stored_ident`]); a
-/// scoped alias is a logical value and is quoted as is.
-fn on_clause(join: &Join, tables: &[TableRef], to_sql: &str) -> String {
+/// referenced side, and `from_alias` (a scoped alias) on the referencing side
+/// when the edge leaves a role-played instance rather than the declared
+/// `from_alias` (Phase 6.3b). Stored aliases and key columns keep any quotes
+/// they were written with, so each is stripped and quoted once
+/// ([`quote_stored_ident`]); a scoped alias is a logical value and is quoted as
+/// is.
+fn on_clause(join: &Join, tables: &[TableRef], from_alias: Option<&str>, to_sql: &str) -> String {
     // Phase 33: Prefer ref_columns (resolved during inference).
     // Fall back to target PK for backward compat (legacy joins without ref_columns).
     let ref_cols: &[String] = if join.ref_columns.is_empty() {
@@ -97,7 +101,7 @@ fn on_clause(join: &Join, tables: &[TableRef], to_sql: &str) -> String {
         .map(|(fk, pk)| {
             format!(
                 "{}.{} = {}.{}",
-                quote_stored_ident(&join.from_alias),
+                from_alias.map_or_else(|| quote_stored_ident(&join.from_alias), quote_ident),
                 quote_stored_ident(fk),
                 to_sql,
                 quote_stored_ident(pk),
@@ -124,6 +128,10 @@ pub(super) struct ResolvedJoin<'a> {
     /// Whether `emit_alias` is a role-playing scoped alias. Scoped joins put
     /// the scoped alias on the PK side of the synthesized ON clause.
     pub scoped: bool,
+    /// The scoped alias of the referencing side, when the edge leaves a
+    /// role-played instance: `a__dep` for `regions` reached through the
+    /// departure airport (Phase 6.3b). `None` uses the declared `from_alias`.
+    pub from_emit: Option<String>,
 }
 
 /// Render `LEFT JOIN` clauses for resolver-selected edges onto `sql`.
@@ -156,6 +164,7 @@ pub(super) fn push_join_clauses(
             sql.push_str(&synthesize_on_clause_scoped(
                 rj.join,
                 &def.tables,
+                rj.from_emit.as_deref(),
                 &rj.emit_alias,
             ));
         } else {
@@ -232,6 +241,7 @@ fn push_bare_join<'a>(
         bare_alias: alias,
         join,
         scoped: false,
+        from_emit: None,
     });
 }
 
@@ -300,11 +310,11 @@ pub(super) fn resolve_joins_pkfk<'a>(
     // Phase 32: Collect scoped joins from metrics with USING relationships.
     // Each entry carries the scoped alias and the resolved Join edge, so the
     // emitters never re-derive the relationship from the alias string (SG-12).
-    let mut scoped_joins: Vec<(String, &Join)> = Vec::new();
+    let mut scoped_joins: Vec<(String, &Join, String)> = Vec::new();
     // Also track which bare aliases are role-playing (have multiple relationships).
     let mut role_playing_bare_aliases: HashSet<String> = HashSet::new();
 
-    let add_scoped = |scoped_joins: &mut Vec<(String, &'a Join)>,
+    let add_scoped = |scoped_joins: &mut Vec<(String, &'a Join, String)>,
                       role_playing: &mut HashSet<String>,
                       using_rel: &str| {
         if let Some(join) = crate::graph::find_relationship(&def.joins, using_rel) {
@@ -312,8 +322,8 @@ pub(super) fn resolve_joins_pkfk<'a>(
             // `scoped_join_alias` normalizes the name, so every spelling of
             // one relationship yields the same alias.
             let scoped = scoped_join_alias(&to_alias, using_rel);
-            if !scoped_joins.iter().any(|(s, _)| *s == scoped) {
-                scoped_joins.push((scoped, join));
+            if !scoped_joins.iter().any(|(s, _, _)| *s == scoped) {
+                scoped_joins.push((scoped, join, using_rel.to_string()));
             }
             role_playing.insert(to_alias);
         }
@@ -339,9 +349,24 @@ pub(super) fn resolve_joins_pkfk<'a>(
 
     // Collect needed bare aliases from source_table fields (lowercased).
     let mut needed: HashSet<String> = HashSet::new();
+    // Phase 6.3b: a dimension reachable only THROUGH a role-played table is
+    // joined under each role's scoped chain (`r__dep` off `a__dep`), never
+    // bare: a bare walk would hang it off the first-declared relationship.
+    // `find_using_context` has already required a single role for it.
+    let mut descendant_tables: Vec<(String, String)> = Vec::new();
     for dim in resolved_dims {
         if let Some(ref st) = dim.source_table {
             let alias = st.to_ascii_lowercase();
+            if let Some(rp) = super::role_playing::role_playing_on_path("", def, &alias)
+                .ok()
+                .flatten()
+                .filter(|rp| *rp != alias && role_playing_bare_aliases.contains(rp))
+            {
+                if !descendant_tables.iter().any(|(_, d)| *d == alias) {
+                    descendant_tables.push((rp, alias));
+                }
+                continue;
+            }
             if alias != *root {
                 // If this is a role-playing table, the dimension alias will be resolved
                 // via find_using_context() in expand(). Don't add the bare alias here;
@@ -433,7 +458,11 @@ pub(super) fn resolve_joins_pkfk<'a>(
     }
 
     // If no bare aliases, fact aliases, or scoped aliases needed, return empty
-    if needed.is_empty() && scoped_joins.is_empty() && fact_needed.is_empty() {
+    if needed.is_empty()
+        && scoped_joins.is_empty()
+        && fact_needed.is_empty()
+        && descendant_tables.is_empty()
+    {
         return Vec::new();
     }
 
@@ -528,13 +557,34 @@ pub(super) fn resolve_joins_pkfk<'a>(
 
     // Sort scoped joins by alias for deterministic output, then append.
     scoped_joins.sort_by(|a, b| a.0.cmp(&b.0));
-    for (scoped_alias, join) in scoped_joins {
+    for (scoped_alias, join, rel) in &scoped_joins {
         result.push(ResolvedJoin {
             bare_alias: join.table.to_ascii_lowercase(),
-            emit_alias: scoped_alias,
+            emit_alias: scoped_alias.clone(),
             join,
             scoped: true,
+            from_emit: None,
         });
+        // Each descendant dimension's chain continues from this instance.
+        let target = join.table.to_ascii_lowercase();
+        for (rp, table) in &descendant_tables {
+            if *rp != target {
+                continue;
+            }
+            for edge in super::role_playing::descendant_chain(def, rp, table).unwrap_or_default() {
+                let emit_alias = scoped_join_alias(&edge.table, rel);
+                if result.iter().any(|rj| rj.emit_alias == emit_alias) {
+                    continue;
+                }
+                result.push(ResolvedJoin {
+                    bare_alias: edge.table.to_ascii_lowercase(),
+                    emit_alias,
+                    join: edge,
+                    scoped: true,
+                    from_emit: Some(scoped_join_alias(&edge.from_alias, rel)),
+                });
+            }
+        }
     }
 
     result
@@ -632,7 +682,7 @@ mod tests {
             pk_columns: vec!["id".to_string()],
             ..Default::default()
         }];
-        let result = synthesize_on_clause_scoped(&join, &tables, "airports__dep_airport");
+        let result = synthesize_on_clause_scoped(&join, &tables, None, "airports__dep_airport");
         assert!(
             result.contains(r#""airports__dep_airport""#),
             "Should use scoped alias, got: {result}"
@@ -658,7 +708,7 @@ mod tests {
             pk_columns: vec!["id".to_string()],
             ..Default::default()
         }];
-        let result = synthesize_on_clause_scoped(&join, &tables, "airports__dep");
+        let result = synthesize_on_clause_scoped(&join, &tables, None, "airports__dep");
         assert!(
             result.contains(r#""code""#),
             "Should use ref_columns, got: {result}"
@@ -687,7 +737,7 @@ mod tests {
             ..Default::default()
         }];
         assert_eq!(
-            synthesize_on_clause_scoped(&join, &tables, "p"),
+            synthesize_on_clause_scoped(&join, &tables, None, "p"),
             r#""c"."Parent Ref" = "p"."Key Col""#
         );
     }
@@ -707,7 +757,7 @@ mod tests {
             pk_columns: vec!["id".to_string()],
             ..Default::default()
         }];
-        let result = synthesize_on_clause_scoped(&join, &tables, "airports__dep");
+        let result = synthesize_on_clause_scoped(&join, &tables, None, "airports__dep");
         assert!(
             result.contains(r#""id""#),
             "Should fall back to pk_columns when ref_columns are empty, got: {result}"

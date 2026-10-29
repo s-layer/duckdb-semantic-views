@@ -446,12 +446,22 @@ pub(super) fn find_using_context(
     if rels.len() <= 1 {
         // EXP-4: the dimension's own table has a single inbound relationship,
         // but if it is reachable only THROUGH a role-playing table, its join
-        // path is ambiguous — and, unlike a dimension directly on the
-        // role-playing table, a descendant cannot be scoped by a co-queried
-        // metric's USING. Reject it instead of silently binding to the
-        // first-declared relationship (a declaration-order-dependent wrong
-        // grouping).
+        // path is ambiguous: which instance of the role-played table does it
+        // hang off? Phase 6.3b (Snowflake's transitive hop): the metrics' `USING`
+        // answers that as it does for the role-played table itself, and the
+        // chain onward is followed under scoped aliases (`r__dep`) joined off
+        // that instance (`descendant_chain`). Without a single role it is
+        // refused rather than silently bound to the first-declared relationship.
         if let Some(rp) = role_playing_on_path(view_name, def, &dim_table_lower)? {
+            if descendant_chain(def, &rp, &dim_table_lower).is_some()
+                && resolved_mets
+                    .iter()
+                    .all(|met| names_a_role_for(def, met, &rp) && !met_is_on(met, &rp))
+            {
+                if let [(_, rel)] = using_edges_to(def, &rp, resolved_mets).as_slice() {
+                    return Ok(Some(scoped_join_alias(&dim_table_lower, rel)));
+                }
+            }
             let available_relationships = relationships_to_table(def, &rp);
             return Err(ExpandError::AmbiguousDescendantPath {
                 view_name: view_name.to_string(),
@@ -465,50 +475,7 @@ pub(super) fn find_using_context(
     }
 
     // Multiple relationships -> role-playing table. Look for USING context.
-    // Collect all USING relationships from co-queried metrics that target this table.
-    // (edge, spelling as written): deduplicated by the EDGE the spelling names
-    // (`graph::RelNameMatch`), and the alias built from the written spelling —
-    // `scoped_join_alias` normalizes it. By edge, so `dep` and `"dep"` are one
-    // role of a view declaring one of them, and two roles of a view stored
-    // before #249 that declares both (which was ambiguous then too).
-    let mut using_rels_for_table: Vec<(&crate::model::Join, String)> = Vec::new();
-    let mut note_using = |using_rel: &str| {
-        let m = crate::graph::RelNameMatch::new(&def.joins, using_rel);
-        let edge = def
-            .joins
-            .iter()
-            .find(|j| m.matches_join(j) && j.table.to_ascii_lowercase() == dim_table_lower);
-        if let Some(edge) = edge {
-            if !using_rels_for_table
-                .iter()
-                .any(|(e, _)| std::ptr::eq(*e, edge))
-            {
-                using_rels_for_table.push((edge, using_rel.to_string()));
-            }
-        }
-    };
-    for met in resolved_mets {
-        for using_rel in &met.using_relationships {
-            note_using(using_rel);
-        }
-        // A window metric reads its inner metric through that metric's path.
-        if let Some(inner) = window_inner(def, met) {
-            for using_rel in &inner.using_relationships {
-                note_using(using_rel);
-            }
-            if inner.source_table.is_none() {
-                for using_rel in collect_derived_metric_using(inner, &def.metrics) {
-                    note_using(&using_rel);
-                }
-            }
-        }
-        // Also check derived metrics: walk their transitive dependencies
-        if met.source_table.is_none() {
-            for using_rel in collect_derived_metric_using(met, &def.metrics) {
-                note_using(&using_rel);
-            }
-        }
-    }
+    let using_rels_for_table = using_edges_to(def, &dim_table_lower, resolved_mets);
 
     // Phase 6.3 (Snowflake parity, decided by Anentropic 2026-10-28): EVERY
     // co-queried metric must name its own path to a role-played table. A metric
@@ -548,6 +515,98 @@ pub(super) fn find_using_context(
             available_relationships: rels,
         })
     }
+}
+
+/// The relationships to `table` that the metrics' `USING` names, a window
+/// metric through its inner metric and a derived one through its components.
+///
+/// Each entry is (edge, spelling as written): deduplicated by the EDGE the
+/// spelling names (`graph::RelNameMatch`), and the alias built from the written
+/// spelling, which `scoped_join_alias` normalizes. By edge, so `dep` and
+/// `"dep"` are one role of a view declaring one of them, and two roles of a
+/// view stored before #249 that declares both (which was ambiguous then too).
+fn using_edges_to<'a>(
+    def: &'a SemanticViewDefinition,
+    table: &str,
+    resolved_mets: &[&crate::model::Metric],
+) -> Vec<(&'a crate::model::Join, String)> {
+    let mut using_rels_for_table: Vec<(&crate::model::Join, String)> = Vec::new();
+    let mut note_using = |using_rel: &str| {
+        let m = crate::graph::RelNameMatch::new(&def.joins, using_rel);
+        let edge = def
+            .joins
+            .iter()
+            .find(|j| m.matches_join(j) && j.table.eq_ignore_ascii_case(table));
+        if let Some(edge) = edge {
+            if !using_rels_for_table
+                .iter()
+                .any(|(e, _)| std::ptr::eq(*e, edge))
+            {
+                using_rels_for_table.push((edge, using_rel.to_string()));
+            }
+        }
+    };
+    for met in resolved_mets {
+        for using_rel in &met.using_relationships {
+            note_using(using_rel);
+        }
+        // A window metric reads its inner metric through that metric's path.
+        if let Some(inner) = window_inner(def, met) {
+            for using_rel in &inner.using_relationships {
+                note_using(using_rel);
+            }
+            if inner.source_table.is_none() {
+                for using_rel in collect_derived_metric_using(inner, &def.metrics) {
+                    note_using(&using_rel);
+                }
+            }
+        }
+        // Also check derived metrics: walk their transitive dependencies
+        if met.source_table.is_none() {
+            for using_rel in collect_derived_metric_using(met, &def.metrics) {
+                note_using(&using_rel);
+            }
+        }
+    }
+    using_rels_for_table
+}
+
+/// Whether `met` is declared on `table` itself.
+fn met_is_on(met: &crate::model::Metric, table: &str) -> bool {
+    met.source_table
+        .as_deref()
+        .is_some_and(|t| t.eq_ignore_ascii_case(table))
+}
+
+/// The relationships from the role-played table `rp` down to `table`, which is
+/// reachable only through it, in join order (`a -> r`, then `r -> country`):
+/// each table on the way has exactly one inbound relationship, so the chain is
+/// the single path a role's instance continues along. `None` when the walk
+/// does not end at `rp` along such edges.
+pub(super) fn descendant_chain<'a>(
+    def: &'a SemanticViewDefinition,
+    rp: &str,
+    table: &str,
+) -> Option<Vec<&'a crate::model::Join>> {
+    let mut chain: Vec<&crate::model::Join> = Vec::new();
+    let mut current = table.to_ascii_lowercase();
+    while !current.eq_ignore_ascii_case(rp) {
+        let inbound: Vec<&crate::model::Join> = def
+            .joins
+            .iter()
+            .filter(|j| !j.fk_columns.is_empty() && j.table.eq_ignore_ascii_case(&current))
+            .collect();
+        let [edge] = inbound.as_slice() else {
+            return None;
+        };
+        if chain.len() > def.joins.len() {
+            return None; // A cycle; validation refuses these at CREATE.
+        }
+        chain.push(edge);
+        current = edge.from_alias.to_ascii_lowercase();
+    }
+    chain.reverse();
+    Some(chain)
 }
 
 /// The metric a window metric is computed over, when `met` is one (and that

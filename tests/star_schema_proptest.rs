@@ -39,6 +39,12 @@
 //! path, and is then oracled as one aggregate per path, outer-merged on the
 //! queried dimensions (a third invariant: otherwise it is refused as
 //! ambiguous).
+//!
+//! Phase 6.3b adds `q`, reached only THROUGH `p` (`p.qid -> q.id`), with the
+//! dimension `qcat`. Snowflake's transitive hop: grouping by `qcat` follows the
+//! path each metric names to `p` and then the single relationship onward, so it
+//! is accepted and refused exactly as `pcat` is, and oracled by extending each
+//! path's join with `LEFT JOIN q ON p.qid = q.id`.
 
 use proptest::prelude::*;
 use semantic_views::expand::{expand, DimensionName, MetricName, QueryRequest};
@@ -59,8 +65,11 @@ struct Instance {
     u_rows: Vec<(Option<i64>, Option<i64>)>,
     /// Child rows: `(fk, d, v)`.
     t_rows: Vec<(Option<i64>, Option<i64>, Option<i64>)>,
-    /// Phase 6.3: the role-played table's rows, `pcat` for ids `0..n_p`.
-    p_rows: Vec<Option<i64>>,
+    /// Phase 6.3: the role-played table's rows, `(pcat, qid)` for ids
+    /// `0..n_p`; `qid` (6.3b) references `q` (valid, NULL or dangling).
+    p_rows: Vec<(Option<i64>, Option<i64>)>,
+    /// Phase 6.3b: `q`'s rows, `qcat` for ids `0..n_q`.
+    q_rows: Vec<Option<i64>>,
     /// Phase 6.3: each child row's two references to `p`, `(p1, p2)`, in the
     /// order of `t_rows` (a valid id, NULL, or dangling).
     t_roles: Vec<(Option<i64>, Option<i64>)>,
@@ -86,8 +95,17 @@ struct Instance {
 /// fact `t.v + 1`. Each is lowered to a dimension on its fact's table, so it
 /// has to group and merge across grains like `uwd` and `td`.
 ///
-/// `pcat` (Phase 6.3) is on the role-played table `p`.
-const DIMS: [&str; 8] = ["td", "ucat", "uwd", "etd", "eucat", "uw1", "tv1", "pcat"];
+/// `pcat` (Phase 6.3) is on the role-played table `p`, and `qcat` (6.3b) on
+/// `q`, reached only through `p`.
+const DIMS: [&str; 9] = [
+    "td", "ucat", "uwd", "etd", "eucat", "uw1", "tv1", "pcat", "qcat",
+];
+
+/// Whether a dimension is on `p` or reached only through it, so its path comes
+/// from the metrics' `USING`.
+fn is_role_dim(name: &str) -> bool {
+    matches!(name, "pcat" | "qcat")
+}
 /// `svf` (PAR-6) is a CHILD-grain metric whose expression reaches a fact
 /// declared on the PARENT: `sum(t.v - u.uw1)` where `uw1 = u.w + 1` lives on
 /// `u`. Before PAR-6 the fact was inlined but `u` was never joined, so this
@@ -349,19 +367,27 @@ fn arb_instance() -> impl Strategy<Value = Instance> {
         ];
         let t_row = (fk_cell, cat_cell.clone(), val_cell.clone()).prop_map(|(fk, d, v)| (fk, d, v));
         let t_rows = prop::collection::vec(t_row, 0..=20);
-        (u_rows, t_rows, 1usize..=3).prop_flat_map(move |(u_rows, t_rows, n_p)| {
-            let p_rows = prop::collection::vec(cat_cell_for_p(), n_p);
+        (u_rows, t_rows, 1usize..=3, 1usize..=2).prop_flat_map(move |(u_rows, t_rows, n_p, n_q)| {
+            // Phase 6.3b: `p.qid` is NULL, a valid `q` id or a dangling one.
+            let q_ref = prop_oneof![
+                1 => Just(None),
+                4 => (0i64..n_q as i64).prop_map(Some),
+                1 => Just(Some(n_q as i64)),
+            ];
+            let p_rows = prop::collection::vec((cat_cell_for_p(), q_ref), n_p);
+            let q_rows = prop::collection::vec(cat_cell_for_p(), n_q);
             let p_ref = prop_oneof![
                 1 => Just(None),
                 4 => (0i64..n_p as i64).prop_map(Some),
                 1 => Just(Some(n_p as i64)),
             ];
             let t_roles = prop::collection::vec((p_ref.clone(), p_ref), t_rows.len());
-            (Just(u_rows), Just(t_rows), p_rows, t_roles).prop_map(
-                |(u_rows, t_rows, p_rows, t_roles)| Instance {
+            (Just(u_rows), Just(t_rows), p_rows, q_rows, t_roles).prop_map(
+                |(u_rows, t_rows, p_rows, q_rows, t_roles)| Instance {
                     u_rows,
                     t_rows,
                     p_rows,
+                    q_rows,
                     t_roles,
                 },
             )
@@ -436,6 +462,16 @@ fn build_def() -> SemanticViewDefinition {
         TableRef {
             alias: "p".to_string(),
             table: "p".to_string(),
+            pk_columns: vec!["id".to_string()],
+            unique_constraints: vec![],
+            comment: None,
+            synonyms: vec![],
+            tags: Vec::new(),
+        },
+        // Phase 6.3b: reached only through `p`.
+        TableRef {
+            alias: "q".to_string(),
+            table: "q".to_string(),
             pk_columns: vec!["id".to_string()],
             unique_constraints: vec![],
             comment: None,
@@ -546,6 +582,20 @@ fn build_def() -> SemanticViewDefinition {
             is_enum: false,
             sample_values: Vec::new(),
         },
+        // Phase 6.3b: one relationship past the role-played table.
+        Dimension {
+            name: "qcat".to_string(),
+            expr: "q.qcat".to_string(),
+            source_table: Some("q".to_string()),
+            output_type: None,
+            comment: None,
+            synonyms: vec![],
+            is_filter: false,
+            tags: Vec::new(),
+            cortex_search_service: None,
+            is_enum: false,
+            sample_values: Vec::new(),
+        },
     ];
     let using_metric = |name: &str, expr: &str, source: Option<&str>, using: &[&str]| Metric {
         name: name.to_string(),
@@ -598,6 +648,14 @@ fn build_def() -> SemanticViewDefinition {
         },
         role("t_p1", "p1"),
         role("t_p2", "p2"),
+        Join {
+            from_alias: "p".to_string(),
+            table: "q".to_string(),
+            fk_columns: vec!["qid".to_string()],
+            ref_columns: vec!["id".to_string()],
+            name: Some("p_q".to_string()),
+            cardinality: Cardinality::ManyToOne,
+        },
     ];
     SemanticViewDefinition {
         tables,
@@ -652,7 +710,8 @@ fn make_db(inst: &Instance) -> duckdb::Connection {
     let conn = duckdb::Connection::open_in_memory().expect("in-memory DuckDB");
     conn.execute_batch(
         "CREATE TABLE u (id INTEGER, ucat INTEGER, w INTEGER); \
-         CREATE TABLE p (id INTEGER, pcat INTEGER); \
+         CREATE TABLE p (id INTEGER, pcat INTEGER, qid INTEGER); \
+         CREATE TABLE q (id INTEGER, qcat INTEGER); \
          CREATE TABLE t (fk INTEGER, d INTEGER, v INTEGER, p1 INTEGER, p2 INTEGER);",
     )
     .expect("create tables");
@@ -692,10 +751,18 @@ fn make_db(inst: &Instance) -> duckdb::Connection {
         .p_rows
         .iter()
         .enumerate()
-        .map(|(i, pcat)| format!("({i},{})", cell(pcat)))
+        .map(|(i, (pcat, qid))| format!("({i},{},{})", cell(pcat), cell(qid)))
         .collect();
     conn.execute_batch(&format!("INSERT INTO p VALUES {};", values.join(",")))
         .expect("insert p rows");
+    let values: Vec<String> = inst
+        .q_rows
+        .iter()
+        .enumerate()
+        .map(|(i, qcat)| format!("({i},{})", cell(qcat)))
+        .collect();
+    conn.execute_batch(&format!("INSERT INTO q VALUES {};", values.join(",")))
+        .expect("insert q rows");
     conn
 }
 
@@ -717,6 +784,8 @@ fn child_dim_item(name: &str) -> String {
         "tv1" => "t.v + 1 AS tv1".to_string(),
         // Phase 6.3: only in a per-path grain, which joins `p`.
         "pcat" => "p.pcat AS pcat".to_string(),
+        // Phase 6.3b: past `p`, through the same path's `p`.
+        "qcat" => "q.qcat AS qcat".to_string(),
         other => unreachable!("unexpected dim {other}"),
     }
 }
@@ -952,7 +1021,8 @@ fn role_oracle_sql(case: &Case) -> String {
     let path = |col: &str, agg: &str| {
         format!(
             "SELECT {dim_items}, {agg} AS m FROM t LEFT JOIN u ON t.fk = u.id \
-             LEFT JOIN p ON t.{col} = p.id{where_sql} GROUP BY {group_by}"
+             LEFT JOIN p ON t.{col} = p.id LEFT JOIN q ON p.qid = q.id{where_sql} \
+             GROUP BY {group_by}"
         )
     };
     let p1 = mets.iter().any(|m| matches!(*m, "ct_p1" | "dp"));
@@ -1042,7 +1112,7 @@ proptest! {
 
         let selects_parent_metric = case.sel_metrics.iter().any(|&i| is_parent_metric(METS[i]));
         let selects_child_dim = case.sel_dims.iter().any(|&i| is_child_dim(DIMS[i]));
-        let selects_pcat = case.sel_dims.iter().any(|&i| DIMS[i] == "pcat");
+        let selects_pcat = case.sel_dims.iter().any(|&i| is_role_dim(DIMS[i]));
         let every_metric_names_p = !case.sel_metrics.is_empty()
             && case.sel_metrics.iter().all(|&i| names_p_path(METS[i]));
         let result = expand("star", &def, &req);
@@ -1241,6 +1311,10 @@ fn generator_reaches_both_where_clause_branches() {
     let mut pcat_both_paths_oracled = 0usize;
     let mut pcat_sv_p2_oracled = 0usize;
     let mut using_without_pcat_oracled = 0usize;
+    // Phase 6.3b: `qcat`, past the role-played table, refused and oracled, the
+    // oracled cases including both paths at once.
+    let mut qcat_refused = 0usize;
+    let mut qcat_both_paths_oracled = 0usize;
     let mut distinct: HashSet<String> = HashSet::new();
 
     for _ in 0..400 {
@@ -1254,15 +1328,22 @@ fn generator_reaches_both_where_clause_branches() {
         // The two rejection branches of the property, mirrored: everything else
         // falls through to the differential comparison.
         let pred_touches_child = case.where_pred.as_ref().is_some_and(Pred::touches_child);
-        let selects_pcat = case.sel_dims.iter().any(|&i| DIMS[i] == "pcat");
+        let selects_pcat = case.sel_dims.iter().any(|&i| is_role_dim(DIMS[i]));
         let every_metric_names_p =
             !case.sel_metrics.is_empty() && case.sel_metrics.iter().all(|&i| names_p_path(METS[i]));
         let pcat_refused_here = selects_pcat && !every_metric_names_p;
         let oracled = !pcat_refused_here
             && !(selects_parent_metric && (selects_child_dim || pred_touches_child));
         let has = |name: &str| case.sel_metrics.iter().any(|&i| METS[i] == name);
+        let selects_qcat = case.sel_dims.iter().any(|&i| DIMS[i] == "qcat");
         if pcat_refused_here {
             pcat_refused += 1;
+            if selects_qcat {
+                qcat_refused += 1;
+            }
+        }
+        if selects_qcat && oracled && (has("dp") || (has("ct_p1") && has("sv_p2"))) {
+            qcat_both_paths_oracled += 1;
         }
         if selects_pcat && oracled {
             pcat_oracled += 1;
@@ -1411,6 +1492,12 @@ fn generator_reaches_both_where_clause_branches() {
         "no oracled pcat query took both paths ({pcat_both_paths_oracled}) or the \
          metric-over-metric `sv_p2` ({pcat_sv_p2_oracled}); the per-path outer \
          merge has no randomized coverage"
+    );
+    assert!(
+        qcat_refused > 0 && qcat_both_paths_oracled > 0,
+        "`qcat`, one relationship past the role-played table, must be both refused \
+         and oracled through both paths (refused={qcat_refused}, \
+         both paths={qcat_both_paths_oracled})"
     );
     assert!(
         using_without_pcat_oracled > 0,

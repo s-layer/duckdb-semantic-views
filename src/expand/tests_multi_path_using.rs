@@ -431,3 +431,132 @@ fn a_window_without_a_path_or_beside_another_path_is_refused() {
         );
     }
 }
+
+// ---------------------------------------------------------------------------
+// Phase 6.3b: a dimension one relationship past the role-played table.
+// Airports A and B are in North, C in South.
+// ---------------------------------------------------------------------------
+
+/// `flights_def` plus `r` (regions), reached only through the role-played
+/// airports: `a(region_id) REFERENCES r`.
+fn regions_def() -> SemanticViewDefinition {
+    let mut def = window_def();
+    def.tables.push(table("r", "regions", "region_id"));
+    def.dimensions.push(dim("region", "r.region_name", "r"));
+    def.joins
+        .push(rel("airport_region", "a", "r", "region_id", "region_id"));
+    def
+}
+
+/// Snowflake's transitive hop: the metric's `USING` names the path to
+/// airports, and the single relationship onward to regions follows it. All
+/// four flights depart from North; three arrive there and one in South.
+#[test]
+fn a_dimension_past_the_role_played_table_follows_the_metrics_path() {
+    assert_eq!(
+        run(&regions_def(), &["region"], &["departures"]),
+        table_of(&[&["North", "4"]])
+    );
+    assert_eq!(
+        run(&regions_def(), &["region"], &["arrivals"]),
+        table_of(&[&["North", "3"], &["South", "1"]])
+    );
+}
+
+/// Metrics through different paths are merged per region, as they are per city.
+#[test]
+fn metrics_with_different_paths_are_merged_by_a_region() {
+    assert_eq!(
+        run(&regions_def(), &["region"], &["departures", "arrivals"]),
+        table_of(&[&["North", "4", "3"], &["South", "NULL", "1"]])
+    );
+    assert_eq!(
+        run(&regions_def(), &["region"], &["movements"]),
+        table_of(&[&["North", "7"], &["South", "NULL"]])
+    );
+}
+
+/// The region and the city of one role group together.
+#[test]
+fn a_region_and_a_city_group_through_the_same_path() {
+    assert_eq!(
+        run(&regions_def(), &["region", "city"], &["departures"]),
+        table_of(&[&["North", "Alpha", "3"], &["North", "Beta", "1"]])
+    );
+}
+
+/// A window metric reaches the region through its inner metric's path.
+#[test]
+fn a_window_reaches_a_region_through_its_inner_metric() {
+    assert_eq!(
+        run(&regions_def(), &["region"], &["wa"]),
+        table_of(&[&["North", "3"], &["South", "1"]])
+    );
+}
+
+/// A metric with no path to airports still cannot say which region it means.
+#[test]
+fn a_region_with_a_metric_that_names_no_path_is_refused() {
+    for mets in [&["flight_count"][..], &["departures", "flight_count"][..]] {
+        let err = expand("v", &regions_def(), &req(&["region"], mets)).unwrap_err();
+        assert!(
+            matches!(err, ExpandError::AmbiguousDescendantPath { .. }),
+            "{mets:?}: expected AmbiguousDescendantPath, got: {err}"
+        );
+    }
+}
+
+/// A semi-additive metric whose snapshot dimension is a region snapshots
+/// through its own `USING` path, also when the region is not queried (the
+/// table is then joined only for the snapshot ordering). Every flight departs
+/// from North, so each carrier's flights all rank first.
+#[test]
+fn a_snapshot_over_a_region_joins_it_through_the_metrics_path() {
+    let mut def = regions_def();
+    let mut latest = metric(
+        "latest_dep_seats",
+        "SUM(f.seats)",
+        Some("f"),
+        &["dep_airport"],
+    );
+    latest.non_additive_by = vec![crate::model::NonAdditiveDim {
+        dimension: "region".to_string(),
+        ..Default::default()
+    }];
+    def.metrics.push(latest);
+    assert_eq!(
+        run(&def, &["carrier"], &["latest_dep_seats"]),
+        table_of(&[&["c1", "30"], &["c2", "70"]])
+    );
+    assert_eq!(
+        run(&def, &["region"], &["latest_dep_seats"]),
+        table_of(&[&["North", "100"]])
+    );
+}
+
+/// TECH-DEBT #65: the hop reaches dimensions only. A metric over a FACT on the
+/// descendant table is still refused, loudly, rather than joined off the
+/// first-declared airport.
+#[test]
+fn a_metric_over_a_fact_past_the_role_played_table_is_refused() {
+    let mut def = regions_def();
+    def.facts.push(crate::model::Fact {
+        name: "rname".to_string(),
+        expr: "r.region_name".to_string(),
+        source_table: Some("r".to_string()),
+        ..Default::default()
+    });
+    def.metrics.push(metric(
+        "dep_regions",
+        "COUNT(DISTINCT r.rname)",
+        Some("f"),
+        &["dep_airport"],
+    ));
+    for dims in [&[][..], &["carrier"][..]] {
+        let err = expand("v", &def, &req(dims, &["dep_regions"])).unwrap_err();
+        assert!(
+            matches!(err, ExpandError::AmbiguousMemberFactPath { .. }),
+            "{dims:?}: {err}"
+        );
+    }
+}

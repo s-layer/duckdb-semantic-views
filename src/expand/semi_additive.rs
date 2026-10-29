@@ -272,6 +272,7 @@ pub(super) fn build_snapshot_block(
         na_dim_sources.extend(w.source_tables.iter().cloned());
     }
     let dims: Vec<&crate::model::Dimension> = resolved_dims.iter().map(|rd| rd.dim).collect();
+    let join_dims = with_na_dims_reached_through_a_role(def, &dims, &na_groups);
     let resolved_joins = match anchor {
         // Re-anchored: walk out from the metric's own table. The NA-dim and
         // `where_clause` tables ride the same extra-sources channel they do on
@@ -295,7 +296,7 @@ pub(super) fn build_snapshot_block(
                 &needs.scoped,
             )
         }
-        None => resolve_joins_pkfk(def, &dims, resolved_mets, &na_dim_sources),
+        None => resolve_joins_pkfk(def, &join_dims, resolved_mets, &na_dim_sources),
     };
     push_join_clauses(&mut sql, &resolved_joins, def, "\n    LEFT JOIN ");
 
@@ -801,6 +802,39 @@ fn collect_na_groups(
         }
     }
     Ok(groups)
+}
+
+/// `dims` plus every NA dimension reached only THROUGH a role-played table.
+///
+/// Phase 6.3b: such a dimension is scoped to its metric's role (`r__dep`), and
+/// `resolve_joins_pkfk` joins its table as a chain off that role's instance
+/// only when it is handed the dimension itself; as an extra source table it
+/// would be walked bare.
+fn with_na_dims_reached_through_a_role<'a>(
+    def: &'a SemanticViewDefinition,
+    dims: &[&'a crate::model::Dimension],
+    na_groups: &[NaGroup],
+) -> Vec<&'a crate::model::Dimension> {
+    let mut join_dims = dims.to_vec();
+    for (nd, scoped) in na_groups
+        .iter()
+        .flat_map(|g| g.na_dims.iter().zip(&g.na_dim_scoped))
+    {
+        let Some(dim) = super::resolution::find_dimension(def, &nd.dimension) else {
+            continue;
+        };
+        let reached_through_a_role = scoped.is_some()
+            && dim.source_table.as_deref().is_some_and(|t| {
+                super::role_playing::role_playing_on_path("", def, t)
+                    .ok()
+                    .flatten()
+                    .is_some_and(|rp| !rp.eq_ignore_ascii_case(t))
+            });
+        if reached_through_a_role && !join_dims.iter().any(|d| std::ptr::eq(*d, dim)) {
+            join_dims.push(dim);
+        }
+    }
+    join_dims
 }
 
 /// Collect the (lowercased) source-table aliases of every active NA dim,

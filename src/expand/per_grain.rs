@@ -660,22 +660,40 @@ fn dimension_role(
     def: &SemanticViewDefinition,
     dim: &Dimension,
     mets: &[&Metric],
-) -> Result<Option<(String, String)>, ()> {
+) -> Result<Vec<(String, String)>, ()> {
     let Some(table) = dim.source_table.as_ref().map(|t| t.to_ascii_lowercase()) else {
-        return Ok(None);
+        return Ok(Vec::new());
     };
     let Some(scoped) =
         super::role_playing::find_using_context("", def, dim, mets).map_err(|_| ())?
     else {
-        return Ok(None);
+        return Ok(Vec::new());
     };
+    // Phase 6.3b: a table reached only THROUGH the role-played one takes the
+    // role-played table's relationship, and so does every table on the chain
+    // between them, so `anchor_joins` joins the whole chain off that instance.
+    // `role_playing_on_path` finds no role-played table above the view's root,
+    // which can itself be role-played (reached back from two child tables).
+    let rp = super::role_playing::role_playing_on_path("", def, &table)
+        .map_err(|_| ())?
+        .unwrap_or_else(|| table.clone());
     let rel = def.joins.iter().find_map(|j| {
         let name = j.name.as_ref()?;
-        (j.table.to_ascii_lowercase() == table
+        (j.table.to_ascii_lowercase() == rp
             && super::join_resolver::scoped_join_alias(&table, name) == scoped)
             .then(|| name.clone())
     });
-    rel.map(|rel| Some((table, rel))).ok_or(())
+    let rel = rel.ok_or(())?;
+    let mut roles = vec![(rp.clone(), rel.clone())];
+    if rp != table {
+        let chain = super::role_playing::descendant_chain(def, &rp, &table).ok_or(())?;
+        roles.extend(
+            chain
+                .iter()
+                .map(|edge| (edge.table.to_ascii_lowercase(), rel.clone())),
+        );
+    }
+    Ok(roles)
 }
 
 /// The role each queried role-played dimension table plays for ONE metric (a
@@ -692,7 +710,7 @@ fn metric_roles(
 ) -> Option<HashMap<String, String>> {
     let mut roles: HashMap<String, String> = HashMap::new();
     for dim in resolved_dims {
-        if let Some((table, rel)) = dimension_role(def, dim, &[met]).ok()? {
+        for (table, rel) in dimension_role(def, dim, &[met]).ok()? {
             roles.insert(table, rel);
         }
     }
@@ -803,7 +821,11 @@ fn role_playing_affects_query(
         .collect();
     dim_tables.iter().any(|table| match ambiguity(table) {
         None => false,
-        Some(ambiguous) => !(ambiguous == *table && rescued),
+        Some(ambiguous) => {
+            !(rescued
+                && (ambiguous == *table
+                    || super::role_playing::descendant_chain(def, &ambiguous, table).is_some()))
+        }
     })
 }
 
@@ -1604,13 +1626,30 @@ pub(super) fn anchor_joins<'a>(
                 if !emitted.insert(scoped.clone()) {
                     continue;
                 }
-                if let Some(join) = crate::graph::find_relationship(&def.joins, rel) {
-                    joins.push(ResolvedJoin {
-                        emit_alias: scoped,
-                        bare_alias: to.clone(),
-                        join,
-                        scoped: true,
-                    });
+                match crate::graph::find_relationship(&def.joins, rel) {
+                    Some(join) if join.table.eq_ignore_ascii_case(to) => {
+                        joins.push(ResolvedJoin {
+                            emit_alias: scoped,
+                            bare_alias: to.clone(),
+                            join,
+                            scoped: true,
+                            from_emit: None,
+                        });
+                    }
+                    // Phase 6.3b: a table past the role-played one, joined off
+                    // the role's instance of its parent (`r__dep` on `a__dep`).
+                    Some(_) => {
+                        if let Some(edge) = edge_between(def, from, to) {
+                            joins.push(ResolvedJoin {
+                                emit_alias: scoped,
+                                bare_alias: to.clone(),
+                                join: edge,
+                                scoped: true,
+                                from_emit: Some(super::join_resolver::scoped_join_alias(from, rel)),
+                            });
+                        }
+                    }
+                    None => {}
                 }
                 continue;
             }
@@ -1623,6 +1662,7 @@ pub(super) fn anchor_joins<'a>(
                     bare_alias: to.clone(),
                     join,
                     scoped: false,
+                    from_emit: None,
                 });
             }
         }
@@ -1652,6 +1692,7 @@ pub(super) fn anchor_joins<'a>(
                         bare_alias: b.clone(),
                         join: edge,
                         scoped: false,
+                        from_emit: None,
                     });
                 }
             }
@@ -1667,6 +1708,7 @@ pub(super) fn anchor_joins<'a>(
                 bare_alias: table,
                 join,
                 scoped: true,
+                from_emit: None,
             });
         }
     }
