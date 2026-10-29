@@ -236,6 +236,13 @@ fn scan_chains(expr: &str, kind: ChainKind) -> Vec<IdentRef<'_>> {
             _ if b == b'"' || crate::util::is_ident_byte(b) => {
                 let end = scan_chain(bytes, i);
                 let raw = &expr[i..end];
+                // A quoted part that never closes runs to the end of the text
+                // (`x + "b`): it names nothing, so it is neither a reference
+                // nor a call head, and nothing is substituted over it.
+                if !quotes_closed(raw.as_bytes()) {
+                    i = end;
+                    continue;
+                }
                 // COR-3: an INTERVAL literal's unit (`INTERVAL '1' DAY`, and
                 // `INTERVAL'1' DAY` with no space) is marked before the
                 // typed-literal rules below swallow the `INTERVAL` keyword itself.
@@ -684,6 +691,24 @@ fn skip_quoted_part(bytes: &[u8], i: usize) -> usize {
     len
 }
 
+/// Whether every quoted part of an identifier chain closes (`""` inside one is
+/// an escaped quote).
+fn quotes_closed(chain: &[u8]) -> bool {
+    let mut open = false;
+    let mut i = 0;
+    while i < chain.len() {
+        if chain[i] == b'"' {
+            if open && chain.get(i + 1) == Some(&b'"') {
+                i += 2;
+                continue;
+            }
+            open = !open;
+        }
+        i += 1;
+    }
+    !open
+}
+
 /// Byte length of the **first part** of a reference chain (`a` in `a.city`, the
 /// whole `"C d"` in `"C d".x`, or the entire chain when it is bare). `chain` is
 /// assumed well-formed as produced by [`scan_chain`] — it starts with a `"` or
@@ -1054,6 +1079,17 @@ pub(crate) fn rewrite_qualifier(expr: &str, alias: &str, replacement: &str) -> S
 
 #[cfg(test)]
 mod tests {
+
+    // fuzz_sql_expand (PR #323 CI): a quoted part that never closes runs to
+    // the end of the text, so it names nothing; a substitution there rewrote
+    // the stray quote itself.
+    #[test]
+    fn an_unterminated_quoted_identifier_is_not_a_reference() {
+        for expr in ["a + \"b", "a + t.\"b", "a + \""] {
+            let refs: Vec<&str> = scan_references(expr).iter().map(|r| r.raw).collect();
+            assert_eq!(refs, vec!["a"], "{expr}");
+        }
+    }
 
     // PARSE-7: in a DuckDB escape string `\'` is an escaped quote, so the
     // literal continues past it. Treating `\` as ordinary consumed the middle
