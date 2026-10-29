@@ -44,7 +44,7 @@ Parameters
 Output
 ======
 
-Returns a single VARCHAR value containing the YAML representation of the semantic view definition. The YAML includes all user-declared clauses: tables, relationships, facts, dimensions, metrics, and materializations with their full configuration (comments, synonyms, access modifiers, named-filter labels, NON ADDITIVE BY, window specs).
+Returns a single VARCHAR value containing the YAML representation of the semantic view definition. The YAML includes all user-declared clauses: tables, relationships, variables, facts, dimensions, metrics, and materializations with their full configuration (comments, synonyms, access modifiers, named-filter labels, NON ADDITIVE BY, window specs).
 
 The output always carries a ``joins`` and a ``facts`` key (``[]`` when the view has none), and an ``output_type: null`` line on every dimension, metric, and fact. ``output_type`` is a withdrawn field: a type name there is rejected on import, but ``null`` is accepted and ignored, so the exported YAML re-imports unchanged. See :ref:`ref-yaml-format`.
 

@@ -15,6 +15,7 @@ mod metrics;
 mod relationships;
 mod scan;
 mod tables;
+mod variables;
 mod window;
 
 use crate::errors::ParseError;
@@ -37,6 +38,7 @@ pub(crate) use scan::{
     source_table_roundtrips_verbatim, split_at_depth0_commas,
 };
 pub(crate) use tables::{inline_query_error, parse_tables_clause};
+pub(crate) use variables::{parse_variable_entry, parse_variables_clause};
 
 /// Re-parse a rendered window expression, returning just the `WindowSpec`.
 ///
@@ -97,6 +99,7 @@ pub(super) struct ParsedMetric {
 pub struct KeywordBody {
     pub tables: Vec<TableRef>,
     pub relationships: Vec<Join>,
+    pub variables: Vec<crate::model::Variable>,
     pub facts: Vec<Fact>,
     pub dimensions: Vec<Dimension>,
     pub metrics: Vec<Metric>,
@@ -127,6 +130,7 @@ impl KeywordBody {
             dimensions: self.dimensions,
             metrics: self.metrics,
             joins: self.relationships,
+            variables: self.variables,
             facts: self.facts,
             materializations: self.materializations,
             comment: self.view_comment,
@@ -178,6 +182,7 @@ pub fn parse_keyword_body(text: &str, base_offset: usize) -> Result<KeywordBody,
 
     let mut tables: Vec<TableRef> = Vec::new();
     let mut relationships: Vec<Join> = Vec::new();
+    let mut variables: Vec<crate::model::Variable> = Vec::new();
     let mut facts_raw: Vec<ParsedQualifiedEntry> = Vec::new();
     let mut dimensions_raw: Vec<ParsedQualifiedEntry> = Vec::new();
     let mut metrics_raw: Vec<ParsedMetric> = Vec::new();
@@ -190,6 +195,9 @@ pub fn parse_keyword_body(text: &str, base_offset: usize) -> Result<KeywordBody,
             }
             "relationships" => {
                 relationships = parse_relationships_clause(bound.content, bound.content_offset)?;
+            }
+            "variables" => {
+                variables = parse_variables_clause(bound.content, bound.content_offset)?;
             }
             "facts" => {
                 facts_raw =
@@ -237,7 +245,7 @@ pub fn parse_keyword_body(text: &str, base_offset: usize) -> Result<KeywordBody,
     }
 
     // Map parsed clause entries onto the Fact / Dimension / Metric model types.
-    let facts = facts_raw
+    let facts: Vec<Fact> = facts_raw
         .into_iter()
         .map(|e| Fact {
             name: e.name,
@@ -304,10 +312,20 @@ pub fn parse_keyword_body(text: &str, base_offset: usize) -> Result<KeywordBody,
         message,
         position: None,
     })?;
+    crate::variables::validate_parts(&variables, &dimensions, &facts, &metrics).map_err(
+        |message| ParseError {
+            message: format!("{message}."),
+            position: bounds
+                .iter()
+                .find(|b| b.keyword == "variables")
+                .map(|b| b.keyword_offset),
+        },
+    )?;
 
     Ok(KeywordBody {
         tables,
         relationships,
+        variables,
         facts,
         dimensions,
         metrics,

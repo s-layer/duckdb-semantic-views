@@ -67,12 +67,15 @@ src/
 ├── ffi_util.rs                # FFI seam helpers: buffer handoff, UTF-8-safe error truncation
 ├── render_ddl.rs              # SemanticViewDefinition → CREATE SEMANTIC VIEW text (GET_DDL)
 ├── render_yaml.rs             # SemanticViewDefinition → YAML
+├── variables.rs               # View VARIABLES (Phase 6.5): declaration rules, and the binding that writes a
+│                              # query's values (or defaults) into the member expressions before expand()
 │
 ├── body_parser/               # Tokenizer + clause-body parser for the CREATE body (pure, always compiled)
 │   ├── lexer.rs cursor.rs scan.rs clause_bounds.rs   #   token layer, cursor, clause bounds
 │   ├── tables.rs relationships.rs metrics.rs entries.rs
 │   ├── annotations.rs window.rs materializations.rs
 │   ├── metadata.rs            #   Cortex Analyst clauses: SAMPLE_VALUES, CORTEX SEARCH, MAX_STALENESS, AI_*
+│   ├── variables.rs           #   VARIABLES clause: `name [type] [{DEFAULT | :=} expr] [COMMENT '...']`
 │   ├── cross_refs.rs          #   semantic cross-reference checks shared by the DDL and YAML paths
 │   └── mod.rs
 ├── parse/                     # Text-level planning behind the grammar productions (write side)

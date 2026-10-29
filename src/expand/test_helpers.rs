@@ -15,6 +15,7 @@ use crate::model::{
 /// - metrics: total_revenue = sum(amount), order_count = count(*)
 pub(super) fn orders_view() -> SemanticViewDefinition {
     SemanticViewDefinition {
+        variables: Vec::new(),
         tables: vec![TableRef {
             alias: "orders".to_string(),
             table: "orders".to_string(),
@@ -110,6 +111,7 @@ pub(super) fn minimal_def(
     metric_expr: &str,
 ) -> SemanticViewDefinition {
     SemanticViewDefinition {
+        variables: Vec::new(),
         tables: vec![TableRef {
             alias: table.to_string(),
             table: table.to_string(),

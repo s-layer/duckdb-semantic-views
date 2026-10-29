@@ -12,6 +12,7 @@ pub(super) fn make_def(
     metrics: Vec<(&str, Option<&str>)>,
 ) -> SemanticViewDefinition {
     SemanticViewDefinition {
+        variables: Vec::new(),
         tables: tables
             .iter()
             .map(|(alias, table, pks)| TableRef {
@@ -88,6 +89,7 @@ pub(super) fn make_def_with_facts(
     facts: Vec<(&str, &str, &str)>,
 ) -> SemanticViewDefinition {
     SemanticViewDefinition {
+        variables: Vec::new(),
         tables: tables
             .iter()
             .map(|(alias, table)| TableRef {
@@ -171,6 +173,7 @@ pub(super) fn make_def_with_derived_metrics(
         });
     }
     SemanticViewDefinition {
+        variables: Vec::new(),
         tables: vec![TableRef {
             alias: "o".to_string(),
             table: "orders".to_string(),
@@ -207,6 +210,7 @@ pub(super) fn make_def_with_named_joins(
     metrics: Vec<(&str, Option<&str>, Vec<&str>)>,     // (name, source, using_rels)
 ) -> SemanticViewDefinition {
     SemanticViewDefinition {
+        variables: Vec::new(),
         tables: tables
             .iter()
             .map(|(alias, table, pks)| TableRef {

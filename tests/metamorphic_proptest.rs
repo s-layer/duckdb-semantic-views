@@ -988,6 +988,7 @@ fn build_def(names: &Names, chain: Option<&Chain>) -> SemanticViewDefinition {
     ];
 
     SemanticViewDefinition {
+        variables: Vec::new(),
         tables,
         dimensions,
         metrics,

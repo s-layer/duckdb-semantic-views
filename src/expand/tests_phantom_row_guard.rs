@@ -36,6 +36,7 @@ use crate::model::{Cardinality, Dimension, Join, SemanticViewDefinition, TableRe
 /// referencing `o.id`.
 fn child_def() -> SemanticViewDefinition {
     SemanticViewDefinition {
+        variables: Vec::new(),
         tables: vec![
             TableRef {
                 alias: "o".to_string(),

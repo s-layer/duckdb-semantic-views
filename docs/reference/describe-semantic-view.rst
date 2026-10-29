@@ -7,7 +7,7 @@
 DESCRIBE SEMANTIC VIEW
 ========================
 
-Returns the definition of a semantic view as a multi-row result set in property-per-row format. Each row represents one property of one object (semantic view, table, relationship, fact, dimension, metric, derived metric, or materialization) in the view definition.
+Returns the definition of a semantic view as a multi-row result set in property-per-row format. Each row represents one property of one object (semantic view, table, relationship, variable, fact, dimension, metric, derived metric, or materialization) in the view definition.
 
 
 .. _ref-describe-syntax:
@@ -51,13 +51,13 @@ The result contains multiple rows with 5 VARCHAR columns:
      - Description
    * - ``object_kind``
      - VARCHAR
-     - The type of object: ``TABLE``, ``RELATIONSHIP``, ``FACT``, ``DIMENSION``, ``METRIC``, ``DERIVED_METRIC``, ``MATERIALIZATION``, ``CUSTOM_INSTRUCTIONS``, or ``AI_VERIFIED_QUERY``. Empty string on the view-level rows.
+     - The type of object: ``TABLE``, ``RELATIONSHIP``, ``VARIABLE``, ``FACT``, ``DIMENSION``, ``METRIC``, ``DERIVED_METRIC``, ``MATERIALIZATION``, ``CUSTOM_INSTRUCTIONS``, or ``AI_VERIFIED_QUERY``. Empty string on the view-level rows.
    * - ``object_name``
      - VARCHAR
-     - The name of the object (table name, relationship name, fact/dimension/metric name, materialization name, verified query name). Empty string on the view-level rows and the ``CUSTOM_INSTRUCTIONS`` rows.
+     - The name of the object (table name, relationship name, variable name, fact/dimension/metric name, materialization name, verified query name). Empty string on the view-level rows and the ``CUSTOM_INSTRUCTIONS`` rows.
    * - ``parent_entity``
      - VARCHAR
-     - The parent table for this object. Empty string for the view-level rows and for ``TABLE``, ``DERIVED_METRIC``, ``MATERIALIZATION``, ``CUSTOM_INSTRUCTIONS``, and ``AI_VERIFIED_QUERY`` objects.
+     - The parent table for this object. Empty string for the view-level rows and for ``TABLE``, ``VARIABLE``, ``DERIVED_METRIC``, ``MATERIALIZATION``, ``CUSTOM_INSTRUCTIONS``, and ``AI_VERIFIED_QUERY`` objects.
    * - ``property``
      - VARCHAR
      - The property name being described.
@@ -71,7 +71,7 @@ The result contains multiple rows with 5 VARCHAR columns:
 Object Kinds and Properties
 ===========================
 
-Rows appear in definition order: the view-level comment, ``MAX_STALENESS`` and tags (when set), then ``TABLE`` objects, then ``RELATIONSHIP``, ``FACT``, ``DIMENSION``, ``METRIC``, ``DERIVED_METRIC``, ``MATERIALIZATION``, ``CUSTOM_INSTRUCTIONS``, and ``AI_VERIFIED_QUERY``.
+Rows appear in definition order: the view-level comment, ``MAX_STALENESS`` and tags (when set), then ``TABLE`` objects, then ``RELATIONSHIP``, ``VARIABLE``, ``FACT``, ``DIMENSION``, ``METRIC``, ``DERIVED_METRIC``, ``MATERIALIZATION``, ``CUSTOM_INSTRUCTIONS``, and ``AI_VERIFIED_QUERY``.
 
 .. versionchanged:: 0.14.0
 
@@ -145,6 +145,26 @@ Rows appear in definition order: the view-level comment, ``MAX_STALENESS`` and t
         - JSON array of foreign key column names (e.g., ``["customer_id"]``).
       * - ``REF_KEY``
         - JSON array of referenced key column names (e.g., ``["id"]``).
+
+**VARIABLE**
+   .. versionadded:: 0.18.0
+
+   One block per variable declared in the ``VARIABLES`` clause (see :ref:`ref-create-variables`), in declaration order, named by ``object_name``. Variables have an empty ``parent_entity``. Each property is emitted only when the variable has it; a variable with no type, default or comment produces one ``DATA_TYPE`` row with an empty value:
+
+   .. list-table::
+      :header-rows: 1
+      :widths: 25 75
+
+      * - Property
+        - Description
+      * - ``DATA_TYPE``
+        - The variable's type as declared (e.g., ``INTEGER``).
+      * - ``DEFAULT_VALUE``
+        - The default expression as written (e.g., ``1000`` or ``current_date``). A default declared with ``:=`` is shown the same way.
+      * - ``COMMENT``
+        - The variable's comment text.
+
+   A member that reads a variable reports its ``DATA_TYPE`` as if the variable were a ``NULL`` of the variable's type (or the variable's default, when it has no type).
 
 **FACT**
    One block per fact declared in the ``FACTS`` clause:
@@ -565,6 +585,27 @@ The relationships of a view with more than one table:
    │ order_customer │ FOREIGN_KEY │ ["customer_id"] │
    │ order_customer │ REF_KEY     │ ["id"]          │
    └────────────────┴─────────────┴─────────────────┘
+
+The variables of the ``sales_analysis`` view from :ref:`ref-create-variables`:
+
+.. code-block:: sql
+
+   SELECT object_name, property, property_value
+   FROM (DESCRIBE SEMANTIC VIEW sales_analysis)
+   WHERE object_kind = 'VARIABLE';
+
+.. code-block:: text
+
+   ┌───────────────┬───────────────┬─────────────────────────┐
+   │ object_name   │ property      │ property_value          │
+   ├───────────────┼───────────────┼─────────────────────────┤
+   │ min_amount    │ DATA_TYPE     │ INTEGER                 │
+   │ min_amount    │ DEFAULT_VALUE │ 1000                    │
+   │ multiplier    │ DATA_TYPE     │ DOUBLE                  │
+   │ multiplier    │ DEFAULT_VALUE │ 1.0                     │
+   │ target_region │ DATA_TYPE     │ VARCHAR                 │
+   │ target_region │ COMMENT       │ the region to report on │
+   └───────────────┴───────────────┴─────────────────────────┘
 
 **Error: view does not exist:**
 

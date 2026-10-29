@@ -24,6 +24,7 @@ Syntax
        [ facts := [ '<fact_name> [ AS <alias> ]' [, ...] ] , ]
        [ where_clause := '<predicate>' , ]
        [ params := row( <value> [, ...] ) , ]
+       [ variables := { '<var_name>': <value> [, ...] } , ]
        [ column_order := [ '<list_name>' [, ...] ] ]
    )
 
@@ -33,7 +34,7 @@ Syntax
 Parameters
 ==========
 
-``explain_semantic_view()`` accepts the same parameters as :ref:`semantic_view() <ref-semantic-view-function>`, so any query you can run you can also explain. To explain a :ref:`SEMANTIC_VIEW(...) <ref-sv-construct>` query, write each clause as the parameter of the same name, with ``WHERE`` as ``where_clause``. The construct turns into exactly that call, so
+``explain_semantic_view()`` accepts the same parameters as :ref:`semantic_view() <ref-semantic-view-function>`, so any query you can run you can also explain. To explain a :ref:`SEMANTIC_VIEW(...) <ref-sv-construct>` query, write each clause as the parameter of the same name, with ``WHERE`` as ``where_clause`` and ``VARIABLES`` as ``variables``. The construct turns into exactly that call, so
 
 .. code-block:: sql
 
@@ -76,6 +77,11 @@ A value the construct takes as a prepared-statement parameter goes in ``params``
    * - ``params``
      - row (named)
      - Optional values for ``where_clause``'s ``$1``, ``$2``, ..., as in :ref:`semantic_view() <ref-sv-where-params>`. The plan is of the query with the values in place.
+   * - ``variables``
+     - STRUCT (named)
+     - Optional values for the view's :ref:`variables <ref-create-variables>`, by name, as in :ref:`semantic_view() <ref-sv-variables>`. In the expanded SQL, each value the query sets appears as a parameter, numbered after ``where_clause``'s own (``CAST(($2) AS DOUBLE)``), and each variable left unset has its default written in (``CAST((1000) AS INTEGER)``). Each is cast to the variable's type when it has one.
+
+       .. versionadded:: 0.18.0
    * - ``column_order``
      - VARCHAR[] (named)
      - Optional order of the lists' columns, for example ``['metrics', 'dimensions']``. It is checked as in :ref:`semantic_view() <ref-semantic-view-function>`.
@@ -208,6 +214,19 @@ The expanded SQL shows where the predicate lands relative to the ``GROUP BY``, w
    WHERE (o.ordered_at) >= DATE '2024-01-01'
    GROUP BY
        1
+
+**Variables:**
+
+.. code-block:: duckdb-sql
+
+   SELECT * FROM explain_semantic_view('sales_analysis',
+       dimensions := ['sale_category'],
+       metrics := ['weighted_sales'],
+       where_clause := 'region = target_region',
+       variables := {'target_region': 'x', 'multiplier': 2}
+   );
+
+Over the ``sales_analysis`` view from :ref:`ref-create-variables`, the values this query sets show as parameters in the expanded SQL: ``WHERE (region) = (CAST(($1) AS VARCHAR))`` for ``target_region`` and ``SUM(amount * (CAST(($2) AS DOUBLE)))`` for ``multiplier``. ``min_amount`` is not set, so its default is written in: ``amount >= (CAST((1000) AS INTEGER))``.
 
 **Materialization routing match:**
 

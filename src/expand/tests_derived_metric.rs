@@ -214,6 +214,7 @@ fn expand_derived_metric_correct_sql() {
 #[test]
 fn expand_derived_only_no_base_metrics_requested() {
     let def = SemanticViewDefinition {
+        variables: Vec::new(),
         tables: vec![
             TableRef {
                 alias: "o".to_string(),
@@ -297,6 +298,7 @@ fn expand_derived_only_no_base_metrics_requested() {
 #[test]
 fn resolve_joins_includes_transitive_deps_from_derived() {
     let def = SemanticViewDefinition {
+        variables: Vec::new(),
         tables: vec![
             TableRef {
                 alias: "o".to_string(),
@@ -383,6 +385,7 @@ fn resolve_joins_includes_transitive_deps_from_derived() {
 #[test]
 fn expand_derived_metric_with_facts_chain() {
     let def = SemanticViewDefinition {
+        variables: Vec::new(),
         tables: vec![],
         dimensions: vec![],
         metrics: vec![

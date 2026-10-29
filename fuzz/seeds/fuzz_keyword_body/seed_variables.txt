@@ -1,0 +1,1 @@
+AS TABLES (s AS sales PRIMARY KEY (sale_id)) VARIABLES (min_amount INTEGER DEFAULT 1000, multiplier DOUBLE := 1.0, target_region VARCHAR COMMENT 'it''s the region', untyped DEFAULT 'COMMENT x', bare) FACTS (s.adj AS amount * multiplier) DIMENSIONS (s.cat AS CASE WHEN amount >= min_amount THEN 'HIGH' ELSE 'LOW' END) METRICS (s.w AS SUM(amount * multiplier))

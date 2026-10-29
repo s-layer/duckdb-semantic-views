@@ -61,6 +61,8 @@ pub unsafe extern "C" fn sv_semantic_view_bind_rust(
     param_count: usize,
     order_ptr: *const u8,
     order_len: usize,
+    vars_ptr: *const u8,
+    vars_len: usize,
     fence: u8,
     out_ptr: *mut *mut u8,
     out_len: *mut usize,
@@ -94,6 +96,8 @@ pub unsafe extern "C" fn sv_semantic_view_bind_rust(
                 param_count,
                 order_ptr,
                 order_len,
+                vars_ptr,
+                vars_len,
                 fence != 0,
             )
         },
@@ -128,6 +132,8 @@ unsafe fn semantic_view_bind_body(
     param_count: usize,
     order_ptr: *const u8,
     order_len: usize,
+    vars_ptr: *const u8,
+    vars_len: usize,
     fence: bool,
 ) -> Result<Vec<u8>, String> {
     use crate::ddl::read_ffi::read_str_arg;
@@ -146,6 +152,8 @@ unsafe fn semantic_view_bind_body(
         .map_err(|detail| format!("malformed `facts` payload: {detail}"))?;
     let column_order = parse_varchar_list(order_ptr, order_len)
         .map_err(|detail| format!("malformed `column_order` payload: {detail}"))?;
+    let variables = parse_varchar_list(vars_ptr, vars_len)
+        .map_err(|detail| format!("malformed `variables` payload: {detail}"))?;
 
     // The `where_clause` named parameter is optional: the shim passes
     // (nullptr, 0) when the caller omitted it. An explicitly empty string is
@@ -193,6 +201,20 @@ unsafe fn semantic_view_bind_body(
             .map_err(|e| QueryError::from(e).to_string())?;
     }
 
+    // The variables the query sets are the values of `params` after the
+    // predicate's own (Phase 6.5): written into the member expressions and the
+    // predicate here, so the expansion never sees a variable.
+    let bound = crate::variables::bind(
+        &view_name,
+        def,
+        crate::variables::Values::Query {
+            names: &variables,
+            first_slot: param_count + 1,
+        },
+    )?;
+    let crate::variables::Bound { def, substitution } = bound;
+    let where_clause = where_clause.map(|w| substitution.apply(&w));
+
     // For the shim's isolated bind (`fence`), the predicate becomes one that
     // names only its members (`expand::where_fence`), so the expansion checks
     // their expressions and joins on the query's own route without the
@@ -217,10 +239,11 @@ unsafe fn semantic_view_bind_body(
     // An expression item becomes a member of the query's own copy of the
     // definition (TECH-DEBT #76). Wildcards expand against the stored one, so
     // that `o.*` takes in no expression item.
-    let lowered = lower_expression_items(&view_name, &def, items).map_err(|e| match e {
-        ItemError::Invalid(detail) => invalid(detail),
-        ItemError::Expand(e) => QueryError::from(*e).to_string(),
-    })?;
+    let lowered =
+        lower_expression_items(&view_name, &def, items, &substitution).map_err(|e| match e {
+            ItemError::Invalid(detail) => invalid(detail),
+            ItemError::Expand(e) => QueryError::from(*e).to_string(),
+        })?;
     let items = &lowered.items;
     let stored = &def;
     let def = lowered.def.as_ref().unwrap_or(stored);

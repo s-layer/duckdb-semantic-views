@@ -409,6 +409,7 @@ mod tests {
     /// `database_name` and `schema_name`, so we don't need a full view.
     fn def_with_db_schema(db: Option<&str>, schema: Option<&str>) -> SemanticViewDefinition {
         SemanticViewDefinition {
+            variables: Vec::new(),
             tables: vec![],
             dimensions: vec![],
             metrics: vec![],

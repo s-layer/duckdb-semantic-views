@@ -435,6 +435,7 @@ fn build_def(order: SortOrder, na: NaKey, unit: &str) -> SemanticViewDefinition 
         tags: Vec::new(),
     }];
     SemanticViewDefinition {
+        variables: Vec::new(),
         max_staleness: None,
         module_custom_instructions: Default::default(),
         verified_queries: Vec::new(),
@@ -1349,6 +1350,7 @@ fn role_def(order: SortOrder) -> SemanticViewDefinition {
         tags: Vec::new(),
     };
     SemanticViewDefinition {
+        variables: Vec::new(),
         max_staleness: None,
         module_custom_instructions: Default::default(),
         verified_queries: Vec::new(),

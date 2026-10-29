@@ -1,0 +1,2 @@
+CREATE SEMANTIC VIEW v TABLES (s AS sales PRIMARY KEY (sale_id)) VARIABLES (min_amount INTEGER DEFAULT 1000 -- the floor
+, multiplier DOUBLE := coalesce(NULL, 1.0) COMMENT = 'weight', target_region VARCHAR) DIMENSIONS (s.region AS region, s.cat AS amount >= min_amount) METRICS (s.w AS SUM(amount * multiplier));

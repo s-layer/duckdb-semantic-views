@@ -436,6 +436,34 @@ pub fn check_create_members(
         }
     }
     def.temp_tables = temp;
+    // Each variable's default and type bind, as Snowflake checks them at
+    // CREATE (Phase 6.5).
+    for v in &def.variables {
+        let Some(probe) = crate::variables::create_probe(v) else {
+            continue;
+        };
+        match caller_describe(database, schema, &probe) {
+            Ok(cols) => {
+                if let Some((_, data_type)) = cols
+                    .first()
+                    .filter(|(_, t)| crate::variables::unsupported_type(t))
+                {
+                    return Err(format!(
+                        "semantic view '{view_name}': variable '{}' has type {data_type}; a \
+                         variable can't be a list, array, STRUCT, MAP, UNION, VARIANT or JSON",
+                        v.name
+                    ));
+                }
+            }
+            Err(CallerError::Interrupted(m)) => return Err(m),
+            Err(CallerError::Failed(m)) => {
+                return Err(format!(
+                    "semantic view '{view_name}': variable '{}' does not bind: {m}",
+                    v.name
+                ));
+            }
+        }
+    }
     let unbound = crate::query::member_types::first_unbound_member(
         view_name,
         &def,

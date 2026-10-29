@@ -127,7 +127,7 @@ Unknown clause keyword
 
    Unknown clause keyword '<word>'; did you mean '<KEYWORD>'?
 
-**Cause:** A word in the body does not match any known clause keyword (TABLES, RELATIONSHIPS, FACTS, DIMENSIONS, METRICS, MATERIALIZATIONS).
+**Cause:** A word in the body does not match any known clause keyword (TABLES, RELATIONSHIPS, VARIABLES, FACTS, DIMENSIONS, METRICS, MATERIALIZATIONS).
 
 **Fix:** Check spelling. The error suggests the closest valid keyword.
 
@@ -150,12 +150,12 @@ Clause out of order
 .. code-block:: text
 
    Clause '<KEYWORD>' appears out of order; clauses must appear as: TABLES,
-   RELATIONSHIPS (optional), FACTS (optional), DIMENSIONS (optional),
-   METRICS (optional), MATERIALIZATIONS (optional).
+   RELATIONSHIPS (optional), VARIABLES (optional), FACTS (optional),
+   DIMENSIONS (optional), METRICS (optional), MATERIALIZATIONS (optional).
 
 **Cause:** Clauses are not in the required order.
 
-**Fix:** Reorder clauses to: TABLES, RELATIONSHIPS, FACTS, DIMENSIONS, METRICS, MATERIALIZATIONS.
+**Fix:** Reorder clauses to: TABLES, RELATIONSHIPS, VARIABLES, FACTS, DIMENSIONS, METRICS, MATERIALIZATIONS.
 
 
 Unclosed parenthesis
@@ -352,6 +352,74 @@ Tables defined by a query
 
    -- Fix
    TABLES (paid AS (SELECT * FROM orders WHERE amount > 0) PRIMARY KEY (id))
+
+
+.. _ref-err-variables:
+
+Variables
+---------
+
+.. versionadded:: 0.18.0
+
+.. code-block:: text
+
+   VARIABLES needs at least one variable: 'name [type] [DEFAULT <expr>]'.
+
+   variable '<name>' is declared twice
+
+   variable '<name>' has the name of a <kind>; a variable can't share a name with a fact, dimension or metric
+
+   variable '<name>' has an invalid default: <reason>
+
+   metric '<metric>' uses variable '<name>' in its window frame; a variable can't be used in a window frame bound
+
+   semantic view '<view>': variable '<name>' has type <type>; a variable can't be a list, array, STRUCT, MAP, UNION, VARIANT or JSON
+
+   semantic view '<view>': variable '<name>' does not bind: <DuckDB error>
+
+**Cause and fix**, in the same order:
+
+- ``VARIABLES ()`` lists no variable. Declare one, or leave the clause out.
+- Two variables have the same name, compared the way DuckDB compares identifiers (case-insensitively, quoted or not), so ``k`` and ``K`` collide. Rename one.
+- A variable has the name of a fact, dimension or metric (``<kind>`` says which). Rename the variable.
+- The default is not one expression a query can evaluate. ``<reason>`` says why: it is empty, holds a ``;``, holds a subquery, or holds a prepared-statement parameter. Write a single expression. To supply a value at run time, set the variable in the query instead (see :ref:`ref-sv-variables`).
+- A window metric's frame bound (``ROWS BETWEEN n PRECEDING AND CURRENT ROW``) names a variable. Write the bound as a number.
+- The variable's type is nested or semi-structured, which Snowflake also refuses. Use a scalar type.
+- ``CREATE`` binds each variable on its own, and DuckDB could not bind this one. The rest of the message is DuckDB's error: usually the type does not exist (``Type with name NOT_A_TYPE does not exist``), or the default reads a column (``Referenced column "amount" was not found``), which a default cannot do. Use an existing type, and read columns in the member expressions instead.
+
+.. code-block:: sql
+
+   -- This will fail: "semantic view 'v': variable 'k' does not bind:
+   -- Binder Error: Referenced column "amount" was not found ..."
+   VARIABLES (k INTEGER DEFAULT amount)
+
+   -- Fix: give the variable a value, and read the column in the member
+   VARIABLES (k INTEGER DEFAULT 1)
+   METRICS (sales.n AS SUM(amount * k))
+
+A ``VARIABLES`` entry that does not follow ``name [type] [{DEFAULT | :=} <expr>] [COMMENT '...']`` is refused while the statement is parsed:
+
+.. code-block:: text
+
+   Expected a variable name at the start of '<entry>': a variable is 'name [type] [DEFAULT <expr>] [COMMENT '...']'.
+
+   Variable '<name>' has two defaults; give one.
+
+   Expected an expression after the default of variable '<name>'.
+
+   Unexpected '<text>' after the comment of variable '<name>'; COMMENT comes last.
+
+A variable's name is one identifier, with no table alias and no quotes around it as a string (``o.v`` and ``'v'`` are refused). ``DEFAULT`` and ``:=`` are the same keyword, so an entry takes one of them, once, with an expression after it, and ``COMMENT`` ends the entry.
+
+``CREATE SEMANTIC VIEW ... FROM YAML`` also refuses a variable that ``GET_DDL`` could not write back as it was declared:
+
+.. code-block:: text
+
+   variable '<name>' holds a SQL comment marker, which CREATE would drop
+
+   variable '<name>' does not read back from GET_DDL as written ('<entry>'); a type or default can't hold surrounding whitespace, or a DEFAULT, := or COMMENT of its own outside brackets
+
+**Fix:** Remove the comment from the ``data_type`` or ``default``, and write each as one type or one expression. See :ref:`ref-yaml-format-variable`.
 
 
 Graph validation errors
@@ -854,7 +922,7 @@ Malformed SEMANTIC_VIEW(...)
 
 .. code-block:: text
 
-   Parser Error: expected DIMENSIONS, METRICS, FACTS or WHERE after the view name in SEMANTIC_VIEW(...), got: ,
+   Parser Error: expected DIMENSIONS, METRICS, FACTS, WHERE or VARIABLES after the view name in SEMANTIC_VIEW(...), got: ,
 
    Parser Error: METRICS given twice in SEMANTIC_VIEW(...)
 
@@ -876,7 +944,7 @@ Parameter outside WHERE
 
 **Cause:** A prepared-statement parameter (``?``, ``$1``, ``$name``) appears in ``DIMENSIONS``, ``METRICS`` or ``FACTS``.
 
-**Fix:** Use parameters only in the construct's ``WHERE``. To choose the view, the dimensions or the metrics at run time, use :ref:`semantic_view() <ref-semantic-view-function>`, whose arguments can all be bound.
+**Fix:** Use parameters only in the construct's ``WHERE`` and in the values of its ``VARIABLES`` (see :ref:`ref-sv-variables`). To choose the view, the dimensions or the metrics at run time, use :ref:`semantic_view() <ref-semantic-view-function>`, whose arguments can all be bound.
 
 
 Two columns with the same name
@@ -891,6 +959,37 @@ Two columns with the same name
 **Cause:** Two items produce the same column name, through an alias or because an alias repeats a member's name.
 
 **Fix:** Give one of them another alias.
+
+
+.. _ref-err-query-variables:
+
+Variables in a query
+--------------------
+
+.. versionadded:: 0.18.0
+
+.. code-block:: text
+
+   semantic view '<view>': variable '<name>' has no default, so the query must set it: VARIABLES <name> = <value>
+
+   semantic view '<view>' has no variable '<name>'. Did you mean '<closest>'?
+
+   Binder Error: semantic_view: variables must be a struct of values by name, e.g. variables := {'min_amount': 2000}, not <type>
+
+   Parser Error: VARIABLES comes last in SEMANTIC_VIEW(...), after <CLAUSE>
+
+   Parser Error: expected 'name = value' in VARIABLES, got: <text>
+
+   Parser Error: a variable's value can't be a query
+
+**Cause and fix**, in the same order:
+
+- The view declares a :ref:`variable <ref-create-variables>` with no default, and the query does not set it. Every query of the view must set such a variable, even one that reads no member that uses it, as in Snowflake. Set it in the construct's ``VARIABLES`` or in ``variables := {...}``. A :ref:`standard-SQL query <howto-standard-sql>` cannot set variables, so query such a view with ``SEMANTIC_VIEW(...)`` instead, or give the variable a default.
+- The query sets a variable the view does not declare. The hint names the closest declared variable, when one is close. Check the spelling against :ref:`DESCRIBE SEMANTIC VIEW <ref-describe-semantic-view>`.
+- ``variables`` is not a struct with named fields, such as ``row(1)``. Pass ``{'name': value, ...}``. ``explain_semantic_view`` reports the same error under its own name.
+- A clause follows ``VARIABLES`` in the construct. Move ``VARIABLES`` to the end, after ``WHERE``.
+- An item in ``VARIABLES`` is not an assignment. Write ``name = value`` or ``name => value``.
+- A value is a ``SEMANTIC_VIEW(...)`` query. A variable's value cannot be a query. A plain subquery as a value, such as ``(SELECT 'x')``, gets DuckDB's own ``Table function cannot contain subqueries``. Compute the value first, and pass it as a value or a prepared-statement parameter.
 
 
 .. _ref-err-expression-items:

@@ -11,6 +11,7 @@ use semantic_views::model::{
 /// Simple definition: base_table "orders", 3 dimensions, 3 metrics, 1 filter, no joins.
 fn simple_definition() -> SemanticViewDefinition {
     SemanticViewDefinition {
+        variables: Vec::new(),
         tables: vec![semantic_views::model::TableRef {
             alias: "orders".to_string(),
             table: "orders".to_string(),
@@ -129,6 +130,7 @@ fn simple_definition() -> SemanticViewDefinition {
 /// 3 metrics (2 with source_table), 2 joins, 1 filter.
 fn joined_definition() -> SemanticViewDefinition {
     SemanticViewDefinition {
+        variables: Vec::new(),
         tables: vec![
             semantic_views::model::TableRef {
                 alias: "orders".to_string(),

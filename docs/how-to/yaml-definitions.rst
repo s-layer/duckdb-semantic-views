@@ -110,7 +110,7 @@ Use the :ref:`READ_YAML_FROM_SEMANTIC_VIEW() <ref-read-yaml>` scalar function to
 
    SELECT READ_YAML_FROM_SEMANTIC_VIEW('order_metrics');
 
-The function returns a single VARCHAR value containing the YAML representation of the view definition. The output includes all clauses (tables, relationships, facts, dimensions, metrics, materializations) that were declared when the view was created.
+The function returns a single VARCHAR value containing the YAML representation of the view definition. The output includes all clauses (tables, relationships, variables, facts, dimensions, metrics, materializations) that were declared when the view was created.
 
 To save the output to a file, use DuckDB's ``COPY`` statement:
 

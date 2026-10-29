@@ -9,6 +9,7 @@ use crate::model::{Dimension, Join, Metric, SemanticViewDefinition, TableRef};
 
 fn qualified_ref_def() -> SemanticViewDefinition {
     SemanticViewDefinition {
+        variables: Vec::new(),
         tables: vec![
             TableRef {
                 alias: "o".to_string(),
@@ -83,6 +84,7 @@ fn test_expand_qualified_column_refs_verbatim() {
 #[test]
 fn test_expand_multiple_qualified_refs_different_tables() {
     let def = SemanticViewDefinition {
+        variables: Vec::new(),
         tables: vec![
             TableRef {
                 alias: "o".to_string(),

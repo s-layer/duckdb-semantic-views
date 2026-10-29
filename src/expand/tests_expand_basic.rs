@@ -9,6 +9,7 @@ use crate::model::TableRef;
 
 fn def_with_join_columns() -> crate::model::SemanticViewDefinition {
     crate::model::SemanticViewDefinition {
+        variables: Vec::new(),
         tables: vec![
             TableRef {
                 alias: "o".to_string(),

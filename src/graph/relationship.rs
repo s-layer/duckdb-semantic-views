@@ -1414,6 +1414,7 @@ mod tests {
         // at all; an FK-less relationship is rejected even when TABLES has one
         // entry (here it targets a table that is not declared).
         let mut def = SemanticViewDefinition {
+            variables: Vec::new(),
             tables: vec![TableRef {
                 alias: "o".to_string(),
                 table: "orders".to_string(),
@@ -1645,6 +1646,7 @@ mod tests {
         /// Build a minimal definition for FK reference validation testing.
         fn make_fk_ref_def(tables: Vec<TableRef>, joins: Vec<Join>) -> SemanticViewDefinition {
             SemanticViewDefinition {
+                variables: Vec::new(),
                 tables,
                 joins,
                 dimensions: vec![],
