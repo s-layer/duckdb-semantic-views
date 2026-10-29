@@ -35,6 +35,7 @@ fn table(alias: &str, pk: &str) -> TableRef {
     TableRef {
         alias: alias.to_string(),
         table: format!("bc_{alias}"),
+        definition: None,
         pk_columns: vec![pk.to_string()],
         unique_constraints: vec![],
         comment: None,

@@ -47,6 +47,14 @@
 //! path's join with `LEFT JOIN q ON p.qid = q.id`. A second hop, `s` under `q`
 //! (`q.sid -> s.id`, dimension `scat`), puts a chain edge whose left side is
 //! itself a chain table under the same check.
+//!
+//! Phase 6.4 reads any of the five tables through an INLINE QUERY
+//! (`alias AS (<query>)`) instead of by name, chosen per case. The query reads
+//! `<x>_src`, which holds every row of `<x>` twice, once marked as noise, and
+//! keeps the unmarked copy: `SELECT * EXCLUDE (noise) FROM <x>_src WHERE NOT
+//! noise`. The table itself is renamed `<x>_oracle`, which only the oracle
+//! reads (through a CTE named `<x>`), so an expansion that reads the table any
+//! other way either fails to bind or, reading the noise, disagrees with it.
 
 use proptest::prelude::*;
 use semantic_views::expand::{expand, DimensionName, MetricName, QueryRequest};
@@ -348,6 +356,44 @@ struct Case {
     sel_dims: Vec<usize>,
     sel_metrics: Vec<usize>,
     where_pred: Option<Pred>,
+    /// Phase 6.4: which of [`TABLES`] the definition reads through an inline
+    /// query, by position.
+    inline: Vec<bool>,
+}
+
+/// The definition's tables, in declaration order.
+const TABLES: [&str; 5] = ["t", "u", "p", "q", "s"];
+
+/// The inline query a table read that way is defined by (Phase 6.4).
+fn inline_query(table: &str) -> String {
+    format!("SELECT * EXCLUDE (noise) FROM {table}_src WHERE NOT noise")
+}
+
+/// The oracle over the tables `inline` renamed: a CTE gives each its old name.
+fn oracle_over(oracle: String, inline: &[bool]) -> String {
+    let ctes: Vec<String> = TABLES
+        .iter()
+        .zip(inline)
+        .filter(|(_, &is_inline)| is_inline)
+        .map(|(table, _)| format!("{table} AS (SELECT * FROM {table}_oracle)"))
+        .collect();
+    if ctes.is_empty() {
+        oracle
+    } else {
+        format!("WITH {} {oracle}", ctes.join(", "))
+    }
+}
+
+/// Read each table `inline` marks through its inline query.
+fn with_inline_tables(mut def: SemanticViewDefinition, inline: &[bool]) -> SemanticViewDefinition {
+    for ((t, &is_inline), name) in def.tables.iter_mut().zip(inline).zip(TABLES) {
+        assert_eq!(t.alias, name, "TABLES follows build_def's order");
+        if is_inline {
+            t.definition = Some(inline_query(&t.table));
+            t.table = String::new();
+        }
+    }
+    def
 }
 
 fn arb_instance() -> impl Strategy<Value = Instance> {
@@ -435,16 +481,20 @@ fn arb_case() -> impl Strategy<Value = Case> {
             1 => Just(None),
             3 => arb_pred().prop_map(Some),
         ];
-        (Just(inst), dim_sel, met_sel, where_pred)
+        // Phase 6.4: each table is read through its inline query in about
+        // one case in three, independently, so every mix occurs.
+        let inline = prop::collection::vec(prop::bool::weighted(0.35), TABLES.len());
+        (Just(inst), dim_sel, met_sel, where_pred, inline)
             .prop_filter(
                 "at least one of dimensions/metrics must be selected",
-                |(_, sel_dims, sel_metrics, _)| !sel_dims.is_empty() || !sel_metrics.is_empty(),
+                |(_, sel_dims, sel_metrics, _, _)| !sel_dims.is_empty() || !sel_metrics.is_empty(),
             )
-            .prop_map(|(inst, sel_dims, sel_metrics, where_pred)| Case {
+            .prop_map(|(inst, sel_dims, sel_metrics, where_pred, inline)| Case {
                 inst,
                 sel_dims,
                 sel_metrics,
                 where_pred,
+                inline,
             })
     })
 }
@@ -457,6 +507,7 @@ fn build_def() -> SemanticViewDefinition {
         TableRef {
             alias: "t".to_string(),
             table: "t".to_string(),
+            definition: None,
             pk_columns: vec![],
             unique_constraints: vec![],
             comment: None,
@@ -466,6 +517,7 @@ fn build_def() -> SemanticViewDefinition {
         TableRef {
             alias: "u".to_string(),
             table: "u".to_string(),
+            definition: None,
             pk_columns: vec!["id".to_string()],
             unique_constraints: vec![],
             comment: None,
@@ -476,6 +528,7 @@ fn build_def() -> SemanticViewDefinition {
         TableRef {
             alias: "p".to_string(),
             table: "p".to_string(),
+            definition: None,
             pk_columns: vec!["id".to_string()],
             unique_constraints: vec![],
             comment: None,
@@ -486,6 +539,7 @@ fn build_def() -> SemanticViewDefinition {
         TableRef {
             alias: "q".to_string(),
             table: "q".to_string(),
+            definition: None,
             pk_columns: vec!["id".to_string()],
             unique_constraints: vec![],
             comment: None,
@@ -496,6 +550,7 @@ fn build_def() -> SemanticViewDefinition {
         TableRef {
             alias: "s".to_string(),
             table: "s".to_string(),
+            definition: None,
             pk_columns: vec!["id".to_string()],
             unique_constraints: vec![],
             comment: None,
@@ -751,8 +806,9 @@ fn build_def() -> SemanticViewDefinition {
     }
 }
 
-/// Create the physical tables and insert the generated rows.
-fn make_db(inst: &Instance) -> duckdb::Connection {
+/// Create the physical tables and insert the generated rows; then give each
+/// table `inline` marks its inline query's source and move it out of the way.
+fn make_db(inst: &Instance, inline: &[bool]) -> duckdb::Connection {
     let conn = duckdb::Connection::open_in_memory().expect("in-memory DuckDB");
     conn.execute_batch(
         "CREATE TABLE u (id INTEGER, ucat INTEGER, w INTEGER); \
@@ -818,6 +874,21 @@ fn make_db(inst: &Instance) -> duckdb::Connection {
         .collect();
     conn.execute_batch(&format!("INSERT INTO s VALUES {};", values.join(",")))
         .expect("insert s rows");
+    // Phase 6.4: what an inline-query table reads, every row twice, the
+    // second copy marked as noise for the query to drop. The table itself is
+    // the oracle's alone.
+    for (table, _) in TABLES
+        .iter()
+        .zip(inline)
+        .filter(|(_, &is_inline)| is_inline)
+    {
+        conn.execute_batch(&format!(
+            "CREATE TABLE {table}_src AS SELECT *, false AS noise FROM {table}; \
+             INSERT INTO {table}_src SELECT *, true FROM {table}; \
+             ALTER TABLE {table} RENAME TO {table}_oracle;"
+        ))
+        .expect("create the inline-query sources");
+    }
     conn
 }
 
@@ -1145,7 +1216,7 @@ proptest! {
             &[],
         )
         .expect("the pool's items parse");
-        let stored = build_def();
+        let stored = with_inline_tables(build_def(), &case.inline);
         let lowered = lower_expression_items("star", &stored, items)
             .unwrap_or_else(|e| panic!("the pool's expression items lower: {e:?}"));
         let def = lowered.def.clone().unwrap_or(stored);
@@ -1269,11 +1340,14 @@ proptest! {
             .collect::<Vec<_>>()
             .join(", ");
         let expanded = format!("SELECT {renamed} FROM ({expanded}) ex");
-        let oracle = if selects_pcat {
-            role_oracle_sql(&case)
-        } else {
-            oracle_sql(&case)
-        };
+        let oracle = oracle_over(
+            if selects_pcat {
+                role_oracle_sql(&case)
+            } else {
+                oracle_sql(&case)
+            },
+            &case.inline,
+        );
 
         // Canonical projection (output columns sorted by name) so a column-order
         // difference between the two formulations is not a false diff.
@@ -1296,7 +1370,7 @@ proptest! {
                                       SELECT {proj} FROM ({expanded}) qd) e2) AS diff"
         );
 
-        let conn = make_db(&case.inst);
+        let conn = make_db(&case.inst, &case.inline);
         let diff: i64 = conn.query_row(&cmp, [], |r| r.get(0)).unwrap_or_else(|e| {
             panic!("differential comparison query failed: {e}\n--- expanded:\n{expanded}\n--- oracle:\n{oracle}")
         });
@@ -1374,6 +1448,9 @@ fn generator_reaches_both_where_clause_branches() {
     let mut qcat_both_paths_oracled = 0usize;
     let mut scat_refused = 0usize;
     let mut scat_both_paths_oracled = 0usize;
+    // Phase 6.4: each table read through its inline query in an oracled case
+    // that reads the table (a member on it, or for `t` a child dimension).
+    let mut inline_read_oracled = [0usize; 5];
     let mut distinct: HashSet<String> = HashSet::new();
 
     for _ in 0..400 {
@@ -1419,6 +1496,18 @@ fn generator_reaches_both_where_clause_branches() {
             }
             if has("sv_p2") {
                 pcat_sv_p2_oracled += 1;
+            }
+        }
+        let reads = [
+            selects_child_dim,
+            selects_parent_metric,
+            selects_pcat,
+            selects_qcat,
+            selects_scat,
+        ];
+        for (k, read) in reads.into_iter().enumerate() {
+            if oracled && read && case.inline[k] {
+                inline_read_oracled[k] += 1;
             }
         }
         if !selects_pcat && oracled && USING_METS.iter().any(|m| has(m)) {
@@ -1480,6 +1569,13 @@ fn generator_reaches_both_where_clause_branches() {
         }
     }
 
+    for (k, table) in TABLES.iter().enumerate() {
+        assert!(
+            inline_read_oracled[k] > 0,
+            "no oracled case read table '{table}' through its inline query \
+             (Phase 6.4); counts: {inline_read_oracled:?}"
+        );
+    }
     assert!(
         with_pred > 0 && without_pred > 0,
         "where_clause must be both present and absent across cases \

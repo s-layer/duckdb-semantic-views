@@ -99,7 +99,7 @@ Rows appear in definition order: the view-level comment, ``MAX_STALENESS`` and t
         - The view's tags as a JSON object. See ``TAGS`` below.
 
 **TABLE**
-   One block per table declared in the ``TABLES`` clause. Each table produces 3-7 property rows:
+   One block per table declared in the ``TABLES`` clause, named by its physical table, or by its alias for a table defined by a query. Each table produces 1-7 property rows:
 
    .. list-table::
       :header-rows: 1
@@ -113,6 +113,10 @@ Rows appear in definition order: the view-level comment, ``MAX_STALENESS`` and t
         - The DuckDB schema containing the physical table (e.g., ``main``).
       * - ``BASE_TABLE_NAME``
         - The physical table name.
+      * - ``DEFINITION``
+        - For a table :ref:`defined by a query <ref-create-inline-query>`, the query, without its parentheses. Such a table has no ``BASE_TABLE_*`` rows, as in Snowflake.
+
+          .. versionadded:: 0.18.0
       * - ``PRIMARY_KEY``
         - JSON array of primary key column names (e.g., ``["id"]``). Only emitted when a primary key is declared.
       * - ``COMMENT``

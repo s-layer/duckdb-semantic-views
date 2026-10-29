@@ -134,6 +134,7 @@ mod tests {
         TableRef {
             alias: alias.to_string(),
             table: alias.to_string(),
+            definition: None,
             pk_columns: vec!["id".to_string()],
             unique_constraints: vec![],
             comment: None,

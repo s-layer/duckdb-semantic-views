@@ -76,6 +76,8 @@ fn is_balanced(sql: &str) -> bool {
 /// more inputs, never assert a false positive.
 fn def_fragments_balanced(def: &SemanticViewDefinition) -> bool {
     let mut frags: Vec<&str> = Vec::new();
+    // An inline-query table's query is emitted inside `(...)` in FROM/JOIN.
+    frags.extend(def.tables.iter().filter_map(|t| t.definition.as_deref()));
     for d in &def.dimensions {
         frags.push(&d.expr);
         if let Some(ot) = &d.output_type {

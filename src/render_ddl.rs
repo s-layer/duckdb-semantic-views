@@ -295,7 +295,16 @@ fn emit_tables(out: &mut String, def: &SemanticViewDefinition) {
         out.push_str("    ");
         out.push_str(&emit_alias(&table.alias));
         out.push_str(" AS ");
-        out.push_str(&emit_table(&table.table));
+        match &table.definition {
+            // An inline-query table (Phase 6.4). The query holds no comment
+            // (`validate_ddl_representable`), so it is written as stored.
+            Some(query) => {
+                out.push('(');
+                out.push_str(query);
+                out.push(')');
+            }
+            None => out.push_str(&emit_table(&table.table)),
+        }
         if !table.pk_columns.is_empty() {
             out.push_str(" PRIMARY KEY (");
             out.push_str(&emit_column_list(&table.pk_columns));
@@ -1180,6 +1189,35 @@ mod tests {
             ddl.contains("NON ADDITIVE BY (date_dim DESC NULLS FIRST)"),
             "Expected NON ADDITIVE BY with DESC NULLS FIRST: {ddl}"
         );
+    }
+
+    // Phase 6.4: an inline-query table renders as `alias AS (<query>)` and
+    // parses back to the same table.
+    #[test]
+    fn an_inline_query_table_renders_and_parses_back() {
+        use crate::body_parser::parse_keyword_body;
+        for query in [
+            "SELECT * FROM customer JOIN addr ON customer.id = addr.cid",
+            "SELECT 1 AS id\nWHERE true",
+        ] {
+            let mut def = minimal_def();
+            def.tables.push(TableRef {
+                alias: "ci".to_string(),
+                definition: Some(query.to_string()),
+                pk_columns: vec!["id".to_string()],
+                synonyms: vec!["customer_details".to_string()],
+                ..Default::default()
+            });
+            let ddl = render_create_ddl("rt", &def).unwrap();
+            assert!(
+                ddl.contains(&format!("ci AS ({query}) PRIMARY KEY (id)")),
+                "{ddl}"
+            );
+            let as_pos = ddl.find(" AS\n").unwrap();
+            let body = format!("AS {}", &ddl[as_pos + 4..]);
+            let kb = parse_keyword_body(&body, 0).expect("Round-trip parse should succeed");
+            assert_eq!(kb.tables, def.tables, "{ddl}");
+        }
     }
 
     #[test]

@@ -27,7 +27,17 @@ use serde::{Deserialize, Serialize};
 #[cfg_attr(feature = "arbitrary", derive(arbitrary::Arbitrary))]
 pub struct TableRef {
     pub alias: String,
+    /// The physical table, as written. Empty for an inline-query table
+    /// ([`Self::definition`]); never serialized empty, so a physical table's
+    /// JSON is unchanged.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
     pub table: String,
+    /// The query of an inline-query logical table (Snowflake's
+    /// `alias AS (<query>)`, Phase 6.4), as written between its parentheses.
+    /// `None` for a physical table. A table has one or the other, never both.
+    /// Old stored JSON without this field deserializes to None.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub definition: Option<String>,
     /// Primary key columns for this table (Phase 24: PK/FK model).
     /// Old stored JSON without this field deserializes with empty Vec.
     /// Not serialized when empty to preserve backward-compatible JSON.
@@ -52,6 +62,20 @@ pub struct TableRef {
     /// Old stored JSON without this field deserializes to empty Vec.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub tags: Vec<Tag>,
+}
+
+impl TableRef {
+    /// The name `DESCRIBE` and the `SHOW` listings give the table: its
+    /// physical table, or for an inline-query table, which has none, its alias
+    /// (Snowflake lists every logical table by its alias).
+    #[must_use]
+    pub fn listed_name(&self) -> &str {
+        if self.definition.is_some() {
+            &self.alias
+        } else {
+            &self.table
+        }
+    }
 }
 
 /// The name of a Snowflake object tag: `tag`, `schema.tag` or `database.schema.tag`.
@@ -894,24 +918,23 @@ pub struct SemanticViewDefinition {
 }
 
 impl SemanticViewDefinition {
-    /// Physical table name of the primary (first) table in the view.
-    ///
-    /// All semantic views have at least one table entry. This is the table
-    /// that appears in the FROM clause of expanded SQL.
+    /// Listed name ([`TableRef::listed_name`]) of the primary (first) table
+    /// in the view: the one whose members are written unqualified.
     #[must_use]
     pub fn base_table(&self) -> &str {
-        self.tables.first().map_or("", |t| t.table.as_str())
+        self.tables.first().map_or("", TableRef::listed_name)
     }
 
-    /// Build a mapping from table alias to actual table name.
+    /// Build a mapping from table alias to listed table name.
     ///
     /// Used by SHOW/DESCRIBE `VTabs` to resolve the stored alias (e.g. `"o"`)
-    /// to the real table name (e.g. `"orders"`).
+    /// to the real table name (e.g. `"orders"`), or to the alias itself for an
+    /// inline-query table ([`TableRef::listed_name`]).
     #[must_use]
     pub fn alias_to_table_map(&self) -> std::collections::HashMap<String, String> {
         self.tables
             .iter()
-            .map(|t| (t.alias.clone(), t.table.clone()))
+            .map(|t| (t.alias.clone(), t.listed_name().to_string()))
             .collect()
     }
 }
@@ -970,8 +993,19 @@ impl SemanticViewDefinition {
     /// Returns an error if the YAML is syntactically invalid or missing
     /// required fields. The `name` parameter appears in the error message.
     pub fn from_yaml(name: &str, yaml: &str) -> Result<Self, String> {
-        let def: Self = yaml_serde::from_str(yaml)
+        let mut def: Self = yaml_serde::from_str(yaml)
             .map_err(|e| format!("invalid YAML definition for semantic view '{name}': {e}"))?;
+        // An inline query is usually a `|` block scalar, which ends in a line
+        // break. The DDL parser trims the query it reads between the
+        // parentheses, so the YAML form stores it trimmed as well.
+        for t in &mut def.tables {
+            if let Some(query) = &mut t.definition {
+                let trimmed = query.trim();
+                if trimmed.len() != query.len() {
+                    *query = trimmed.to_string();
+                }
+            }
+        }
         Ok(def)
     }
 
@@ -1102,12 +1136,49 @@ fn validate_yaml_tables(def: &SemanticViewDefinition) -> Result<(), String> {
         // the TABLES parser rejects as an empty quoted identifier. So this is
         // deliberately an emptiness check and not a `slot_*` call — the wider
         // check would reject names `GET_DDL` renders correctly (PR #209 review).
-        if t.table.is_empty() {
-            return Err(format!(
-                "table '{}' has an empty table name; a TABLES entry is \
-                 'alias AS table_name'",
-                t.alias
-            ));
+        // An inline-query table (Phase 6.4) has a `definition` and no table
+        // name; every other table has a name. Its query is held to what the
+        // DDL form's parser checks, since GET_DDL writes it between
+        // parentheses.
+        match (&t.definition, t.table.is_empty()) {
+            (Some(_), false) => {
+                return Err(format!(
+                    "table '{}' has both a table name and a definition; give one",
+                    t.alias
+                ));
+            }
+            (None, true) => {
+                return Err(format!(
+                    "table '{}' has an empty table name; a TABLES entry is \
+                     'alias AS table_name' or 'alias AS (<query>)'",
+                    t.alias
+                ));
+            }
+            (Some(query), true) => {
+                // Beyond the parser's own checks, the query must come back
+                // from GET_DDL -> CREATE as the same text: the parser trims
+                // it, and the front door blanks comments before parsing.
+                let reason = crate::body_parser::inline_query_error(query).or_else(|| {
+                    if query.trim() != query {
+                        Some("it has surrounding whitespace".to_string())
+                    } else if crate::util::blank_sql_comments(query) != *query {
+                        Some(
+                            "it holds a SQL comment, which CREATE would drop from \
+                             the stored query"
+                                .to_string(),
+                        )
+                    } else {
+                        None
+                    }
+                });
+                if let Some(reason) = reason {
+                    return Err(format!(
+                        "table '{}' has an invalid inline query: {reason}",
+                        t.alias
+                    ));
+                }
+            }
+            (None, false) => {}
         }
         for c in &t.pk_columns {
             slot_column("table", "PRIMARY KEY column", c)?;
@@ -1930,6 +2001,114 @@ mod tests {
                     metrics:\n  - name: total\n    expr: sum(o.amount)\n    source_table: o\n";
         let e = yaml_err(yaml);
         assert!(e.contains("table"), "{e}");
+    }
+
+    // Phase 6.4: an inline-query table in YAML is `definition:` in place of
+    // `table:`.
+    #[test]
+    fn yaml_inline_query_table_imports_and_exports() {
+        let yaml = "tables:\n  - alias: o\n    definition: SELECT * FROM orders WHERE amount > 0\n\
+                    \x20   pk_columns: [id]\n\
+                    dimensions: []\n\
+                    metrics:\n  - name: total\n    expr: sum(o.amount)\n    source_table: o\n";
+        let def = SemanticViewDefinition::from_yaml_with_size_cap("v", yaml)
+            .expect("an inline-query table imports");
+        assert_eq!(def.tables[0].table, "");
+        assert_eq!(
+            def.tables[0].definition.as_deref(),
+            Some("SELECT * FROM orders WHERE amount > 0")
+        );
+        let json = serde_json::to_string(&def.tables[0]).unwrap();
+        assert!(
+            !json.contains("\"table\""),
+            "no empty table name is stored: {json}"
+        );
+        let exported = crate::render_yaml::render_yaml_export(&def).unwrap();
+        let back = SemanticViewDefinition::from_yaml_with_size_cap("v", &exported).unwrap();
+        assert_eq!(back.tables, def.tables);
+    }
+
+    #[test]
+    fn yaml_inline_query_table_with_a_table_name_too_is_rejected() {
+        let yaml = "tables:\n  - alias: o\n    table: orders\n    definition: SELECT 1 AS id\n\
+                    dimensions: []\n\
+                    metrics:\n  - name: total\n    expr: count(*)\n    source_table: o\n";
+        let e = yaml_err(yaml);
+        assert!(e.contains("both a table name and a definition"), "{e}");
+    }
+
+    #[test]
+    fn yaml_inline_query_that_is_not_one_query_is_rejected() {
+        // Nothing balanced the YAML form's parentheses, so a query that would
+        // close the subquery early and open another is refused.
+        for (query, reason) in [
+            ("'SELECT 1 AS id) AS x, (SELECT 2'", "do not nest"),
+            ("'SELECT 1 AS id /* open'", "never closed"),
+            ("'SELECT $1 AS id'", "parameter $1"),
+            ("'  '", "empty"),
+        ] {
+            let yaml = format!(
+                "tables:\n  - alias: o\n    definition: {query}\n\
+                 dimensions: []\n\
+                 metrics:\n  - name: total\n    expr: count(*)\n    source_table: o\n"
+            );
+            let e = yaml_err(&yaml);
+            assert!(
+                e.contains("invalid inline query") && e.contains(reason),
+                "{query}: {e}"
+            );
+        }
+    }
+
+    #[test]
+    fn yaml_inline_query_block_scalar_is_stored_trimmed() {
+        // A `|` block scalar ends in a line break. The DDL parser trims the
+        // query it reads between the parentheses, so the YAML form stores it
+        // trimmed too, or GET_DDL -> CREATE would store a different text.
+        let yaml = "tables:\n  - alias: o\n    definition: |\n      SELECT 1 AS id\n      \
+                    WHERE true\n\
+                    dimensions: []\n\
+                    metrics:\n  - name: total\n    expr: count(*)\n    source_table: o\n";
+        let def = SemanticViewDefinition::from_yaml_with_size_cap("v", yaml).unwrap();
+        assert_eq!(
+            def.tables[0].definition.as_deref(),
+            Some("SELECT 1 AS id\nWHERE true")
+        );
+    }
+
+    #[test]
+    fn yaml_inline_query_with_a_comment_is_rejected() {
+        // The DDL front door blanks comments before the query is parsed, so a
+        // comment kept by YAML would not survive GET_DDL -> CREATE.
+        let accepted: Vec<&str> = ["'SELECT 1 AS id -- note'", "'SELECT /* note */ 1 AS id'"]
+            .into_iter()
+            .filter(|query| {
+                let yaml = format!(
+                    "tables:\n  - alias: o\n    definition: {query}\n\
+                     dimensions: []\n\
+                     metrics:\n  - name: total\n    expr: count(*)\n    source_table: o\n"
+                );
+                !SemanticViewDefinition::from_yaml_with_size_cap("v", &yaml)
+                    .is_err_and(|e| e.contains("invalid inline query") && e.contains("comment"))
+            })
+            .collect();
+        assert!(accepted.is_empty(), "not refused: {accepted:?}");
+    }
+
+    #[test]
+    fn inline_query_with_surrounding_whitespace_is_not_representable() {
+        // A definition built in code skips the YAML load's trim; the DDL
+        // parser would trim it on the way back in.
+        let mut def = SemanticViewDefinition::from_yaml_with_size_cap(
+            "v",
+            "tables:\n  - alias: o\n    definition: SELECT 1 AS id\n\
+             dimensions: []\n\
+             metrics:\n  - name: total\n    expr: count(*)\n    source_table: o\n",
+        )
+        .unwrap();
+        def.tables[0].definition = Some("SELECT 1 AS id\n".to_string());
+        let e = validate_ddl_representable(&def).unwrap_err();
+        assert!(e.contains("surrounding whitespace"), "{e}");
     }
 
     #[test]
@@ -3192,6 +3371,7 @@ mod tests {
             let tr = TableRef {
                 alias: "o".to_string(),
                 table: "orders".to_string(),
+                definition: None,
                 pk_columns: vec!["id".to_string()],
                 unique_constraints: vec![
                     vec!["email".to_string()],
@@ -3252,6 +3432,7 @@ mod tests {
             let tr = TableRef {
                 alias: "o".to_string(),
                 table: "orders".to_string(),
+                definition: None,
                 pk_columns: vec!["id".to_string()],
                 unique_constraints: vec![],
                 comment: None,
@@ -3286,6 +3467,7 @@ mod tests {
             let tr = TableRef {
                 alias: "f".to_string(),
                 table: "fact_table".to_string(),
+                definition: None,
                 pk_columns: vec![],
                 unique_constraints: vec![],
                 comment: None,
@@ -3549,6 +3731,7 @@ mod tests {
             let tr = TableRef {
                 alias: "o".to_string(),
                 table: "orders".to_string(),
+                definition: None,
                 pk_columns: vec!["id".to_string()],
                 unique_constraints: vec![],
                 comment: Some("Main orders table".to_string()),

@@ -194,7 +194,9 @@ semantic_view('shop', dimensions := [...], metrics := [...])
        expand/ generates SQL, and DuckDB plans it as a subquery of the caller's query.
        TABLES entries arrive qualified with the stamp, or as temp.main for one CREATE found
        temporary (SemanticViewDefinition::temp_tables). The shim (SvTablePinner) first
-       resolves the other names the expansion uses (a member subquery's tables, functions,
+       resolves the other names the expansion uses (a member subquery's tables, the tables an
+       inline-query table's query reads (Phase 6.4; `expand::table_source` emits the query as a
+       FROM subquery), functions,
        macros, table functions, cast types) as DuckDB resolves a view stored in the stamped
        schema, and pins each to what it finds, so a caller's CTE or current schema can't
        stand in for it.

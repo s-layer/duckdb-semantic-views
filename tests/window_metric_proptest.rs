@@ -291,6 +291,7 @@ fn build_def(func: WFunc, mode: &PartMode) -> SemanticViewDefinition {
     let tables = vec![TableRef {
         alias: "s".to_string(),
         table: "s".to_string(),
+        definition: None,
         pk_columns: vec![],
         unique_constraints: vec![],
         comment: None,

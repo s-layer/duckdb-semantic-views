@@ -36,7 +36,7 @@ pub(crate) use scan::{
     column_roundtrips_verbatim, identifier_slot_error, identifier_slot_roundtrips_verbatim,
     source_table_roundtrips_verbatim, split_at_depth0_commas,
 };
-pub(crate) use tables::parse_tables_clause;
+pub(crate) use tables::{inline_query_error, parse_tables_clause};
 
 /// Re-parse a rendered window expression, returning just the `WindowSpec`.
 ///
@@ -1316,6 +1316,108 @@ mod tests {
         assert_eq!(result[0].alias, "o");
         assert_eq!(result[0].table, "orders");
         assert_eq!(result[0].pk_columns, vec!["o_orderkey"]);
+    }
+
+    // Phase 6.4: an inline-query logical table, `alias AS (<query>)`.
+    #[test]
+    fn an_inline_query_table_keeps_its_query_and_its_keywords() {
+        let result = parse_tables_clause(
+            "ci AS ( SELECT * FROM customer JOIN addr ON customer.id = addr.cid ) \
+             PRIMARY KEY (id) UNIQUE (email) WITH SYNONYMS ('customer_details') \
+             COMMENT = 'Customers'",
+            0,
+        )
+        .unwrap();
+        assert_eq!(result[0].alias, "ci");
+        assert_eq!(result[0].table, "");
+        assert_eq!(
+            result[0].definition.as_deref(),
+            Some("SELECT * FROM customer JOIN addr ON customer.id = addr.cid")
+        );
+        assert_eq!(result[0].pk_columns, vec!["id"]);
+        assert_eq!(result[0].unique_constraints, vec![vec!["email"]]);
+        assert_eq!(result[0].synonyms, vec!["customer_details"]);
+        assert_eq!(result[0].comment.as_deref(), Some("Customers"));
+    }
+
+    #[test]
+    fn an_inline_query_reads_brackets_in_strings_and_names_as_text() {
+        let result = parse_tables_clause(
+            "t AS (SELECT ')' AS \"a)\", (1 + 2) AS b, $$)$$ AS c FROM x), u AS y",
+            0,
+        )
+        .unwrap();
+        assert_eq!(
+            result[0].definition.as_deref(),
+            Some("SELECT ')' AS \"a)\", (1 + 2) AS b, $$)$$ AS c FROM x")
+        );
+        assert_eq!(result[1].alias, "u");
+        assert_eq!(result[1].table, "y");
+        assert_eq!(result[1].definition, None);
+    }
+
+    #[test]
+    fn an_inline_query_without_an_alias_is_refused() {
+        let err = parse_tables_clause("(SELECT 1 AS id) PRIMARY KEY (id)", 0).unwrap_err();
+        assert!(
+            err.message.contains("needs an alias"),
+            "got {}",
+            err.message
+        );
+        assert_eq!(err.position, Some(0));
+    }
+
+    #[test]
+    fn an_unclosed_inline_query_is_refused() {
+        let err = parse_tables_clause("t AS (SELECT (1 FROM x", 0).unwrap_err();
+        assert!(err.message.contains("Unclosed '('"), "got {}", err.message);
+        assert_eq!(err.position, Some(5));
+    }
+
+    #[test]
+    fn an_inline_query_that_is_not_one_query_is_refused() {
+        for (entry, reason) in [
+            ("t AS ()", "empty"),
+            ("t AS (  )", "empty"),
+            ("t AS (SELECT 1; SELECT 2)", "';'"),
+            ("t AS (SELECT [1)", "do not nest"),
+            ("t AS (SELECT * FROM x WHERE k = $1)", "parameter $1"),
+            ("t AS (SELECT * FROM x WHERE k = ?)", "parameter ?"),
+        ] {
+            let err = parse_tables_clause(entry, 0).unwrap_err();
+            assert!(
+                err.message.contains("Invalid inline query for table 't'")
+                    && err.message.contains(reason),
+                "{entry}: got {}",
+                err.message
+            );
+        }
+    }
+
+    #[test]
+    fn inline_query_error_needs_everything_closed_by_the_end() {
+        for query in [
+            "SELECT 1 /* open",
+            "SELECT 1 /* a */ /* b",
+            "SELECT 'open",
+            "SELECT \"open",
+            "SELECT $$open",
+            "SELECT (1",
+            "SELECT 1) AS a, (SELECT 2",
+        ] {
+            assert!(
+                super::inline_query_error(query).is_some(),
+                "{query} should be refused"
+            );
+        }
+        for query in [
+            "SELECT 1 -- a trailing comment",
+            "SELECT 1 /* closed */",
+            "SELECT ';' AS semi, '$1' AS dollar",
+            "VALUES (1, 'a'), (2, 'b')",
+        ] {
+            assert_eq!(super::inline_query_error(query), None, "{query}");
+        }
     }
 
     #[test]

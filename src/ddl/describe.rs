@@ -262,42 +262,46 @@ fn collect_cortex_analyst_rows(def: &SemanticViewDefinition, rows: &mut Vec<Desc
 /// Collect TABLE property rows from the definition.
 ///
 /// Each table alias emits: `BASE_TABLE_DATABASE_NAME`, `BASE_TABLE_SCHEMA_NAME`,
-/// `BASE_TABLE_NAME`, and optionally `PRIMARY_KEY` (only when non-empty).
+/// `BASE_TABLE_NAME` (or, for an inline-query table, `DEFINITION`), and
+/// optionally `PRIMARY_KEY` (only when non-empty).
 fn collect_table_rows(def: &SemanticViewDefinition, rows: &mut Vec<DescribeRow>) {
     let db_name = def.database_name.clone().unwrap_or_default();
     let sch_name = def.schema_name.clone().unwrap_or_default();
 
     for table in &def.tables {
-        let obj_name = table.table.clone();
-        // A table that was temporary at CREATE lives in `temp.main`.
-        let (table_db, table_schema) =
-            if crate::expand::temp_table_name(&table.table, def).is_some() {
-                ("temp".to_string(), "main".to_string())
-            } else {
-                (db_name.clone(), sch_name.clone())
-            };
-
-        rows.push(DescribeRow {
-            object_kind: "TABLE".to_string(),
-            object_name: obj_name.clone(),
-            parent_entity: String::new(),
-            property: "BASE_TABLE_DATABASE_NAME".to_string(),
-            property_value: table_db,
-        });
-        rows.push(DescribeRow {
-            object_kind: "TABLE".to_string(),
-            object_name: obj_name.clone(),
-            parent_entity: String::new(),
-            property: "BASE_TABLE_SCHEMA_NAME".to_string(),
-            property_value: table_schema,
-        });
-        rows.push(DescribeRow {
-            object_kind: "TABLE".to_string(),
-            object_name: obj_name.clone(),
-            parent_entity: String::new(),
-            property: "BASE_TABLE_NAME".to_string(),
-            property_value: table.table.clone(),
-        });
+        let obj_name = table.listed_name().to_string();
+        // An inline-query table shows its query in place of the BASE_TABLE_*
+        // rows, as Snowflake's DESCRIBE does (Phase 6.4).
+        if let Some(ref query) = table.definition {
+            rows.push(DescribeRow {
+                object_kind: "TABLE".to_string(),
+                object_name: obj_name.clone(),
+                parent_entity: String::new(),
+                property: "DEFINITION".to_string(),
+                property_value: query.clone(),
+            });
+        } else {
+            // A table that was temporary at CREATE lives in `temp.main`.
+            let (table_db, table_schema) =
+                if crate::expand::temp_table_name(&table.table, def).is_some() {
+                    ("temp".to_string(), "main".to_string())
+                } else {
+                    (db_name.clone(), sch_name.clone())
+                };
+            for (property, property_value) in [
+                ("BASE_TABLE_DATABASE_NAME", table_db),
+                ("BASE_TABLE_SCHEMA_NAME", table_schema),
+                ("BASE_TABLE_NAME", table.table.clone()),
+            ] {
+                rows.push(DescribeRow {
+                    object_kind: "TABLE".to_string(),
+                    object_name: obj_name.clone(),
+                    parent_entity: String::new(),
+                    property: property.to_string(),
+                    property_value,
+                });
+            }
+        }
         if !table.pk_columns.is_empty() {
             rows.push(DescribeRow {
                 object_kind: "TABLE".to_string(),

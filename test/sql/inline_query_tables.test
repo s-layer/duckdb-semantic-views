@@ -1,0 +1,324 @@
+# Inline-query logical tables (Phase 6.4): a TABLES entry defined by a query,
+# `alias AS (<query>)`, as Snowflake allows. The table is read through its query
+# wherever a physical table would be read, DESCRIBE shows a DEFINITION row in
+# place of the BASE_TABLE_* rows, and GET_DDL and the YAML export carry the
+# query.
+
+require semantic_views
+
+statement ok
+CREATE TABLE iq_customer (c_cust_id INTEGER, c_first_name VARCHAR, c_region VARCHAR);
+
+statement ok
+CREATE TABLE iq_customer_address (ca_cust_id INTEGER, ca_city VARCHAR);
+
+statement ok
+CREATE TABLE iq_orders (id INTEGER, cust_id INTEGER, amount INTEGER);
+
+statement ok
+INSERT INTO iq_customer VALUES (1, 'Ann', 'N'), (2, 'Bob', 'S'), (3, 'Cy', 'N'), (4, 'Di', 'S');
+
+statement ok
+INSERT INTO iq_customer_address VALUES (1, 'Oslo'), (2, 'Rome'), (3, 'Oslo'), (4, 'Pisa');
+
+statement ok
+INSERT INTO iq_orders VALUES (10, 1, 5), (11, 1, 7), (12, 2, 11), (13, 3, 1), (14, 4, -3);
+
+# --- Snowflake's documented example ----------------------------------------------
+
+# The customer table is a join of two physical tables. Snowflake writes no AS
+# before TABLES; the other keywords of a logical table follow the query.
+
+statement ok
+CREATE SEMANTIC VIEW iq_sv
+  TABLES (
+    o AS iq_orders PRIMARY KEY (id),
+    customer_info AS (SELECT * FROM iq_customer JOIN iq_customer_address ON iq_customer.c_cust_id = iq_customer_address.ca_cust_id)
+      PRIMARY KEY (c_cust_id) WITH SYNONYMS ('customer_details')
+      COMMENT = 'Information about customers'
+  )
+  RELATIONSHIPS (orders_to_customers AS o(cust_id) REFERENCES customer_info)
+  DIMENSIONS (
+    customer_info.city AS customer_info.ca_city,
+    customer_info.first_name AS customer_info.c_first_name
+  )
+  METRICS (
+    o.revenue AS SUM(o.amount),
+    customer_info.customer_count AS COUNT(*)
+  );
+
+query TII
+SELECT * FROM SEMANTIC_VIEW(iq_sv DIMENSIONS customer_info.city METRICS o.revenue, customer_info.customer_count)
+ORDER BY 1;
+----
+Oslo	13	2
+Pisa	-3	1
+Rome	11	1
+
+query TI
+SELECT city, AGG(revenue) FROM iq_sv GROUP BY city ORDER BY 1;
+----
+Oslo	13
+Pisa	-3
+Rome	11
+
+# DESCRIBE: the query in a DEFINITION row, without its parentheses, and no
+# BASE_TABLE_* rows. An inline-query table is named by its alias.
+
+query TTTT
+SELECT object_kind, object_name, property, property_value
+FROM (DESCRIBE SEMANTIC VIEW iq_sv) WHERE object_name = 'customer_info';
+----
+TABLE	customer_info	DEFINITION	SELECT * FROM iq_customer JOIN iq_customer_address ON iq_customer.c_cust_id = iq_customer_address.ca_cust_id
+TABLE	customer_info	PRIMARY_KEY	["c_cust_id"]
+TABLE	customer_info	COMMENT	Information about customers
+TABLE	customer_info	SYNONYMS	["customer_details"]
+
+query TTTT
+SELECT object_kind, object_name, parent_entity, property
+FROM (DESCRIBE SEMANTIC VIEW iq_sv) WHERE parent_entity = 'customer_info' AND property = 'TABLE';
+----
+DIMENSION	city	customer_info	TABLE
+DIMENSION	first_name	customer_info	TABLE
+METRIC	customer_count	customer_info	TABLE
+
+query TTT
+SELECT table_name, name, data_type FROM (SHOW SEMANTIC DIMENSIONS IN iq_sv) ORDER BY name;
+----
+customer_info	city	VARCHAR
+customer_info	first_name	VARCHAR
+
+# GET_DDL writes the query back between its parentheses.
+
+query I
+SELECT contains(GET_DDL('SEMANTIC_VIEW', 'iq_sv'),
+  'customer_info AS (SELECT * FROM iq_customer JOIN iq_customer_address ON iq_customer.c_cust_id = iq_customer_address.ca_cust_id) PRIMARY KEY (c_cust_id)');
+----
+true
+
+# The YAML export carries the query as `definition:` and re-imports to the same
+# view.
+
+query I
+SELECT contains(READ_YAML_FROM_SEMANTIC_VIEW('iq_sv'), 'definition: SELECT * FROM iq_customer JOIN');
+----
+true
+
+# A `|` block scalar ends in a line break, which the YAML form trims, as the DDL
+# parser trims the query between its parentheses: the stored query is the one
+# GET_DDL -> CREATE stores again.
+
+statement ok
+CREATE SEMANTIC VIEW iq_sv_yaml FROM YAML $$
+tables:
+- alias: o
+  table: iq_orders
+  pk_columns: [id]
+- alias: paid
+  definition: |
+    SELECT * FROM iq_orders
+    WHERE amount > 0
+  pk_columns: [id]
+joins:
+- name: o_paid
+  from_alias: o
+  table: paid
+  fk_columns: [id]
+dimensions: []
+metrics:
+- name: paid_revenue
+  expr: SUM(paid.amount)
+  source_table: paid
+$$;
+
+query I
+SELECT * FROM SEMANTIC_VIEW(iq_sv_yaml METRICS paid.paid_revenue);
+----
+24
+
+query I
+SELECT property_value = 'SELECT * FROM iq_orders' || chr(10) || 'WHERE amount > 0'
+FROM (DESCRIBE SEMANTIC VIEW iq_sv_yaml) WHERE object_name = 'paid' AND property = 'DEFINITION';
+----
+true
+
+# --- name resolution -------------------------------------------------------------
+
+# The query's table names resolve as a view's body does, in the schema the view
+# was created in: not in the caller's current schema, and not as the caller's
+# CTE of the same name.
+
+statement ok
+CREATE SCHEMA iq_other;
+
+statement ok
+CREATE TABLE iq_other.iq_customer (c_cust_id INTEGER, c_first_name VARCHAR, c_region VARCHAR);
+
+statement ok
+USE iq_other;
+
+query TI
+SELECT * FROM SEMANTIC_VIEW(memory.main.iq_sv DIMENSIONS customer_info.city METRICS o.revenue) ORDER BY 1;
+----
+Oslo	13
+Pisa	-3
+Rome	11
+
+statement ok
+USE memory.main;
+
+query TI
+WITH iq_customer AS (SELECT 1 AS c_cust_id, 'X' AS c_first_name, 'Z' AS c_region)
+SELECT * FROM SEMANTIC_VIEW(iq_sv DIMENSIONS customer_info.city METRICS o.revenue) ORDER BY 1;
+----
+Oslo	13
+Pisa	-3
+Rome	11
+
+# A temporary table the query reads is found, in the session that has it.
+
+statement ok
+CREATE TEMP TABLE iq_vip (cust_id INTEGER);
+
+statement ok
+INSERT INTO iq_vip VALUES (1), (2);
+
+statement ok
+CREATE SEMANTIC VIEW iq_vip_sv
+  TABLES (vo AS (SELECT * FROM iq_orders WHERE cust_id IN (SELECT cust_id FROM iq_vip)) PRIMARY KEY (id))
+  METRICS (vo.vip_revenue AS SUM(vo.amount));
+
+query I
+SELECT * FROM SEMANTIC_VIEW(iq_vip_sv METRICS vo.vip_revenue);
+----
+23
+
+# The query may aggregate: a lifetime value per customer, bucketed by a
+# dimension.
+
+statement ok
+CREATE SEMANTIC VIEW iq_ltv
+  TABLES (
+    c AS iq_customer PRIMARY KEY (c_cust_id),
+    ltv AS (SELECT cust_id, SUM(amount) AS lifetime FROM iq_orders GROUP BY cust_id) PRIMARY KEY (cust_id)
+  )
+  RELATIONSHIPS (c_ltv AS c(c_cust_id) REFERENCES ltv)
+  DIMENSIONS (ltv.tier AS CASE WHEN ltv.lifetime >= 12 THEN 'high' ELSE 'low' END)
+  METRICS (c.customers AS COUNT(*));
+
+query TI
+SELECT * FROM SEMANTIC_VIEW(iq_ltv DIMENSIONS ltv.tier METRICS c.customers) ORDER BY 1;
+----
+high	1
+low	3
+
+# --- a query that reads its own view ----------------------------------------------
+
+# CREATE binds the query against the view it replaces, so a view whose query
+# reads the view itself is stored. Querying it then recurses, and DuckDB's
+# binder stops the recursion with an error: no crash (TECH-DEBT #62, QRY-1).
+
+statement ok
+CREATE SEMANTIC VIEW iq_self TABLES (o AS iq_orders PRIMARY KEY (id)) METRICS (o.m AS SUM(o.amount));
+
+statement ok
+CREATE OR REPLACE SEMANTIC VIEW iq_self
+  TABLES (t AS (SELECT 1 AS id, m FROM semantic_view('iq_self', metrics := ['m'])) PRIMARY KEY (id))
+  METRICS (t.m AS SUM(t.m));
+
+statement error
+SELECT * FROM semantic_view('iq_self', metrics := ['m']);
+----
+Max expression depth limit
+
+statement ok
+DROP SEMANTIC VIEW iq_self;
+
+# --- refusals --------------------------------------------------------------------
+
+# The alias is required.
+
+statement error
+CREATE SEMANTIC VIEW iq_bad TABLES ((SELECT 1 AS id) PRIMARY KEY (id)) METRICS (x.n AS COUNT(*));
+----
+An inline query in TABLES needs an alias: write 'alias AS (<query>)'
+
+# The query is bound at CREATE, like every logical table.
+
+statement error
+CREATE SEMANTIC VIEW iq_bad
+  TABLES (o AS iq_orders PRIMARY KEY (id), x AS (SELECT * FROM iq_no_such_table) PRIMARY KEY (id))
+  RELATIONSHIPS (ox AS o(cust_id) REFERENCES x)
+  METRICS (o.m AS SUM(o.amount));
+----
+semantic view 'iq_bad': table 'x' does not bind: Catalog Error: Table with name iq_no_such_table does not exist
+
+# A member reads the query's output columns.
+
+statement error
+CREATE SEMANTIC VIEW iq_bad
+  TABLES (t AS (SELECT 1 AS id) PRIMARY KEY (id))
+  DIMENSIONS (t.d AS t.no_such_column)
+  METRICS (t.n AS COUNT(*));
+----
+semantic view 'iq_bad': dimension 'd' does not bind
+
+# A prepared-statement parameter has no value inside the definition.
+
+statement error
+CREATE SEMANTIC VIEW iq_bad TABLES (t AS (SELECT $1 AS id) PRIMARY KEY (id)) METRICS (t.n AS COUNT(*));
+----
+Invalid inline query for table 't': it holds the prepared statement parameter $1
+
+# YAML: the query must stay one query between the parentheses GET_DDL writes,
+# and a table has a name or a definition, not both.
+
+statement error
+CREATE SEMANTIC VIEW iq_bad FROM YAML $$
+tables:
+- alias: t
+  definition: SELECT 1 AS id) AS x, (SELECT 2
+  pk_columns: [id]
+dimensions: []
+metrics:
+- name: n
+  expr: COUNT(*)
+  source_table: t
+$$;
+----
+table 't' has an invalid inline query: its brackets do not nest
+
+statement error
+CREATE SEMANTIC VIEW iq_bad FROM YAML $$
+tables:
+- alias: t
+  table: iq_orders
+  definition: SELECT 1 AS id
+  pk_columns: [id]
+dimensions: []
+metrics:
+- name: n
+  expr: COUNT(*)
+  source_table: t
+$$;
+----
+table 't' has both a table name and a definition; give one
+
+# A comment would not survive GET_DDL -> CREATE, which blanks comments before
+# the query is parsed.
+
+statement error
+CREATE SEMANTIC VIEW iq_bad FROM YAML $$
+tables:
+- alias: t
+  definition: |
+    SELECT 1 AS id -- a note
+  pk_columns: [id]
+dimensions: []
+metrics:
+- name: n
+  expr: COUNT(*)
+  source_table: t
+$$;
+----
+table 't' has an invalid inline query: it holds a SQL comment

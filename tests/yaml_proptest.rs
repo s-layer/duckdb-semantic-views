@@ -152,9 +152,13 @@ fn arb_table_ref() -> impl Strategy<Value = TableRef> {
         proptest::option::of(arb_payload()),
         proptest::collection::vec(arb_payload(), 0..=2),
         arb_tags(),
+        proptest::option::of(prop_oneof![
+            Just("SELECT * FROM orders".to_string()),
+            Just("SELECT id, ' – ☕' AS note\nFROM orders\nWHERE amount > 0".to_string()),
+        ]),
     )
         .prop_map(
-            |(alias, table, pk_columns, unique_constraints, comment, synonyms, tags)| TableRef {
+            |(
                 alias,
                 table,
                 pk_columns,
@@ -162,6 +166,23 @@ fn arb_table_ref() -> impl Strategy<Value = TableRef> {
                 comment,
                 synonyms,
                 tags,
+                definition,
+            )| {
+                TableRef {
+                    // An inline-query table (Phase 6.4) has no table name.
+                    table: if definition.is_some() {
+                        String::new()
+                    } else {
+                        table
+                    },
+                    definition,
+                    alias,
+                    pk_columns,
+                    unique_constraints,
+                    comment,
+                    synonyms,
+                    tags,
+                }
             },
         )
 }
@@ -879,6 +900,10 @@ fn arb_oracle_def() -> impl Strategy<Value = SemanticViewDefinition> {
         ),
         arb_oracle_verified_queries(),
         arb_oracle_metadata_refusal(),
+        prop_oneof![
+            2 => Just(None),
+            1 => arb_inline_query().prop_map(Some),
+        ],
     )
         .prop_map(
             |(
@@ -892,7 +917,12 @@ fn arb_oracle_def() -> impl Strategy<Value = SemanticViewDefinition> {
                 (sql_generation, question_categorization),
                 verified_queries,
                 refusal,
+                inline_query,
             )| {
+                if let Some(query) = inline_query {
+                    def.tables[0].table = String::new();
+                    def.tables[0].definition = Some(query);
+                }
                 def.tags = view_tags;
                 def.dimensions[0].tags = dim_tags;
                 def.dimensions[0].sample_values = sample_values;
@@ -910,6 +940,31 @@ fn arb_oracle_def() -> impl Strategy<Value = SemanticViewDefinition> {
                 def
             },
         )
+}
+
+/// The query of an inline-query table `o` (Phase 6.4), as YAML may carry it:
+/// with the line break a `|` block ends in, surrounding blanks, a comment
+/// (which the front door would blank on replay), comment markers inside a
+/// string (which it would not), and shapes that are not one query. Refused
+/// and accepted shapes are both generated on purpose.
+fn arb_inline_query() -> impl Strategy<Value = String> {
+    (
+        prop_oneof![
+            Just("SELECT * FROM orders"),
+            Just("SELECT *\nFROM orders\nWHERE amount > 0"),
+            Just("SELECT id, '--' AS a, '/* x */' AS b FROM orders"),
+            Just("SELECT 1 AS id) AS x, (SELECT 2"),
+            Just("SELECT 1 AS id;"),
+        ],
+        prop_oneof![Just(""), Just("  ")],
+        prop_oneof![
+            3 => Just(""),
+            2 => Just("\n"),
+            1 => Just(" -- a note"),
+            1 => Just("\n/* a note */\n"),
+        ],
+    )
+        .prop_map(|(body, lead, tail)| format!("{lead}{body}{tail}"))
 }
 
 /// A definition anchored at one table `o`, with one dimension, one base metric
@@ -1400,6 +1455,36 @@ fn generator_varies_comment_markers_in_expressions() {
         "no expression carried a comment marker inside a string literal — without \
          this arm the property cannot tell a correct rule from one that refuses \
          every `--`"
+    );
+}
+
+#[test]
+fn generator_reaches_both_outcomes_on_the_inline_query_axis() {
+    // Each shape the YAML form must either store as GET_DDL -> CREATE stores
+    // it, or refuse: a `|` block's trailing line break (stored trimmed), a
+    // comment (refused), and comment markers inside a string (accepted).
+    let imports = |d: &SemanticViewDefinition| {
+        let yaml = yaml_serde::to_string(d).expect("YAML serialize");
+        SemanticViewDefinition::from_yaml_with_size_cap(VIEW, &yaml).is_ok()
+    };
+    let defs = sample_defs(512);
+    let with_query: Vec<(&str, bool)> = defs
+        .iter()
+        .filter_map(|d| d.tables[0].definition.as_deref().map(|q| (q, imports(d))))
+        .collect();
+    assert!(
+        with_query.iter().any(|(q, ok)| *ok && q.ends_with('\n')),
+        "no query with a trailing line break was imported"
+    );
+    assert!(
+        with_query
+            .iter()
+            .any(|(q, ok)| !*ok && q.contains("-- a note")),
+        "no query with a comment was refused"
+    );
+    assert!(
+        with_query.iter().any(|(q, ok)| *ok && q.contains("'--'")),
+        "no query with comment markers inside a string was imported"
     );
 }
 

@@ -18,6 +18,7 @@ pub(super) fn orders_view() -> SemanticViewDefinition {
         tables: vec![TableRef {
             alias: "orders".to_string(),
             table: "orders".to_string(),
+            definition: None,
             pk_columns: vec![],
             unique_constraints: vec![],
             comment: None,
@@ -112,6 +113,7 @@ pub(super) fn minimal_def(
         tables: vec![TableRef {
             alias: table.to_string(),
             table: table.to_string(),
+            definition: None,
             pk_columns: vec![],
             unique_constraints: vec![],
             comment: None,
@@ -234,6 +236,7 @@ impl TestFixtureExt for SemanticViewDefinition {
         self.tables.push(TableRef {
             alias: alias.to_string(),
             table: table.to_string(),
+            definition: None,
             pk_columns: pk_columns.iter().map(|s| s.to_string()).collect(),
             unique_constraints: vec![],
             comment: None,

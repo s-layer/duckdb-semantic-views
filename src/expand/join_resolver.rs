@@ -9,6 +9,7 @@ use super::facts::{
 };
 use super::resolution::{
     qualify_and_quote_table_ref, quote_ident, quote_ident_if_needed, quote_stored_ident,
+    table_source,
 };
 
 /// Build a role-playing scoped alias in the documented `{table}__{rel}` format.
@@ -149,9 +150,11 @@ pub(super) fn push_join_clauses(
             .tables
             .iter()
             .find(|t| t.alias.to_ascii_lowercase() == rj.bare_alias);
-        let physical_table = table_ref.map_or(rj.bare_alias.as_str(), |t| t.table.as_str());
         sql.push_str(prefix);
-        sql.push_str(&qualify_and_quote_table_ref(physical_table, def));
+        sql.push_str(&table_ref.map_or_else(
+            || qualify_and_quote_table_ref(&rj.bare_alias, def),
+            |t| table_source(t, def),
+        ));
         sql.push_str(" AS ");
         // A scoped alias is a logical value; a bare one is stored as written.
         sql.push_str(&if rj.scoped {

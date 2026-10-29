@@ -23,7 +23,7 @@ Syntax
        [ COMMENT = '<text>' ]
    [ AS ]
    TABLES (
-       [ <alias> AS ] <table_name>
+       { [ <alias> AS ] <table_name> | <alias> AS ( <query> ) }
            [ PRIMARY KEY ( <column> [, <column> ...] ) ]
            [ UNIQUE ( <column> [, <column> ...] ) ]
            [ COMMENT = '<text>' ]
@@ -345,7 +345,7 @@ Clauses must appear in the following order: ``TABLES``, ``RELATIONSHIPS``, ``FAC
 TABLES
 ------
 
-Declares the physical tables available to the semantic view. Each entry assigns an alias and maps it to a physical table. A primary key declaration is optional but recommended for multi-table views (it drives JOIN synthesis and cardinality inference).
+Declares the logical tables available to the semantic view. Each entry assigns an alias and maps it to a physical table, or to a query (see :ref:`Tables defined by a query <ref-create-inline-query>`). A primary key declaration is optional but recommended for multi-table views (it drives JOIN synthesis and cardinality inference).
 
 .. code-block:: sql
 
@@ -358,6 +358,7 @@ Declares the physical tables available to the semantic view. Each entry assigns 
 
 - ``<alias>``, a short name used to reference this table in all other clauses. Optional -- ``AS <table_name>`` may be omitted (``TABLES (orders PRIMARY KEY (id))``), in which case the alias defaults to the table name.
 - ``<table_name>``, the physical table name. Supports catalog-qualified names (``catalog.schema.table``).
+- ``( <query> )``, in place of ``<table_name>``: a query that defines the table. The alias is then required. See :ref:`Tables defined by a query <ref-create-inline-query>`.
 - ``PRIMARY KEY (<column>, ...)``, optional. One or more columns forming the table's primary key. Used for JOIN synthesis and cardinality inference. This is semantic metadata, not a DuckDB constraint. Omit for fact tables that do not need to be join targets.
 - ``COMMENT = '<text>'``, optional. A human-readable description of the table.
 - ``WITH SYNONYMS = ('<synonym>', ...)``, optional. Alternative names for discoverability. May be written before or after ``COMMENT`` when both are present.
@@ -374,6 +375,31 @@ Declares the physical tables available to the semantic view. Each entry assigns 
 ``UNIQUE (<column>, ...)`` declares additional unique constraints. Used for cardinality inference: if a relationship's FK columns match a UNIQUE constraint, the relationship is inferred as one-to-one.
 
 The first table in the ``TABLES`` clause is the **base table** (the root of the relationship graph). All other tables must be reachable from the base table through declared relationships.
+
+.. _ref-create-inline-query:
+
+**Tables defined by a query:**
+
+A logical table can be a SQL query instead of a physical table, as in Snowflake. Write the query in parentheses after ``AS``; the alias is required. The table's other keywords follow the closing parenthesis.
+
+.. code-block:: sql
+
+   TABLES (
+       o AS orders PRIMARY KEY (id),
+       customer_info AS (
+           SELECT * FROM customer JOIN customer_address
+               ON customer.c_cust_id = customer_address.ca_cust_id
+       ) PRIMARY KEY (c_cust_id) WITH SYNONYMS = ('customer_details')
+         COMMENT = 'Information about customers'
+   )
+
+Members on the table read the query's output columns (``customer_info.c_first_name``), and relationships and keys work as for a physical table. Every query of the view reads the table through its query, so it can join, filter or aggregate (``SELECT cust_id, SUM(amount) AS lifetime FROM orders GROUP BY cust_id``).
+
+- The query is bound at ``CREATE``, like every logical table: a query DuckDB cannot bind refuses the ``CREATE``, naming the table's alias.
+- Table names in the query resolve as they would in a view body: in the schema the view was created in, whatever schema the querying session is in, and never as a CTE of the querying statement.
+- The query is one query. It cannot hold a ``;`` or a prepared-statement parameter (``$1``, ``?``).
+- ``DESCRIBE SEMANTIC VIEW`` shows the query in a ``DEFINITION`` row in place of the ``BASE_TABLE_*`` rows, and names the table by its alias. ``GET_DDL`` writes the query back in its parentheses. In YAML the table has ``definition:`` in place of ``table:`` (see :ref:`ref-yaml-format`).
+- Comments in the query are not kept. In the DDL form they are blanked before the query is stored, like the rest of the ``CREATE`` text. The YAML form refuses a ``definition`` with a comment in it, and stores the query without the line break a ``|`` block ends in.
 
 
 .. _ref-create-relationships:

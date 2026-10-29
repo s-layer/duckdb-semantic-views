@@ -1,0 +1,2 @@
+CREATE SEMANTIC VIEW v TABLES (o AS orders PRIMARY KEY (id), ci AS (SELECT c.*, a.city FROM customer c JOIN addr a ON c.id = a.cid -- joined
+) PRIMARY KEY (id)) RELATIONSHIPS (o_ci AS o(cust_id) REFERENCES ci) DIMENSIONS (ci.city AS ci.city) METRICS (o.revenue AS SUM(o.amount));

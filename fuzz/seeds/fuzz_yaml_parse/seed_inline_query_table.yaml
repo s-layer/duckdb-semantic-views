@@ -1,0 +1,25 @@
+tables:
+  - alias: o
+    table: orders
+    pk_columns:
+      - id
+  - alias: paid
+    definition: |
+      SELECT * FROM orders
+      WHERE amount > 0 -- refunds are left out
+    pk_columns:
+      - id
+joins:
+  - name: o_paid
+    from_alias: o
+    table: paid
+    fk_columns:
+      - id
+dimensions:
+  - name: region
+    expr: o.region
+    source_table: o
+metrics:
+  - name: paid_revenue
+    expr: SUM(paid.amount)
+    source_table: paid

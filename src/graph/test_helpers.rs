@@ -17,6 +17,7 @@ pub(super) fn make_def(
             .map(|(alias, table, pks)| TableRef {
                 alias: alias.to_string(),
                 table: table.to_string(),
+                definition: None,
                 pk_columns: pks.iter().map(|s| s.to_string()).collect(),
                 unique_constraints: vec![],
                 comment: None,
@@ -92,6 +93,7 @@ pub(super) fn make_def_with_facts(
             .map(|(alias, table)| TableRef {
                 alias: alias.to_string(),
                 table: table.to_string(),
+                definition: None,
                 pk_columns: vec!["id".to_string()],
                 unique_constraints: vec![],
                 comment: None,
@@ -172,6 +174,7 @@ pub(super) fn make_def_with_derived_metrics(
         tables: vec![TableRef {
             alias: "o".to_string(),
             table: "orders".to_string(),
+            definition: None,
             pk_columns: vec!["id".to_string()],
             unique_constraints: vec![],
             comment: None,
@@ -209,6 +212,7 @@ pub(super) fn make_def_with_named_joins(
             .map(|(alias, table, pks)| TableRef {
                 alias: alias.to_string(),
                 table: table.to_string(),
+                definition: None,
                 pk_columns: pks.iter().map(|s| s.to_string()).collect(),
                 unique_constraints: vec![],
                 comment: None,
