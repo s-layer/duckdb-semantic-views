@@ -1098,6 +1098,28 @@ Ambiguous dimension path
    Every metric needs its own ``USING``. A metric without one used to take the
    path of a co-queried metric that had one.
 
+A dimension on a table reached only *through* the role-playing table, such as
+``regions`` referenced by ``airports``, reports the same problem in this form:
+
+.. code-block:: text
+
+   semantic view '<view>': dimension '<dim>' is ambiguous -- its table '<table>'
+   is reachable only through the role-playing table '<rp_table>', which is
+   joined via multiple relationships: [<rel1>, <rel2>]. Query it with metrics
+   that each name one of them in their USING (a metric on '<rp_table>' itself
+   cannot), ...
+
+It has the same causes and fixes. The dimension takes its path from the
+metrics, so a query with no metrics, or with a metric declared on the
+role-playing table (whose ``USING`` cannot start there), has no path to give
+it. When every metric names a path, the region follows it: ``departures`` by
+region groups by the departure airport's region.
+
+.. versionchanged:: 0.18.0
+
+   A dimension past the role-playing table used to be refused even when every
+   metric named a path to it.
+
 
 Ambiguous fact or metric on a role-playing table
 ------------------------------------------------

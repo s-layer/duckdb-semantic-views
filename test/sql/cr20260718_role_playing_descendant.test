@@ -9,6 +9,10 @@
 #   EXP-5 — a FACT sourced on `a` or on a descendant of it (facts carry no
 #           USING context at all).
 # Both must now error at query time, like a directly-queried role-playing dim.
+#
+# Phase 6.3b (Snowflake's transitive hop): a descendant dimension follows the
+# role a metric's USING names, so EXP-4's query is answered through that
+# airport instance; with a metric that names no role it is still refused.
 
 require semantic_views
 
@@ -60,17 +64,38 @@ CREATE SEMANTIC VIEW cr718rp AS
   )
   METRICS (
     f.departure_count USING (dep_airport) AS COUNT(*),
-    f.arrival_count USING (arr_airport) AS COUNT(*)
+    f.arrival_count USING (arr_airport) AS COUNT(*),
+    f.flight_count AS COUNT(*)
   )
 
 # EXP-4: `region_name` is on `r`, a descendant of the role-playing `a`. Which
-# airport role does the region hang off? Ambiguous -> reject (before the fix it
-# silently used the departure instance).
-statement error
+# airport role does the region hang off? Before EXP-4 it silently used the
+# departure instance. Since 6.3b the metric's USING answers it: both flights
+# arrive in the Northeast (BOS, JFK), and depart from West and Europe.
+query TI rowsort
 SELECT region_name, arrival_count
 FROM SEMANTIC_VIEW(cr718rp DIMENSIONS region_name METRICS arrival_count);
 ----
-ambiguous
+Northeast	2
+
+# Through both paths at once, merged per region.
+query TII rowsort
+SELECT * FROM SEMANTIC_VIEW(cr718rp DIMENSIONS region_name METRICS departure_count, arrival_count);
+----
+Europe	1	NULL
+Northeast	NULL	2
+West	1	NULL
+
+# A metric with no USING names no airport, so the region stays ambiguous.
+statement error
+SELECT * FROM SEMANTIC_VIEW(cr718rp DIMENSIONS region_name METRICS flight_count);
+----
+is reachable only through the role-playing table
+
+statement error
+SELECT * FROM SEMANTIC_VIEW(cr718rp DIMENSIONS region_name METRICS departure_count, flight_count);
+----
+is reachable only through the role-playing table
 
 # Control: a dimension DIRECTLY on the role-playing table still resolves via the
 # co-queried metric's USING (the one-hop case is unaffected). departure_count

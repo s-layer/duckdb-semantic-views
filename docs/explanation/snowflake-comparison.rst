@@ -475,10 +475,9 @@ Both systems support ``USING`` on metrics to select which relationship path a me
    on its own table.
 
 Both systems refuse a dimension on a role-played table when a metric in the
-query names no path to it. One difference remains: Snowflake also accepts a
-dimension one relationship *beyond* the role-played table (``regions`` reached
-from ``airports``), taking the path from the metric's ``USING``. That is
-refused here as ambiguous for now.
+query names no path to it. Both also accept a dimension *beyond* the
+role-played table (``regions`` reached from ``airports``), taking the path
+from the metric's ``USING`` and following the single relationship onward.
 
 Facts Query Mode
 ----------------
