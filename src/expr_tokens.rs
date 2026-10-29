@@ -148,8 +148,8 @@ impl IdentRef<'_> {
 /// non-ASCII byte, so Unicode identifiers scan intact) or a `"…"` quoted part
 /// (with `""` escape). The returned spans are non-overlapping. Together with
 /// [`scan_function_heads`] they tile the non-literal identifier text, except
-/// for the words in a keyword position, which neither returns (COR-3: see
-/// [`scan_chains`]).
+/// for the words in a keyword position and a chain whose quoted part never
+/// closes, which neither returns (COR-3: see [`scan_chains`]).
 ///
 /// A chain immediately followed by `(` (skipping whitespace) is a **function
 /// call**, not a name reference (`SUM(x)`, `date_trunc (...)`), and is not
@@ -174,7 +174,8 @@ pub(crate) fn scan_references(expr: &str) -> Vec<IdentRef<'_>> {
 /// Which class of identifier chain a scan collects: [`scan_references`] keeps
 /// the chains that are *not* function-call heads; [`scan_function_heads`] keeps
 /// the ones that *are*. Every chain is at most one of the two; a chain in a
-/// keyword position (a cast's type, an `INTERVAL` unit, …) is neither.
+/// keyword position (a cast's type, an `INTERVAL` unit, …) is neither, and so
+/// is a chain whose quoted part never closes.
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum ChainKind {
     /// A name reference — a chain not immediately followed by `(`.
@@ -192,7 +193,8 @@ enum ChainKind {
 /// `DuckDB`'s expression grammar (COR-3), which are part of the syntax rather
 /// than names: a cast's target type, a typed literal's type, the field of
 /// `EXTRACT(field FROM …)`, an `INTERVAL`'s unit and `AT TIME ZONE`. A chain
-/// there belongs to neither [`ChainKind`].
+/// there belongs to neither [`ChainKind`], and neither does a chain whose
+/// quoted part never closes (`x + "b`), which names nothing.
 fn scan_chains(expr: &str, kind: ChainKind) -> Vec<IdentRef<'_>> {
     let bytes = expr.as_bytes();
     let len = bytes.len();
@@ -332,7 +334,8 @@ fn scan_chains(expr: &str, kind: ChainKind) -> Vec<IdentRef<'_>> {
 /// keyword positions: such a chain is *either* a name reference (returned
 /// there) *or* a call head (returned here), never both. A chain in a keyword
 /// position (COR-3: a cast's type, a typed literal's type, an `EXTRACT` field,
-/// an `INTERVAL` unit, `AT TIME ZONE`) is in neither result. It is the
+/// an `INTERVAL` unit, `AT TIME ZONE`) is in neither result, and neither is a
+/// chain whose quoted part never closes. It is the
 /// engine primitive behind aggregate-function detection — matching the last
 /// part of each head against a known-aggregate set — so that detection shares
 /// the tokenizer's literal handling (a `sum(` inside `'…'` is not a call) and
