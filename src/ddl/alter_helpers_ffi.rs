@@ -455,8 +455,10 @@ metrics:
 /// the member binding included, with nothing written
 /// ([`crate::ddl::define::yaml_create_definition`], then
 /// [`crate::ddl::read_ffi::check_create_members`]), and CREATE's database
-/// guards. `database` and `schema`
-/// are the caller's current ones. On success the buffer holds the schema the
+/// guards. `database` and `schema` are the caller's current ones;
+/// `catalog_elsewhere` is non-zero when another database holds the catalog and
+/// `database` holds none, the condition CREATE's single-catalog guard refuses.
+/// On success the buffer holds the schema the
 /// name qualifies, empty for none, for the C++ side to check it exists as
 /// CREATE does. The C++ side runs it in an `SvCallerScope`.
 ///
@@ -477,6 +479,7 @@ pub unsafe extern "C" fn sv_verify_yaml_rust(
     database_len: usize,
     schema_ptr: *const u8,
     schema_len: usize,
+    catalog_elsewhere: u8,
     out_ptr: *mut *mut u8,
     out_len: *mut usize,
     error_buf: *mut u8,
@@ -506,10 +509,10 @@ pub unsafe extern "C" fn sv_verify_yaml_rust(
                      from the database the extension was loaded into."
                 ));
             }
-            // CREATE's single-catalog guard (`managed_catalog_guard_select`):
-            // the catalog lives in the database new connections start in.
-            let catalog = crate::ddl::read_ffi::caller_definitions(Some(&view.name))?;
-            if catalog.present && !catalog.database.eq_ignore_ascii_case(&database) {
+            // CREATE's single-catalog guard (`managed_catalog_guard_select`),
+            // whose condition the C++ bind evaluates: another database has the
+            // catalog and this one has none.
+            if catalog_elsewhere != 0 {
                 return Err(format!(
                     "semantic_views: semantic-view DDL was issued against database '{database}', \
                      but the semantic view catalog lives in a different database. Semantic views \

@@ -544,5 +544,31 @@ $$);
 ----
 the semantic view catalog lives in a different database
 
+# As CREATE's guard does, verify lets an attached database that has its own
+# semantic_layer._definitions through.
+statement ok
+CREATE SCHEMA coa_other.semantic_layer;
+
+statement ok
+CREATE TABLE coa_other.semantic_layer._definitions (schema_name VARCHAR, name VARCHAR, definition VARCHAR);
+
+query T
+SELECT * FROM verify_semantic_view_yaml('coa_check', $$
+tables:
+  - alias: o
+    table: coa_orders
+    pk_columns: [id]
+dimensions:
+  - name: region
+    expr: o.region
+    source_table: o
+metrics: []
+$$);
+----
+YAML file is valid for creating a semantic view. No object has been created yet.
+
+statement ok
+DROP SCHEMA coa_other.semantic_layer CASCADE;
+
 statement ok
 USE memory;

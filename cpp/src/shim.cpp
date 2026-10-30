@@ -38,6 +38,7 @@
 #include "duckdb/parser/tableref/showref.hpp"
 #include "duckdb/planner/operator_extension.hpp"
 #include "duckdb/function/replacement_scan.hpp"
+#include "duckdb/main/attached_database.hpp"
 #include <chrono>
 #include <cstdint>
 #include <cstring>
@@ -151,13 +152,16 @@ extern "C" {
     // Rust FFI behind verify_semantic_view_yaml(view_name, yaml)
     // (src/ddl/alter_helpers_ffi.rs): CREATE ... FROM YAML's checks, the
     // member binding included, with nothing written. Runs in an SvCallerScope.
-    // rc 0: out holds the schema the name qualifies (empty for none); 1: the
-    // definition is refused (error_buf); 2: internal error (error_buf).
+    // `catalog_elsewhere` is CREATE's single-catalog guard condition (see
+    // sv_catalog_elsewhere). rc 0: out holds the schema the name qualifies
+    // (empty for none); 1: the definition is refused (error_buf); 2: internal
+    // error (error_buf).
     uint8_t sv_verify_yaml_rust(
         const uint8_t *name_ptr, size_t name_len,
         const uint8_t *yaml_ptr, size_t yaml_len,
         const uint8_t *database_ptr, size_t database_len,
         const uint8_t *schema_ptr, size_t schema_len,
+        uint8_t catalog_elsewhere,
         char **out_ptr, size_t *out_len,
         char *error_buf, size_t error_buf_len);
 
@@ -1720,6 +1724,27 @@ static unique_ptr<FunctionData> sv_check_create_bind(ClientContext &context, Tab
 // <view_name> FROM YAML $$<yaml>$$` checks, every member's binding included,
 // without the write (Snowflake's verify_only). Its one row is Snowflake's
 // message; a refused definition fails the bind with CREATE's error.
+// CREATE's single-catalog guard condition (`managed_catalog_guard_select`):
+// some attached database other than `current` has semantic_layer._definitions,
+// and `current` has none.
+static bool sv_catalog_elsewhere(ClientContext &context, const Identifier &current) {
+    auto has_catalog = [&](const Identifier &database) {
+        EntryLookupInfo lookup(CatalogType::TABLE_ENTRY,
+                               QualifiedName(database, Identifier("semantic_layer"), Identifier("_definitions")));
+        auto entry = Catalog::GetEntry(context, lookup, OnEntryNotFound::RETURN_NULL);
+        return entry && entry->type == CatalogType::TABLE_ENTRY;
+    };
+    if (has_catalog(current)) {
+        return false;
+    }
+    for (auto &database : DatabaseManager::Get(context).GetDatabases(context)) {
+        if (database->GetName() != current && has_catalog(database->GetName())) {
+            return true;
+        }
+    }
+    return false;
+}
+
 static unique_ptr<FunctionData> sv_verify_yaml_bind(ClientContext &context, TableFunctionBindInput &input,
                                                     vector<LogicalType> &return_types,
                                                     sv_compat::bind_names_t &names) {
@@ -1728,8 +1753,10 @@ static unique_ptr<FunctionData> sv_verify_yaml_bind(ClientContext &context, Tabl
     }
     auto name = input.inputs[0].GetValue<std::string>();
     auto yaml = input.inputs[1].GetValue<std::string>();
-    auto database = DatabaseManager::GetDefaultDatabase(context).GetIdentifierName();
+    auto current = DatabaseManager::GetDefaultDatabase(context);
+    auto database = current.GetIdentifierName();
     auto schema = ClientData::Get(context).catalog_search_path->GetDefault().GetSchema().GetIdentifierName();
+    const uint8_t catalog_elsewhere = sv_catalog_elsewhere(context, current) ? 1 : 0;
     SvOwnedBuffer target;
     char error_buf[4096];
     std::memset(error_buf, 0, sizeof(error_buf));
@@ -1741,6 +1768,7 @@ static unique_ptr<FunctionData> sv_verify_yaml_bind(ClientContext &context, Tabl
             reinterpret_cast<const uint8_t *>(yaml.data()), yaml.size(),
             reinterpret_cast<const uint8_t *>(database.data()), database.size(),
             reinterpret_cast<const uint8_t *>(schema.data()), schema.size(),
+            catalog_elsewhere,
             &target.ptr, &target.len, error_buf, sizeof(error_buf));
         caller.ThrowIfCancelled();
     }
