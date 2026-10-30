@@ -151,3 +151,18 @@ pub fn enrich_definition_for_create(
     def.temp_tables = crate::expand::temp_table_candidates(&def);
     serde_json::to_string(&def).map_err(|e| crate::errors::ParseError::positionless(e.to_string()))
 }
+
+/// The view a `CREATE SEMANTIC VIEW <name> FROM YAML $$<yaml>$$` names and the
+/// definition it would store, checked as that statement checks it short of
+/// binding the members: the name, the YAML, and [`enrich_definition_for_create`].
+/// `verify_semantic_view_yaml` (Snowflake's `verify_only`) runs this and then
+/// the member check, and writes nothing.
+pub fn yaml_create_definition(
+    name: &str,
+    yaml: &str,
+) -> Result<(crate::ident::ViewRef, String), String> {
+    let view = crate::ident::parse_view_ref(name).map_err(|e| format!("Invalid view name: {e}"))?;
+    let def = crate::model::SemanticViewDefinition::from_yaml_with_size_cap(&view.name, yaml)?;
+    let json = enrich_definition_for_create(&view.name, def).map_err(|e| e.message)?;
+    Ok((view, json))
+}

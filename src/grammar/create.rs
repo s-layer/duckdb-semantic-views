@@ -1,4 +1,4 @@
-//! CREATE [OR REPLACE] SEMANTIC VIEW as a grammar production.
+//! CREATE [OR REPLACE | OR ALTER] SEMANTIC VIEW as a grammar production.
 //!
 //! The rule matches the statement's prefix and the view name, then takes every
 //! token up to the end of the statement without interpreting it
@@ -25,7 +25,7 @@ use crate::parse::{plan_create, RewriteAction};
 /// [`ANY_TOKEN`] is what matches.
 pub(super) const RULES: &str = r"
 SvCreate <- 'CREATE' SvOrReplace? 'SEMANTIC' 'VIEW' SvIfNotExists? SvViewName SvCreateToken*
-SvOrReplace <- 'OR' 'REPLACE'
+SvOrReplace <- 'OR' ('REPLACE' / 'ALTER')
 SvIfNotExists <- 'IF' 'NOT' 'EXISTS'
 SvCreateToken <- Identifier
 ";
@@ -61,6 +61,20 @@ mod tests {
         let want = crate::parse::plan_create(sql).unwrap().unwrap();
         assert_eq!(got, want);
         assert!(matches!(got, RewriteAction::Create { .. }));
+    }
+
+    #[test]
+    fn create_or_alter_plans_as_its_text_plans() {
+        let sql = "CREATE OR ALTER SEMANTIC VIEW v AS TABLES (o AS orders PRIMARY KEY (id)) DIMENSIONS (o.r AS o.region)";
+        let got = transform(&tree(sql, root(sql, "SvCreate", vec![]))).unwrap();
+        assert_eq!(got, crate::parse::plan_create(sql).unwrap().unwrap());
+        assert!(matches!(
+            got,
+            RewriteAction::Create {
+                mode: crate::parse::CreateMode::OrAlter,
+                ..
+            }
+        ));
     }
 
     /// The body is planned from the rebuilt text: a tab inside an expression

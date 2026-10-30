@@ -38,6 +38,7 @@
 #include "duckdb/parser/tableref/showref.hpp"
 #include "duckdb/planner/operator_extension.hpp"
 #include "duckdb/function/replacement_scan.hpp"
+#include "duckdb/main/attached_database.hpp"
 #include <chrono>
 #include <cstdint>
 #include <cstring>
@@ -148,6 +149,22 @@ extern "C" {
     // Return codes: 0 every member binds; 1 a member does not bind, or the
     // caller was cancelled (the whole message in out_ptr/out_len); 3 internal
     // error (error_buf).
+    // Rust FFI behind verify_semantic_view_yaml(view_name, yaml)
+    // (src/ddl/alter_helpers_ffi.rs): CREATE ... FROM YAML's checks, the
+    // member binding included, with nothing written. Runs in an SvCallerScope.
+    // `catalog_elsewhere` is CREATE's single-catalog guard condition (see
+    // sv_catalog_elsewhere). rc 0: out holds the schema the name qualifies
+    // (empty for none); 1: the definition is refused (error_buf); 2: internal
+    // error (error_buf).
+    uint8_t sv_verify_yaml_rust(
+        const uint8_t *name_ptr, size_t name_len,
+        const uint8_t *yaml_ptr, size_t yaml_len,
+        const uint8_t *database_ptr, size_t database_len,
+        const uint8_t *schema_ptr, size_t schema_len,
+        uint8_t catalog_elsewhere,
+        char **out_ptr, size_t *out_len,
+        char *error_buf, size_t error_buf_len);
+
     uint8_t sv_check_create_members_rust(
         const uint8_t *name_ptr, size_t name_len,
         const uint8_t *def_ptr, size_t def_len,
@@ -268,6 +285,14 @@ extern "C" {
     uint8_t sv_read_yaml_from_semantic_view_exec_rust(
         const uint8_t *name_ptr, size_t name_len,
         const uint8_t *sp_ptr, size_t sp_len,
+        char **out_ptr, size_t *out_len,
+        char *error_buf, size_t error_buf_len);
+    // `__sv_or_alter(new_def, view_name, schema)` (src/or_alter.rs): the
+    // definition a CREATE OR ALTER writes, merged with the view it alters.
+    uint8_t sv_or_alter_exec_rust(
+        const uint8_t *def_ptr, size_t def_len,
+        const uint8_t *name_ptr, size_t name_len,
+        const uint8_t *schema_ptr, size_t schema_len,
         char **out_ptr, size_t *out_len,
         char *error_buf, size_t error_buf_len);
 
@@ -518,6 +543,23 @@ static const std::vector<SvFunctionDoc> &sv_function_docs() {
          "Internal helper behind CREATE SEMANTIC VIEW: checks that every member "
          "of the definition binds. Use that statement instead; this function is "
          "not for direct use.",
+         {},
+         {"semantic_views", "internal"}},
+        {"verify_semantic_view_yaml", {"view_name", "yaml"},
+         "Checks a YAML definition as CREATE SEMANTIC VIEW ... FROM YAML would, "
+         "every member's binding included, without creating anything "
+         "(Snowflake's verify_only). Returns one row saying the YAML is valid, "
+         "or fails with the error the CREATE would raise.",
+         {"SELECT * FROM verify_semantic_view_yaml('sales', '{tables: [{alias: o, "
+          "table: orders, pk_columns: [id]}], dimensions: [{name: region, "
+          "expr: o.region, source_table: o}], metrics: [{name: revenue, "
+          "expr: SUM(o.amount), source_table: o}]}');"},
+         {"semantic_views", "metadata"}},
+        {"__sv_or_alter", {"definition", "view_name", "schema"},
+         "Internal helper behind CREATE OR ALTER SEMANTIC VIEW: carries the "
+         "altered view's tags, creation time and unaffected materializations "
+         "into the new definition. Use that statement instead; this function "
+         "is not for direct use.",
          {},
          {"semantic_views", "internal"}},
     };
@@ -1678,6 +1720,78 @@ static unique_ptr<FunctionData> sv_check_create_bind(ClientContext &context, Tab
     return std::move(bd);
 }
 
+// verify_semantic_view_yaml(view_name, yaml): what `CREATE SEMANTIC VIEW
+// <view_name> FROM YAML $$<yaml>$$` checks, every member's binding included,
+// without the write (Snowflake's verify_only). Its one row is Snowflake's
+// message; a refused definition fails the bind with CREATE's error.
+// CREATE's single-catalog guard condition (`managed_catalog_guard_select`):
+// some attached database other than `current` has semantic_layer._definitions,
+// and `current` has none.
+static bool sv_catalog_elsewhere(ClientContext &context, const Identifier &current) {
+    auto has_catalog = [&](const Identifier &database) {
+        EntryLookupInfo lookup(CatalogType::TABLE_ENTRY,
+                               QualifiedName(database, Identifier("semantic_layer"), Identifier("_definitions")));
+        auto entry = Catalog::GetEntry(context, lookup, OnEntryNotFound::RETURN_NULL);
+        return entry && entry->type == CatalogType::TABLE_ENTRY;
+    };
+    if (has_catalog(current)) {
+        return false;
+    }
+    for (auto &database : DatabaseManager::Get(context).GetDatabases(context)) {
+        if (database->GetName() != current && has_catalog(database->GetName())) {
+            return true;
+        }
+    }
+    return false;
+}
+
+static unique_ptr<FunctionData> sv_verify_yaml_bind(ClientContext &context, TableFunctionBindInput &input,
+                                                    vector<LogicalType> &return_types,
+                                                    sv_compat::bind_names_t &names) {
+    if (input.inputs.size() != 2 || input.inputs[0].IsNull() || input.inputs[1].IsNull()) {
+        throw BinderException("verify_semantic_view_yaml: expected a view name and a YAML definition");
+    }
+    auto name = input.inputs[0].GetValue<std::string>();
+    auto yaml = input.inputs[1].GetValue<std::string>();
+    auto current = DatabaseManager::GetDefaultDatabase(context);
+    auto database = current.GetIdentifierName();
+    auto schema = ClientData::Get(context).catalog_search_path->GetDefault().GetSchema().GetIdentifierName();
+    const uint8_t catalog_elsewhere = sv_catalog_elsewhere(context, current) ? 1 : 0;
+    SvOwnedBuffer target;
+    char error_buf[4096];
+    std::memset(error_buf, 0, sizeof(error_buf));
+    uint8_t rc;
+    {
+        SvCallerScope caller(context);
+        rc = sv_verify_yaml_rust(
+            reinterpret_cast<const uint8_t *>(name.data()), name.size(),
+            reinterpret_cast<const uint8_t *>(yaml.data()), yaml.size(),
+            reinterpret_cast<const uint8_t *>(database.data()), database.size(),
+            reinterpret_cast<const uint8_t *>(schema.data()), schema.size(),
+            catalog_elsewhere,
+            &target.ptr, &target.len, error_buf, sizeof(error_buf));
+        caller.ThrowIfCancelled();
+    }
+    if (rc == 1) {
+        throw BinderException("%s", string(error_buf));
+    }
+    if (rc != 0) {
+        throw InternalException("semantic_views: verifying the YAML failed: %s", string(error_buf));
+    }
+    // A qualifier must name a schema that exists, as CREATE requires.
+    auto target_schema = target.to_string();
+    if (!target_schema.empty() &&
+        !Catalog::GetCatalog(context, DatabaseManager::GetDefaultDatabase(context))
+             .GetSchema(context, Identifier(target_schema), OnEntryNotFound::RETURN_NULL)) {
+        throw BinderException("semantic_views: schema '%s' does not exist", target_schema);
+    }
+    auto bd = make_uniq<CreateFromYamlBindData>();
+    bd->new_def = "YAML file is valid for creating a semantic view. No object has been created yet.";
+    return_types.push_back(LogicalType::VARCHAR);
+    names.emplace_back("status");
+    return std::move(bd);
+}
+
 // The values of `params`: a row (`params := row('EU', 2024)`, or a struct),
 // whose fields where_clause refers to as $1, $2, ... in order. Absent or NULL
 // is no values.
@@ -2612,6 +2726,46 @@ static void sv_read_yaml_from_semantic_view_exec(DataChunk &args,
     }
 }
 
+// __sv_or_alter(new_def VARCHAR, view_name VARCHAR, schema VARCHAR) -> VARCHAR
+//
+// The definition a CREATE OR ALTER SEMANTIC VIEW writes (src/parse/native_sql.rs):
+// `new_def` with the tags, unaffected materializations and `created_on` of the
+// view it alters, which is read in the executing query's transaction.
+static void sv_or_alter_exec(DataChunk &args, ExpressionState &state, Vector &result) {
+    for (idx_t c = 0; c < 3; ++c) {
+        args.data[c].Flatten(args.size());
+    }
+    auto def_data = FlatVector::GetData<string_t>(args.data[0]);
+    auto name_data = FlatVector::GetData<string_t>(args.data[1]);
+    auto schema_data = FlatVector::GetData<string_t>(args.data[2]);
+    auto &result_validity = sv_compat::validity_mut(result);
+
+    SvCallerScope caller(state.GetContext());
+    for (idx_t i = 0; i < args.size(); ++i) {
+        if (!FlatVector::Validity(args.data[0]).RowIsValid(i) ||
+            !FlatVector::Validity(args.data[1]).RowIsValid(i) ||
+            !FlatVector::Validity(args.data[2]).RowIsValid(i)) {
+            result_validity.SetInvalid(i);
+            continue;
+        }
+        const string_t &d = def_data[i];
+        const string_t &n = name_data[i];
+        const string_t &sc = schema_data[i];
+        sv_emit_scalar_row(
+            result, i, "CREATE OR ALTER SEMANTIC VIEW",
+            [&](char **op, size_t *ol, char *eb, size_t ebl) {
+                return sv_or_alter_exec_rust(
+                    reinterpret_cast<const uint8_t *>(d.GetData()), d.GetSize(),
+                    reinterpret_cast<const uint8_t *>(n.GetData()), n.GetSize(),
+                    reinterpret_cast<const uint8_t *>(sc.GetData()), sc.GetSize(),
+                    op, ol, eb, ebl);
+            });
+    }
+    if (args.AllConstant()) {
+        result.SetVectorType(VectorType::CONSTANT_VECTOR);
+    }
+}
+
 extern "C" {
     // Two arities on one name (TECH-DEBT #25): the third `BOOLEAN` argument is
     // Snowflake's `use_fully_qualified_names`. Registering a set rather than
@@ -2645,6 +2799,15 @@ extern "C" {
             }
             return false;
         }
+    }
+    bool sv_register_or_alter(duckdb_database db_handle, char *error_buf, size_t error_buf_len) {
+        LogicalType args[] = {LogicalType::VARCHAR, LogicalType::VARCHAR, LogicalType::VARCHAR};
+        return sv_register_scalar_function(
+            db_handle, "__sv_or_alter",
+            args, 3,
+            LogicalType::VARCHAR,
+            sv_or_alter_exec,
+            error_buf, error_buf_len);
     }
     bool sv_register_read_yaml_from_semantic_view(duckdb_database db_handle,
                                                   char *error_buf, size_t error_buf_len) {
@@ -5120,6 +5283,33 @@ extern "C" {
                         snprintf(error_buf, error_buf_len,
                             "sv_register_grammar_hooks: failed to register "
                             "__sv_check_create helper TF: %s",
+                            helper_err);
+                    }
+                    return false;
+                }
+            }
+
+            // Snowflake's verify_only for FROM YAML: a user-facing function,
+            // but registered here with the CREATE helpers it shares checks with.
+            {
+                LogicalType arg_types[] = {
+                    LogicalType::VARCHAR,  // view_name
+                    LogicalType::VARCHAR,  // yaml
+                };
+                char helper_err[1024];
+                std::memset(helper_err, 0, sizeof(helper_err));
+                if (!sv_register_table_function(
+                        db_handle,
+                        "verify_semantic_view_yaml",
+                        arg_types, 2,
+                        sv_verify_yaml_bind,
+                        sv_create_from_yaml_function,
+                        sv_create_from_yaml_init_local,
+                        helper_err, sizeof(helper_err))) {
+                    if (error_buf != nullptr && error_buf_len > 0) {
+                        snprintf(error_buf, error_buf_len,
+                            "sv_register_grammar_hooks: failed to register "
+                            "verify_semantic_view_yaml: %s",
                             helper_err);
                     }
                     return false;

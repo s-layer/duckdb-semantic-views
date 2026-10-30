@@ -7,7 +7,7 @@
 Functions
 =========
 
-Loading the extension registers 20 SQL functions (19 names; ``get_ddl`` has two overloads). Most day-to-day work goes through the statements -- ``CREATE``, ``SHOW``, ``DESCRIBE`` -- and two query functions. This page lists every registered function, says which ones to call directly and which ones back a statement, and shows how a tool or agent can read their descriptions, parameters, and examples over SQL.
+Loading the extension registers 22 SQL functions (21 names; ``get_ddl`` has two overloads). Most day-to-day work goes through the statements -- ``CREATE``, ``SHOW``, ``DESCRIBE`` -- and two query functions. This page lists every registered function, says which ones to call directly and which ones back a statement, and shows how a tool or agent can read their descriptions, parameters, and examples over SQL.
 
 
 .. _ref-functions-inventory:
@@ -39,6 +39,9 @@ Function Inventory
    * - :ref:`read_yaml_from_semantic_view() <ref-read-yaml>`
      - scalar
      - Return a stored view's definition as YAML, ready to re-import with ``CREATE SEMANTIC VIEW ... FROM YAML``.
+   * - :ref:`verify_semantic_view_yaml(view_name, yaml) <ref-create-verify-yaml>`
+     - table
+     - Check a YAML definition as ``CREATE SEMANTIC VIEW ... FROM YAML`` would, without creating anything.
 
 **These back a statement -- use the statement instead:**
 
@@ -104,6 +107,9 @@ Function Inventory
    * - ``__sv_compute_create_from_yaml``
      - table
      - Used by :ref:`CREATE SEMANTIC VIEW ... FROM YAML FILE <ref-create-semantic-view>`. Not part of the supported interface; its parameters and behavior can change in any release.
+   * - ``__sv_or_alter``
+     - scalar
+     - Used by :ref:`CREATE OR ALTER SEMANTIC VIEW <ref-create-or-alter>` to carry over what the statement can't state. Not part of the supported interface; its parameters and behavior can change in any release.
 
 The statements are the stable interface. The functions behind them are listed here so that a tool reading ``duckdb_functions()`` can tell what each one is; their descriptions say which statement to use.
 
@@ -148,11 +154,13 @@ DuckDB 2.0's ``duckdb_functions()`` has an ``extension_name`` column, but it is 
    │ show_semantic_materializations_all  │ table         │ metadata │
    │ show_semantic_metrics               │ table         │ metadata │
    │ show_semantic_metrics_all           │ table         │ metadata │
+   │ verify_semantic_view_yaml           │ table         │ metadata │
    │ __sv_check_create                   │ table         │ internal │
    │ __sv_compute_create_from_yaml       │ table         │ internal │
+   │ __sv_or_alter                       │ scalar        │ internal │
    └─────────────────────────────────────┴───────────────┴──────────┘
 
-``DISTINCT`` folds the two ``get_ddl`` overloads into one row; without it the query returns 20 rows, one per overload.
+``DISTINCT`` folds the two ``get_ddl`` overloads into one row; without it the query returns 22 rows, one per overload.
 
 **The columns a tool needs:**
 
@@ -177,13 +185,13 @@ DuckDB 2.0's ``duckdb_functions()`` has an ``extension_name`` column, but it is 
      - What the function does. For a function that backs a statement, the description names the statement to use instead.
    * - ``parameters``
      - VARCHAR[]
-     - Parameter names. For a table function, the positional arguments come first, in call order, and everything after them is a named parameter, passed as ``name := value``, in no guaranteed order. The number of positional arguments varies: none for ``list_semantic_views``, ``list_terse_semantic_views`` and the ``*_all`` functions; one (``view_name``) for ``semantic_view``, ``explain_semantic_view`` and the other functions that take a view; two (``view_name``, ``metric_name``) for ``show_semantic_dimensions_for_metric``; four for ``__sv_check_create`` and five for ``__sv_compute_create_from_yaml``. The metadata doesn't mark where the positional group ends, so take the count from this list. ``search_path`` is always named, and is reserved (see :ref:`ref-functions-search-path`).
+     - Parameter names. For a table function, the positional arguments come first, in call order, and everything after them is a named parameter, passed as ``name := value``, in no guaranteed order. The number of positional arguments varies: none for ``list_semantic_views``, ``list_terse_semantic_views`` and the ``*_all`` functions; one (``view_name``) for ``semantic_view``, ``explain_semantic_view`` and the other functions that take a view; two (``view_name``, ``metric_name``) for ``show_semantic_dimensions_for_metric`` and (``view_name``, ``yaml``) for ``verify_semantic_view_yaml``; four for ``__sv_check_create`` and five for ``__sv_compute_create_from_yaml``. The metadata doesn't mark where the positional group ends, so take the count from this list. ``search_path`` is always named, and is reserved (see :ref:`ref-functions-search-path`).
    * - ``parameter_types``
      - VARCHAR[]
      - The DuckDB type of each parameter, in the same order as ``parameters``.
    * - ``return_type``
      - VARCHAR
-     - The result type of a scalar function (``VARCHAR`` for both scalars here). ``NULL`` for table functions.
+     - The result type of a scalar function (``VARCHAR`` for every scalar here). ``NULL`` for table functions.
    * - ``examples``
      - VARCHAR[]
      - Runnable SQL. For a function that backs a statement, the example is the statement itself.

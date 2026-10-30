@@ -70,8 +70,8 @@ Concept Mapping
      - ``PRIVATE`` / ``PUBLIC`` on metrics and facts; `"You cannot mark a dimension as private. Dimensions are always public." <https://docs.snowflake.com/en/sql-reference/sql/create-semantic-view>`_
      - Same rule: ``PRIVATE`` / ``PUBLIC`` on metrics and facts, ``PRIVATE`` rejected on dimensions. ``PUBLIC`` is accepted on a dimension as an explicit no-op, since it asserts what is already true
    * - Materializations / pre-aggregation
-     - Not part of Snowflake's ``CREATE SEMANTIC VIEW`` DDL
-     - ``MATERIALIZATIONS`` clause for routing to pre-aggregated tables (see :ref:`howto-materializations`)
+     - `Materializations <https://docs.snowflake.com/en/user-guide/views-semantic/materializations>`_ (preview), added with ``ALTER SEMANTIC VIEW ... ADD MATERIALIZATION``. Snowflake builds and refreshes them and rewrites covered queries onto them, rolling additive metrics up
+     - ``MATERIALIZATIONS`` clause in ``CREATE`` routing an exact dimension and metric match to a table you build and refresh (see :ref:`howto-materializations`)
    * - Query interface
      - ``SEMANTIC_VIEW(...)`` construct, and direct SQL with semantic resolution
      - The same :ref:`SEMANTIC_VIEW(...) <ref-sv-construct>` construct, :ref:`standard SQL <howto-standard-sql>` with ``AGG``, and the :ref:`semantic_view() <ref-semantic-view-function>` table function
@@ -96,6 +96,12 @@ Concept Mapping
    * - Retrieve DDL text
      - ``GET_DDL('SEMANTIC_VIEW', ...)`` or ``GET_DDL('SEMANTIC VIEW', ...)``
      - :ref:`GET_DDL <ref-get-ddl>`, with either spelling of the object type
+   * - Create or alter in place
+     - ``CREATE OR ALTER SEMANTIC VIEW``
+     - :ref:`CREATE OR ALTER SEMANTIC VIEW <ref-create-or-alter>`, keeping the creation time, tags and still-valid materializations
+   * - Check YAML without creating
+     - ``SYSTEM$CREATE_SEMANTIC_VIEW_FROM_YAML`` with ``verify_only`` set to ``TRUE``
+     - :ref:`verify_semantic_view_yaml() <ref-create-verify-yaml>`
    * - Alter a view
      - ``ALTER SEMANTIC VIEW``
      - :ref:`ALTER SEMANTIC VIEW <ref-alter-semantic-view>` (RENAME TO, SET and UNSET of COMMENT and MAX_STALENESS, SET TAG, UNSET TAG)
@@ -539,9 +545,13 @@ Materializations
 
 .. versionadded:: 0.7.0
 
-Snowflake's ``CREATE SEMANTIC VIEW`` SQL DDL does not include a materializations or pre-aggregation concept. Pre-aggregation in Snowflake is handled through separate materialized views.
+This extension's materializations predate Snowflake's, and they work differently.
 
-DuckDB Semantic Views introduces a ``MATERIALIZATIONS`` clause that declares mappings from pre-aggregated tables to the dimensions and metrics they cover. When a query exactly matches a materialization, the extension routes to the pre-aggregated table instead of expanding raw sources. See :ref:`howto-materializations` for details.
+Snowflake now has `semantic view materializations <https://docs.snowflake.com/en/user-guide/views-semantic/materializations>`_, in preview. They are added with ``ALTER SEMANTIC VIEW ... ADD MATERIALIZATION``, not declared in ``CREATE SEMANTIC VIEW``. Snowflake builds each one on a warehouse, refreshes it to meet the view's ``MAX_STALENESS``, and rewrites a query onto the lowest-cost one that covers it, re-aggregating additive metrics when the materialization has more dimensions than the query asks for.
+
+DuckDB Semantic Views declares them in the ``MATERIALIZATIONS`` clause of ``CREATE SEMANTIC VIEW``, as mappings from tables you build and refresh yourself to the dimensions and metrics they cover. A query is routed to one only on an exact match of its dimensions and metrics, with no rollup. See :ref:`howto-materializations` for details.
+
+Both keep materializations across ``CREATE OR ALTER`` unless the change reaches what they cover. Snowflake suspends an affected materialization; this extension drops it, since it has no suspended state (see :ref:`ref-create-or-alter`).
 
 
 Transactional DDL
@@ -608,7 +618,7 @@ Snowflake ``CREATE SEMANTIC VIEW`` features that are commonly asked about, and w
      - Out of scope; DuckDB handles access control
    * - ``ASOF`` / temporal relationships
      - Not planned; standard equi-joins cover most use cases
-   * - ``CREATE OR ALTER``, ``LABELS`` values other than ``FILTER``, and the ``COPILOT`` clauses
+   * - ``LABELS`` values other than ``FILTER``, and the ``COPILOT`` clauses
      - Not planned; these are Snowflake-catalog or Cortex-specific and have no DuckDB equivalent
 
 

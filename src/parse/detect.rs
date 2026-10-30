@@ -102,6 +102,10 @@ pub(crate) fn detect_create_prefix(trimmed: &str) -> Option<(DdlKind, usize)> {
     {
         return Some((DdlKind::CreateOrReplace, n));
     }
+    // CREATE OR ALTER SEMANTIC VIEW (5 keywords) -- before CREATE SEMANTIC VIEW
+    if let Some(n) = match_keyword_prefix(b, &[b"create", b"or", b"alter", b"semantic", b"view"]) {
+        return Some((DdlKind::CreateOrAlter, n));
+    }
     // CREATE SEMANTIC VIEW IF NOT EXISTS (6 keywords) -- before CREATE SEMANTIC VIEW
     if let Some(n) = match_keyword_prefix(
         b,
@@ -136,6 +140,10 @@ mod tests {
         assert_eq!(
             kind("CREATE SEMANTIC VIEW IF NOT EXISTS v AS"),
             Some(DdlKind::CreateIfNotExists)
+        );
+        assert_eq!(
+            kind("CREATE OR ALTER SEMANTIC VIEW v AS"),
+            Some(DdlKind::CreateOrAlter)
         );
     }
 

@@ -354,6 +354,42 @@ Tables defined by a query
    TABLES (paid AS (SELECT * FROM orders WHERE amount > 0) PRIMARY KEY (id))
 
 
+.. _ref-err-create-or-alter:
+
+CREATE OR ALTER
+---------------
+
+.. versionadded:: 0.18.0
+
+.. code-block:: text
+
+   CREATE OR ALTER SEMANTIC VIEW can't set tags, as in Snowflake, and <owner> has one: an altered view keeps its existing tags. Set the view's own with ALTER SEMANTIC VIEW ... SET TAG, or use CREATE OR REPLACE to give every tag anew
+
+   COPY GRANTS can't be used with CREATE OR ALTER SEMANTIC VIEW, as in Snowflake: an altered view keeps its grants.
+
+   IF NOT EXISTS can't be used with CREATE OR ALTER SEMANTIC VIEW, as in Snowflake: the statement creates the view when it is missing and alters it otherwise.
+
+**Cause:** Snowflake's :ref:`CREATE OR ALTER <ref-create-or-alter>` grammar has no tags, ``COPY GRANTS`` or ``IF NOT EXISTS``. ``<owner>`` is the view, or the table, dimension, fact or metric whose ``WITH TAG``, or YAML ``tags:``, the statement gives. A ``FROM YAML FILE`` body is checked when the file is read.
+
+**Fix:** Remove the clause. An altered view keeps the tags it has; change the view's own with ``ALTER SEMANTIC VIEW ... SET TAG``, or use ``CREATE OR REPLACE`` to set every tag in one statement.
+
+.. code-block:: sql
+
+   -- This will fail: "CREATE OR ALTER SEMANTIC VIEW can't set tags, ..."
+   CREATE OR ALTER SEMANTIC VIEW sales
+     TABLES (o AS orders PRIMARY KEY (id))
+     DIMENSIONS (o.region AS o.region)
+     METRICS (o.revenue AS SUM(o.amount))
+     WITH TAG (owner = 'ops');
+
+   -- Fix
+   CREATE OR ALTER SEMANTIC VIEW sales
+     TABLES (o AS orders PRIMARY KEY (id))
+     DIMENSIONS (o.region AS o.region)
+     METRICS (o.revenue AS SUM(o.amount));
+   ALTER SEMANTIC VIEW sales SET TAG owner = 'ops';
+
+
 .. _ref-err-variables:
 
 Variables

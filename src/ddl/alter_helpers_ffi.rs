@@ -449,3 +449,79 @@ metrics:
         assert_eq!(rc, 1);
     }
 }
+
+/// `verify_semantic_view_yaml(view_name, yaml)` (Snowflake's `verify_only`):
+/// everything `CREATE SEMANTIC VIEW <view_name> FROM YAML $$<yaml>$$` checks,
+/// the member binding included, with nothing written
+/// ([`crate::ddl::define::yaml_create_definition`], then
+/// [`crate::ddl::read_ffi::check_create_members`]), and CREATE's database
+/// guards. `database` and `schema` are the caller's current ones;
+/// `catalog_elsewhere` is non-zero when another database holds the catalog and
+/// `database` holds none, the condition CREATE's single-catalog guard refuses.
+/// On success the buffer holds the schema the
+/// name qualifies, empty for none, for the C++ side to check it exists as
+/// CREATE does. The C++ side runs it in an `SvCallerScope`.
+///
+/// # Safety
+///
+/// Each `(ptr, len)` input pair must point to `len` valid bytes; the out
+/// pointers and `error_buf` are as [`crate::ddl::read_ffi::run_dispatcher`]
+/// takes them.
+#[cfg(feature = "extension")]
+#[no_mangle]
+#[allow(clippy::too_many_arguments)]
+pub unsafe extern "C" fn sv_verify_yaml_rust(
+    name_ptr: *const u8,
+    name_len: usize,
+    yaml_ptr: *const u8,
+    yaml_len: usize,
+    database_ptr: *const u8,
+    database_len: usize,
+    schema_ptr: *const u8,
+    schema_len: usize,
+    catalog_elsewhere: u8,
+    out_ptr: *mut *mut u8,
+    out_len: *mut usize,
+    error_buf: *mut u8,
+    error_buf_len: usize,
+) -> u8 {
+    crate::ddl::read_ffi::run_dispatcher(
+        out_ptr,
+        out_len,
+        error_buf,
+        error_buf_len,
+        "sv_verify_yaml_rust",
+        || {
+            use crate::ddl::read_ffi::read_str_arg;
+            let name = unsafe { read_str_arg(name_ptr, name_len, "view name") }?;
+            let yaml = unsafe { read_str_arg(yaml_ptr, yaml_len, "YAML") }?;
+            let database = unsafe { read_str_arg(database_ptr, database_len, "database") }?;
+            let schema = unsafe { read_str_arg(schema_ptr, schema_len, "schema") }?;
+            let (view, json) = crate::ddl::define::yaml_create_definition(&name, &yaml)?;
+            if let Some(db) = view
+                .database
+                .as_ref()
+                .filter(|db| !db.eq_ignore_ascii_case(&database))
+            {
+                return Err(format!(
+                    "semantic_views: '{view}' names database '{db}', but semantic views are \
+                     single-catalog and this session's database is '{database}'. Manage them \
+                     from the database the extension was loaded into."
+                ));
+            }
+            // CREATE's single-catalog guard (`managed_catalog_guard_select`),
+            // whose condition the C++ bind evaluates: another database has the
+            // catalog and this one has none.
+            if catalog_elsewhere != 0 {
+                return Err(format!(
+                    "semantic_views: semantic-view DDL was issued against database '{database}', \
+                     but the semantic view catalog lives in a different database. Semantic views \
+                     are single-catalog: manage them from the database the extension was loaded \
+                     into, without USE-ing into an attached database."
+                ));
+            }
+            crate::ddl::read_ffi::check_create_members(&view.name, &json, &database, &schema)?;
+            Ok(view.schema.unwrap_or_default().into_bytes())
+        },
+    )
+}

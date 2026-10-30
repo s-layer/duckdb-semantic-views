@@ -1,0 +1,1 @@
+CREATE OR ALTER SEMANTIC VIEW s.v COMMENT = 'c' TABLES (o AS orders PRIMARY KEY (id)) FACTS (o.amt AS o.amount) DIMENSIONS (o.region AS o.region) METRICS (o.revenue AS SUM(o.amt)) MATERIALIZATIONS (m AS (TABLE agg, DIMENSIONS (region), METRICS (revenue)))

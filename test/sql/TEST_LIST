@@ -155,3 +155,4 @@ test/sql/metadata_clauses.test
 test/sql/multi_path_using.test
 test/sql/inline_query_tables.test
 test/sql/variables.test
+test/sql/create_or_alter.test

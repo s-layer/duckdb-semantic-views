@@ -88,6 +88,21 @@ pub(crate) fn validate_create_body(
         });
     }
 
+    // Snowflake's CREATE OR ALTER grammar has no IF NOT EXISTS: the statement
+    // already creates a missing view and alters an existing one.
+    if kind == DdlKind::CreateOrAlter
+        && super::match_keyword_prefix(after_prefix.as_bytes(), &[b"if", b"not", b"exists"])
+            .is_some()
+    {
+        return Err(ParseError {
+            message: "IF NOT EXISTS can't be used with CREATE OR ALTER SEMANTIC VIEW, as in \
+                      Snowflake: the statement creates the view when it is missing and alters \
+                      it otherwise."
+                .to_string(),
+            position: Some(trim_offset + (trimmed_no_semi.len() - after_prefix.len())),
+        });
+    }
+
     // Quote-aware delimiter scan; honours `"..."` regions so quoted/FQN forms
     // like `"db"."sch"."v"` or `"my view"` are captured intact before
     // normalisation. allow_paren=true: the CREATE form may legally have a `(`
@@ -209,6 +224,15 @@ fn rewrite_ddl_keyword_body(
         (None, None) => None,
     };
 
+    if kind == DdlKind::CreateOrAlter && keyword_body.copy_grants {
+        return Err(ParseError {
+            message: "COPY GRANTS can't be used with CREATE OR ALTER SEMANTIC VIEW, as in \
+                      Snowflake: an altered view keeps its grants."
+                .to_string(),
+            position: None,
+        });
+    }
+
     // Phase 33: Infer cardinality and resolve ref_columns.
     crate::graph::infer_cardinality(&keyword_body.tables, &mut keyword_body.relationships)?;
 
@@ -217,6 +241,7 @@ fn rewrite_ddl_keyword_body(
         comment,
         ..keyword_body.into_definition()
     };
+    or_alter_tags(kind, &def)?;
 
     // 3. Carry the definition structurally — `rewrite_to_native_sql` hands it
     //    straight to `emit_native_create_sql` (AR-2: no JSON serialize / re-parse
@@ -377,6 +402,7 @@ pub(crate) fn rewrite_ddl_yaml_body(
         def.comment = Some(c);
     }
 
+    or_alter_tags(kind, &def)?;
     crate::graph::infer_cardinality(&def.tables, &mut def.joins)?;
 
     Ok(RewriteAction::Create {
@@ -384,4 +410,20 @@ pub(crate) fn rewrite_ddl_yaml_body(
         def: Box::new(def),
         mode: CreateMode::from_kind(kind),
     })
+}
+
+/// A `CREATE OR ALTER` sets no tags (`crate::or_alter::tag_error`). A
+/// `FROM YAML FILE` body is checked when the file is read, by the
+/// `__sv_or_alter` scalar.
+fn or_alter_tags(
+    kind: DdlKind,
+    def: &crate::model::SemanticViewDefinition,
+) -> Result<(), ParseError> {
+    match crate::or_alter::tag_error(def) {
+        Some(message) if kind == DdlKind::CreateOrAlter => Err(ParseError {
+            message,
+            position: None,
+        }),
+        _ => Ok(()),
+    }
 }

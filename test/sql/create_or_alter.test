@@ -1,0 +1,574 @@
+# CREATE OR ALTER SEMANTIC VIEW (Phase 6.6). As in Snowflake, the statement
+# creates the view when it is missing and otherwise makes it match the
+# statement: a clause or property left out is unset. What the statement cannot
+# state carries over: the creation time, the tags of the view and of each
+# table, dimension, fact and metric it keeps by name, and, when it has no
+# MATERIALIZATIONS clause, each materialization whose query it leaves
+# unchanged. It takes no tags, IF NOT EXISTS or COPY GRANTS.
+#
+# Also verify_semantic_view_yaml, Snowflake's verify_only for YAML: CREATE ...
+# FROM YAML's checks with nothing written.
+
+require semantic_views
+
+statement ok
+CREATE TABLE coa_orders (id INTEGER PRIMARY KEY, region VARCHAR, status VARCHAR, amount INTEGER);
+
+statement ok
+INSERT INTO coa_orders VALUES (1, 'East', 's', 100), (2, 'West', 'p', 200), (3, 'East', 's', 150);
+
+# A pre-aggregated table with wrong numbers on purpose: a query that reads it
+# returns 999 / 888, one computed from coa_orders 250 / 200.
+statement ok
+CREATE TABLE coa_agg (region VARCHAR, revenue BIGINT);
+
+statement ok
+INSERT INTO coa_agg VALUES ('East', 999), ('West', 888);
+
+# --- A missing view is created ------------------------------------------
+
+query T
+CREATE OR ALTER SEMANTIC VIEW coa_new
+  TABLES (o AS coa_orders PRIMARY KEY (id))
+  DIMENSIONS (o.region AS o.region)
+  METRICS (o.revenue AS SUM(o.amount));
+----
+coa_new
+
+query TI
+SELECT * FROM semantic_view('coa_new', dimensions := ['region'], metrics := ['revenue']) ORDER BY 1;
+----
+East	250
+West	200
+
+# --- An existing view is altered in place --------------------------------
+
+statement ok
+CREATE SEMANTIC VIEW coa_v
+  TABLES (o AS coa_orders PRIMARY KEY (id) WITH TAG (t = 'table'))
+  FACTS (o.amt AS o.amount WITH TAG (f = 'fact'))
+  DIMENSIONS (
+    o.region AS o.region WITH TAG (d = 'region'),
+    o.status AS o.status WITH TAG (d = 'status')
+  )
+  METRICS (o.revenue AS SUM(o.amt) WITH TAG (m = 'revenue'))
+  MATERIALIZATIONS (by_region AS (TABLE coa_agg, DIMENSIONS (region), METRICS (revenue)))
+  COMMENT = 'first';
+
+statement ok
+ALTER SEMANTIC VIEW coa_v SET TAG owner = 'ops';
+
+# An old creation time, so keeping it is observable.
+statement ok
+UPDATE semantic_layer._definitions
+SET definition = json_merge_patch(definition, '{"created_on": "2000-01-01T00:00:00Z"}')::VARCHAR
+WHERE name = 'coa_v';
+
+# The materialization routes: the wrong numbers.
+query TI
+SELECT * FROM semantic_view('coa_v', dimensions := ['region'], metrics := ['revenue']) ORDER BY 1;
+----
+East	999
+West	888
+
+# No COMMENT, `status` renamed to `state`, by_region's query unchanged.
+query T
+CREATE OR ALTER SEMANTIC VIEW coa_v
+  TABLES (o AS coa_orders PRIMARY KEY (id))
+  FACTS (o.amt AS o.amount)
+  DIMENSIONS (o.region AS o.region, o.state AS o.status)
+  METRICS (o.revenue AS SUM(o.amt));
+----
+coa_v
+
+query TT
+SELECT created_on, comment FROM (SHOW SEMANTIC VIEWS) WHERE name = 'coa_v';
+----
+2000-01-01T00:00:00Z	(empty)
+
+# The view's tag and each kept member's tags carry over; the renamed member
+# was dropped and added, so it has none.
+query IIIIIII
+SELECT ddl LIKE '%o AS coa_orders PRIMARY KEY (id) WITH TAG (t = ''table'')' || chr(10) || '%',
+       ddl LIKE '%o.amt AS o.amount WITH TAG (f = ''fact'')' || chr(10) || '%',
+       ddl LIKE '%o.region AS o.region WITH TAG (d = ''region''),' || chr(10)
+                || '    o.state AS o.status' || chr(10) || ')%',
+       ddl LIKE '%o.revenue AS SUM(o.amt) WITH TAG (m = ''revenue'')' || chr(10) || '%',
+       ddl LIKE '%MATERIALIZATIONS (%by_region AS (%',
+       ddl LIKE '%' || chr(10) || 'WITH TAG (owner = ''ops'')' || chr(10),
+       ddl NOT LIKE '%COMMENT%'
+FROM (SELECT GET_DDL('SEMANTIC_VIEW', 'coa_v') AS ddl);
+----
+true	true	true	true	true	true	true
+
+query TI
+SELECT * FROM semantic_view('coa_v', dimensions := ['region'], metrics := ['revenue']) ORDER BY 1;
+----
+East	999
+West	888
+
+# The same statement again changes nothing.
+statement ok
+CREATE OR ALTER SEMANTIC VIEW coa_v
+  TABLES (o AS coa_orders PRIMARY KEY (id))
+  FACTS (o.amt AS o.amount)
+  DIMENSIONS (o.region AS o.region, o.state AS o.status)
+  METRICS (o.revenue AS SUM(o.amt));
+
+query I
+SELECT count(*) FROM (SHOW SEMANTIC MATERIALIZATIONS IN coa_v);
+----
+1
+
+# The fact by_region's metric reads changes, so its table no longer answers the
+# query: it is dropped and the query computes from coa_orders.
+statement ok
+CREATE OR ALTER SEMANTIC VIEW coa_v
+  TABLES (o AS coa_orders PRIMARY KEY (id))
+  FACTS (o.amt AS o.amount * 2)
+  DIMENSIONS (o.region AS o.region, o.state AS o.status)
+  METRICS (o.revenue AS SUM(o.amt));
+
+query I
+SELECT count(*) FROM (SHOW SEMANTIC MATERIALIZATIONS IN coa_v);
+----
+0
+
+query TI
+SELECT * FROM semantic_view('coa_v', dimensions := ['region'], metrics := ['revenue']) ORDER BY 1;
+----
+East	500
+West	400
+
+# A MATERIALIZATIONS clause in the statement is the view's whole set.
+statement ok
+CREATE OR ALTER SEMANTIC VIEW coa_v
+  TABLES (o AS coa_orders PRIMARY KEY (id))
+  FACTS (o.amt AS o.amount)
+  DIMENSIONS (o.region AS o.region)
+  METRICS (o.revenue AS SUM(o.amt))
+  MATERIALIZATIONS (again AS (TABLE coa_agg, DIMENSIONS (region), METRICS (revenue)));
+
+query T
+SELECT name FROM (SHOW SEMANTIC MATERIALIZATIONS IN coa_v);
+----
+again
+
+# --- What the statement refuses, leaving the view as it was --------------
+
+statement error
+CREATE OR ALTER SEMANTIC VIEW coa_v
+  TABLES (o AS coa_orders PRIMARY KEY (id))
+  DIMENSIONS (o.region AS o.region WITH TAG (d = 'x'))
+  METRICS (o.revenue AS SUM(o.amount));
+----
+CREATE OR ALTER SEMANTIC VIEW can't set tags, as in Snowflake, and dimension 'region' has one
+
+statement error
+CREATE OR ALTER SEMANTIC VIEW coa_v
+  TABLES (o AS coa_orders PRIMARY KEY (id))
+  DIMENSIONS (o.region AS o.region)
+  METRICS (o.revenue AS SUM(o.amount))
+  WITH TAG (owner = 'x');
+----
+and the view has one
+
+statement error
+CREATE OR ALTER SEMANTIC VIEW coa_v
+  TABLES (o AS coa_orders PRIMARY KEY (id))
+  DIMENSIONS (o.region AS o.region)
+  METRICS (o.revenue AS SUM(o.amount))
+  COPY GRANTS;
+----
+COPY GRANTS can't be used with CREATE OR ALTER SEMANTIC VIEW
+
+statement error
+CREATE OR ALTER SEMANTIC VIEW IF NOT EXISTS coa_v
+  TABLES (o AS coa_orders PRIMARY KEY (id))
+  DIMENSIONS (o.region AS o.region)
+  METRICS (o.revenue AS SUM(o.amount));
+----
+IF NOT EXISTS can't be used with CREATE OR ALTER SEMANTIC VIEW
+
+# A member that does not bind is refused as CREATE OR REPLACE refuses it.
+statement error
+CREATE OR ALTER SEMANTIC VIEW coa_v
+  TABLES (o AS coa_orders PRIMARY KEY (id))
+  DIMENSIONS (o.region AS o.no_such_column)
+  METRICS (o.revenue AS SUM(o.amount));
+----
+dimension 'region' does not bind
+
+query T
+SELECT name FROM (SHOW SEMANTIC MATERIALIZATIONS IN coa_v);
+----
+again
+
+query T
+SELECT json_extract_string(definition, '$.tags[0].value')
+FROM semantic_layer._definitions WHERE schema_name = 'main' AND name = 'coa_v';
+----
+ops
+
+# --- In a transaction, and per schema -------------------------------------
+
+statement ok
+BEGIN;
+
+statement ok
+CREATE SEMANTIC VIEW coa_txn
+  TABLES (o AS coa_orders PRIMARY KEY (id))
+  DIMENSIONS (o.region AS o.region)
+  METRICS (o.revenue AS SUM(o.amount) WITH TAG (m = 'kept'));
+
+statement ok
+CREATE OR ALTER SEMANTIC VIEW coa_txn
+  TABLES (o AS coa_orders PRIMARY KEY (id))
+  DIMENSIONS (o.region AS o.region)
+  METRICS (o.revenue AS MAX(o.amount));
+
+statement ok
+COMMIT;
+
+query T
+SELECT json_extract_string(definition, '$.metrics[0].tags[0].value')
+FROM semantic_layer._definitions WHERE name = 'coa_txn';
+----
+kept
+
+statement ok
+CREATE SCHEMA coa_s;
+
+# A view of the same name in another schema is another view: nothing carries
+# over from main.coa_v.
+statement ok
+CREATE OR ALTER SEMANTIC VIEW coa_s.coa_v
+  TABLES (o AS main.coa_orders PRIMARY KEY (id))
+  DIMENSIONS (o.region AS o.region)
+  METRICS (o.revenue AS SUM(o.amount));
+
+query TT
+SELECT schema_name, coalesce(json_extract_string(definition, '$.tags'), 'none')
+FROM semantic_layer._definitions WHERE name = 'coa_v' ORDER BY 1;
+----
+coa_s	none
+main	[{"name":{"tag":"owner"},"value":"ops"}]
+
+# --- A kept materialization's table resolves as it did -------------------
+
+# Run from another schema, a table name without one resolves there, so the
+# materialization would read another table: it is dropped.
+statement ok
+CREATE OR REPLACE SEMANTIC VIEW coa_m
+  TABLES (o AS main.coa_orders PRIMARY KEY (id))
+  DIMENSIONS (o.region AS o.region)
+  METRICS (o.revenue AS SUM(o.amount))
+  MATERIALIZATIONS (by_region AS (TABLE coa_agg, DIMENSIONS (region), METRICS (revenue)));
+
+statement ok
+SET schema = 'coa_s';
+
+statement ok
+CREATE OR ALTER SEMANTIC VIEW main.coa_m
+  TABLES (o AS main.coa_orders PRIMARY KEY (id))
+  DIMENSIONS (o.region AS o.region)
+  METRICS (o.revenue AS SUM(o.amount));
+
+statement ok
+SET schema = 'main';
+
+query I
+SELECT count(*) FROM (SHOW SEMANTIC MATERIALIZATIONS IN coa_m);
+----
+0
+
+query TI
+SELECT * FROM semantic_view('coa_m', dimensions := ['region'], metrics := ['revenue']) ORDER BY 1;
+----
+East	250
+West	200
+
+# A temporary materialization table stays the temporary table it was, though
+# a permanent table of the same name exists.
+statement ok
+CREATE TABLE coa_tmp (region VARCHAR, revenue BIGINT);
+
+statement ok
+INSERT INTO coa_tmp VALUES ('East', 1), ('West', 2);
+
+statement ok
+CREATE TEMP TABLE coa_tmp (region VARCHAR, revenue BIGINT);
+
+statement ok
+INSERT INTO coa_tmp VALUES ('East', 777), ('West', 666);
+
+statement ok
+CREATE OR REPLACE SEMANTIC VIEW coa_m
+  TABLES (o AS main.coa_orders PRIMARY KEY (id))
+  DIMENSIONS (o.region AS o.region)
+  METRICS (o.revenue AS SUM(o.amount))
+  MATERIALIZATIONS (by_region AS (TABLE coa_tmp, DIMENSIONS (region), METRICS (revenue)));
+
+statement ok
+CREATE OR ALTER SEMANTIC VIEW coa_m
+  TABLES (o AS main.coa_orders PRIMARY KEY (id))
+  DIMENSIONS (o.region AS o.region)
+  METRICS (o.revenue AS SUM(o.amount));
+
+query TI
+SELECT * FROM semantic_view('coa_m', dimensions := ['region'], metrics := ['revenue']) ORDER BY 1;
+----
+East	777
+West	666
+
+# --- FROM YAML and FROM YAML FILE ----------------------------------------
+
+statement ok
+CREATE OR REPLACE SEMANTIC VIEW coa_y
+  TABLES (o AS coa_orders PRIMARY KEY (id))
+  DIMENSIONS (o.region AS o.region WITH TAG (d = 'region'))
+  METRICS (o.revenue AS SUM(o.amount));
+
+statement ok
+CREATE OR ALTER SEMANTIC VIEW coa_y FROM YAML $$
+tables:
+  - alias: o
+    table: coa_orders
+    pk_columns: [id]
+dimensions:
+  - name: region
+    expr: upper(o.region)
+    source_table: o
+metrics:
+  - name: revenue
+    expr: SUM(o.amount)
+    source_table: o
+$$;
+
+query TT
+SELECT json_extract_string(definition, '$.dimensions[0].expr'),
+       json_extract_string(definition, '$.dimensions[0].tags[0].value')
+FROM semantic_layer._definitions WHERE name = 'coa_y';
+----
+upper(o.region)	region
+
+statement error
+CREATE OR ALTER SEMANTIC VIEW coa_y FROM YAML $$
+tables:
+  - alias: o
+    table: coa_orders
+    pk_columns: [id]
+dimensions:
+  - name: region
+    expr: o.region
+    source_table: o
+    tags:
+      - name: {tag: d}
+        value: other
+metrics: []
+$$;
+----
+CREATE OR ALTER SEMANTIC VIEW can't set tags, as in Snowflake, and dimension 'region' has one
+
+statement ok
+COPY (SELECT 'tables:
+  - alias: o
+    table: coa_orders
+    pk_columns: [id]
+dimensions:
+  - name: region
+    expr: lower(o.region)
+    source_table: o
+metrics:
+  - name: revenue
+    expr: SUM(o.amount)
+    source_table: o')
+TO '__TEST_DIR__/coa_file.yaml' (FORMAT CSV, HEADER FALSE, QUOTE '');
+
+statement ok
+CREATE OR ALTER SEMANTIC VIEW coa_y FROM YAML FILE '__TEST_DIR__/coa_file.yaml';
+
+query TT
+SELECT json_extract_string(definition, '$.dimensions[0].expr'),
+       json_extract_string(definition, '$.dimensions[0].tags[0].value')
+FROM semantic_layer._definitions WHERE name = 'coa_y';
+----
+lower(o.region)	region
+
+statement ok
+COPY (SELECT 'tables:
+  - alias: o
+    table: coa_orders
+    pk_columns: [id]
+dimensions:
+  - name: region
+    expr: o.region
+    source_table: o
+metrics: []
+tags:
+  - name: {tag: owner}
+    value: file')
+TO '__TEST_DIR__/coa_tagged.yaml' (FORMAT CSV, HEADER FALSE, QUOTE '');
+
+statement error
+CREATE OR ALTER SEMANTIC VIEW coa_y FROM YAML FILE '__TEST_DIR__/coa_tagged.yaml';
+----
+CREATE OR ALTER SEMANTIC VIEW can't set tags, as in Snowflake, and the view has one
+
+# A YAML FILE creates a missing view too.
+statement ok
+CREATE OR ALTER SEMANTIC VIEW coa_from_file FROM YAML FILE '__TEST_DIR__/coa_file.yaml';
+
+query TI
+SELECT * FROM semantic_view('coa_from_file', dimensions := ['region'], metrics := ['revenue']) ORDER BY 1;
+----
+east	250
+west	200
+
+# --- verify_semantic_view_yaml: the CREATE's checks, nothing written ----
+
+query T
+SELECT * FROM verify_semantic_view_yaml('coa_check', $$
+tables:
+  - alias: o
+    table: coa_orders
+    pk_columns: [id]
+dimensions:
+  - name: region
+    expr: o.region
+    source_table: o
+metrics: []
+$$);
+----
+YAML file is valid for creating a semantic view. No object has been created yet.
+
+query I
+SELECT count(*) FROM semantic_layer._definitions WHERE name = 'coa_check';
+----
+0
+
+# A member that does not bind fails as the CREATE would.
+statement error
+SELECT * FROM verify_semantic_view_yaml('coa_check', $$
+tables:
+  - alias: o
+    table: coa_orders
+    pk_columns: [id]
+dimensions:
+  - name: region
+    expr: o.no_such_column
+    source_table: o
+metrics: []
+$$);
+----
+dimension 'region' does not bind
+
+statement error
+SELECT * FROM verify_semantic_view_yaml('coa_check', 'tables: [');
+----
+invalid YAML definition for semantic view 'coa_check'
+
+statement error
+SELECT * FROM verify_semantic_view_yaml('no_such_schema.coa_check', $$
+tables:
+  - alias: o
+    table: coa_orders
+    pk_columns: [id]
+dimensions:
+  - name: region
+    expr: o.region
+    source_table: o
+metrics: []
+$$);
+----
+schema 'no_such_schema' does not exist
+
+statement error
+SELECT * FROM verify_semantic_view_yaml('other_db.main.coa_check', $$
+tables:
+  - alias: o
+    table: coa_orders
+    pk_columns: [id]
+dimensions:
+  - name: region
+    expr: o.region
+    source_table: o
+metrics: []
+$$);
+----
+names database 'other_db', but semantic views are single-catalog
+
+query T
+SELECT * FROM verify_semantic_view_yaml('coa_s.coa_check', $$
+tables:
+  - alias: o
+    table: main.coa_orders
+    pk_columns: [id]
+dimensions:
+  - name: region
+    expr: o.region
+    source_table: o
+metrics: []
+$$);
+----
+YAML file is valid for creating a semantic view. No object has been created yet.
+
+statement error
+SELECT * FROM verify_semantic_view_yaml('coa_check', NULL);
+----
+expected a view name and a YAML definition
+
+# CREATE's single-catalog guard: from an attached database, verify fails as
+# the CREATE would.
+statement ok
+ATTACH ':memory:' AS coa_other;
+
+statement ok
+CREATE TABLE coa_other.main.coa_orders (id INTEGER, region VARCHAR, amount INTEGER);
+
+statement ok
+USE coa_other;
+
+statement error
+SELECT * FROM verify_semantic_view_yaml('coa_check', $$
+tables:
+  - alias: o
+    table: coa_orders
+    pk_columns: [id]
+dimensions:
+  - name: region
+    expr: o.region
+    source_table: o
+metrics: []
+$$);
+----
+the semantic view catalog lives in a different database
+
+# As CREATE's guard does, verify lets an attached database that has its own
+# semantic_layer._definitions through.
+statement ok
+CREATE SCHEMA coa_other.semantic_layer;
+
+statement ok
+CREATE TABLE coa_other.semantic_layer._definitions (schema_name VARCHAR, name VARCHAR, definition VARCHAR);
+
+query T
+SELECT * FROM verify_semantic_view_yaml('coa_check', $$
+tables:
+  - alias: o
+    table: coa_orders
+    pk_columns: [id]
+dimensions:
+  - name: region
+    expr: o.region
+    source_table: o
+metrics: []
+$$);
+----
+YAML file is valid for creating a semantic view. No object has been created yet.
+
+statement ok
+DROP SCHEMA coa_other.semantic_layer CASCADE;
+
+statement ok
+USE memory;

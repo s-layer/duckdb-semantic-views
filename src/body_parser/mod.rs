@@ -117,6 +117,8 @@ pub struct KeywordBody {
     pub custom_instructions: crate::model::CustomInstructions,
     /// A trailing `AI_VERIFIED_QUERIES (...)`. Empty when absent.
     pub verified_queries: Vec<crate::model::VerifiedQuery>,
+    /// A trailing `COPY GRANTS` was written (a no-op, stored nowhere).
+    pub copy_grants: bool,
 }
 
 impl KeywordBody {
@@ -338,6 +340,7 @@ pub fn parse_keyword_body(text: &str, base_offset: usize) -> Result<KeywordBody,
             question_categorization: trailing.view.ai_question_categorization,
         },
         verified_queries: trailing.view.verified_queries,
+        copy_grants: trailing.view.copy_grants,
     })
 }
 

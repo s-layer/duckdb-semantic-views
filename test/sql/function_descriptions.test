@@ -30,13 +30,13 @@ WHERE function_name IN (
     'show_semantic_metrics_all', 'show_semantic_facts_all',
     'show_semantic_materializations_all',
     'show_semantic_dimensions_for_metric', '__sv_compute_create_from_yaml',
-    '__sv_check_create');
+    '__sv_check_create', '__sv_or_alter', 'verify_semantic_view_yaml');
 
-# All 19 functions are registered (get_ddl has two overloads, hence 20 rows).
+# All 21 functions are registered (get_ddl has two overloads, hence 22 rows).
 query I
 SELECT count(*) FROM sv_fns;
 ----
-20
+22
 
 # --- Case 1: every overload has a description ----------------------------
 
@@ -57,7 +57,7 @@ ORDER BY ALL;
 query T
 SELECT function_name FROM sv_fns
 WHERE len(examples) = 0
-  AND function_name NOT IN ('__sv_compute_create_from_yaml', '__sv_check_create')
+  AND function_name NOT IN ('__sv_compute_create_from_yaml', '__sv_check_create', '__sv_or_alter')
 ORDER BY ALL;
 ----
 
@@ -69,7 +69,8 @@ ORDER BY ALL;
 query T
 SELECT function_name FROM sv_fns
 WHERE function_name NOT IN ('semantic_view', 'explain_semantic_view',
-                            'get_ddl', 'read_yaml_from_semantic_view')
+                            'get_ddl', 'read_yaml_from_semantic_view',
+                            'verify_semantic_view_yaml')
   AND NOT (coalesce(description, '') LIKE 'Backs %'
            OR coalesce(description, '') LIKE 'Internal helper behind %')
 ORDER BY ALL;
@@ -78,7 +79,8 @@ ORDER BY ALL;
 query T
 SELECT function_name FROM sv_fns
 WHERE function_name NOT IN ('semantic_view', 'explain_semantic_view',
-                            'get_ddl', 'read_yaml_from_semantic_view')
+                            'get_ddl', 'read_yaml_from_semantic_view',
+                            'verify_semantic_view_yaml')
   AND coalesce(description, '') NOT LIKE '%Use that statement%'
 ORDER BY ALL;
 ----
@@ -169,6 +171,16 @@ SELECT READ_YAML_FROM_SEMANTIC_VIEW('sales');
 
 statement ok
 SELECT READ_YAML_FROM_SEMANTIC_VIEW('sales');
+
+query T
+SELECT array_to_string(examples, ' || ') FROM sv_fns WHERE function_name = 'verify_semantic_view_yaml';
+----
+SELECT * FROM verify_semantic_view_yaml('sales', '{tables: [{alias: o, table: orders, pk_columns: [id]}], dimensions: [{name: region, expr: o.region, source_table: o}], metrics: [{name: revenue, expr: SUM(o.amount), source_table: o}]}');
+
+query T
+SELECT * FROM verify_semantic_view_yaml('sales', '{tables: [{alias: o, table: orders, pk_columns: [id]}], dimensions: [{name: region, expr: o.region, source_table: o}], metrics: [{name: revenue, expr: SUM(o.amount), source_table: o}]}');
+----
+YAML file is valid for creating a semantic view. No object has been created yet.
 
 query T
 SELECT array_to_string(examples, ' || ') FROM sv_fns WHERE function_name = 'list_semantic_views';
