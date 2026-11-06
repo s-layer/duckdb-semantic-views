@@ -51,6 +51,30 @@ If no build for ``<host>`` has been published yet, the install fails. Until one 
 When ``<host>`` is a development or nightly DuckDB build (its version contains a ``-``, such as ``v2.0.1-dev42``), the message ends with ``Load a semantic_views build compiled against this DuckDB.`` instead. The community repository only has builds for tagged releases, so build the extension from source against that DuckDB.
 
 
+
+.. _ref-err-newer-format:
+
+View written by a newer release
+-------------------------------
+
+.. versionadded:: 0.18.0
+
+.. code-block:: text
+
+   semantic view '<name>' was written by a newer version of semantic_views
+   (storage format <n>; this version reads up to <m>); upgrade the extension to read it
+
+**Cause:** Each stored view records the storage format of the release that wrote it. A view written by a later release can hold settings this release does not know, so reading it with this release could return other numbers without saying why. Any query, ``DESCRIBE`` or ``GET_DDL`` of such a view is refused instead. This happens when a database file is opened with an older release than the one that last created or changed the view.
+
+**Fix:** Install the release that wrote the view, or a later one:
+
+.. code-block:: sql
+
+   FORCE INSTALL semantic_views FROM community;
+   LOAD semantic_views;
+
+Releases up to 0.17.0 have no such check. A view that uses variables, a table defined by a query, or a metric written over another metric on its own table must not be read by one of them.
+
 .. _ref-err-ddl:
 
 DDL Errors (CREATE SEMANTIC VIEW)
@@ -306,7 +330,7 @@ Members that do not bind
 
    semantic view '<view>': <kind> '<name>' does not bind: <DuckDB error>
 
-**Cause:** ``CREATE`` binds each dimension, fact and metric in a query of its own against the view's tables, as Snowflake compiles each expression at ``CREATE``. DuckDB cannot bind the member the message names: its expression refers to a column, table or function that does not exist, has a syntax error, or passes an argument DuckDB rejects. The rest of the message is DuckDB's own error. ``PRIVATE`` members are bound too, and every ``CREATE`` form is checked: ``OR REPLACE``, ``IF NOT EXISTS``, ``FROM YAML`` and ``FROM YAML FILE``. When every member binds, each table in ``TABLES`` is resolved as well; ``<kind>`` is then ``table`` and ``<name>`` the table's alias, for a table that does not exist even if no member reads it, or a :ref:`table defined by a query <ref-create-inline-query>` whose query DuckDB cannot bind.
+**Cause:** ``CREATE`` binds each dimension, fact and metric in a query of its own against the view's tables, as Snowflake compiles each expression at ``CREATE``. DuckDB cannot bind the member the message names: its expression refers to a column, table or function that does not exist, has a syntax error, or passes an argument DuckDB rejects. The rest of the message is DuckDB's own error. ``PRIVATE`` members are bound too, and every ``CREATE`` form is checked: ``OR REPLACE``, ``IF NOT EXISTS``, ``FROM YAML`` and ``FROM YAML FILE``. A :ref:`table defined by a query <ref-create-inline-query>` is bound before the members, so a query DuckDB cannot bind is reported with ``<kind>`` ``table`` and ``<name>`` the table's alias; when the query names one of the view's variables, which are not read inside a table's query, the message says so: ``table '<alias>' does not bind: variables are not read inside a table's query, and it names variable '<name>'``. When every member binds, each physical table in ``TABLES`` is resolved as well, with ``<kind>`` ``table``, for a table that does not exist even if no member reads it.
 
 **Fix:** Correct the expression, or create the missing table, column or function before the view.
 
@@ -1009,7 +1033,9 @@ Variables in a query
 
 .. code-block:: text
 
-   semantic view '<view>': variable '<name>' has no default, so the query must set it: VARIABLES <name> = <value>
+   semantic view '<view>': variable '<name>' has no default, so the query must set it: VARIABLES <name> = <value> in SEMANTIC_VIEW(...); a standard-SQL query cannot set variables: query it with SEMANTIC_VIEW(...), or give the variable a default
+
+   semantic view '<view>': variable '<name>' is set twice
 
    semantic view '<view>' has no variable '<name>'. Did you mean '<closest>'?
 

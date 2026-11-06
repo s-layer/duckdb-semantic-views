@@ -849,7 +849,12 @@ pub struct Join {
 /// pre-versioning ("legacy") row; the `init_catalog` upgrade pass stamps
 /// completed rows up to this value. Bump when the stored JSON shape changes
 /// in a way the upgrade pass must normalise.
-pub const CURRENT_SCHEMA_VERSION: u32 = 1;
+///
+/// 2 (v0.18.0): variables, query-defined tables and same-table metric
+/// references, which a version-1 reader misreads or cannot load. A stamp
+/// above this value is refused by [`SemanticViewDefinition::from_json`], so
+/// the next such change is reported instead of misread.
+pub const CURRENT_SCHEMA_VERSION: u32 = 2;
 
 /// Top-level definition of a semantic view.
 ///
@@ -974,6 +979,14 @@ impl SemanticViewDefinition {
     ///
     /// The `name` parameter is used only in the error message for context.
     pub fn from_json(name: &str, json: &str) -> Result<Self, String> {
+        let version = Self::stored_schema_version(json);
+        if version > CURRENT_SCHEMA_VERSION {
+            return Err(format!(
+                "semantic view '{name}' was written by a newer version of semantic_views \
+                 (storage format {version}; this version reads up to {CURRENT_SCHEMA_VERSION}); \
+                 upgrade the extension to read it"
+            ));
+        }
         let def: Self = serde_json::from_str(json)
             .map_err(|e| format!("invalid definition for semantic view '{name}': {e}"))?;
         Ok(def)
@@ -2998,6 +3011,43 @@ mod tests {
             SemanticViewDefinition::stored_schema_version(r#"{"schema_version":7,"tables":[]}"#),
             7
         );
+    }
+
+    /// A row stamped by a later release is refused by name, not read with
+    /// whatever fields this release happens to know (v0.18.0 review F2).
+    #[test]
+    fn from_json_refuses_a_newer_schema_version() {
+        let newer = format!(
+            r#"{{"schema_version":{},"tables":[],"dimensions":[],"metrics":[]}}"#,
+            CURRENT_SCHEMA_VERSION + 1
+        );
+        let err = SemanticViewDefinition::from_json("future_v", &newer).unwrap_err();
+        assert!(
+            err.contains("semantic view 'future_v' was written by a newer version"),
+            "{err}"
+        );
+        assert!(err.contains("upgrade"), "{err}");
+    }
+
+    /// The current stamp and every older one still load.
+    #[test]
+    fn from_json_reads_current_and_older_schema_versions() {
+        for version in 0..=CURRENT_SCHEMA_VERSION {
+            let json = format!(
+                r#"{{"schema_version":{version},"tables":[],"dimensions":[],"metrics":[]}}"#
+            );
+            assert!(
+                SemanticViewDefinition::from_json("v", &json).is_ok(),
+                "version {version}"
+            );
+        }
+    }
+
+    /// v0.18.0 stores constructs a v1 reader misreads (variables, same-table
+    /// metric references, query-defined tables), so the stamp moved to 2.
+    #[test]
+    fn current_schema_version_is_two() {
+        assert_eq!(CURRENT_SCHEMA_VERSION, 2);
     }
 
     #[test]

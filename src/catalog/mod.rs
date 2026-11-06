@@ -1685,11 +1685,17 @@ mod tests {
             "joins":[{"table":"c","on":"o.cid = c.id"}]}"#;
         // A no-join single-table view: trivially complete, should be stamped.
         let single = r#"{"tables":[{"alias":"o","table":"orders"}],"dimensions":[],"metrics":[]}"#;
+        // A row a v0.17.0 or earlier release stamped (format 1).
+        let format_one = r#"{"schema_version":1,"tables":[{"alias":"o","table":"orders"}],"dimensions":[],"metrics":[]}"#;
+        // A row a later release stamped: never re-stamped down.
+        let future = r#"{"schema_version":99,"tables":[{"alias":"o","table":"orders"}],"dimensions":[],"metrics":[]}"#;
 
         for (name, def) in [
             ("complete_v", complete),
             ("incomplete_v", incomplete),
             ("single_v", single),
+            ("format_one_v", format_one),
+            ("future_v", future),
         ] {
             con.execute(
                 "INSERT INTO semantic_layer._definitions (schema_name, name, definition) \
@@ -1724,6 +1730,16 @@ mod tests {
             SemanticViewDefinition::stored_schema_version(&stored("incomplete_v")),
             0,
             "un-upgradeable legacy row must be left at version 0"
+        );
+        assert_eq!(
+            SemanticViewDefinition::stored_schema_version(&stored("format_one_v")),
+            CURRENT_SCHEMA_VERSION,
+            "a format-1 row must be re-stamped current"
+        );
+        assert_eq!(
+            SemanticViewDefinition::stored_schema_version(&stored("future_v")),
+            99,
+            "a newer row must keep its stamp"
         );
 
         // Idempotent: a second pass changes nothing and does not error.
@@ -2136,7 +2152,13 @@ mod tests {
         let db_path_buf = unique_temp_db_path("test_tc6_restart_persistence");
         let db_path = db_path_buf.to_str().expect("temp dir is UTF-8");
 
-        let json = r#"{"schema_version":1,"base_table":"sales","dimensions":[],"metrics":[]}"#;
+        // At the current version, so the upgrade pass on reopen leaves the row
+        // byte-identical (an older stamp is re-stamped, which is tested apart).
+        let json = format!(
+            r#"{{"schema_version":{},"base_table":"sales","dimensions":[],"metrics":[]}}"#,
+            crate::model::CURRENT_SCHEMA_VERSION
+        );
+        let json = json.as_str();
 
         // --- Session 1: create the catalog and persist a definition. ---
         {

@@ -21,12 +21,12 @@ AS
   DIMENSIONS (o.region AS o.region)
   METRICS (o.total AS SUM(o.amount))
 
-# A1: the freshly written definition carries schema_version = 1.
+# A1: the freshly written definition carries schema_version = 2 (v0.18.0).
 query I
 SELECT CAST(json_extract(definition, '$.schema_version') AS INTEGER)
 FROM semantic_layer._definitions WHERE name = 'ar4_sv'
 ----
-1
+2
 
 # A2: CREATE OR REPLACE re-stamps it.
 statement ok
@@ -40,7 +40,7 @@ query I
 SELECT CAST(json_extract(definition, '$.schema_version') AS INTEGER)
 FROM semantic_layer._definitions WHERE name = 'ar4_sv'
 ----
-1
+2
 
 # A3: the normal view still queries correctly.
 query TI rowsort
@@ -63,3 +63,27 @@ statement error
 SELECT * FROM SEMANTIC_VIEW(ar4_legacy DIMENSIONS region METRICS total)
 ----
 foreign-key column metadata
+
+# C: a row stamped by a later release is refused by name, on every read path,
+# rather than read with the fields this release knows (v0.18.0 review F2).
+statement ok
+INSERT INTO semantic_layer._definitions (schema_name, name, definition) VALUES (
+  'main',
+  'ar4_future',
+  '{"tables":[{"alias":"o","table":"ar4_orders","pk_columns":["id"]}],"dimensions":[{"name":"region","expr":"o.region","source_table":"o"}],"metrics":[{"name":"total","expr":"SUM(o.amount)","source_table":"o"}],"schema_version":99}'
+)
+
+statement error
+SELECT * FROM SEMANTIC_VIEW(ar4_future DIMENSIONS region METRICS total)
+----
+semantic view 'ar4_future' was written by a newer version of semantic_views (storage format 99; this version reads up to 2)
+
+statement error
+DESCRIBE SEMANTIC VIEW ar4_future
+----
+was written by a newer version of semantic_views
+
+statement error
+SELECT GET_DDL('SEMANTIC VIEW', 'ar4_future')
+----
+was written by a newer version of semantic_views
