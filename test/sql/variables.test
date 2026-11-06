@@ -564,7 +564,7 @@ semantic view 'var_sv': variable 'TARGET_region' is set twice
 statement error
 SELECT AGG(total_sales) FROM var_sv;
 ----
-a standard-SQL query cannot set variables: query it with SEMANTIC_VIEW(...), or give the variable a default
+variables := {'target_region': <value>} in semantic_view(); a standard-SQL query cannot set variables, so query the view one of those ways, or give the variable a default
 
 # Variables are not read inside a table's query, so a query naming one is
 # refused as that table not binding, not blamed on the first member.
@@ -576,3 +576,16 @@ CREATE SEMANTIC VIEW var_bad_inline
   METRICS (big.n AS COUNT(*));
 ----
 semantic view 'var_bad_inline': table 'big' does not bind: variables are not read inside a table's query, and it names variable 'floor_amount'
+
+# The hint is given only when the column that does not bind is the variable:
+# a typo whose candidate list happens to quote a variable's name keeps
+# DuckDB's own error.
+
+statement error
+CREATE SEMANTIC VIEW var_bad_inline
+  TABLES (big AS (SELECT * FROM var_sales WHERE regin = 'x') PRIMARY KEY (sale_id))
+  VARIABLES (region VARCHAR DEFAULT 'EU')
+  DIMENSIONS (big.reg AS big.sale_id)
+  METRICS (big.n AS COUNT(*));
+----
+<REGEX>:.*table 'big' does not bind: Binder Error: Referenced column "regin" not found.*

@@ -222,7 +222,7 @@ Leave out the default when no value is a safe guess, such as an exchange rate th
 
 .. code-block:: text
 
-   Binder Error: semantic_view: semantic view 'order_fx': variable 'fx_rate' has no default, so the query must set it: VARIABLES fx_rate = <value> in SEMANTIC_VIEW(...); a standard-SQL query cannot set variables: query it with SEMANTIC_VIEW(...), or give the variable a default
+   Binder Error: semantic_view: semantic view 'order_fx': variable 'fx_rate' has no default, so the query must set it: VARIABLES fx_rate = <value> in SEMANTIC_VIEW(...), or variables := {'fx_rate': <value>} in semantic_view(); a standard-SQL query cannot set variables, so query the view one of those ways, or give the variable a default
 
 Set it and the query runs:
 

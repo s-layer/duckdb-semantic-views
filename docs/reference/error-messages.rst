@@ -1033,7 +1033,7 @@ Variables in a query
 
 .. code-block:: text
 
-   semantic view '<view>': variable '<name>' has no default, so the query must set it: VARIABLES <name> = <value> in SEMANTIC_VIEW(...); a standard-SQL query cannot set variables: query it with SEMANTIC_VIEW(...), or give the variable a default
+   semantic view '<view>': variable '<name>' has no default, so the query must set it: VARIABLES <name> = <value> in SEMANTIC_VIEW(...), or variables := {'<name>': <value>} in semantic_view(); a standard-SQL query cannot set variables, so query the view one of those ways, or give the variable a default
 
    semantic view '<view>': variable '<name>' is set twice
 

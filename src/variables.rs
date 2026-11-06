@@ -333,10 +333,11 @@ pub fn bind(
             (Values::Query { .. }, None, _) => {
                 return Err(format!(
                     "semantic view '{view_name}': variable '{}' has no default, so the query \
-                     must set it: VARIABLES {} = <value> in SEMANTIC_VIEW(...); a standard-SQL \
-                     query cannot set variables: query it with SEMANTIC_VIEW(...), or give the \
+                     must set it: VARIABLES {} = <value> in SEMANTIC_VIEW(...), or \
+                     variables := {{'{}': <value>}} in semantic_view(); a standard-SQL query \
+                     cannot set variables, so query the view one of those ways, or give the \
                      variable a default",
-                    v.name, v.name
+                    v.name, v.name, v.name
                 ));
             }
         };

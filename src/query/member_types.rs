@@ -302,6 +302,11 @@ pub fn first_unbound_member(
         probe,
         last_failure: None,
     };
+    // A table defined by a query binds on its own first, so a query that does
+    // not bind is reported as that table, not as the first member reading it.
+    if let Some(unbound) = first_unbound_table(&def, &mut prober, |t| t.definition.is_some())? {
+        return Ok(Some(unbound));
+    }
     let mut missing: Vec<(&'static str, &str)> = Vec::new();
     missing.extend(
         def.dimensions
@@ -343,20 +348,48 @@ pub fn first_unbound_member(
             }));
         }
     }
-    // Every table is resolved, as Snowflake resolves each logical table, also
-    // one that no member reads and that no query would join.
-    for table in &def.tables {
+    // Every physical table is resolved too, as Snowflake resolves each logical
+    // table, also one that no member reads and that no query would join.
+    first_unbound_table(&def, &mut prober, |t| t.definition.is_none())
+}
+
+/// The first of `def`'s tables `which` selects that does not bind on its own.
+///
+/// Variables are not substituted into a table's query (Phase 6.5), so when
+/// the column `DuckDB` cannot find is one of the view's variables the error
+/// says so, ahead of `DuckDB`'s own (v0.18.0 review O2).
+fn first_unbound_table(
+    def: &SemanticViewDefinition,
+    prober: &mut Prober<'_, '_>,
+    which: impl Fn(&crate::model::TableRef) -> bool,
+) -> Result<Option<UnboundMember>, Interrupted> {
+    for table in def.tables.iter().filter(|t| which(t)) {
         if (prober.cancelled)() {
             return Err(Interrupted);
         }
         let sql = format!(
             "SELECT * FROM {} LIMIT 0",
-            crate::expand::table_source(table, &def)
+            crate::expand::table_source(table, def)
         );
         match (prober.probe)(&sql) {
             Ok(_) => {}
             Err(ProbeError::Interrupted) => return Err(Interrupted),
             Err(ProbeError::Failed(error)) => {
+                let lowered = error.to_ascii_lowercase();
+                let variable = def.variables.iter().find(|v| {
+                    lowered.contains(&format!(
+                        "referenced column \"{}\" not found",
+                        crate::ident::normalize_ident_part(&v.name)
+                    ))
+                });
+                let error = match variable {
+                    Some(v) => format!(
+                        "variables are not read inside a table's query, and it names \
+                         variable '{}': {error}",
+                        v.name
+                    ),
+                    None => error,
+                };
                 return Ok(Some(UnboundMember {
                     kind: "table",
                     name: table.alias.clone(),
