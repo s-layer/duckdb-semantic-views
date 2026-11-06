@@ -298,10 +298,8 @@ fn emit_native_create_sql(
     // the patch. Phase 39 metadata behaviour is preserved because the
     // enriched JSON omits the three metadata keys (Vec::is_empty /
     // Option::is_none skip_serializing) so the patch is the sole source.
-    // AR-4: stamp the storage-format version alongside the metadata so every
-    // freshly written row records `schema_version`. It is injected here (not
-    // carried on the struct) so it never leaks into YAML export.
-    let schema_version = crate::model::CURRENT_SCHEMA_VERSION;
+    // AR-4: the enriched JSON already carries `schema_version`, the format
+    // the view needs (`enrich_definition_for_create`); the patch leaves it.
     let metadata_patched_definition = format!(
         "json_merge_patch( \
             new_def::JSON, \
@@ -310,8 +308,7 @@ fn emit_native_create_sql(
               'database_name', current_database(), \
               'schema_name', {schema_expr}, \
               'resolution_schema_name', current_schema(), \
-              'temp_tables', {temp_tables}, \
-              'schema_version', {schema_version} \
+              'temp_tables', {temp_tables} \
             ) \
          )::VARCHAR",
         temp_tables = temp_tables_expr("new_def::JSON")
@@ -391,9 +388,8 @@ fn emit_native_create_from_yaml_file(
     // overrides keys present in the patch. The helper TF's new_def omits the
     // three metadata keys (skip_serializing_if on the struct), so the patch
     // is the sole source -- no risk of overwriting a user-supplied value.
-    // AR-4: stamp schema_version alongside the metadata (see the inline-CREATE
-    // sibling above). Injected here rather than carried on the struct so it
-    // stays out of YAML export.
+    // AR-4: the helper TF's new_def already carries `schema_version` (see the
+    // inline-CREATE sibling above).
     let metadata_patched = format!(
         "json_merge_patch( \
             new_def::JSON, \
@@ -402,12 +398,10 @@ fn emit_native_create_from_yaml_file(
               'database_name', current_database(), \
               'schema_name', {schema_expr}, \
               'resolution_schema_name', current_schema(), \
-              'temp_tables', {temp_tables}, \
-              'schema_version', {schema_version} \
+              'temp_tables', {temp_tables} \
             ) \
          )::VARCHAR",
-        temp_tables = temp_tables_expr("new_def::JSON"),
-        schema_version = crate::model::CURRENT_SCHEMA_VERSION
+        temp_tables = temp_tables_expr("new_def::JSON")
     );
     let helper_from = format!(
         "FROM __sv_compute_create_from_yaml('{path_escaped}', \

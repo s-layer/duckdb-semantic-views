@@ -847,9 +847,20 @@ pub struct Join {
 /// on [`SemanticViewDefinition`] — it never appears in YAML export and adds
 /// no construction-site burden. Absent / `0` in stored JSON denotes a
 /// pre-versioning ("legacy") row; the `init_catalog` upgrade pass stamps
-/// completed rows up to this value. Bump when the stored JSON shape changes
+/// completed rows up to the format each needs. Bump when the stored JSON shape changes
 /// in a way the upgrade pass must normalise.
-pub const CURRENT_SCHEMA_VERSION: u32 = 1;
+///
+/// 2 (v0.18.0): variables, query-defined tables and same-table metric
+/// references, which a version-1 reader misreads or cannot load. A stamp
+/// above this value is refused by [`SemanticViewDefinition::from_json`], so
+/// the next such change is reported instead of misread.
+///
+/// This is the newest format this release reads and writes, not the stamp
+/// every row gets: a view is stamped with
+/// [`SemanticViewDefinition::required_schema_version`], the lowest format
+/// that reads it, so a view that uses nothing newer stays readable by an
+/// older release after a newer one has opened the database.
+pub const CURRENT_SCHEMA_VERSION: u32 = 2;
 
 /// Top-level definition of a semantic view.
 ///
@@ -974,6 +985,14 @@ impl SemanticViewDefinition {
     ///
     /// The `name` parameter is used only in the error message for context.
     pub fn from_json(name: &str, json: &str) -> Result<Self, String> {
+        let version = Self::stored_schema_version(json);
+        if version > CURRENT_SCHEMA_VERSION {
+            return Err(format!(
+                "semantic view '{name}' was written by a newer version of semantic_views \
+                 (storage format {version}; this version reads up to {CURRENT_SCHEMA_VERSION}); \
+                 upgrade the extension to read it"
+            ));
+        }
         let def: Self = serde_json::from_str(json)
             .map_err(|e| format!("invalid definition for semantic view '{name}': {e}"))?;
         Ok(def)
@@ -995,6 +1014,27 @@ impl SemanticViewDefinition {
             schema_version: u32,
         }
         serde_json::from_str::<Probe>(json).map_or(0, |p| p.schema_version)
+    }
+
+    /// The lowest storage format that reads this definition correctly, which
+    /// is what CREATE stamps it with and what the load-time upgrade pass raises
+    /// an older stamp to. A view that uses nothing newer than format 1 keeps
+    /// format 1, so a release that reads only format 1 can still read it.
+    ///
+    /// Format 2 (v0.18.0) is needed by variables, a query-defined table and a
+    /// metric written over a metric on its own table: a format-1 reader drops
+    /// the first two and reads the third as a column, so it would answer with
+    /// a wrong number or a misleading error rather than refuse.
+    #[must_use]
+    pub fn required_schema_version(&self) -> u32 {
+        let needs_two = !self.variables.is_empty()
+            || self.tables.iter().any(|t| t.definition.is_some())
+            || crate::graph::has_same_table_metric_refs(self);
+        if needs_two {
+            2
+        } else {
+            1
+        }
     }
 
     /// True when any relationship lacks foreign-key column metadata
@@ -2998,6 +3038,111 @@ mod tests {
             SemanticViewDefinition::stored_schema_version(r#"{"schema_version":7,"tables":[]}"#),
             7
         );
+    }
+
+    /// A row stamped by a later release is refused by name, not read with
+    /// whatever fields this release happens to know (v0.18.0 review F2).
+    #[test]
+    fn from_json_refuses_a_newer_schema_version() {
+        let newer = format!(
+            r#"{{"schema_version":{},"tables":[],"dimensions":[],"metrics":[]}}"#,
+            CURRENT_SCHEMA_VERSION + 1
+        );
+        let err = SemanticViewDefinition::from_json("future_v", &newer).unwrap_err();
+        assert!(
+            err.contains("semantic view 'future_v' was written by a newer version"),
+            "{err}"
+        );
+        assert!(err.contains("upgrade"), "{err}");
+    }
+
+    /// The current stamp and every older one still load.
+    #[test]
+    fn from_json_reads_current_and_older_schema_versions() {
+        for version in 0..=CURRENT_SCHEMA_VERSION {
+            let json = format!(
+                r#"{{"schema_version":{version},"tables":[],"dimensions":[],"metrics":[]}}"#
+            );
+            assert!(
+                SemanticViewDefinition::from_json("v", &json).is_ok(),
+                "version {version}"
+            );
+        }
+    }
+
+    /// v0.18.0 stores constructs a v1 reader misreads (variables, same-table
+    /// metric references, query-defined tables), so the stamp moved to 2.
+    #[test]
+    fn current_schema_version_is_two() {
+        assert_eq!(CURRENT_SCHEMA_VERSION, 2);
+    }
+
+    /// A definition from YAML, for the storage-format tests below.
+    fn format_test_def(yaml: &str) -> SemanticViewDefinition {
+        SemanticViewDefinition::from_yaml("v", yaml).unwrap()
+    }
+
+    const FORMAT_ONE_YAML: &str = "
+tables:
+  - alias: o
+    table: orders
+    pk_columns: [id]
+dimensions:
+  - name: region
+    expr: o.region
+    source_table: o
+metrics:
+  - name: total
+    expr: SUM(o.amount)
+    source_table: o
+";
+
+    /// A view using nothing newer than format 1 is stamped 1, so a release
+    /// that reads up to format 1 can still read it.
+    #[test]
+    fn required_schema_version_is_one_without_format_two_constructs() {
+        assert_eq!(
+            format_test_def(FORMAT_ONE_YAML).required_schema_version(),
+            1
+        );
+    }
+
+    #[test]
+    fn required_schema_version_is_two_with_variables() {
+        let yaml = format!("{FORMAT_ONE_YAML}variables:\n  - name: floor\n    default: '1'\n");
+        assert_eq!(format_test_def(&yaml).required_schema_version(), 2);
+    }
+
+    #[test]
+    fn required_schema_version_is_two_with_a_query_defined_table() {
+        let yaml = FORMAT_ONE_YAML.replace(
+            "    table: orders\n",
+            "    definition: SELECT * FROM orders\n",
+        );
+        let def = format_test_def(&yaml);
+        assert!(
+            def.tables[0].definition.is_some(),
+            "fixture must set a definition"
+        );
+        assert_eq!(def.required_schema_version(), 2);
+    }
+
+    #[test]
+    fn required_schema_version_is_two_with_a_same_table_metric_reference() {
+        let yaml = format!(
+            "{FORMAT_ONE_YAML}  - name: doubled\n    expr: o.total * 2\n    source_table: o\n"
+        );
+        assert_eq!(format_test_def(&yaml).required_schema_version(), 2);
+    }
+
+    /// A metric named like a column, read inside an aggregate, is a column
+    /// read, not a same-table metric reference, so it needs no newer format.
+    #[test]
+    fn required_schema_version_ignores_a_column_read_inside_an_aggregate() {
+        let yaml = format!(
+            "{FORMAT_ONE_YAML}  - name: amount\n    expr: MAX(o.amount)\n    source_table: o\n"
+        );
+        assert_eq!(format_test_def(&yaml).required_schema_version(), 1);
     }
 
     #[test]

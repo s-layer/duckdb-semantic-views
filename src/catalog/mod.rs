@@ -445,8 +445,9 @@ fn migrate_definitions_to_schema_scoped(
 
 /// One-time `schema_version` upgrade pass over `_definitions` (AR-4).
 ///
-/// For every stored row still below [`crate::model::CURRENT_SCHEMA_VERSION`]:
-/// stamp it to the current version **iff** it can be positively verified as
+/// For every stored row still below the format it needs
+/// ([`crate::model::SemanticViewDefinition::required_schema_version`]): stamp
+/// it with that format **iff** it can be positively verified as
 /// current-format (parses cleanly and every relationship carries `fk_columns`).
 /// Rows that fail to parse, or whose relationships lack FK metadata (legacy
 /// pre-Phase-24 encodings), are left untouched at version 0 — the fan-trap
@@ -454,9 +455,9 @@ fn migrate_definitions_to_schema_scoped(
 /// silently trusting them. Non-destructive: no row is deleted or rewritten
 /// beyond the version stamp.
 ///
-/// Idempotent: rows already at the current version are skipped, so subsequent
-/// loads are no-ops. The `schema_version` integer is inlined from a
-/// compile-time constant (no user input), so the `json_object` embed is safe.
+/// Idempotent: rows already at the format they need are skipped, so subsequent
+/// loads are no-ops. The `schema_version` integer inlined in the `UPDATE` is a
+/// `u32` the definition computed (no user text), so the embed is safe.
 fn upgrade_definitions_schema(con: &Connection) -> Result<(), Box<dyn std::error::Error>> {
     // CAT-2: `schema_name` is selected because it is half the primary key. The
     // stamp below must target the row that was actually verified — keying on
@@ -477,17 +478,24 @@ fn upgrade_definitions_schema(con: &Connection) -> Result<(), Box<dyn std::error
     };
 
     for (schema_name, name, json) in rows {
-        if crate::model::SemanticViewDefinition::stored_schema_version(&json)
-            >= crate::model::CURRENT_SCHEMA_VERSION
-        {
-            continue; // already current
+        let stored = crate::model::SemanticViewDefinition::stored_schema_version(&json);
+        if stored >= crate::model::CURRENT_SCHEMA_VERSION {
+            continue; // nothing this release could raise it to
         }
         // Only stamp rows we can positively verify as current-format. A parse
         // failure or missing FK metadata => un-upgradeable legacy row; leave it
         // at version 0 so reads hard-error rather than silently under-checking.
-        let upgradeable = crate::model::SemanticViewDefinition::from_json(&name, &json)
-            .is_ok_and(|def| !def.has_incomplete_relationships());
-        if !upgradeable {
+        let Some(version) = crate::model::SemanticViewDefinition::from_json(&name, &json)
+            .ok()
+            .filter(|def| !def.has_incomplete_relationships())
+            .map(|def| def.required_schema_version())
+        else {
+            continue;
+        };
+        // The lowest format that reads the row, never lower than its stamp: a
+        // view that needs no more than format 1 keeps it, so an older release
+        // still reads it after this one has opened the database.
+        if stored >= version {
             continue;
         }
         con.execute(
@@ -496,7 +504,6 @@ fn upgrade_definitions_schema(con: &Connection) -> Result<(), Box<dyn std::error
                  SET definition = json_merge_patch(definition::JSON, \
                      json_object('schema_version', {version}))::VARCHAR \
                  WHERE schema_name = ? AND name = ?",
-                version = crate::model::CURRENT_SCHEMA_VERSION
             ),
             duckdb::params![schema_name, name],
         )?;
@@ -1685,11 +1692,23 @@ mod tests {
             "joins":[{"table":"c","on":"o.cid = c.id"}]}"#;
         // A no-join single-table view: trivially complete, should be stamped.
         let single = r#"{"tables":[{"alias":"o","table":"orders"}],"dimensions":[],"metrics":[]}"#;
+        // A row a v0.17.0 or earlier release stamped (format 1).
+        let format_one = r#"{"schema_version":1,"tables":[{"alias":"o","table":"orders"}],"dimensions":[],"metrics":[]}"#;
+        // Rows that use a format-2 construct (here variables, and a
+        // query-defined table) need format 2, whatever they were stamped.
+        let format_one_with_variables = r#"{"schema_version":1,"tables":[{"alias":"o","table":"orders"}],"dimensions":[],"metrics":[],"variables":[{"name":"floor","default":"1"}]}"#;
+        let legacy_inline = r#"{"tables":[{"alias":"o","definition":"SELECT * FROM orders"}],"dimensions":[],"metrics":[]}"#;
+        // A row a later release stamped: never re-stamped down.
+        let future = r#"{"schema_version":99,"tables":[{"alias":"o","table":"orders"}],"dimensions":[],"metrics":[]}"#;
 
         for (name, def) in [
             ("complete_v", complete),
             ("incomplete_v", incomplete),
             ("single_v", single),
+            ("format_one_v", format_one),
+            ("format_one_vars_v", format_one_with_variables),
+            ("legacy_inline_v", legacy_inline),
+            ("future_v", future),
         ] {
             con.execute(
                 "INSERT INTO semantic_layer._definitions (schema_name, name, definition) \
@@ -1712,12 +1731,12 @@ mod tests {
         };
         assert_eq!(
             SemanticViewDefinition::stored_schema_version(&stored("complete_v")),
-            CURRENT_SCHEMA_VERSION,
-            "complete row must be stamped current"
+            1,
+            "a complete row using no format-2 construct must be stamped 1"
         );
         assert_eq!(
             SemanticViewDefinition::stored_schema_version(&stored("single_v")),
-            CURRENT_SCHEMA_VERSION,
+            1,
             "no-join view is trivially complete and must be stamped"
         );
         assert_eq!(
@@ -1725,12 +1744,33 @@ mod tests {
             0,
             "un-upgradeable legacy row must be left at version 0"
         );
+        assert_eq!(
+            SemanticViewDefinition::stored_schema_version(&stored("format_one_v")),
+            1,
+            "a format-1 row that needs no more must keep format 1, so an older \
+             release can still read it"
+        );
+        assert_eq!(
+            SemanticViewDefinition::stored_schema_version(&stored("format_one_vars_v")),
+            CURRENT_SCHEMA_VERSION,
+            "a format-1 row with variables must be raised to the format it needs"
+        );
+        assert_eq!(
+            SemanticViewDefinition::stored_schema_version(&stored("legacy_inline_v")),
+            CURRENT_SCHEMA_VERSION,
+            "an unstamped row with a query-defined table must be stamped with the format it needs"
+        );
+        assert_eq!(
+            SemanticViewDefinition::stored_schema_version(&stored("future_v")),
+            99,
+            "a newer row must keep its stamp"
+        );
 
         // Idempotent: a second pass changes nothing and does not error.
         init_catalog(&con, ":memory:", false).unwrap();
         assert_eq!(
             SemanticViewDefinition::stored_schema_version(&stored("complete_v")),
-            CURRENT_SCHEMA_VERSION
+            1
         );
     }
 
@@ -1744,7 +1784,7 @@ mod tests {
     #[cfg(not(feature = "extension"))]
     #[test]
     fn upgrade_stamps_only_the_row_it_verified_not_its_namesakes_in_other_schemas() {
-        use crate::model::{SemanticViewDefinition, CURRENT_SCHEMA_VERSION};
+        use crate::model::SemanticViewDefinition;
         let con = in_memory_con();
         init_catalog(&con, ":memory:", false).unwrap();
         con.execute_batch("CREATE SCHEMA analytics;").unwrap();
@@ -1779,7 +1819,7 @@ mod tests {
         };
         assert_eq!(
             SemanticViewDefinition::stored_schema_version(&stored("analytics")),
-            CURRENT_SCHEMA_VERSION,
+            1,
             "the verified row must be stamped"
         );
         assert_eq!(
@@ -2136,7 +2176,13 @@ mod tests {
         let db_path_buf = unique_temp_db_path("test_tc6_restart_persistence");
         let db_path = db_path_buf.to_str().expect("temp dir is UTF-8");
 
-        let json = r#"{"schema_version":1,"base_table":"sales","dimensions":[],"metrics":[]}"#;
+        // At the current version, so the upgrade pass on reopen leaves the row
+        // byte-identical (an older stamp is re-stamped, which is tested apart).
+        let json = format!(
+            r#"{{"schema_version":{},"base_table":"sales","dimensions":[],"metrics":[]}}"#,
+            crate::model::CURRENT_SCHEMA_VERSION
+        );
+        let json = json.as_str();
 
         // --- Session 1: create the catalog and persist a definition. ---
         {

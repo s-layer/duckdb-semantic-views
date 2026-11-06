@@ -96,6 +96,10 @@ pub(super) fn transform(tree: &Tree) -> Result<String, ParseError> {
 /// them as `$1`, `$2`, ....
 struct Params<'e> {
     row: Vec<String>,
+    /// The view the construct names, for the messages of its own checks.
+    view: String,
+    /// The match keys of the variables its `VARIABLES` clause has set so far.
+    variables: Vec<String>,
     /// How the text around the construct refers to its next parameter: the
     /// statement's placeholder, or for a construct inside another's predicate,
     /// that one's next `$n`.
@@ -120,6 +124,8 @@ fn lower(
 ) -> Result<String, ParseError> {
     let mut params = Params {
         row: Vec::new(),
+        view: String::new(),
+        variables: Vec::new(),
         around,
     };
     let name_node = root
@@ -128,6 +134,7 @@ fn lower(
     let name = name_or(tree, name_node, |rest| {
         format!("expected a clause after the view name in SEMANTIC_VIEW(...), got: {rest}")
     })?;
+    params.view.clone_from(&name);
 
     let parts = root
         .find_all("SvQueryPart")
@@ -443,6 +450,20 @@ fn variable_item(tree: &Tree, node: &Node, params: &mut Params<'_>) -> Result<St
     ) else {
         return Err(internal(node, "malformed variable item"));
     };
+    // Refused here, by the view, rather than by DuckDB's `struct_pack` when
+    // the struct of values binds.
+    let key = crate::ident::normalize_ident_part(name);
+    if params.variables.contains(&key) {
+        return Err(error_at(
+            Some(node),
+            format!(
+                "semantic view '{}': variable '{}' is set twice",
+                params.view,
+                clean(name)
+            ),
+        ));
+    }
+    params.variables.push(key);
     let mut text = value.to_string();
     let start = assign_at + assign_len;
     let mut replacements = Vec::new();

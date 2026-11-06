@@ -256,32 +256,39 @@ METRICS (
 );
 ```
 
-Without `USING`, queries that involve an ambiguous join path will error.
+Each metric is grouped through its own relationship, so `DIMENSIONS city METRICS departures, arrivals` returns both counts per city in one query. A metric without `USING` cannot be grouped by `city`: the query is refused as ambiguous, as in Snowflake.
 
 ## DDL reference
 
 ```sql
 -- Full clause order (all clauses after TABLES optional;
--- at least one of DIMENSIONS or METRICS required)
-CREATE SEMANTIC VIEW name AS
-  TABLES (...)
+-- at least one of DIMENSIONS or METRICS required; AS is optional, as in Snowflake)
+CREATE SEMANTIC VIEW name [AS]
+  TABLES (...)              -- a table, or alias AS (SELECT ...)
   RELATIONSHIPS (...)
+  VARIABLES (...)
   FACTS (...)
   DIMENSIONS (...)
   METRICS (...)
   MATERIALIZATIONS (...);
 
-CREATE OR REPLACE SEMANTIC VIEW name AS ...;
-CREATE SEMANTIC VIEW IF NOT EXISTS name AS ...;
-CREATE SEMANTIC VIEW name FROM YAML '...';       -- define from YAML instead
+CREATE OR REPLACE SEMANTIC VIEW name ...;
+CREATE OR ALTER SEMANTIC VIEW name ...;           -- alter in place, keeping tags
+CREATE SEMANTIC VIEW IF NOT EXISTS name ...;
+CREATE SEMANTIC VIEW name FROM YAML $$ ... $$;    -- define from YAML instead
+CREATE SEMANTIC VIEW name FROM YAML FILE 'path.yaml';
+SELECT * FROM verify_semantic_view_yaml('name', $$ ... $$);  -- check YAML only
 DROP SEMANTIC VIEW [IF EXISTS] name;
 
 ALTER SEMANTIC VIEW [IF EXISTS] name RENAME TO new_name;
 ALTER SEMANTIC VIEW [IF EXISTS] name SET COMMENT = '...';
-ALTER SEMANTIC VIEW [IF EXISTS] name UNSET COMMENT;
+ALTER SEMANTIC VIEW [IF EXISTS] name SET MAX_STALENESS = '1 hour';
+ALTER SEMANTIC VIEW [IF EXISTS] name SET TAG owner = 'finance';
+ALTER SEMANTIC VIEW [IF EXISTS] name UNSET COMMENT, MAX_STALENESS;
+ALTER SEMANTIC VIEW [IF EXISTS] name UNSET TAG owner;
 
 DESCRIBE SEMANTIC VIEW name;
-SHOW SEMANTIC VIEWS;
+SHOW SEMANTIC VIEWS [LIMIT n [FROM 'last_name']];
 SHOW SEMANTIC DIMENSIONS [FOR METRIC m] [LIKE '...'] [IN name];
 SHOW SEMANTIC METRICS [LIKE '...'] [IN name];
 SHOW SEMANTIC FACTS [LIKE '...'] [IN name];
@@ -300,6 +307,9 @@ SELECT read_yaml_from_semantic_view('name');      -- YAML export
 
 Documented in full on the [docs site](https://s-layer.github.io/duckdb-semantic-views/):
 
+- **[View variables](https://s-layer.github.io/duckdb-semantic-views/how-to/view-variables.html)** -- `VARIABLES (min_amount INTEGER DEFAULT 1000)` in `CREATE`, read by name in members and set per query with `VARIABLES min_amount = 2000` in `SEMANTIC_VIEW(...)` (or `variables := {...}` in `semantic_view()`), prepared-statement parameters included.
+- **[Tables defined by a query](https://s-layer.github.io/duckdb-semantic-views/how-to/query-defined-tables.html)** -- a `TABLES` entry can be `alias AS (SELECT ...)`, to join, filter or pre-aggregate source tables inside the view.
+- **[CREATE OR ALTER](https://s-layer.github.io/duckdb-semantic-views/how-to/create-or-alter.html)** -- deploy the same definition, SQL or YAML, on every release: the view is altered to match and keeps its creation time, its tags and the materializations the change leaves valid. `verify_semantic_view_yaml` checks a YAML definition without creating anything.
 - **[Standard SQL queries](https://s-layer.github.io/duckdb-semantic-views/how-to/standard-sql.html)** -- `SELECT region, AGG(revenue) FROM sales WHERE ... GROUP BY region HAVING ...`, as in Snowflake; it works in subqueries, CTEs, `CREATE TABLE AS` and from Python.
 - **[Pre-aggregation filtering](https://s-layer.github.io/duckdb-semantic-views/how-to/filtering.html)** -- a `WHERE` inside `SEMANTIC_VIEW(...)` (`where_clause :=` in `semantic_view()`) filters rows *before* metrics are aggregated, which an outer `WHERE` cannot express. Prepared-statement parameters work there.
 - **[Multi-grain queries](https://s-layer.github.io/duckdb-semantic-views/explanation/metric-grain.html)** -- metrics at different grains are each aggregated over their own table and joined on the queried dimensions.
@@ -316,7 +326,7 @@ Documented in full on the [docs site](https://s-layer.github.io/duckdb-semantic-
 
 Full documentation: [s-layer.github.io/duckdb-semantic-views](https://s-layer.github.io/duckdb-semantic-views/)
 
-Includes getting-started and multi-table tutorials, full DDL and query reference, how-to guides for advanced features (FACTS, derived metrics, filtering, role-playing dimensions, fan traps, semi-additive and window metrics, materializations, YAML), and explanation pages covering metric grain, transactional DDL, and feature-by-feature comparisons with Snowflake and Databricks.
+Includes getting-started and multi-table tutorials, full DDL and query reference, how-to guides for advanced features (FACTS, derived metrics, filtering, view variables, tables defined by a query, role-playing dimensions, fan traps, semi-additive and window metrics, materializations, YAML, CREATE OR ALTER), and explanation pages covering metric grain, transactional DDL, and feature-by-feature comparisons with Snowflake and Databricks.
 
 ## Building
 

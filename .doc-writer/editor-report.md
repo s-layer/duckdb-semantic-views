@@ -1,104 +1,116 @@
 # Editor Report
 
-**Generated:** 2026-10-26 (v0.17.0 content refresh: standard-SQL queries, CREATE binds every member, member tags)
-**Files reviewed:** 15 changed pages (14 from the Author pass, plus `reference/create-semantic-view.rst` from the persona PARTIAL fixes); terminology pass over all docs/ pages
-**Changes made:** 9
-  - BLOCKING: 0
-  - SUGGESTION: 6
-  - NITPICK: 3
+**Generated:** 2026-11-06
+**Scope:** v0.18.0 docs pass, changed and new pages only (examples/ excluded)
+**Files reviewed:** 11 (docs/how-to/view-variables.rst, query-defined-tables.rst, create-or-alter.rst, role-playing-dimensions.rst, yaml-definitions.rst, data-sources.rst, how-to/index.rst, docs/explanation/snowflake-comparison.rst, docs/index.rst, docs/conf.py, README.md)
+**Changes made:** 18
+  - BLOCKING: 1
+  - SUGGESTION: 12
+  - NITPICK: 5
 
 ## Summary
 
-Fourteen pages were refreshed for v0.17.0. Every changed or added SQL example, and every
-error text quoted in new prose, was run against the debug build of this code in scratch
-sqllogictest files (`standard_sql.test`, `getting_started.test`, `multi_table.test`,
-`misc.test`: 103 statements, all passing, including the persona-pass fixes); the Python example on the standard-SQL page was run
-in the DuckDB 2.0.0 Python package with the same build. `sphinx-build -W` passes. No
-accuracy mismatch was left in place.
+The three new how-to pages are accurate: every SQL block on them, and the new output tables on the role-playing page, was run against the built extension (DuckDB 2.0.0) and the results and error texts match. One troubleshooting entry named the wrong error for a missing table, and three pages stacked admonitions back to back. The remaining edits are wording: ambiguous "the query's WHERE", one terminology slip, missing cross-references and two British spellings. No INTERNAL NOTES blocks were present to strip. `sphinx-build -W` passes.
+
+Accuracy method: SQL extracted from each page and run with `uv run --with duckdb==2.0.0` against `build/debug/semantic_views.duckdb_extension`; claims about errors were checked by triggering them, and two behaviors (which error a missing table reports; the `:=` default form) were confirmed against `src/query/member_types.rs` and by running them.
 
 ---
 
-## docs/how-to/standard-sql.rst
+## docs/how-to/query-defined-tables.rst
+
+### BLOCKING
+
+| Section | Description | Fix |
+|---------|-------------|-----|
+| Troubleshooting | Accuracy mismatch: entry was headed `table 'c' does not bind: Catalog Error ...`. When a member reads the table (as `city` and `segment` read `c` in the page's view), CREATE reports the first such member (`dimension 'city' does not bind: Catalog Error: Table with name ... does not exist`); `table 'c' does not bind` appears only when no member reads the table (`first_unbound_member`, src/query/member_types.rs). | Heading changed to the dimension form; body now says the error names the first member that reads the table, or the table itself when none does. |
 
 ### SUGGESTION
 
 | Section | Description | Fix |
 |---------|-------------|-----|
-| Aggregate Ad Hoc and Return Fact Rows | Heading ("Aggregate Facts and Dimensions Ad Hoc") did not cover the section's second half, a row-level fact query. | Renamed. |
-| Troubleshooting | Draft listed "must be passed to an aggregate or appear in GROUP BY" as the error for a stray `SELECT` item; the build gives that only when an aggregate and a bare fact share one expression. A bare item next to `AGG` gives "cannot combine facts and metrics". | Entry rewritten around the message the build actually gives, including the misspelled-name case. |
+| Join and Filter | Stacked admonitions (warning + tip back to back). | Tip turned into a paragraph; the PRIMARY KEY warning stays. |
+| Join and Filter, How Table Names Resolve | "the query's WHERE" was ambiguous on a page where "the query" usually means the table's query (2 instances). | Now "the WHERE inside SEMANTIC_VIEW(...)". |
+| Pre-Aggregate | "each customer has exactly one ltv row and the relationship is one-to-one": a customer with no paid orders has none, and the reader is not told why the extension treats it as one-to-one (persona never_assume: relationship modeling). | "its foreign-key column c.id is c's primary key, so each customer has at most one ltv row and the extension infers the relationship as one-to-one". |
+| Intro | First mention of `GET_DDL` unlinked (Rule 4). | Linked to `ref-get-ddl`. |
+
+## docs/how-to/view-variables.rst
+
+### SUGGESTION
+
+| Section | Description | Fix |
+|---------|-------------|-----|
+| Declare Variables | Stacked admonitions (tip + warning). | Typing tip turned into a paragraph; the shadowing warning stays. |
+| Make a Variable Required | Terminology: "tools that write plain SQL" (term map: "standard SQL"). | Now "standard SQL". |
+| Set Variables in a Query | First mention of the construct unlinked (Rule 4). | Linked to `ref-sv-construct`. |
 
 ### NITPICK
 
 | Section | Description | Fix |
 |---------|-------------|-----|
-| Related | Heading was "See Also"; every other how-to ends in "Related" (project rule: how-to layout). | Renamed, with the `howto-standard-sql-related` label. |
+| Declare Variables | "``:=`` may stand for ``DEFAULT``" reads oddly. | "``:=`` can replace ``DEFAULT``". |
+
+## docs/how-to/create-or-alter.rst
+
+### SUGGESTION
+
+| Section | Description | Fix |
+|---------|-------------|-----|
+| Keep Materializations Correct | Stacked admonitions (note + tip); the tip carried a Snowflake difference, which context.md assigns to `.. warning::`. | Schema-resolution note turned into a paragraph; Snowflake difference is now a warning. |
+| Deploy from a YAML File | "which is how Snowflake's create_or_alter option for YAML works here" was vague about which Snowflake surface is meant. | Names the `create_or_alter` argument of `SYSTEM$CREATE_SEMANTIC_VIEW_FROM_YAML`, matching the comparison page. |
+| Deploy from a YAML File | `verify_semantic_view_yaml` unlinked on its first mention; "pass the YAML text" omitted the view-name argument. | Linked to `ref-create-verify-yaml`; "pass the view name and the YAML text". |
+| Change the View | `SHOW SEMANTIC MATERIALIZATIONS` unlinked (Rule 4). | Linked to `ref-show-semantic-materializations`. |
+
+## docs/index.rst
+
+### SUGGESTION
+
+| Section | Description | Fix |
+|---------|-------------|-----|
+| Intro | "Snowflake's CREATE SEMANTIC VIEW clauses use Snowflake's syntax" was circular. | "The CREATE SEMANTIC VIEW clauses follow Snowflake's syntax". |
 
 ## docs/explanation/snowflake-comparison.rst
 
-### SUGGESTION
+### NITPICK
 
 | Section | Description | Fix |
 |---------|-------------|-----|
-| Concept Mapping, Query interface | DuckDB column said "direct SQL"; the how-to, CHANGELOG and other pages say "standard SQL". "Direct SQL" stays in the Snowflake column, which quotes Snowflake's term. | Normalized to "standard SQL". |
-| Feature Parity Notes | Draft row linked a Snowflake docs URL that could not be verified offline. | Link removed; the row describes the behavior and links the how-to. |
+| USING RELATIONSHIPS, Clause semantics | British "behaviour" (2 instances); convention is American spelling. | "behavior". |
 
-## docs/explanation/semantic-views-vs-regular-views.rst
+## docs/how-to/role-playing-dimensions.rst
 
-### SUGGESTION
-
-| Section | Description | Fix |
-|---------|-------------|-----|
-| What a Semantic View Does | "The resemblance stops at the surface." is a stock phrase. | "It only looks like a table query." |
-
-## docs/how-to/data-sources.rst
-
-### SUGGESTION
-
-| Section | Description | Fix |
-|---------|-------------|-----|
-| Troubleshooting, Catalog Error | "the plain error appears" was vague about which error. | Says the query raises this error when a table goes missing after CREATE. |
+No editor changes. New data rows, output tables and the corrected `:emphasize-lines` (7,8,17,18) were verified against the built extension.
 
 ### NITPICK
 
 | Section | Description | Fix |
 |---------|-------------|-----|
-| Troubleshooting | Kept the page's existing `--` dash style rather than introducing em dashes. | None needed. |
+| Query with USING Context | (Persona-step fix, recorded here for completeness.) Arrivals query had no output; refused query had no error text. | Output and error added; see the persona report. |
 
-## docs/how-to/facts.rst
+## docs/how-to/yaml-definitions.rst, data-sources.rst, how-to/index.rst, docs/conf.py, README.md
+
+No changes needed. The verify example in yaml-definitions runs as written. nav_links summaries and toctree entries match the new page titles. README's em dashes are in lines this pass did not touch (README is Markdown and outside the RST `--` convention).
 
 ### NITPICK
 
 | Section | Description | Fix |
 |---------|-------------|-----|
-| Troubleshooting | The second entry's bold heading now quotes the error the reader sees (`fact '...' does not bind: ...`), matching how the page's other entries lead with the symptom. | Heading changed. |
+| README.md | Pre-existing em dashes in untouched lines 178-181, 220. | Left as is (out of scope). |
 
 ---
 
 ## Diataxis Type Integrity
 
-- `tutorials/getting-started.rst`, `tutorials/multi-table.rst`: new steps are do-then-observe with
-  expected output; explanation kept to one sentence each and linked out to the how-to and the
-  error reference.
-- `how-to/standard-sql.rst`: the clause-mapping table is reference-like but scoped to the task;
-  the full message list moved to the error reference (`ref-err-standard-sql`) and is linked rather
-  than repeated.
-- `explanation/semantic-views-vs-regular-views.rst`: the new example is illustrative, not a step.
+All three new pages are how-to guides and follow the project layout (title, versionadded, intro, Prerequisites, tasks, Troubleshooting, Related). "Choose Between OR ALTER and OR REPLACE" and "Variables and Materializations" are short decision aids that stay goal-oriented; no structural blur.
 
-## Cross-References
+## Cross-Reference Linking
 
-All new `:ref:` targets resolve (strict build). New anchors: `ref-err-standard-sql`,
-`ref-err-facts-metrics`, `howto-standard-sql-setup`, `howto-standard-sql-adhoc`, `howto-standard-sql-verify`,
-`howto-standard-sql-app`, `howto-standard-sql-troubleshooting`, `howto-standard-sql-related`,
-`tutorial-gs-standard-sql`. Pages that mention the standard-SQL form now link
-`howto-standard-sql`: index, getting-started, the query reference, error reference, filtering,
-both comparisons, semantic-vs-regular views.
-
----
+`api_reference: manual`. Every `:ref:` on the changed pages resolves (`sphinx-build -W` exits 0). Links added: `ref-get-ddl`, `ref-sv-construct`, `ref-create-verify-yaml`, `ref-show-semantic-materializations`.
 
 ## Terminology Changes
 
 | Term | Before | After | Authority |
 |------|--------|-------|-----------|
-| standard SQL | "direct SQL" (DuckDB column of the Snowflake concept table) | "standard SQL" | CHANGELOG `[Unreleased]`, `how-to/standard-sql.rst` title |
-| does not bind | n/a (new term) | added to `terminology.yaml` with the rule that CREATE no longer accepts an unbindable member | `ref-err-member-bind` |
-| define-time inference pass | note said the bind probe runs only on the query path | note updated: CREATE binds every member (a check, not type inference) | #315 |
+| standard SQL | plain SQL | standard SQL | terminology.yaml project_terms |
+| behavior | behaviour | behavior | terminology.yaml conventions (American spelling) |
+
+terminology.yaml needed no new entries: the new pages use existing canonical forms ("the WHERE inside SEMANTIC_VIEW(...)", `where_clause` only in the function form, "fan trap", "define time").

@@ -193,6 +193,47 @@ SELECT * FROM SEMANTIC_VIEW(iq_vip_sv METRICS vo.vip_revenue);
 ----
 23
 
+# The query resolves its names at each query, as a DuckDB view body does: a
+# temporary table created after the view, in the querying session, shadows the
+# schema table of that name. A physical TABLES entry is pinned at CREATE and
+# does not move (Anentropic's decision on the v0.18.0 review, F3).
+
+statement ok
+CREATE SEMANTIC VIEW iq_shadow_inline
+  TABLES (so AS (SELECT * FROM iq_orders) PRIMARY KEY (id))
+  METRICS (so.total AS SUM(so.amount));
+
+statement ok
+CREATE SEMANTIC VIEW iq_shadow_phys
+  TABLES (so AS iq_orders PRIMARY KEY (id))
+  METRICS (so.total AS SUM(so.amount));
+
+query II
+SELECT (SELECT total FROM SEMANTIC_VIEW(iq_shadow_inline METRICS total)),
+       (SELECT total FROM SEMANTIC_VIEW(iq_shadow_phys METRICS total));
+----
+21	21
+
+statement ok
+CREATE TEMP TABLE iq_orders (id INTEGER, cust_id INTEGER, amount INTEGER);
+
+statement ok
+INSERT INTO temp.iq_orders VALUES (99, 1, 1000);
+
+query II
+SELECT (SELECT total FROM SEMANTIC_VIEW(iq_shadow_inline METRICS total)),
+       (SELECT total FROM SEMANTIC_VIEW(iq_shadow_phys METRICS total));
+----
+1000	21
+
+statement ok
+DROP TABLE temp.iq_orders;
+
+query I
+SELECT total FROM SEMANTIC_VIEW(iq_shadow_inline METRICS total);
+----
+21
+
 # The query may aggregate: a lifetime value per customer, bucketed by a
 # dimension.
 
@@ -250,6 +291,17 @@ CREATE SEMANTIC VIEW iq_bad
   TABLES (o AS iq_orders PRIMARY KEY (id), x AS (SELECT * FROM iq_no_such_table) PRIMARY KEY (id))
   RELATIONSHIPS (ox AS o(cust_id) REFERENCES x)
   METRICS (o.m AS SUM(o.amount));
+----
+semantic view 'iq_bad': table 'x' does not bind: Catalog Error: Table with name iq_no_such_table does not exist
+
+# The table is named even when a member reads it: the query, not the member,
+# is what does not bind.
+
+statement error
+CREATE SEMANTIC VIEW iq_bad
+  TABLES (x AS (SELECT * FROM iq_no_such_table) PRIMARY KEY (id))
+  DIMENSIONS (x.d AS x.id)
+  METRICS (x.n AS COUNT(*));
 ----
 semantic view 'iq_bad': table 'x' does not bind: Catalog Error: Table with name iq_no_such_table does not exist
 

@@ -24,7 +24,7 @@ version = 2
 unused-ignored-advisory = "deny"
 # zip 6.0.0 is a build dependency of libduckdb-sys =1.10506.0, which requires
 # zip "6", so the advisories' fix (zip >= 9) cannot be taken until a
-# libduckdb-sys release moves. All three are in archive extraction, which
+# libduckdb-sys release moves. All four are in archive extraction, which
 # libduckdb-sys's build script runs only with DUCKDB_DOWNLOAD_LIB=1, to unpack
 # DuckDB's own release zip. This repo never sets it: the `bundled` build
 # unpacks the crate's duckdb.tar.gz with tar instead. Drop these when the
@@ -33,6 +33,7 @@ ignore = [
     { id = "RUSTSEC-2026-0367", reason = "zip 6 via libduckdb-sys build script; extraction path unused (DUCKDB_DOWNLOAD_LIB unset)" },
     { id = "RUSTSEC-2026-0368", reason = "zip 6 via libduckdb-sys build script; extraction path unused (DUCKDB_DOWNLOAD_LIB unset)" },
     { id = "RUSTSEC-2026-0369", reason = "zip 6 via libduckdb-sys build script; extraction path unused (DUCKDB_DOWNLOAD_LIB unset)" },
+    { id = "RUSTSEC-2026-0429", reason = "zip 6 via libduckdb-sys build script; extraction path unused (DUCKDB_DOWNLOAD_LIB unset)" },
 ]
 
 [bans]

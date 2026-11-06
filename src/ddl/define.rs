@@ -148,8 +148,20 @@ pub fn enrich_definition_for_create(
     //    `temp_tables` goes out holding every name written without a schema;
     //    the INSERT keeps only those that are temporary tables in the
     //    creating session (`native_sql::temp_tables_expr`).
+    //    `schema_version` (AR-4) is the lowest storage format that reads the
+    //    view, so a view using nothing newer stays readable by an older
+    //    release. It is added to the JSON here, not carried on the struct, so
+    //    it stays out of YAML export.
     def.temp_tables = crate::expand::temp_table_candidates(&def);
-    serde_json::to_string(&def).map_err(|e| crate::errors::ParseError::positionless(e.to_string()))
+    let internal = |e: serde_json::Error| crate::errors::ParseError::positionless(e.to_string());
+    let mut json = serde_json::to_value(&def).map_err(internal)?;
+    if let Some(object) = json.as_object_mut() {
+        object.insert(
+            "schema_version".to_string(),
+            def.required_schema_version().into(),
+        );
+    }
+    serde_json::to_string(&json).map_err(internal)
 }
 
 /// The view a `CREATE SEMANTIC VIEW <name> FROM YAML $$<yaml>$$` names and the

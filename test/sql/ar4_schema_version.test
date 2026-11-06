@@ -1,8 +1,9 @@
 # AR-4: schema_version stamp + SG-7 legacy-relationship hard error.
 #
 # Covers the end-to-end integration paths the Rust unit tests cannot:
-#   A. CREATE / CREATE OR REPLACE inject schema_version into the stored JSON
-#      via the CREATE production's json_merge_patch emission.
+#   A. Every CREATE form stamps the stored JSON with schema_version: the
+#      lowest storage format that reads the view, so a view using nothing
+#      newer than format 1 stays readable by a release that reads format 1.
 #   B. A legacy definition whose relationship lacks fk_columns is rejected at
 #      query time (SG-7) instead of silently mis-aggregating.
 
@@ -21,7 +22,7 @@ AS
   DIMENSIONS (o.region AS o.region)
   METRICS (o.total AS SUM(o.amount))
 
-# A1: the freshly written definition carries schema_version = 1.
+# A1: a view using no format-2 construct is stamped 1.
 query I
 SELECT CAST(json_extract(definition, '$.schema_version') AS INTEGER)
 FROM semantic_layer._definitions WHERE name = 'ar4_sv'
@@ -49,6 +50,98 @@ SELECT region, total FROM SEMANTIC_VIEW(ar4_sv DIMENSIONS region METRICS total)
 EU	200.00
 US	100.00
 
+# A4: variables, a query-defined table and a metric over a same-table metric
+# each need format 2, through every CREATE form; CREATE OR ALTER re-stamps by
+# what the new statement uses. One result set, so each view's stamp shows.
+statement ok
+CREATE SEMANTIC VIEW ar4_vars
+  TABLES (o AS ar4_orders PRIMARY KEY (id))
+  VARIABLES (floor_amount DECIMAL(10,2) DEFAULT 0)
+  DIMENSIONS (o.region AS o.region)
+  METRICS (o.total AS SUM(o.amount) FILTER (WHERE o.amount >= floor_amount))
+
+statement ok
+CREATE SEMANTIC VIEW ar4_inline
+  TABLES (o AS (SELECT * FROM ar4_orders) PRIMARY KEY (id))
+  DIMENSIONS (o.region AS o.region)
+  METRICS (o.total AS SUM(o.amount))
+
+statement ok
+CREATE SEMANTIC VIEW ar4_metric_ref
+  TABLES (o AS ar4_orders PRIMARY KEY (id))
+  DIMENSIONS (o.region AS o.region)
+  METRICS (o.total AS SUM(o.amount), o.doubled AS o.total * 2)
+
+statement ok
+CREATE SEMANTIC VIEW ar4_yaml_plain FROM YAML $$
+tables:
+  - alias: o
+    table: ar4_orders
+    pk_columns: [id]
+dimensions:
+  - name: region
+    expr: o.region
+    source_table: o
+metrics: []
+$$
+
+statement ok
+CREATE SEMANTIC VIEW ar4_yaml_vars FROM YAML $$
+tables:
+  - alias: o
+    table: ar4_orders
+    pk_columns: [id]
+variables:
+  - name: floor_amount
+    default: '0'
+dimensions:
+  - name: region
+    expr: o.region
+    source_table: o
+metrics: []
+$$
+
+statement ok
+CREATE SEMANTIC VIEW ar4_altered
+  TABLES (o AS ar4_orders PRIMARY KEY (id))
+  DIMENSIONS (o.region AS o.region)
+
+statement ok
+CREATE OR ALTER SEMANTIC VIEW ar4_altered
+  TABLES (o AS ar4_orders PRIMARY KEY (id))
+  VARIABLES (floor_amount DECIMAL(10,2) DEFAULT 0)
+  DIMENSIONS (o.region AS o.region)
+
+statement ok
+CREATE SEMANTIC VIEW ar4_altered_back
+  TABLES (o AS (SELECT * FROM ar4_orders) PRIMARY KEY (id))
+  DIMENSIONS (o.region AS o.region)
+
+statement ok
+CREATE OR ALTER SEMANTIC VIEW ar4_altered_back
+  TABLES (o AS ar4_orders PRIMARY KEY (id))
+  DIMENSIONS (o.region AS o.region)
+
+query TI
+SELECT name, CAST(json_extract(definition, '$.schema_version') AS INTEGER)
+FROM semantic_layer._definitions WHERE name LIKE 'ar4\_%' ESCAPE '\' AND name <> 'ar4_sv'
+ORDER BY name
+----
+ar4_altered	2
+ar4_altered_back	1
+ar4_inline	2
+ar4_metric_ref	2
+ar4_vars	2
+ar4_yaml_plain	1
+ar4_yaml_vars	2
+
+# A5: the format-2 views still query correctly.
+query TR rowsort
+SELECT region, doubled FROM SEMANTIC_VIEW(ar4_metric_ref DIMENSIONS region METRICS doubled)
+----
+EU	400.0
+US	200.0
+
 # B: inject a legacy row whose relationship carries no fk_columns (the
 # pre-Phase-24 `on`-only encoding), bypassing the parser. Querying it must
 # hard-error rather than silently under-checking fan traps (SG-7).
@@ -63,3 +156,27 @@ statement error
 SELECT * FROM SEMANTIC_VIEW(ar4_legacy DIMENSIONS region METRICS total)
 ----
 foreign-key column metadata
+
+# C: a row stamped by a later release is refused by name, on every read path,
+# rather than read with the fields this release knows (v0.18.0 review F2).
+statement ok
+INSERT INTO semantic_layer._definitions (schema_name, name, definition) VALUES (
+  'main',
+  'ar4_future',
+  '{"tables":[{"alias":"o","table":"ar4_orders","pk_columns":["id"]}],"dimensions":[{"name":"region","expr":"o.region","source_table":"o"}],"metrics":[{"name":"total","expr":"SUM(o.amount)","source_table":"o"}],"schema_version":99}'
+)
+
+statement error
+SELECT * FROM SEMANTIC_VIEW(ar4_future DIMENSIONS region METRICS total)
+----
+semantic view 'ar4_future' was written by a newer version of semantic_views (storage format 99; this version reads up to 2)
+
+statement error
+DESCRIBE SEMANTIC VIEW ar4_future
+----
+was written by a newer version of semantic_views
+
+statement error
+SELECT GET_DDL('SEMANTIC VIEW', 'ar4_future')
+----
+was written by a newer version of semantic_views

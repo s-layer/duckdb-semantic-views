@@ -132,6 +132,13 @@ enum Stop {
     TooLong,
 }
 
+/// Whether any metric in `def` is written over a metric on its own table,
+/// which only storage format 2 reads (`SemanticViewDefinition::required_schema_version`).
+#[must_use]
+pub fn has_same_table_metric_refs(def: &SemanticViewDefinition) -> bool {
+    (0..def.metrics.len()).any(|i| !same_table_refs(def, i).is_empty())
+}
+
 /// Refuse a metric over a same-table metric that cannot be inlined as an
 /// aggregate ([`refusal`]), a cycle of such references, and a chain deeper
 /// than [`MAX_REFERENCE_DEPTH`] or longer, inlined, than [`MAX_INLINED_LEN`].

@@ -27,12 +27,23 @@ Consider flights with departure and arrival airports:
 .. code-block:: sql
 
    CREATE TABLE airports (airport_code VARCHAR, city VARCHAR, country VARCHAR);
+   INSERT INTO airports VALUES
+       ('DEN', 'Denver',        'US'),
+       ('SFO', 'San Francisco', 'US'),
+       ('LHR', 'London',        'UK'),
+       ('JFK', 'New York',      'US');
+
    CREATE TABLE flights (
        flight_id INTEGER,
        departure_code VARCHAR,
        arrival_code VARCHAR,
        carrier VARCHAR
    );
+   INSERT INTO flights VALUES
+       (1, 'SFO', 'DEN', 'UA'),
+       (2, 'SFO', 'LHR', 'BA'),
+       (3, 'DEN', 'SFO', 'UA'),
+       (4, 'DEN', 'JFK', 'UA');
 
 Both ``departure_code`` and ``arrival_code`` point to ``airports``. A dimension like ``city`` from ``airports`` is ambiguous: is it the departure city or the arrival city?
 
@@ -45,7 +56,7 @@ Define a Role-Playing View
 Declare two named relationships to the same target table. Then use ``USING`` on metrics to select which relationship path each metric traverses.
 
 .. code-block:: sql
-   :emphasize-lines: 8,9,16,17
+   :emphasize-lines: 7,8,17,18
 
    CREATE SEMANTIC VIEW flight_analytics AS
    TABLES (
@@ -62,11 +73,12 @@ Declare two named relationships to the same target table. Then use ``USING`` on 
        f.carrier AS f.carrier
    )
    METRICS (
+       f.flight_count AS COUNT(*),
        f.departure_count USING (dep_airport) AS COUNT(*),
        f.arrival_count   USING (arr_airport) AS COUNT(*)
    );
 
-The ``USING (dep_airport)`` clause tells the extension: when this metric is queried alongside a dimension from the ``airports`` table, use the ``dep_airport`` relationship to resolve the join path.
+The ``USING (dep_airport)`` clause tells the extension: when this metric is queried alongside a dimension from the ``airports`` table, use the ``dep_airport`` relationship to resolve the join path. ``flight_count`` names no relationship, so it can be grouped by ``carrier`` but not by ``city``.
 
 Snowflake's documentation writes the same view with one plain count and a
 metric per role over it. A metric can name another metric on its own table,
@@ -98,6 +110,15 @@ Query with USING Context
        METRICS departure_count
    ) ORDER BY city;
 
+.. code-block:: text
+
+   ┌───────────────┬─────────────────┐
+   │     city      │ departure_count │
+   ├───────────────┼─────────────────┤
+   │ Denver        │               2 │
+   │ San Francisco │               2 │
+   └───────────────┴─────────────────┘
+
 **Arrivals by city:** the ``arrival_count`` metric's USING context resolves ``city`` via ``arr_airport``:
 
 .. code-block:: sql
@@ -106,6 +127,17 @@ Query with USING Context
        DIMENSIONS city
        METRICS arrival_count
    ) ORDER BY city;
+
+.. code-block:: text
+
+   ┌───────────────┬───────────────┐
+   │     city      │ arrival_count │
+   ├───────────────┼───────────────┤
+   │ Denver        │             1 │
+   │ London        │             1 │
+   │ New York      │             1 │
+   │ San Francisco │             1 │
+   └───────────────┴───────────────┘
 
 **Departures and arrivals by city in one query:** each metric is grouped by
 ``city`` through its own relationship, and the two results are merged on
@@ -118,6 +150,19 @@ metric:
        DIMENSIONS city
        METRICS departure_count, arrival_count
    ) ORDER BY city;
+
+.. code-block:: text
+
+   ┌───────────────┬─────────────────┬───────────────┐
+   │     city      │ departure_count │ arrival_count │
+   ├───────────────┼─────────────────┼───────────────┤
+   │ Denver        │               2 │             1 │
+   │ London        │            NULL │             1 │
+   │ New York      │            NULL │             1 │
+   │ San Francisco │               2 │             1 │
+   └───────────────┴─────────────────┴───────────────┘
+
+No flight departs from London or New York, so their ``departure_count`` is ``NULL``.
 
 .. versionadded:: 0.18.0
 
@@ -136,6 +181,10 @@ metric in the query names a path:
        DIMENSIONS city
        METRICS departure_count, flight_count
    );
+
+.. code-block:: text
+
+   Binder Error: semantic_view: semantic view 'flight_analytics': dimension 'city' is ambiguous -- table 'a' is reached via multiple relationships: [dep_airport, arr_airport]. Give every metric in the query a USING that names one of them, or use a dimension from a non-ambiguous table. ...
 
 .. versionchanged:: 0.18.0
 
@@ -165,8 +214,17 @@ it by ``city`` is refused, as in Snowflake.
 
    SELECT * FROM SEMANTIC_VIEW(flight_analytics
        DIMENSIONS carrier
-       METRICS departure_count, arrival_count
+       METRICS departure_count, arrival_count, flight_count
    ) ORDER BY carrier;
+
+.. code-block:: text
+
+   ┌─────────┬─────────────────┬───────────────┬──────────────┐
+   │ carrier │ departure_count │ arrival_count │ flight_count │
+   ├─────────┼─────────────────┼───────────────┼──────────────┤
+   │ BA      │               1 │             1 │            1 │
+   │ UA      │               3 │             3 │            3 │
+   └─────────┴─────────────────┴───────────────┴──────────────┘
 
 
 .. _howto-rp-derived:
@@ -446,10 +504,12 @@ Troubleshooting
 **Facts on a role-playing table**
    .. versionchanged:: 0.11.0
 
-   A fact sourced on a role-playing table (or a descendant of one) is now
-   rejected. Facts carry no ``USING`` context, so the role was always
-   unresolvable -- previously such a fact silently read the first-declared
-   relationship's rows.
+   Querying a fact sourced on a role-playing table (or a descendant of one)
+   directly, as in ``FACTS airport_city``, is refused as ambiguous. A fact
+   query carries no ``USING`` context, so the role cannot be resolved --
+   previously such a fact silently read the first-declared relationship's
+   rows. A ``USING`` metric that aggregates the fact works (see
+   :ref:`howto-rp-facts`).
 
 **A member references a fact on a role-playing table**
    .. versionchanged:: 0.14.0

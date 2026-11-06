@@ -30,5 +30,5 @@ pub use names::validate_name_uniqueness;
 pub(crate) use relationship::{find_relationship, RelNameMatch};
 pub use relationship::{validate_graph, RelationshipGraph};
 pub(crate) use same_table_metrics::inline_same_table_metrics;
-pub use same_table_metrics::validate_same_table_metric_refs;
+pub use same_table_metrics::{has_same_table_metric_refs, validate_same_table_metric_refs};
 pub use using::validate_using_relationships;
