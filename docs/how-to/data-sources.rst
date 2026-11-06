@@ -143,6 +143,8 @@ Creating a ``VIEW`` instead of a ``TABLE`` keeps queries reading the latest Iceb
 
 This is useful when the underlying Iceberg table changes frequently. The trade-off is that each :ref:`semantic-view query <ref-semantic-view-function>` re-scans the Iceberg metadata.
 
+The scan can also go inside the semantic view, as a table defined by a query: ``o AS (SELECT * FROM iceberg_scan('s3://my-bucket/warehouse/orders')) PRIMARY KEY (id)`` in ``TABLES``. The definition then travels with the view in ``GET_DDL`` and YAML. See :ref:`howto-query-tables`.
+
 .. _howto-ds-schema-evolution:
 
 Schema Evolution
@@ -150,8 +152,8 @@ Schema Evolution
 
 If columns are added or removed from the Iceberg table, update the semantic view to match:
 
-- **New column:** Add a dimension or metric referencing the new column, then ``CREATE OR REPLACE SEMANTIC VIEW`` to update the definition.
-- **Removed column:** Any dimension or metric referencing the dropped column will cause a query-time SQL error. Update the semantic view definition to remove those references. ``CREATE OR REPLACE`` binds every member of the new definition, so a reference you missed is reported then, and the old definition stays in place until the replacement binds.
+- **New column:** Add a dimension or metric referencing the new column, then run the updated definition with ``CREATE OR ALTER SEMANTIC VIEW``, which keeps the view's tags and the materializations the change does not affect (see :ref:`howto-create-or-alter`), or with ``CREATE OR REPLACE SEMANTIC VIEW``.
+- **Removed column:** Any dimension or metric referencing the dropped column will cause a query-time SQL error. Update the semantic view definition to remove those references. ``CREATE OR ALTER`` and ``CREATE OR REPLACE`` bind every member of the new definition, so a reference you missed is reported then, and the old definition stays in place until the new one binds.
 
 .. tip::
 

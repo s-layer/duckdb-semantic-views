@@ -79,18 +79,38 @@ The ``CREATE OR REPLACE``, ``CREATE OR ALTER`` and ``CREATE IF NOT EXISTS`` vari
    ...
    $$;
 
-``CREATE OR ALTER`` suits a YAML file you keep in version control and load on every deploy: the view comes to match the file, and keeps its creation time, its tags and the materializations the change leaves valid. The YAML can't carry ``tags:`` then. See :ref:`ref-create-or-alter`.
+``CREATE OR ALTER`` suits a YAML file you keep in version control and load on every deploy: the view comes to match the file, and keeps its creation time, its tags and the materializations the change leaves valid. The YAML can't carry ``tags:`` then. See :ref:`howto-create-or-alter`.
 
-To check a definition without creating anything, pass it to ``verify_semantic_view_yaml``. It runs every check the ``CREATE`` would, including binding each member, and fails with the ``CREATE``'s error if one fails:
+
+.. _howto-yaml-verify:
+
+Check a Definition Without Creating It
+======================================
+
+.. versionadded:: 0.18.0
+
+To check a definition without creating anything, pass the view name and the YAML text to ``verify_semantic_view_yaml``. It runs every check the ``CREATE`` would, including binding each member against its tables, and fails with the ``CREATE``'s error if one fails:
 
 .. code-block:: duckdb-sql
 
    SELECT * FROM verify_semantic_view_yaml('order_metrics', $$
-   ...
+   tables:
+     - alias: o
+       table: orders
+       pk_columns:
+         - id
+   dimensions:
+     - name: region
+       expr: o.region
+       source_table: o
+   metrics:
+     - name: revenue
+       expr: SUM(o.amount)
+       source_table: o
    $$);
    -- YAML file is valid for creating a semantic view. No object has been created yet.
 
-See :ref:`verify_semantic_view_yaml <ref-create-verify-yaml>`.
+This is the extension's form of the ``verify_only`` argument of Snowflake's ``SYSTEM$CREATE_SEMANTIC_VIEW_FROM_YAML``. It does not check whether a view of that name already exists. See :ref:`verify_semantic_view_yaml <ref-create-verify-yaml>`.
 
 
 .. _howto-yaml-import-file:
@@ -218,3 +238,4 @@ Related
 - :ref:`ref-read-yaml` -- ``READ_YAML_FROM_SEMANTIC_VIEW()`` function reference
 - :ref:`ref-create-semantic-view` -- ``FROM YAML`` and ``FROM YAML FILE`` syntax
 - :ref:`ref-get-ddl` -- Export as SQL DDL (alternative to YAML export)
+- :ref:`howto-create-or-alter` -- Deploy a YAML file on every release with ``CREATE OR ALTER``

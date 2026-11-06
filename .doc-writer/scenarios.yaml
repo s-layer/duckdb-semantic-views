@@ -4,7 +4,7 @@ user_personas:
     skill_level: "intermediate"
     generated_at: "2026-08-09"
     updated_at: "2026-10-01"
-    update_note: "2026-10-26 (v0.17.0): S1-S6 reused; docs/how-to/standard-sql.rst added to doc_pages (one new page, under the regeneration threshold); S7 and S8 appended for the standard-SQL query form and CREATE binding every member. Earlier: S1-S5 reused unchanged (page set grew by two pages, explanation/metric-grain.rst and how-to/filtering.rst, well under the regeneration threshold). S6 appended for the v0.13.0 duckdb_functions() metadata feature. 2026-10-01: docs/reference/functions.rst added to doc_pages (created by the audit-fix PR to satisfy S6)."
+    update_note: "2026-11-06 (v0.18.0): S1-S8 reused; three how-to pages added (view-variables, query-defined-tables, create-or-alter), under the regeneration threshold; S9-S12 appended for view variables, query-defined tables, CREATE OR ALTER and multi-path USING. 2026-10-26 (v0.17.0): S1-S6 reused; docs/how-to/standard-sql.rst added to doc_pages (one new page, under the regeneration threshold); S7 and S8 appended for the standard-SQL query form and CREATE binding every member. Earlier: S1-S5 reused unchanged (page set grew by two pages, explanation/metric-grain.rst and how-to/filtering.rst, well under the regeneration threshold). S6 appended for the v0.13.0 duckdb_functions() metadata feature. 2026-10-01: docs/reference/functions.rst added to doc_pages (created by the audit-fix PR to satisfy S6)."
     doc_pages:
       - "docs/index.rst"
       - "docs/changelog.md"
@@ -27,6 +27,9 @@ user_personas:
       - "docs/how-to/query-facts.rst"
       - "docs/how-to/materializations.rst"
       - "docs/how-to/yaml-definitions.rst"
+      - "docs/how-to/view-variables.rst"
+      - "docs/how-to/query-defined-tables.rst"
+      - "docs/how-to/create-or-alter.rst"
       - "docs/explanation/index.rst"
       - "docs/explanation/semantic-views-vs-regular-views.rst"
       - "docs/explanation/metric-grain.rst"
@@ -93,3 +96,23 @@ user_personas:
         starting_point: "docs/index.rst"
         persona_relevance: "I keep view definitions in version control and deploy them with a script. A definition that is accepted and then fails on first query breaks a dashboard in production; one that fails at CREATE breaks my deploy, which is where I want it."
         done_when: "I know that CREATE (and CREATE OR REPLACE, IF NOT EXISTS, FROM YAML) binds every member and what it does not check, I know the error message format, I know a refused CREATE OR REPLACE leaves the old view in place, and I know which failures can still surface only at query time."
+      - id: S9
+        goal: "I want to give my view a threshold and a currency rate that each query can set, with sensible defaults, and set them from my Python app with bound parameters"
+        starting_point: "docs/index.rst"
+        persona_relevance: "Snowflake added VARIABLES to semantic views; without them I need one view per threshold or rate. My dashboard backend passes request values, so the binding must be safe."
+        done_when: "I know where VARIABLES goes in CREATE and the entry syntax, can read a variable in a member, can set it per query in SEMANTIC_VIEW(...) and semantic_view(), know what happens with no default, can bind values from Python, can see where values land in the generated SQL, and know the limits (standard SQL, materializations, window frames)."
+      - id: S10
+        goal: "I want a logical table in my view that is a query (a join of customers to addresses, only paid orders, a per-customer total) instead of a physical table"
+        starting_point: "docs/index.rst"
+        persona_relevance: "Snowflake lets a TABLES entry be a query; my source schemas rarely match the logical model one-to-one, and I would rather keep the shaping inside the model than create DuckDB views for it."
+        done_when: "I have the syntax with keys and relationships, a runnable example with output, know what the PRIMARY KEY promise means, how table names in the query resolve, what is refused, and how the query appears in DESCRIBE, GET_DDL, YAML and the generated SQL."
+      - id: S11
+        goal: "I want to deploy the same view definition (SQL or YAML) on every release without losing tags, creation time or materializations, and check a YAML file before deploying it"
+        starting_point: "docs/index.rst"
+        persona_relevance: "My view definitions live in git and a CI job applies them. CREATE OR REPLACE resets things set outside the file; I need Snowflake's CREATE OR ALTER semantics and a dry-run check."
+        done_when: "I know how OR ALTER differs from OR REPLACE, what is kept and what is unset, when a materialization is dropped and how to restore it, how to change tags around it, how to preview a change in a transaction, how to deploy YAML with it, and how to validate YAML with verify_semantic_view_yaml."
+      - id: S12
+        goal: "I want departures and arrivals per city in one query over a flights table that references airports twice"
+        starting_point: "docs/index.rst"
+        persona_relevance: "Role-playing dimensions are standard in my star schemas; Snowflake answers this query, and splitting it into two queries in the app is friction."
+        done_when: "I can define the two relationships and USING metrics, run the combined query and see its output including NULLs for unreached groups, and know which combinations are refused and what the error looks like."

@@ -89,6 +89,11 @@ html_theme_options = {
                     "summary": "Detect and resolve aggregation inflation from one-to-many joins",
                 },
                 {
+                    "title": "Tables Defined by a Query",
+                    "url": "how-to/query-defined-tables",
+                    "summary": "Join, filter or pre-aggregate source tables inside the view's TABLES clause",
+                },
+                {
                     "title": "Data Sources",
                     "url": "how-to/data-sources",
                     "summary": "Connect CSV, Parquet, Iceberg, and database tables to semantic views",
@@ -97,6 +102,16 @@ html_theme_options = {
                     "title": "Filtering",
                     "url": "how-to/filtering",
                     "summary": "Filter before aggregation inside SEMANTIC_VIEW(...) or after it with an outer WHERE",
+                },
+                {
+                    "title": "View Variables",
+                    "url": "how-to/view-variables",
+                    "summary": "Set thresholds, rates and reporting dates per query with VARIABLES",
+                },
+                {
+                    "title": "Standard SQL",
+                    "url": "how-to/standard-sql",
+                    "summary": "Query a view by name with SELECT ... GROUP BY and AGG()",
                 },
                 {
                     "title": "Metadata Annotations",
@@ -132,6 +147,11 @@ html_theme_options = {
                     "title": "YAML Definitions",
                     "url": "how-to/yaml-definitions",
                     "summary": "Export and import semantic view definitions as YAML",
+                },
+                {
+                    "title": "CREATE OR ALTER",
+                    "url": "how-to/create-or-alter",
+                    "summary": "Change a view in place, keeping its creation time, tags and valid materializations",
                 },
             ],
         },

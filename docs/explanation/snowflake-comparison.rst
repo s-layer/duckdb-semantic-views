@@ -39,6 +39,9 @@ Concept Mapping
    * - Table declarations
      - ``TABLES`` clause with aliases
      - ``TABLES`` clause with aliases and optional ``PRIMARY KEY``
+   * - Logical tables defined by a query
+     - ``<alias> AS ( <query> )`` in ``TABLES``
+     - The same form (see :ref:`howto-query-tables`)
    * - Relationships
      - ``RELATIONSHIPS`` clause with FK REFERENCES
      - ``RELATIONSHIPS`` clause with FK REFERENCES
@@ -474,7 +477,7 @@ Both systems support ``USING`` on metrics to select which relationship path a me
 
 .. versionadded:: 0.18.0
 
-   Snowflake's multi-path behaviour: metrics with different ``USING`` paths to
+   Snowflake's multi-path behavior: metrics with different ``USING`` paths to
    one table can be queried together with a dimension on it. Each metric is
    grouped through its own path and the results are merged on the queried
    dimensions, so a group one path never reaches shows ``NULL`` for that
@@ -508,7 +511,7 @@ Both systems allow facts to be queried directly as row-level columns. In Snowfla
    In both systems, facts and metrics cannot be combined in the same query. Use ``FACTS`` or ``METRICS``, not both.
 
 .. versionchanged:: 0.18.0
-   Both systems now read a member in the clause it is listed in, following Snowflake's ``2026_07`` behaviour change. A dimension listed in ``FACTS`` is read row by row, a fact listed in ``DIMENSIONS`` is grouped on, and ``FACTS`` with ``DIMENSIONS`` in one query is refused (see :ref:`ref-err-facts-dimensions`).
+   Both systems now read a member in the clause it is listed in, following Snowflake's ``2026_07`` behavior change. A dimension listed in ``FACTS`` is read row by row, a fact listed in ``DIMENSIONS`` is grouped on, and ``FACTS`` with ``DIMENSIONS`` in one query is refused (see :ref:`ref-err-facts-dimensions`).
 
 
 Semi-Additive and Window Metrics
@@ -614,10 +617,16 @@ Snowflake ``CREATE SEMANTIC VIEW`` features that are commonly asked about, and w
      - **Accepted and stored**, with Snowflake's syntax, so Snowflake DDL pastes as written. None of it changes a query: there is no Cortex Analyst to read it, no search service to call, and no automatic refresh for ``MAX_STALENESS`` to bound. The clauses show in ``DESCRIBE`` with Snowflake's ``CUSTOM_INSTRUCTIONS`` and ``AI_VERIFIED_QUERY`` rows and survive ``GET_DDL`` and YAML export. ``MAX_STALENESS`` takes whole seconds, as Snowflake's ``CREATE`` reference writes it, and also the ``'1 hour'`` form its materializations guide uses; ``ALTER ... SET`` / ``UNSET MAX_STALENESS`` work. ``COPY GRANTS`` is accepted and ignored, as DuckDB has no grants on these views. Snowflake's ``GET_DDL`` can write sample values set outside the DDL as a trailing ``WITH EXTENSION (CA = '<json>')`` clause. That clause is not part of Snowflake's ``CREATE`` syntax and its JSON is undocumented, so it is not planned: it is refused with an error that names it, and the values can be restated as ``SAMPLE_VALUES``. See :ref:`Cortex Analyst metadata <ref-create-cortex-metadata>`.
    * - View variables -- ``VARIABLES (min_amount INTEGER DEFAULT 1000, ...)`` in ``CREATE``, read by bare name in member expressions, and set per query with ``VARIABLES min_amount = 2000`` as the last clause of ``SEMANTIC_VIEW(...)``
      - **Supported**, with Snowflake's rules: an entry is ``name [type] [{DEFAULT | :=} <expr>] [COMMENT '...']``, an unqualified name is the variable and a qualified one the column, a default is evaluated by each query, and a variable with no default must be set by every query of the view. Members, the query's ``WHERE`` and expression items read variables, and a window frame bound cannot. ``semantic_view()`` takes the values as ``variables := {'min_amount': 2000}``, and a value can be a prepared-statement parameter. DuckDB names the refused types differently: a variable cannot be a list, array, ``STRUCT``, ``MAP``, ``UNION``, ``VARIANT`` or ``JSON``, the counterparts of Snowflake's ``VARIANT``, ``OBJECT`` and ``ARRAY``. A standard-SQL query over the view cannot set variables, so defaults apply. A materialization covering a member that reads a variable is not used for routing. ``DESCRIBE`` shows ``VARIABLE`` rows, and ``GET_DDL`` and the YAML export write the variables back. See :ref:`ref-create-variables` and :ref:`ref-sv-variables`.
+   * - Logical tables defined by a query -- ``customer_info AS (SELECT * FROM customer JOIN customer_address ON ...) PRIMARY KEY (c_cust_id)`` in ``TABLES``
+     - **Supported**, written the same way. The alias is required, and keys, relationships, comments, synonyms and tags work as on a physical table. Every query of the view reads the table through its query, which may join, filter or aggregate. The query is bound at ``CREATE``, and its table names resolve in the schema the view was created in, as in a DuckDB view body, rather than through Snowflake's name resolution. It cannot hold a ``;`` or a prepared-statement parameter, and SQL comments in it are not kept. ``DESCRIBE`` shows it in a ``DEFINITION`` row in place of the ``BASE_TABLE_*`` rows, and ``GET_DDL`` and the YAML export (``definition:``) write it back. A release of the extension older than 0.18.0 cannot read a view that has such a table. See :ref:`howto-query-tables`.
+   * - ``CREATE OR ALTER SEMANTIC VIEW``, and the ``create_or_alter`` and ``verify_only`` options of ``SYSTEM$CREATE_SEMANTIC_VIEW_FROM_YAML``
+     - **Supported.** The statement creates a missing view and otherwise alters it to match: a clause, property or member it leaves out is unset or removed. It keeps the creation time and the tags of the view and of each table, fact, dimension and metric it keeps by name, and, as in Snowflake, it takes no tags, ``IF NOT EXISTS`` or ``COPY GRANTS``. A materialization whose covered members the change reaches is dropped, where Snowflake suspends it, since this extension has no suspended state to resume; a ``MATERIALIZATIONS`` clause in the statement replaces the view's materializations. ``create_or_alter`` is ``CREATE OR ALTER SEMANTIC VIEW ... FROM YAML``, and ``verify_only`` is the ``verify_semantic_view_yaml(view_name, yaml)`` table function, which runs the ``CREATE``'s checks and returns Snowflake's message. See :ref:`howto-create-or-alter`.
+   * - Multi-path ``USING`` -- metrics with different ``USING`` relationships to one role-played table, queried together with a dimension on it (``DIMENSIONS city METRICS departures, arrivals``)
+     - **Supported.** Each metric is grouped through its own relationship and the results are merged on the queried dimensions, so a group that one path never reaches has ``NULL`` for that path's metrics. A derived metric over such metrics is computed from the merged parts, a dimension on a table reached through the role-played one (``regions`` from ``airports``) follows each metric's path, and a metric can be written over another metric on its own table (``f.departures USING (dep_airport) AS f.flight_count``), as Snowflake documents it. A metric with no ``USING`` grouped by a role-played dimension is refused, as in Snowflake. Two window metrics on different paths, or metrics on different paths beside a semi-additive metric whose ``NON ADDITIVE BY`` dimension is not queried, are refused with advice to query them separately. See :ref:`howto-role-playing`.
    * - Column-level security
      - Out of scope; DuckDB handles access control
    * - ``ASOF`` / temporal relationships
-     - Not planned; standard equi-joins cover most use cases
+     - Not supported yet. Relationships are equi-joins on key columns
    * - ``LABELS`` values other than ``FILTER``, and the ``COPILOT`` clauses
      - Not planned; these are Snowflake-catalog or Cortex-specific and have no DuckDB equivalent
 
