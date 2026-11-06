@@ -64,7 +64,7 @@ View written by a newer release
    semantic view '<name>' was written by a newer version of semantic_views
    (storage format <n>; this version reads up to <m>); upgrade the extension to read it
 
-**Cause:** Each stored view records the storage format of the release that wrote it. A view written by a later release can hold settings this release does not know, so reading it with this release could return other numbers without saying why. Any query, ``DESCRIBE`` or ``GET_DDL`` of such a view is refused instead. This happens when a database file is opened with an older release than the one that last created or changed the view.
+**Cause:** Each stored view records the oldest storage format that can read it, which depends on the features the view uses. A view that uses a feature from a later release can hold settings this release does not know, so reading it with this release could return other numbers without saying why. Any query, ``DESCRIBE`` or ``GET_DDL`` of such a view is refused instead. This happens when a database file is opened with an older release than the one that last created or changed the view, and the view uses a feature added since. Other views in the same database still work.
 
 **Fix:** Install the release that wrote the view, or a later one:
 
