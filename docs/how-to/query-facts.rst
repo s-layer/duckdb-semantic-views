@@ -49,6 +49,8 @@ To read dimensions alongside facts, list them in ``FACTS`` too. A dimension list
 
 This returns one row per source row, with ``region`` and ``net_price`` columns.
 
+A row-level query reads the rows of the view's first table in ``TABLES``, joined to the tables its members need. So a dimension of a table that table references repeats once per row that references it: with ``orders`` first and ``customers`` referenced by ``orders``, ``FACTS customer_name`` returns one row per order, so a customer with three orders appears three times. For one row per distinct customer, list the dimension in ``DIMENSIONS`` instead.
+
 A query that lists facts in ``FACTS`` and dimensions in ``DIMENSIONS`` is refused, as it is in Snowflake:
 
 .. code-block:: text

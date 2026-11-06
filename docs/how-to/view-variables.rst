@@ -222,7 +222,7 @@ Leave out the default when no value is a safe guess, such as an exchange rate th
 
 .. code-block:: text
 
-   Binder Error: semantic_view: semantic view 'order_fx': variable 'fx_rate' has no default, so the query must set it: VARIABLES fx_rate = <value>
+   Binder Error: semantic_view: semantic view 'order_fx': variable 'fx_rate' has no default, so the query must set it: VARIABLES fx_rate = <value> in SEMANTIC_VIEW(...); a standard-SQL query cannot set variables: query it with SEMANTIC_VIEW(...), or give the variable a default
 
 Set it and the query runs:
 
@@ -347,7 +347,7 @@ To list a view's variables with their types, defaults and comments, read the ``V
 Variables and Materializations
 ==============================
 
-A :ref:`materialization <howto-materializations>` holds numbers computed with one set of values, and a query may ask for another. So a materialization that covers a member reading a variable, directly or through a fact or another metric, is never used to answer a query, whatever values the query sets. The query computes from the base tables instead. Materializations of the view that cover only members without variables still route.
+A :ref:`materialization <howto-materializations>` holds numbers computed with one set of values, and a query may ask for another. So a materialization that covers a member reading a variable, directly or through a fact or another metric, is never used to answer a query, whatever values the query sets. The query computes from the base tables instead. Materializations of the view that cover only members without variables still route. ``CREATE`` accepts such a materialization without a warning, so check which members a materialization covers before relying on it.
 
 Keep variables out of the members your materializations cover when routing matters. For ``order_analysis``, a materialization of ``order_count`` by ``region`` routes, and one of ``revenue`` by ``region`` does not, because ``revenue`` reads ``fx_rate``.
 

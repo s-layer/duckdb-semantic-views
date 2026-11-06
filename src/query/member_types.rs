@@ -396,8 +396,9 @@ fn member_request(def: &SemanticViewDefinition, kind: &str, name: &str) -> Reque
 /// A copy of `def` in which no member is PRIVATE, so every member can be
 /// requested by a probe. It is never stored or queried.
 fn public_copy(def: &SemanticViewDefinition) -> SemanticViewDefinition {
-    // A member that uses a variable is typed with the variable a NULL of its
-    // type (Phase 6.5): its type does not depend on the value.
+    // A member that uses a variable is typed with the variable's default, or
+    // a NULL of the variable's type when it has none (Phase 6.5): its type
+    // does not depend on the value.
     let mut def = crate::variables::for_probe(def);
     for m in &mut def.metrics {
         m.access = AccessModifier::Public;

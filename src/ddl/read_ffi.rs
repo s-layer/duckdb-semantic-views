@@ -464,6 +464,40 @@ pub fn check_create_members(
             }
         }
     }
+    // A table defined by a query binds on its own first, so a query that does
+    // not bind is reported as that table, not as the first member reading it.
+    // Variables are not substituted into a table's query (Phase 6.5), so a
+    // query naming one is told why (v0.18.0 review O2).
+    for table in def.tables.iter().filter(|t| t.definition.is_some()) {
+        let probe = format!(
+            "SELECT * FROM {} AS t LIMIT 0",
+            crate::expand::table_source(table, &def)
+        );
+        match caller_describe(database, schema, &probe) {
+            Ok(_) => {}
+            Err(CallerError::Interrupted(m)) => return Err(m),
+            Err(CallerError::Failed(m)) => {
+                let lowered = m.to_ascii_lowercase();
+                let variable = def.variables.iter().find(|v| {
+                    lowered.contains(&format!(
+                        "\"{}\"",
+                        crate::ident::normalize_ident_part(&v.name)
+                    ))
+                });
+                return Err(match variable {
+                    Some(v) => format!(
+                        "semantic view '{view_name}': table '{}' does not bind: variables are \
+                         not read inside a table's query, and it names variable '{}'",
+                        table.alias, v.name
+                    ),
+                    None => format!(
+                        "semantic view '{view_name}': table '{}' does not bind: {m}",
+                        table.alias
+                    ),
+                });
+            }
+        }
+    }
     let unbound = crate::query::member_types::first_unbound_member(
         view_name,
         &def,

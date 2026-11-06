@@ -197,7 +197,7 @@ The query is bound at ``CREATE``, like every table in ``TABLES``, so a query tha
 
 - **In the schema the view was created in**, whichever schema the querying session is in. A view created from ``main`` keeps reading ``main.orders`` after ``USE staging``.
 - **Never as a CTE of the querying statement.** ``WITH orders AS (...) SELECT * FROM SEMANTIC_VIEW(customer_sales ...)`` still reads the ``orders`` table.
-- **A temporary table** the query reads is found in the session that has it.
+- **A temporary table comes first**, as in any DuckDB view, and the names are looked up each time the view is queried. So a temporary ``orders`` created in a session after the view shadows the schema's ``orders`` in that session's queries. A physical ``TABLES`` entry (``o AS orders``) works differently: whether it is a temporary table is settled at ``CREATE``. Qualify the name in the query (``main.orders``) when no session's temporary table should replace it.
 
 Write a schema-qualified name (``analytics.orders``) in the query when the view is meant to read a table outside its own schema.
 
@@ -276,8 +276,11 @@ Troubleshooting
 **An inline query in TABLES needs an alias: write 'alias AS (<query>)'**
    A query in ``TABLES`` has no alias to name its columns by. Write ``paid AS (SELECT ...)``.
 
-**semantic view 'customer_sales': dimension 'city' does not bind: Catalog Error: Table with name ... does not exist**
-   A table's query names a table that does not exist, or that exists in another schema than the one the view is created in. The error names the first member that reads the table, or the table itself (``table 'c' does not bind``) when no member does. Create the table, or qualify its name in the query.
+**semantic view 'customer_sales': table 'c' does not bind: Catalog Error: Table with name ... does not exist**
+   A table's query names a table that does not exist, or that exists in another schema than the one the view is created in. Each table's query is bound on its own at ``CREATE``, before the members, so the error names the table. Create the table, or qualify its name in the query.
+
+**table 'c' does not bind: variables are not read inside a table's query, and it names variable 'min_amount'**
+   A table's query is SQL of its own: the view's variables are not substituted into it. Filter in a member that reads the variable, or in the ``WHERE`` of each query.
 
 **semantic view 'customer_sales': dimension 'city' does not bind**
    A member reads a column the query does not return. Check the query's output columns: a column the query renames (``SUM(amount) AS lifetime``) is read by its new name.

@@ -547,3 +547,32 @@ FROM explain_semantic_view('var_sv', dimensions := ['sale_category'], metrics :=
   where_clause := 'region = target_region', variables := {'target_region': 'x', 'multiplier': 2});
 ----
 true
+
+# --- v0.18.0 review fixes ----------------------------------------------------------
+
+# A variable set twice in the construct is refused by the view, by name and
+# whatever its case, not by DuckDB's struct_pack.
+
+statement error
+SELECT * FROM SEMANTIC_VIEW(var_sv METRICS total_sales VARIABLES target_region = '', TARGET_region = 'x');
+----
+semantic view 'var_sv': variable 'TARGET_region' is set twice
+
+# A standard-SQL query cannot set variables, so the no-default error says how
+# to query such a view instead of naming a clause that form cannot carry.
+
+statement error
+SELECT AGG(total_sales) FROM var_sv;
+----
+a standard-SQL query cannot set variables: query it with SEMANTIC_VIEW(...), or give the variable a default
+
+# Variables are not read inside a table's query, so a query naming one is
+# refused as that table not binding, not blamed on the first member.
+
+statement error
+CREATE SEMANTIC VIEW var_bad_inline
+  TABLES (big AS (SELECT * FROM var_sales WHERE amount > floor_amount) PRIMARY KEY (sale_id))
+  VARIABLES (floor_amount INTEGER DEFAULT 1000)
+  METRICS (big.n AS COUNT(*));
+----
+semantic view 'var_bad_inline': table 'big' does not bind: variables are not read inside a table's query, and it names variable 'floor_amount'
