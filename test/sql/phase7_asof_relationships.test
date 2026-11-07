@@ -16,7 +16,9 @@ CREATE TABLE asof_orders (o_id INTEGER, o_cust_id INTEGER, o_date DATE, amount D
 
 # Customer 2 has two addresses starting the same day, which breaks the
 # declared key (ca_cust_id, ca_start_date). Like any key the data breaks, it is
-# not checked: order 4 gets one of the two, and Snowflake also picks one.
+# not checked and the answer is not defined: joined from the orders, order 4
+# gets one of the two (Snowflake also picks one); joined from the addresses
+# (p7_asof_rev below), it is given to both.
 statement ok
 INSERT INTO customer_address VALUES
   (1, '2024-01-01', 'London'), (1, '2024-06-01', 'Paris'),
@@ -155,6 +157,15 @@ ORDER BY 1, 2;
 Berlin	6
 London	1
 Paris	2
+
+# The tie, joined from the addresses: order 4 goes to both tied addresses.
+query TI
+SELECT city, order_id FROM SEMANTIC_VIEW(p7_asof_rev DIMENSIONS a.city, o.order_id)
+WHERE city IN ('Oslo', 'Rome')
+ORDER BY 1, 2;
+----
+Oslo	4
+Rome	4
 
 query TR
 SELECT CASE WHEN city IN ('Oslo', 'Rome') THEN 'Oslo|Rome' ELSE city END, revenue

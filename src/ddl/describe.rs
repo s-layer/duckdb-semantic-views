@@ -135,16 +135,6 @@ struct DescribeRow {
 // `collect_*` helpers in this file to assemble property rows for the
 // C++ Catalog API path's wire format.
 
-/// Format column names as a JSON array: `["col1","col2"]`.
-/// Matches Snowflake format: no spaces after commas.
-///
-/// Delegates to `serde_json` so a value containing `"`, `\`, or a control
-/// character is escaped into valid JSON instead of breaking out of the
-/// string literal (C-12, code-review 2026-07-11) — the previous
-/// `format!("\"{s}\"")` emitted `["a"b"]` for a synonym `a"b`, which the
-/// DESCRIBE output documents as a JSON array. `serde_json` writes no space
-/// after the comma and passes UTF-8 through unescaped, so all-ASCII inputs
-/// stay byte-identical to the prior hand-rolled format.
 /// A relationship's `REF_KEY` value: the referenced columns as a JSON array,
 /// with an ASOF column written `{"type":"ASOF","column":"<col>"}` as
 /// Snowflake writes it (Phase 7.1).
@@ -168,6 +158,16 @@ fn ref_key_json(join: &crate::model::Join) -> String {
     format!("[{}]", items.join(","))
 }
 
+/// Format column names as a JSON array: `["col1","col2"]`.
+/// Matches Snowflake format: no spaces after commas.
+///
+/// Delegates to `serde_json` so a value containing `"`, `\`, or a control
+/// character is escaped into valid JSON instead of breaking out of the
+/// string literal (C-12, code-review 2026-07-11) — the previous
+/// `format!("\"{s}\"")` emitted `["a"b"]` for a synonym `a"b`, which the
+/// DESCRIBE output documents as a JSON array. `serde_json` writes no space
+/// after the comma and passes UTF-8 through unescaped, so all-ASCII inputs
+/// stay byte-identical to the prior hand-rolled format.
 pub(crate) fn format_json_array(items: &[String]) -> String {
     // Serializing a slice of `String` to JSON is infallible (no floats, no
     // non-string map keys, in-memory writer), so `expect` documents an

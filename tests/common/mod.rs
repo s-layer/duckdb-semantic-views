@@ -427,12 +427,18 @@ pub fn arb_canonical_def() -> impl Strategy<Value = SemanticViewDefinition> {
                             } else {
                                 Vec::new()
                             };
+                            // Phase 7.1: an explicit list is ASOF on one of
+                            // its columns about half the time, the position
+                            // drawn from the generated name so it varies.
+                            let asof = (!ref_columns.is_empty() && rel_name.len() % 2 == 0)
+                                .then(|| rel_name.len() / 2 % pk_arity);
                             Some(Join {
                                 name: Some(rel_name),
                                 from_alias: format!("t{}", i + 1),
                                 table: "t0".to_string(),
                                 fk_columns,
                                 ref_columns,
+                                asof,
                                 ..Default::default()
                             })
                         })

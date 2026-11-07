@@ -241,6 +241,24 @@ pub(super) fn push_join_clauses(
             .asof
             .filter(|_| !rj.scoped && !rj.join.table.eq_ignore_ascii_case(&rj.bare_alias));
         let reverse_source = reverse_asof.and_then(|i| reverse_asof_source(rj.join, def, i));
+        // Every caller passes a `LEFT JOIN ` prefix, and every reverse hop is
+        // a bare one whose two tables the view has. Anything else would render
+        // the ASOF pair as a plain inequality join, a silent wrong number, so
+        // it is a bug to catch in tests rather than SQL to emit.
+        debug_assert!(
+            rj.join.asof.is_none() || prefix.ends_with("LEFT JOIN "),
+            "an ASOF relationship joined with the prefix {prefix:?}"
+        );
+        debug_assert!(
+            reverse_asof.is_none() || reverse_source.is_some(),
+            "an ASOF relationship walked backwards has no derived table"
+        );
+        debug_assert!(
+            rj.join.asof.is_none()
+                || !rj.scoped
+                || rj.join.table.eq_ignore_ascii_case(&rj.bare_alias),
+            "a role-played ASOF hop walked backwards"
+        );
         match (&reverse_source, rj.join.asof) {
             (None, Some(_)) => match prefix.strip_suffix("LEFT JOIN ") {
                 Some(lead) => {
