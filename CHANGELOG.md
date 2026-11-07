@@ -9,7 +9,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-_No unreleased changes yet._
+### Fixed
+
+- **A semantic view whose definition reads the view itself is refused at once.** When a table defined by a query reads its own view through `semantic_view()`, directly or through other semantic views, a query of the view now fails with `semantic view '<name>' reads itself`. Before, the view was expanded about 200 times until DuckDB's expression depth limit stopped it, and on Windows, whose threads have a smaller stack, the process crashed first.
 
 ## [0.18.0] - 2026-11-07
 

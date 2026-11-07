@@ -1024,6 +1024,22 @@ Two columns with the same name
 **Fix:** Give one of them another alias.
 
 
+.. _ref-err-reads-itself:
+
+View that reads itself
+----------------------
+
+.. versionadded:: 0.18.1
+
+.. code-block:: text
+
+   semantic view '<view>' reads itself: a table defined by a query in it reads the view, directly or through other semantic views, so it would expand without end
+
+**Cause:** A :ref:`table defined by a query <howto-query-tables>` calls ``semantic_view()`` on the view it belongs to, or on another semantic view whose definition leads back to it. ``CREATE OR REPLACE`` checks the query against the view it replaces, so such a definition is stored, but no query of it can finish. Releases up to 0.18.0 expanded the view until DuckDB's expression depth limit, and on Windows the process could crash first.
+
+**Fix:** Change the table's query so that it reads the tables the view is built on, not the view.
+
+
 .. _ref-err-query-variables:
 
 Variables in a query

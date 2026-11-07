@@ -285,6 +285,9 @@ Troubleshooting
 **semantic view 'customer_sales': dimension 'city' does not bind**
    A member reads a column the query does not return. Check the query's output columns: a column the query renames (``SUM(amount) AS lifetime``) is read by its new name.
 
+**semantic view 'customer_sales' reads itself**
+   A table's query calls ``semantic_view()`` on the view it belongs to, or on another semantic view that leads back to it, so the view would expand without end. A table's query can read another semantic view, but not its own. Read the source tables instead.
+
 **Invalid inline query for table 'o': it holds the prepared statement parameter $1**
    A table's query cannot take a parameter. Filter with the ``WHERE`` of each ``SEMANTIC_VIEW(...)`` query, which can (see :ref:`howto-filtering-app`).
 

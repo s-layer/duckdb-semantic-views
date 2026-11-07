@@ -256,8 +256,10 @@ low	3
 # --- a query that reads its own view ----------------------------------------------
 
 # CREATE binds the query against the view it replaces, so a view whose query
-# reads the view itself is stored. Querying it then recurses, and DuckDB's
-# binder stops the recursion with an error: no crash (TECH-DEBT #62, QRY-1).
+# reads the view itself is stored. Querying it is refused at the second
+# expansion of the view, before the recursion grows: DuckDB's own depth limit
+# came too late on Windows, whose 1 MB stack overflowed first
+# (test/sql/semantic_view_reads_itself.test has the other shapes).
 
 statement ok
 CREATE SEMANTIC VIEW iq_self TABLES (o AS iq_orders PRIMARY KEY (id)) METRICS (o.m AS SUM(o.amount));
@@ -270,7 +272,7 @@ CREATE OR REPLACE SEMANTIC VIEW iq_self
 statement error
 SELECT * FROM semantic_view('iq_self', metrics := ['m']);
 ----
-Max expression depth limit
+semantic view 'iq_self' reads itself
 
 statement ok
 DROP SEMANTIC VIEW iq_self;

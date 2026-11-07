@@ -23,6 +23,7 @@
 #include "duckdb/parser/parsed_data/create_table_info.hpp"
 #include "duckdb/parser/parsed_data/create_type_info.hpp"
 #include "duckdb/parser/parsed_data/create_view_info.hpp"
+#include "duckdb/parser/common_table_expression_info.hpp"
 #include "duckdb/parser/query_node/delete_query_node.hpp"
 #include "duckdb/parser/query_node/insert_query_node.hpp"
 #include "duckdb/parser/query_node/update_query_node.hpp"
@@ -3560,6 +3561,11 @@ static unique_ptr<TableRef> sv_semantic_view_bind_replace(
     // (interrupt or deadline) is raised bare, as in the metadata binds.
     SvCallerScope caller(context);
 
+    // The database and schema the view lives in, as the expansion's payload
+    // frames them; `expand` sets them.
+    std::string view_database;
+    std::string view_schema;
+
     // Expand the request into one SELECT whose parse positions are the call's.
     // With `fence`, the predicate is one that names only where_clause's
     // members (`expand::where_fence`), for the isolated bind below.
@@ -3602,6 +3608,8 @@ static unique_ptr<TableRef> sv_semantic_view_bind_replace(
         std::string database = sv_read_string(framed, payload.len, offset, "semantic_view");
         std::string schema = sv_read_string(framed, payload.len, offset, "semantic_view");
         std::string sql(framed + offset, payload.len - offset);
+        view_database = database;
+        view_schema = schema;
         Parser parser = sv_compat::builtin_parser();
         try {
             parser.ParseQuery(sql);
@@ -3630,6 +3638,59 @@ static unique_ptr<TableRef> sv_semantic_view_bind_replace(
     };
     auto select = expand(false);
 
+    // A view whose definition reads the view itself (a table defined by a
+    // query that calls semantic_view() on it, directly or through other
+    // semantic views) would expand without end. DuckDB binds each expansion
+    // after this function returns, so the views being expanded are marked in
+    // the expansion itself: an unreferenced CTE named after the view, which
+    // every binder inside the expansion can see (`Binder::GetCTEBinding` looks
+    // through the enclosing binders). Finding the mark refuses the view at its
+    // second expansion. Without it the recursion ran until DuckDB's expression
+    // depth limit, about 200 expansions deep, and overflowed Windows' 1 MB
+    // stack before that.
+    std::string view_short_name = view_name;
+    {
+        QualifiedName parsed;
+        std::string parse_error;
+        if (QualifiedName::TryParse(view_name, parsed, parse_error)) {
+            view_short_name = parsed.Name().GetIdentifierName();
+        }
+    }
+    view_short_name = StringUtil::Lower(view_short_name);
+    Identifier reading_mark(StringUtil::Lower("__sv_reading " + view_database + "." + view_schema + "." +
+                                              view_short_name));
+    if (input.binder && input.binder->GetCTEBinding(BindingAlias(reading_mark))) {
+        throw BinderException(input.ref.query_location,
+                              "semantic view '%s' reads itself: a table defined by a query in it reads the "
+                              "view, directly or through other semantic views, so it would expand without end",
+                              view_short_name);
+    }
+    auto add_reading_mark = [&](SelectStatement &statement) {
+        Parser mark_parser = sv_compat::builtin_parser();
+        mark_parser.ParseQuery("SELECT 1");
+        auto mark_select = unique_ptr_cast<SQLStatement, SelectStatement>(std::move(mark_parser.statements[0]));
+        auto mark = make_uniq<CommonTableExpressionInfo>();
+        mark->query_node = std::move(mark_select->node);
+        // The mark goes after the CTEs where_clause's subqueries were hoisted
+        // into (`__sv_sqN`, which `with_ctes` puts first), so their bodies,
+        // bound by a binder from before it, do not see it: where_clause may
+        // read the view itself. Aliases or a column order wrap the expansion
+        // in `SELECT ... FROM (<expansion>) __sv_inner`
+        // (`query::wire::build_projected_sql`), which puts those CTEs one level
+        // down, so the mark goes there too.
+        QueryNode *target = statement.node.get();
+        while (target->type == QueryNodeType::SELECT_NODE && target->cte_map.map.empty()) {
+            auto &node = target->Cast<SelectNode>();
+            if (!node.from_table || node.from_table->type != TableReferenceType::SUBQUERY ||
+                node.from_table->alias.GetIdentifierName() != "__sv_inner") {
+                break;
+            }
+            target = node.from_table->Cast<SubqueryRef>().subquery->node.get();
+        }
+        target->cte_map.map[reading_mark] = std::move(mark);
+    };
+    add_reading_mark(*select);
+
     // DuckDB binds the returned subquery in the caller's scope, so a name the
     // expansion's own tables lack would bind to a column of an enclosing query
     // (a comma join's right side is bound as LATERAL) instead of failing: a
@@ -3650,6 +3711,9 @@ static unique_ptr<TableRef> sv_semantic_view_bind_replace(
         auto isolated = where_clause.empty()
                             ? unique_ptr_cast<SQLStatement, SelectStatement>(select->Copy())
                             : expand(true);
+        if (!where_clause.empty()) {
+            add_reading_mark(*isolated);
+        }
         auto isolated_binder = Binder::CreateBinder(context);
         isolated_binder->Bind(static_cast<SQLStatement &>(*isolated));
     }

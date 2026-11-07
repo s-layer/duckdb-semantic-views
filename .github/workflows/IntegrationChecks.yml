@@ -233,5 +233,13 @@ jobs:
       # all of which the bare runner reports as success.
       # Its last line, "sqllogictest: N file(s) ran, M statements/queries
       # executed", is the check that the suite really ran.
+      #
+      # The suite runs with a 1 MB stack, as Windows threads get by default
+      # (Linux's is 8 MB), so deep recursion that would crash on Windows fails
+      # here, on every PR. Windows itself is tested only by BuildAll, on main:
+      # a self-reading view crashed it there for v0.18.0 while this job, at
+      # 8 MB, stayed green.
       - name: Run SQL logic tests
-        run: just test-sql-prebuilt
+        run: |
+          ulimit -s 1024
+          just test-sql-prebuilt
