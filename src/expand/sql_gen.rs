@@ -642,6 +642,10 @@ fn expand_unhoisted(
         });
     }
 
+    // 0c. A stored ASOF marker must name one of its relationship's key
+    // columns, or the join would lose its ASOF condition.
+    super::join_resolver::check_asof_markers(view_name, def)?;
+
     // 1. Validate: at least one dimension, metric, or fact is required.
     if req.dimensions.is_empty() && req.metrics.is_empty() && req.facts.is_empty() {
         return Err(ExpandError::EmptyRequest {

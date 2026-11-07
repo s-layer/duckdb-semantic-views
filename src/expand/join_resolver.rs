@@ -11,6 +11,7 @@ use super::resolution::{
     qualify_and_quote_table_ref, quote_ident, quote_ident_if_needed, quote_stored_ident,
     table_source,
 };
+use super::types::ExpandError;
 
 /// Build a role-playing scoped alias in the documented `{table}__{rel}` format.
 ///
@@ -192,6 +193,41 @@ fn reverse_asof_source(join: &Join, def: &SemanticViewDefinition, asof: usize) -
             AsofSide::Forward
         ),
     ))
+}
+
+/// Refuse a stored ASOF marker that cannot be emitted.
+///
+/// CREATE only stores a marker that names one of the referenced columns of a
+/// relationship between two of the view's tables, but a definition can also
+/// arrive from storage or (in the fuzzers) be built directly. One whose index
+/// is past the key, or whose tables are missing, would otherwise render as a
+/// plain join with no ASOF condition: a silent wrong number. So expansion
+/// refuses it up front, which also keeps the emission asserts in
+/// [`push_join_clauses`] true.
+pub(super) fn check_asof_markers(
+    view_name: &str,
+    def: &SemanticViewDefinition,
+) -> Result<(), ExpandError> {
+    let has_table = |alias: &str| {
+        def.tables
+            .iter()
+            .any(|t| t.alias.eq_ignore_ascii_case(alias))
+    };
+    for join in &def.joins {
+        let Some(asof) = join.asof else { continue };
+        let fits = asof < join.fk_columns.len() && asof < ref_columns(join, &def.tables).len();
+        if !fits || !has_table(&join.from_alias) || !has_table(&join.table) {
+            return Err(ExpandError::UncheckableDefinition {
+                view_name: view_name.to_string(),
+                reason: format!(
+                    "the ASOF marker of the relationship from '{}' to '{}' does not name \
+                     one of its key columns",
+                    join.from_alias, join.table
+                ),
+            });
+        }
+    }
+    Ok(())
 }
 
 /// A join edge chosen by the resolver, in emission order.
@@ -1054,6 +1090,63 @@ mod tests {
                 .any(|rj| rj.emit_alias == "airports__dep_airport" && rj.scoped),
             "Should include scoped alias airports__dep_airport, got: {:?}",
             result.iter().map(|rj| &rj.emit_alias).collect::<Vec<_>>()
+        );
+    }
+
+    /// A stored ASOF marker that names no referenced column (an index past
+    /// the key, or a key that is empty) cannot be emitted as an ASOF join.
+    /// Expansion refuses the definition instead of rendering a plain
+    /// equality join, or tripping the emission asserts (the fuzz crash on
+    /// PR #336).
+    fn asof_query(def: &SemanticViewDefinition, dim_table: &str) -> Result<String, ExpandError> {
+        use crate::expand::{expand, DimensionName, QueryRequest};
+        use crate::model::Dimension;
+        let mut def = def.clone();
+        def.dimensions = vec![Dimension {
+            name: "d".to_string(),
+            expr: format!("{dim_table}.cust"),
+            source_table: Some(dim_table.to_string()),
+            ..Default::default()
+        }];
+        let req = QueryRequest {
+            dimensions: vec![DimensionName::new("d")],
+            ..Default::default()
+        };
+        expand("v", &def, &req)
+    }
+
+    #[test]
+    fn asof_index_past_the_key_is_refused_forward() {
+        let mut def = asof_def(true);
+        def.joins[0].asof = Some(7);
+        let err = asof_query(&def, "a").expect_err("out-of-range ASOF index expanded");
+        assert!(
+            matches!(err, ExpandError::UncheckableDefinition { .. }),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn asof_index_past_the_key_is_refused_backwards() {
+        let mut def = asof_def(false);
+        def.joins[0].asof = Some(7);
+        let err = asof_query(&def, "o").expect_err("out-of-range ASOF index expanded");
+        assert!(
+            matches!(err, ExpandError::UncheckableDefinition { .. }),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn asof_on_an_empty_key_is_refused() {
+        let mut def = asof_def(false);
+        def.joins[0].ref_columns.clear();
+        def.tables[0].pk_columns.clear();
+        def.joins[0].asof = Some(0);
+        let err = asof_query(&def, "o").expect_err("ASOF on an empty key expanded");
+        assert!(
+            matches!(err, ExpandError::UncheckableDefinition { .. }),
+            "{err}"
         );
     }
 }
