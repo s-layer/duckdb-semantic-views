@@ -353,9 +353,25 @@ fn emit_relationships(out: &mut String, def: &SemanticViewDefinition) {
         // them makes re-parsing resolve to the target's PK, silently
         // rewiring join semantics. When ref_columns match the target PK the
         // list is redundant and is omitted for the historical compact form.
-        if !join.ref_columns.is_empty() && !ref_columns_match_target_pk(def, join) {
+        // Phase 7.1: an ASOF relationship always renders its list, since the
+        // marker lives in it.
+        if !join.ref_columns.is_empty()
+            && (join.asof.is_some() || !ref_columns_match_target_pk(def, join))
+        {
             out.push('(');
-            out.push_str(&emit_column_list(&join.ref_columns));
+            let cols: Vec<String> = join
+                .ref_columns
+                .iter()
+                .enumerate()
+                .map(|(i, c)| {
+                    if join.asof == Some(i) {
+                        format!("ASOF {}", emit_column(c))
+                    } else {
+                        emit_column(c)
+                    }
+                })
+                .collect();
+            out.push_str(&cols.join(", "));
             out.push(')');
         }
         if i + 1 < def.joins.len() {
@@ -777,6 +793,41 @@ mod tests {
         assert!(ddl.contains("o AS orders PRIMARY KEY (id)"));
         assert!(ddl.contains("o.region AS o.region"));
         assert!(ddl.contains("o.revenue AS SUM(o.amount)"));
+    }
+
+    /// Phase 7.1: an ASOF relationship renders its REFERENCES list, with the
+    /// marker, even when the list is the target's primary key, and the DDL
+    /// parses back to the same relationship.
+    #[test]
+    fn asof_relationship_renders_and_reparses() {
+        let mut def = minimal_def();
+        def.tables.push(TableRef {
+            alias: "a".to_string(),
+            table: "addresses".to_string(),
+            pk_columns: vec!["cust".to_string(), "start_date".to_string()],
+            ..Default::default()
+        });
+        def.joins.push(Join {
+            from_alias: "o".to_string(),
+            table: "a".to_string(),
+            fk_columns: vec!["cust".to_string(), "order_date".to_string()],
+            ref_columns: vec!["cust".to_string(), "start_date".to_string()],
+            name: Some("order_address".to_string()),
+            asof: Some(1),
+            ..Default::default()
+        });
+        let ddl = render_create_ddl("v", &def).unwrap();
+        assert!(
+            ddl.contains(
+                "order_address AS o(cust, order_date) REFERENCES a(cust, ASOF start_date)"
+            ),
+            "{ddl}"
+        );
+        let body = &ddl[ddl.find("RELATIONSHIPS (").unwrap() + "RELATIONSHIPS (".len()..];
+        let body = &body[..body.find("\n)").unwrap()];
+        let parsed = crate::body_parser::parse_relationships_clause(body, 0).unwrap();
+        assert_eq!(parsed[0].asof, Some(1));
+        assert_eq!(parsed[0].ref_columns, def.joins[0].ref_columns);
     }
 
     // -------------------------------------------------------------------

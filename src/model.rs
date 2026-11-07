@@ -838,6 +838,16 @@ pub struct Join {
     /// Not serialized when `ManyToOne` to preserve backward-compatible JSON.
     #[serde(default, skip_serializing_if = "Cardinality::is_default")]
     pub cardinality: Cardinality,
+    /// Phase 7.1: the position in `fk_columns` / `ref_columns` of the ASOF
+    /// column pair, for `REFERENCES a (k, ASOF d)`. The pair matches on
+    /// `from.fk >= to.ref` and the join takes, per referencing row, the
+    /// referenced row with the greatest `ref` among those that match (a LEFT
+    /// ASOF join); the other pairs stay equalities. `None` is a plain
+    /// equi-join. Stored JSON without it is a plain relationship; a view that
+    /// sets it needs storage format 3, since an older reader would drop it and
+    /// join on equality.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub asof: Option<usize>,
 }
 
 /// Current storage-format version stamped into freshly written definitions
@@ -851,7 +861,10 @@ pub struct Join {
 /// in a way the upgrade pass must normalise.
 ///
 /// 2 (v0.18.0): variables, query-defined tables and same-table metric
-/// references, which a version-1 reader misreads or cannot load. A stamp
+/// references, which a version-1 reader misreads or cannot load.
+///
+/// 3 (Phase 7.1): ASOF relationships (`Join::asof`), which a version-2 reader
+/// would join on equality. A stamp
 /// above this value is refused by [`SemanticViewDefinition::from_json`], so
 /// the next such change is reported instead of misread.
 ///
@@ -860,7 +873,7 @@ pub struct Join {
 /// [`SemanticViewDefinition::required_schema_version`], the lowest format
 /// that reads it, so a view that uses nothing newer stays readable by an
 /// older release after a newer one has opened the database.
-pub const CURRENT_SCHEMA_VERSION: u32 = 2;
+pub const CURRENT_SCHEMA_VERSION: u32 = 3;
 
 /// Top-level definition of a semantic view.
 ///
@@ -1027,6 +1040,9 @@ impl SemanticViewDefinition {
     /// a wrong number or a misleading error rather than refuse.
     #[must_use]
     pub fn required_schema_version(&self) -> u32 {
+        if self.joins.iter().any(|j| j.asof.is_some()) {
+            return 3;
+        }
         let needs_two = !self.variables.is_empty()
             || self.tables.iter().any(|t| t.definition.is_some())
             || crate::graph::has_same_table_metric_refs(self);
@@ -3074,7 +3090,7 @@ mod tests {
     /// metric references, query-defined tables), so the stamp moved to 2.
     #[test]
     fn current_schema_version_is_two() {
-        assert_eq!(CURRENT_SCHEMA_VERSION, 2);
+        assert_eq!(CURRENT_SCHEMA_VERSION, 3);
     }
 
     /// A definition from YAML, for the storage-format tests below.
@@ -3143,6 +3159,24 @@ metrics:
             "{FORMAT_ONE_YAML}  - name: amount\n    expr: MAX(o.amount)\n    source_table: o\n"
         );
         assert_eq!(format_test_def(&yaml).required_schema_version(), 1);
+    }
+
+    /// Phase 7.1: an ASOF relationship needs format 3, which a format-2
+    /// reader refuses instead of joining on equality.
+    #[test]
+    fn required_schema_version_is_three_with_an_asof_relationship() {
+        let mut def = format_test_def(FORMAT_ONE_YAML);
+        def.joins.push(Join {
+            from_alias: "o".into(),
+            table: "a".into(),
+            fk_columns: vec!["k".into(), "d".into()],
+            ref_columns: vec!["k".into(), "s".into()],
+            asof: Some(1),
+            ..Default::default()
+        });
+        assert_eq!(def.required_schema_version(), 3);
+        def.joins[0].asof = None;
+        assert_eq!(def.required_schema_version(), 1);
     }
 
     #[test]

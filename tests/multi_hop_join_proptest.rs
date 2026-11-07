@@ -36,6 +36,14 @@
 //!    the intermediate `u` to reach `w`; a multi-hop resolution bug (dropped
 //!    intermediate, wrong join order, wrong ON columns) surfaces as invalid SQL
 //!    or a non-zero diff.
+//!
+//! Phase 7.1 makes the first hop an **ASOF** relationship in about half the
+//! cases: `t (fk_u, ts) REFERENCES u (uk, ASOF us)`, `u` keyed by `(uk, us)`
+//! with two start values per key. Each `t` row then joins the `u` row of its
+//! key with the greatest `us <= t.ts`, or none. The oracle states that as a
+//! correlated `max(us)` over `u`, never with an ASOF join, so the expansion's
+//! `ASOF LEFT JOIN` is checked against an independent formulation. The hop is
+//! still many-to-one, so the fence and the per-grain oracle are unchanged.
 
 use proptest::prelude::*;
 use semantic_views::expand::{expand, DimensionName, MetricName, QueryRequest};
@@ -54,6 +62,26 @@ struct Instance {
     u_rows: Vec<(Option<i64>, Option<i64>, Option<i64>)>,
     /// Child rows: `(fk_u, d, v)`.
     t_rows: Vec<(Option<i64>, Option<i64>, Option<i64>)>,
+    /// Phase 7.1: whether `t → u` is the ASOF relationship
+    /// `t (fk_u, ts) REFERENCES u (uk, ASOF us)` instead of `t (fk_u) REFERENCES u (id)`.
+    asof: bool,
+    /// Per `u` row, the raw start offset [`u_key`] turns into `us`.
+    u_starts: Vec<i64>,
+    /// Per `t` row, its ASOF value `ts` (missing entries are NULL).
+    t_ts: Vec<Option<i64>>,
+}
+
+/// The ASOF key `(uk, us)` of `u` row `i`. Rows `2j` and `2j + 1` share the
+/// key `j`, the second starting strictly later, so `(uk, us)` is unique (the
+/// declared PRIMARY KEY holds) and a key has one or two periods.
+fn u_key(inst: &Instance, i: usize) -> (i64, i64) {
+    let start = |i: usize| inst.u_starts.get(i).copied().unwrap_or(0);
+    let us = if i % 2 == 0 {
+        start(i)
+    } else {
+        start(i - 1) + 1 + start(i)
+    };
+    ((i / 2) as i64, us)
 }
 
 /// Queryable objects, by stable name. `td`/`ucat`/`wcat` are dimensions at the
@@ -254,11 +282,19 @@ fn arb_instance() -> impl Strategy<Value = Instance> {
         ];
         let t_row = (fk_u_cell, cat_cell.clone(), val_cell.clone());
         let t_rows = prop::collection::vec(t_row, 0..=20);
-        (w_rows, u_rows, t_rows).prop_map(|(w_rows, u_rows, t_rows)| Instance {
-            w_rows,
-            u_rows,
-            t_rows,
-        })
+        let u_starts = prop::collection::vec(0i64..4, n_u);
+        let ts_cell = prop_oneof![1 => Just(None), 5 => (-1i64..9).prop_map(Some)];
+        let t_ts = prop::collection::vec(ts_cell, 20);
+        (w_rows, u_rows, t_rows, any::<bool>(), u_starts, t_ts).prop_map(
+            |(w_rows, u_rows, t_rows, asof, u_starts, t_ts)| Instance {
+                w_rows,
+                u_rows,
+                t_rows,
+                asof,
+                u_starts,
+                t_ts,
+            },
+        )
     })
 }
 
@@ -289,7 +325,7 @@ fn arb_case() -> impl Strategy<Value = Case> {
 /// Build the semantic-view definition: a `ManyToOne` chain `t → u → w`, a
 /// dimension at each grain, root-grain safe metrics (`sum(t.v)`, `count(*)`),
 /// and ancestor metrics on `u` and `w`.
-fn build_def() -> SemanticViewDefinition {
+fn build_def(asof: bool) -> SemanticViewDefinition {
     let table = |alias: &str, pk: &[&str]| TableRef {
         alias: alias.to_string(),
         table: alias.to_string(),
@@ -302,7 +338,8 @@ fn build_def() -> SemanticViewDefinition {
     };
     // `t` is listed first: base_table() == the first declared table, and the
     // FROM is anchored there with LEFT JOINs outward along the chain.
-    let tables = vec![table("t", &[]), table("u", &["id"]), table("w", &["id"])];
+    let u_pk: &[&str] = if asof { &["uk", "us"] } else { &["id"] };
+    let tables = vec![table("t", &[]), table("u", u_pk), table("w", &["id"])];
     let dim = |name: &str, expr: &str, source: &str| Dimension {
         cortex_search_service: None,
         is_enum: false,
@@ -361,13 +398,26 @@ fn build_def() -> SemanticViewDefinition {
         base_metric("sw", "sum(w.ww)", Some("w")),
     ];
     let joins = vec![
-        Join {
-            from_alias: "t".to_string(),
-            table: "u".to_string(),
-            fk_columns: vec!["fk_u".to_string()],
-            ref_columns: vec!["id".to_string()],
-            name: Some("t_u".to_string()),
-            cardinality: Cardinality::ManyToOne,
+        if asof {
+            Join {
+                from_alias: "t".to_string(),
+                table: "u".to_string(),
+                fk_columns: vec!["fk_u".to_string(), "ts".to_string()],
+                ref_columns: vec!["uk".to_string(), "us".to_string()],
+                name: Some("t_u".to_string()),
+                cardinality: Cardinality::ManyToOne,
+                asof: Some(1),
+            }
+        } else {
+            Join {
+                from_alias: "t".to_string(),
+                table: "u".to_string(),
+                fk_columns: vec!["fk_u".to_string()],
+                ref_columns: vec!["id".to_string()],
+                name: Some("t_u".to_string()),
+                cardinality: Cardinality::ManyToOne,
+                asof: None,
+            }
         },
         Join {
             from_alias: "u".to_string(),
@@ -376,6 +426,7 @@ fn build_def() -> SemanticViewDefinition {
             ref_columns: vec!["id".to_string()],
             name: Some("u_w".to_string()),
             cardinality: Cardinality::ManyToOne,
+            asof: None,
         },
     ];
     SemanticViewDefinition {
@@ -405,8 +456,8 @@ fn make_db(inst: &Instance) -> duckdb::Connection {
     let conn = duckdb::Connection::open_in_memory().expect("in-memory DuckDB");
     conn.execute_batch(
         "CREATE TABLE w (id INTEGER, wcat INTEGER, ww INTEGER); \
-         CREATE TABLE u (id INTEGER, fk_w INTEGER, ucat INTEGER, uw INTEGER); \
-         CREATE TABLE t (fk_u INTEGER, d INTEGER, v INTEGER);",
+         CREATE TABLE u (id INTEGER, uk INTEGER, us INTEGER, fk_w INTEGER, ucat INTEGER, uw INTEGER); \
+         CREATE TABLE t (fk_u INTEGER, ts INTEGER, d INTEGER, v INTEGER);",
     )
     .expect("create tables");
 
@@ -428,7 +479,8 @@ fn make_db(inst: &Instance) -> duckdb::Connection {
             .iter()
             .enumerate()
             .map(|(i, (fk_w, ucat, uw))| {
-                format!("({i},{},{},{})", cell(fk_w), cell(ucat), cell(uw))
+                let (uk, us) = u_key(inst, i);
+                format!("({i},{uk},{us},{},{},{})", cell(fk_w), cell(ucat), cell(uw))
             })
             .collect();
         conn.execute_batch(&format!("INSERT INTO u VALUES {};", values.join(",")))
@@ -438,7 +490,11 @@ fn make_db(inst: &Instance) -> duckdb::Connection {
         let values: Vec<String> = inst
             .t_rows
             .iter()
-            .map(|(fk_u, d, v)| format!("({},{},{})", cell(fk_u), cell(d), cell(v)))
+            .enumerate()
+            .map(|(i, (fk_u, d, v))| {
+                let ts = inst.t_ts.get(i).copied().flatten();
+                format!("({},{},{},{})", cell(fk_u), cell(&ts), cell(d), cell(v))
+            })
             .collect();
         conn.execute_batch(&format!("INSERT INTO t VALUES {};", values.join(",")))
             .expect("insert t rows");
@@ -527,8 +583,19 @@ fn grain_sql(case: &Case, anchor: &str) -> String {
     // The up-chain from the anchor. Joining the whole remaining chain is
     // harmless — every hop is many-to-one, so none of them changes the anchor's
     // row multiset.
+    // Phase 7.1: under the ASOF relationship each `t` row's period is the
+    // greatest `us` of its key at or before `ts`, found by a correlated
+    // `max`, never by an ASOF join; `t` then joins that one `u` row by
+    // equality.
+    let t_from = if case.inst.asof {
+        "FROM (SELECT t.*, (SELECT max(u2.us) FROM u u2 WHERE u2.uk = t.fk_u AND u2.us <= t.ts) \
+         AS asof_us FROM t) t LEFT JOIN u ON t.fk_u = u.uk AND t.asof_us = u.us \
+         LEFT JOIN w ON u.fk_w = w.id"
+    } else {
+        "FROM t LEFT JOIN u ON t.fk_u = u.id LEFT JOIN w ON u.fk_w = w.id"
+    };
     let from = match anchor {
-        "t" => "FROM t LEFT JOIN u ON t.fk_u = u.id LEFT JOIN w ON u.fk_w = w.id",
+        "t" => t_from,
         "u" => "FROM u LEFT JOIN w ON u.fk_w = w.id",
         "w" => "FROM w",
         other => unreachable!("unexpected anchor {other}"),
@@ -648,7 +715,7 @@ fn is_duckdb_group_by_bind_bug(msg: &str) -> bool {
 /// and matches the independent per-grain oracle. Shared by the proptest and the
 /// pinned cases below so a pinned case runs exactly the property's checks.
 fn check_case(case: &Case) -> Result<(), TestCaseError> {
-    let def = build_def();
+    let def = build_def(case.inst.asof);
     let req = QueryRequest {
         where_clause: case.where_pred.as_ref().map(Pred::to_member_sql),
         dimensions: case
@@ -929,6 +996,9 @@ fn ci_or_of_ands_instance() -> Instance {
             (Some(3), Some(2), Some(-3)),
             (Some(1), Some(1), Some(1)),
         ],
+        asof: false,
+        u_starts: vec![],
+        t_ts: vec![],
     }
 }
 
@@ -1007,4 +1077,130 @@ fn duckdb_group_by_bind_bug_still_present() {
         .query_row(query, [], |r| r.get(0))
         .expect("the workaround setting avoids the bug");
     assert_eq!(rows, 0);
+}
+
+/// Phase 7.1: a fixed ASOF instance with the answer written out, so the
+/// generated ASOF cases are known to compare real matches rather than an
+/// oracle and an expansion that agree about NULLs. `u` rows 0 and 1 share key
+/// 0 and start at 2 and 4: `ts` 1 matches neither, 2 and 3 match the first, 4
+/// and 9 the second, and a NULL `ts` none.
+#[test]
+fn pinned_asof_hop_takes_the_latest_period() {
+    let inst = Instance {
+        w_rows: vec![(Some(0), Some(1))],
+        u_rows: vec![(None, Some(0), Some(10)), (None, Some(1), Some(20))],
+        t_rows: [1, 2, 4, 8, 16, 32]
+            .iter()
+            .map(|&v| (Some(0), Some(0), Some(v)))
+            .collect(),
+        asof: true,
+        u_starts: vec![2, 1],
+        t_ts: vec![Some(1), Some(2), Some(3), Some(4), Some(9), None],
+    };
+    let case = Case {
+        inst: inst.clone(),
+        sel_dims: vec![1],
+        sel_metrics: vec![0],
+        where_pred: None,
+    };
+    check_case(&case).unwrap();
+
+    let req = QueryRequest {
+        // PIN: a fixed query with its answer written out; the property above varies the filter.
+        where_clause: None,
+        dimensions: vec![DimensionName::new("ucat")],
+        metrics: vec![MetricName::new("sv")],
+        // PIN: FACTS is a row-level shape with no per-grain meaning. TECH-DEBT #66
+        facts: vec![],
+    };
+    let sql = expand("multihop", &build_def(true), &req).unwrap();
+    let conn = make_db(&inst);
+    let mut stmt = conn
+        .prepare(&format!(
+            "SELECT CAST(ucat AS BIGINT), CAST(sv AS BIGINT) FROM ({sql}) ORDER BY 1 NULLS LAST"
+        ))
+        .unwrap();
+    let rows: Vec<(Option<i64>, Option<i64>)> = stmt
+        .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))
+        .unwrap()
+        .map(Result::unwrap)
+        .collect();
+    assert_eq!(
+        rows,
+        vec![(Some(0), Some(6)), (Some(1), Some(24)), (None, Some(33))],
+        "{sql}"
+    );
+}
+
+/// Phase 7.1: the ASOF hop walked against its direction. With `u` listed
+/// first, a dimensions-only query starts from `u` and joins `t` onto it, so
+/// each `u` row must get exactly the `t` rows whose ASOF match it is. The
+/// oracle finds each `t` row's match by the same correlated `max` as
+/// [`grain_sql`] and joins it to `u` by equality.
+fn reverse_asof_oracle(case: &Case) -> String {
+    let dims: Vec<String> = case
+        .sel_dims
+        .iter()
+        .map(|&i| match DIMS[i] {
+            "td" => "t.d AS td".to_string(),
+            "ucat" => "u.ucat AS ucat".to_string(),
+            "wcat" => "w.wcat AS wcat".to_string(),
+            other => unreachable!("unexpected dim {other}"),
+        })
+        .collect();
+    format!(
+        "SELECT DISTINCT {} FROM u \
+         LEFT JOIN (SELECT t.*, (SELECT max(u2.us) FROM u u2 WHERE u2.uk = t.fk_u \
+                    AND u2.us <= t.ts) AS asof_us FROM t) t \
+           ON t.fk_u = u.uk AND t.asof_us = u.us \
+         LEFT JOIN w ON u.fk_w = w.id",
+        dims.join(", ")
+    )
+}
+
+proptest! {
+    #![proptest_config(ProptestConfig { cases: 128, ..ProptestConfig::default() })]
+
+    #[test]
+    fn asof_hop_walked_backwards_matches_oracle(
+        inst in arb_instance(),
+        sel_dims in prop::sample::subsequence(vec![0usize, 1, 2], 1..=3),
+    ) {
+        let mut inst = inst;
+        inst.asof = true;
+        let case = Case { inst, sel_dims, sel_metrics: vec![], where_pred: None };
+        let mut def = build_def(true);
+        def.tables.swap(0, 1); // `u` first: the base table, so `t` is joined onto it.
+        let req = QueryRequest {
+            // PIN: this property checks which rows the reverse join pairs; dimensions-only queries are the shape that walks it, and `multi_hop_fence_and_aggregation` varies the filter over the forward hop.
+            where_clause: None,
+            dimensions: case.sel_dims.iter().map(|&i| DimensionName::new(DIMS[i])).collect(),
+            metrics: vec![],
+            // PIN: FACTS is a row-level shape with no per-grain meaning. TECH-DEBT #66
+            facts: vec![],
+        };
+        let expanded = expand("multihop", &def, &req)
+            .map_err(|e| TestCaseError::fail(format!("rejected: {e}")))?;
+        // `t` is joined only when one of its dimensions is asked for.
+        prop_assert_eq!(
+            expanded.contains("ASOF JOIN"),
+            case.sel_dims.contains(&0),
+            "the reverse ASOF join is emitted exactly when `td` is queried:\n{}",
+            expanded
+        );
+        let oracle = reverse_asof_oracle(&case);
+        let proj = case.sel_dims.iter().map(|&i| DIMS[i]).collect::<Vec<_>>().join(", ");
+        let cmp = format!(
+            "SELECT \
+               (SELECT count(*) FROM (SELECT {proj} FROM ({expanded}) qa EXCEPT ALL \
+                                      SELECT {proj} FROM ({oracle}) qb) e1) \
+             + (SELECT count(*) FROM (SELECT {proj} FROM ({oracle}) qc EXCEPT ALL \
+                                      SELECT {proj} FROM ({expanded}) qd) e2)"
+        );
+        let conn = make_db(&case.inst);
+        let diff: i64 = conn.query_row(&cmp, [], |r| r.get(0)).unwrap_or_else(|e| {
+            panic!("comparison failed: {e}\n--- expanded:\n{expanded}\n--- oracle:\n{oracle}")
+        });
+        prop_assert_eq!(diff, 0, "--- expanded:\n{}\n--- oracle:\n{}", expanded, oracle);
+    }
 }

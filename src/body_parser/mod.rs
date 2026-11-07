@@ -2982,6 +2982,64 @@ mod tests {
         assert_eq!(result[0].ref_columns, vec!["id"]);
     }
 
+    // Phase 7.1: the ASOF marker in the REFERENCES list.
+    #[test]
+    fn references_asof_column_records_its_position() {
+        let r =
+            parse_relationships_clause("rel AS o(cust, d) REFERENCES a(cust, ASOF start_date)", 0)
+                .unwrap();
+        assert_eq!(r[0].ref_columns, vec!["cust", "start_date"]);
+        assert_eq!(r[0].fk_columns, vec!["cust", "d"]);
+        assert_eq!(r[0].asof, Some(1));
+    }
+
+    #[test]
+    fn references_asof_may_precede_any_column_in_any_case() {
+        let r =
+            parse_relationships_clause("rel AS o(d, cust) REFERENCES a(asof s, cust)", 0).unwrap();
+        assert_eq!(r[0].ref_columns, vec!["s", "cust"]);
+        assert_eq!(r[0].asof, Some(0));
+    }
+
+    #[test]
+    fn references_without_asof_is_plain() {
+        let r = parse_relationships_clause("rel AS o(cust) REFERENCES a(cust)", 0).unwrap();
+        assert_eq!(r[0].asof, None);
+    }
+
+    #[test]
+    fn references_two_asof_columns_refused() {
+        let err = parse_relationships_clause("rel AS o(d, c) REFERENCES a(ASOF s, ASOF c)", 0)
+            .unwrap_err();
+        assert!(
+            err.message.contains("more than one ASOF column"),
+            "{}",
+            err.message
+        );
+    }
+
+    #[test]
+    fn asof_on_a_foreign_key_column_refused() {
+        let err =
+            parse_relationships_clause("rel AS o(c, ASOF d) REFERENCES a(c, s)", 0).unwrap_err();
+        assert!(
+            err.message
+                .contains("must mark a column of the REFERENCES list"),
+            "{}",
+            err.message
+        );
+    }
+
+    /// A column named `asof`, bare or quoted, is a column, not the keyword.
+    #[test]
+    fn a_column_named_asof_is_a_column() {
+        let r =
+            parse_relationships_clause(r#"rel AS o(k, asof) REFERENCES a(k, "ASOF")"#, 0).unwrap();
+        assert_eq!(r[0].fk_columns, vec!["k", "asof"]);
+        assert_eq!(r[0].ref_columns, vec!["k", "\"ASOF\""]);
+        assert_eq!(r[0].asof, None);
+    }
+
     #[test]
     fn references_without_column_list() {
         let result = parse_relationships_clause("rel AS a(fk) REFERENCES b", 0).unwrap();

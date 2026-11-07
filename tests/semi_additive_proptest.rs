@@ -1335,6 +1335,7 @@ fn role_def(order: SortOrder) -> SemanticViewDefinition {
         ref_columns: vec!["id".to_string()],
         name: Some(name.to_string()),
         cardinality: Cardinality::ManyToOne,
+        asof: None,
     };
     let dim = |name: &str, expr: &str, table: &str| Dimension {
         cortex_search_service: None,

@@ -200,6 +200,7 @@ mod tests {
                 ref_columns: vec!["id".to_string()],
                 name: Some("o_to_c".to_string()),
                 cardinality: Cardinality::ManyToOne,
+                asof: None,
             }],
             ..SemanticViewDefinition::default()
         }

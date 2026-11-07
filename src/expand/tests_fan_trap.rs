@@ -372,6 +372,7 @@ fn cyclic_relationships_are_rejected_by_expand() {
                 ref_columns: vec!["id".to_string()],
                 name: Some("r1".to_string()),
                 cardinality: Cardinality::ManyToOne,
+                asof: None,
             },
             Join {
                 from_alias: "b".to_string(),
@@ -380,6 +381,7 @@ fn cyclic_relationships_are_rejected_by_expand() {
                 ref_columns: vec!["id".to_string()],
                 name: Some("r2".to_string()),
                 cardinality: Cardinality::ManyToOne,
+                asof: None,
             },
         ],
         ..Default::default()

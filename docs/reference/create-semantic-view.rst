@@ -33,7 +33,7 @@ Syntax
    )
    [ RELATIONSHIPS (
        <rel_name> AS <from_alias>( <fk_column> [, <fk_column> ...] )
-           REFERENCES <to_alias> [( <ref_column> [, <ref_column> ...] )]
+           REFERENCES <to_alias> [( [ ASOF ] <ref_column> [, [ ASOF ] <ref_column> ...] )]
        [, ... ]
    ) ]
    [ VARIABLES (
@@ -502,11 +502,35 @@ Declares FK/PK join paths between tables. Each entry names a relationship, speci
 - ``(<fk_column>, ...)``, one or more FK column names on the "from" table.
 - ``REFERENCES <to_alias> [(<ref_column>, ...)]``, the target table alias. Optionally specify which columns on the target table to join against. If omitted, the target's ``PRIMARY KEY`` columns are used. The JOIN ON clause is synthesized as ``from_alias.fk_column = to_alias.ref_column``.
 
+**ASOF relationships:**
+
+.. versionadded:: 0.19.0
+
+Write ``ASOF`` before one column of the ``REFERENCES`` list to join each row of the "from" table to the latest matching row of the target, as with an address history or a price list:
+
+.. code-block:: sql
+
+   TABLES (
+       o AS orders           PRIMARY KEY (order_id),
+       a AS customer_address PRIMARY KEY (cust_id, start_date)
+   )
+   RELATIONSHIPS (
+       order_address AS o(cust_id, order_date) REFERENCES a(cust_id, ASOF start_date)
+   )
+
+Each order takes the address of its customer with the greatest ``start_date`` on or before its ``order_date``. The other column pairs must be equal, and the ``ASOF`` pair matches on ``o.order_date >= a.start_date``, as in Snowflake. An order with no such address, or with a ``NULL`` in any of its columns, keeps its row, with ``NULL`` for the address's dimensions. The query joins the target with DuckDB's ``ASOF LEFT JOIN``.
+
+- At most one column of a relationship can be ``ASOF``, and it can be any column of the list.
+- The two ``ASOF`` columns must be numbers, dates, times or timestamps, of types that compare. ``CREATE`` checks this against the tables.
+- As for any relationship, the referenced columns, the ``ASOF`` one included, must be the target's ``PRIMARY KEY`` or a ``UNIQUE`` key. The data is not checked against it, and the answer for data that breaks the key is not defined, as for any key here. If two target rows share a key and a start value, an order that matches them is joined to one of the two when the query joins from the orders (Snowflake also picks one), and to both when it joins from the addresses, as a query with only dimensions does when the address table is first in ``TABLES``.
+- An ``ASOF`` relationship is always many-to-one, whatever keys the "from" table declares, since many rows can match the same target row. A metric on the target is computed over the target's own rows, and grouping it by a dimension of the "from" table is refused as a :ref:`fan trap <howto-fan-traps>`.
+- ``DESCRIBE`` writes the column in ``REF_KEY`` as ``{"type":"ASOF","column":"<column>"}``, ``GET_DDL`` writes the keyword back, and the YAML export writes the column's 0-based position in the list as ``asof``. A release of the extension older than 0.19.0 cannot read a view with an ``ASOF`` relationship.
+
 **Cardinality inference:**
 
 The extension infers cardinality from the "from" table's constraints:
 
-- If the FK columns match a ``PRIMARY KEY`` or ``UNIQUE`` constraint on the "from" table, the relationship is **one-to-one**.
+- If the FK columns match a ``PRIMARY KEY`` or ``UNIQUE`` constraint on the "from" table, the relationship is **one-to-one**, unless it is ``ASOF``.
 - Otherwise, the relationship is **many-to-one** (the default).
 
 Cardinality is used for :ref:`fan trap detection <howto-fan-traps>`.

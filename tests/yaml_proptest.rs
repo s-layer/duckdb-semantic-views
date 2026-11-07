@@ -365,9 +365,12 @@ fn arb_join() -> impl Strategy<Value = Join> {
         arb_cardinality(),
         proptest::collection::vec(arb_name(), 0..=2),
         proptest::option::of(arb_name()),
+        proptest::option::of(0usize..2),
     )
         .prop_map(
-            |(table, from_alias, fk_columns, cardinality, ref_columns, name)| Join {
+            |(table, from_alias, fk_columns, cardinality, ref_columns, name, asof)| Join {
+                // Phase 7.1: an ASOF position within the generated lists.
+                asof: asof.filter(|i| *i < fk_columns.len().min(ref_columns.len())),
                 table,
                 from_alias,
                 fk_columns,

@@ -729,6 +729,7 @@ fn build_def() -> SemanticViewDefinition {
         ref_columns: vec!["id".to_string()],
         name: Some(name.to_string()),
         cardinality: Cardinality::ManyToOne,
+        asof: None,
     };
     let joins = vec![
         Join {
@@ -738,6 +739,7 @@ fn build_def() -> SemanticViewDefinition {
             ref_columns: vec!["id".to_string()],
             name: Some("t_u".to_string()),
             cardinality: Cardinality::ManyToOne,
+            asof: None,
         },
         role("t_p1", "p1"),
         role("t_p2", "p2"),
@@ -748,6 +750,7 @@ fn build_def() -> SemanticViewDefinition {
             ref_columns: vec!["id".to_string()],
             name: Some("p_q".to_string()),
             cardinality: Cardinality::ManyToOne,
+            asof: None,
         },
         Join {
             from_alias: "q".to_string(),
@@ -756,6 +759,7 @@ fn build_def() -> SemanticViewDefinition {
             ref_columns: vec!["id".to_string()],
             name: Some("q_s".to_string()),
             cardinality: Cardinality::ManyToOne,
+            asof: None,
         },
     ];
     SemanticViewDefinition {

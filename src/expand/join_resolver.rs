@@ -11,6 +11,7 @@ use super::resolution::{
     qualify_and_quote_table_ref, quote_ident, quote_ident_if_needed, quote_stored_ident,
     table_source,
 };
+use super::types::ExpandError;
 
 /// Build a role-playing scoped alias in the documented `{table}__{rel}` format.
 ///
@@ -54,7 +55,13 @@ pub(super) fn rewrite_to_scoped_alias(expr: &str, table: &str, scoped: &str) -> 
 /// `from_alias.fk = to_alias.pk` pairs, joined by ` AND `.
 /// Uses `join.from_alias` for the FROM side and `join.table` for the TO side.
 pub(super) fn synthesize_on_clause(join: &Join, tables: &[TableRef]) -> String {
-    on_clause(join, tables, None, &quote_stored_ident(&join.table))
+    on_clause(
+        join,
+        tables,
+        None,
+        &quote_stored_ident(&join.table),
+        AsofSide::Forward,
+    )
 }
 
 /// Synthesize an ON clause with a potentially scoped alias on the PK (target) side.
@@ -72,7 +79,44 @@ pub(super) fn synthesize_on_clause_scoped(
     from_alias: Option<&str>,
     to_alias: &str,
 ) -> String {
-    on_clause(join, tables, from_alias, &quote_ident(to_alias))
+    on_clause(
+        join,
+        tables,
+        from_alias,
+        &quote_ident(to_alias),
+        AsofSide::Forward,
+    )
+}
+
+/// How an ASOF relationship's ASOF pair is rendered (Phase 7.1).
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum AsofSide {
+    /// The referenced table is joined onto the referencing one, by an
+    /// `ASOF LEFT JOIN`: the pair is its `from.fk >= to.ref` match condition.
+    Forward,
+    /// The referencing table is joined onto the referenced one, as the
+    /// derived table [`reverse_asof_source`] builds: the pair is
+    /// `from.<ASOF_MATCH_COLUMN> = to.ref`, the referenced row it matched.
+    Reverse,
+}
+
+/// The column [`reverse_asof_source`] adds to the referencing table: the
+/// referenced row's ASOF value that the row matched.
+const ASOF_MATCH_COLUMN: &str = "__sv_asof_match";
+
+/// The referenced columns of `join`, in `fk_columns` order.
+fn ref_columns<'j>(join: &'j Join, tables: &'j [TableRef]) -> &'j [String] {
+    // Phase 33: Prefer ref_columns (resolved during inference).
+    // Fall back to target PK for backward compat (legacy joins without ref_columns).
+    if join.ref_columns.is_empty() {
+        let to_alias_lower = join.table.to_ascii_lowercase();
+        tables
+            .iter()
+            .find(|t| t.alias.to_ascii_lowercase() == to_alias_lower)
+            .map_or(&[] as &[String], |t| &t.pk_columns)
+    } else {
+        &join.ref_columns
+    }
 }
 
 /// The ON clause of `join` with `to_sql`, an already-quoted alias, on the
@@ -81,35 +125,109 @@ pub(super) fn synthesize_on_clause_scoped(
 /// `from_alias` (Phase 6.3b). Stored aliases and key columns keep any quotes
 /// they were written with, so each is stripped and quoted once
 /// ([`quote_stored_ident`]); a scoped alias is a logical value and is quoted as
-/// is.
-fn on_clause(join: &Join, tables: &[TableRef], from_alias: Option<&str>, to_sql: &str) -> String {
-    // Phase 33: Prefer ref_columns (resolved during inference).
-    // Fall back to target PK for backward compat (legacy joins without ref_columns).
-    let ref_cols: &[String] = if join.ref_columns.is_empty() {
-        let to_alias_lower = join.table.to_ascii_lowercase();
-        tables
-            .iter()
-            .find(|t| t.alias.to_ascii_lowercase() == to_alias_lower)
-            .map_or(&[] as &[String], |t| &t.pk_columns)
-    } else {
-        &join.ref_columns
-    };
-
+/// is. An ASOF relationship's ASOF pair is rendered per `asof`.
+fn on_clause(
+    join: &Join,
+    tables: &[TableRef],
+    from_alias: Option<&str>,
+    to_sql: &str,
+    asof: AsofSide,
+) -> String {
+    let from_sql = from_alias.map_or_else(|| quote_stored_ident(&join.from_alias), quote_ident);
     let pairs: Vec<String> = join
         .fk_columns
         .iter()
-        .zip(ref_cols.iter())
-        .map(|(fk, pk)| {
+        .zip(ref_columns(join, tables).iter())
+        .enumerate()
+        .map(|(i, (fk, pk))| {
+            let (fk_sql, op) = match (join.asof == Some(i), asof) {
+                (false, _) => (quote_stored_ident(fk), "="),
+                (true, AsofSide::Forward) => (quote_stored_ident(fk), ">="),
+                (true, AsofSide::Reverse) => (quote_ident(ASOF_MATCH_COLUMN), "="),
+            };
             format!(
-                "{}.{} = {}.{}",
-                from_alias.map_or_else(|| quote_stored_ident(&join.from_alias), quote_ident),
-                quote_stored_ident(fk),
-                to_sql,
-                quote_stored_ident(pk),
+                "{from_sql}.{fk_sql} {op} {to_sql}.{}",
+                quote_stored_ident(pk)
             )
         })
         .collect();
     pairs.join(" AND ")
+}
+
+/// The referencing table of the ASOF relationship `join`, as a derived table
+/// that carries, per row, the ASOF value of the referenced row it matches
+/// ([`ASOF_MATCH_COLUMN`]).
+///
+/// It is what a join walked against the relationship's direction joins: from
+/// the referenced table, `ON <equalities> AND from.__sv_asof_match = to.ref`
+/// gives each referenced row exactly the referencing rows whose ASOF match it
+/// is, which no condition over the two bare tables can say. A referencing row
+/// with no match has a NULL there and joins no referenced row, as in the
+/// forward join.
+fn reverse_asof_source(join: &Join, def: &SemanticViewDefinition, asof: usize) -> Option<String> {
+    let find = |alias: &str| {
+        def.tables
+            .iter()
+            .find(|t| t.alias.eq_ignore_ascii_case(alias))
+    };
+    let (from, to) = (find(&join.from_alias)?, find(&join.table)?);
+    let ref_col = ref_columns(join, &def.tables).get(asof)?;
+    let inner = Join {
+        from_alias: "__sv_asof_from".to_string(),
+        table: "__sv_asof_to".to_string(),
+        ..join.clone()
+    };
+    Some(format!(
+        "(SELECT \"__sv_asof_from\".*, \"__sv_asof_to\".{ref_col} AS {match_col} \
+         FROM {from_src} AS \"__sv_asof_from\" \
+         ASOF JOIN {to_src} AS \"__sv_asof_to\" ON {on})",
+        ref_col = quote_stored_ident(ref_col),
+        match_col = quote_ident(ASOF_MATCH_COLUMN),
+        from_src = table_source(from, def),
+        to_src = table_source(to, def),
+        on = on_clause(
+            &inner,
+            &def.tables,
+            None,
+            "\"__sv_asof_to\"",
+            AsofSide::Forward
+        ),
+    ))
+}
+
+/// Refuse a stored ASOF marker that cannot be emitted.
+///
+/// CREATE only stores a marker that names one of the referenced columns of a
+/// relationship between two of the view's tables, but a definition can also
+/// arrive from storage or (in the fuzzers) be built directly. One whose index
+/// is past the key, or whose tables are missing, would otherwise render as a
+/// plain join with no ASOF condition: a silent wrong number. So expansion
+/// refuses it up front, which also keeps the emission asserts in
+/// [`push_join_clauses`] true.
+pub(super) fn check_asof_markers(
+    view_name: &str,
+    def: &SemanticViewDefinition,
+) -> Result<(), ExpandError> {
+    let has_table = |alias: &str| {
+        def.tables
+            .iter()
+            .any(|t| t.alias.eq_ignore_ascii_case(alias))
+    };
+    for join in &def.joins {
+        let Some(asof) = join.asof else { continue };
+        let fits = asof < join.fk_columns.len() && asof < ref_columns(join, &def.tables).len();
+        if !fits || !has_table(&join.from_alias) || !has_table(&join.table) {
+            return Err(ExpandError::UncheckableDefinition {
+                view_name: view_name.to_string(),
+                reason: format!(
+                    "the ASOF marker of the relationship from '{}' to '{}' does not name \
+                     one of its key columns",
+                    join.from_alias, join.table
+                ),
+            });
+        }
+    }
+    Ok(())
 }
 
 /// A join edge chosen by the resolver, in emission order.
@@ -150,11 +268,48 @@ pub(super) fn push_join_clauses(
             .tables
             .iter()
             .find(|t| t.alias.to_ascii_lowercase() == rj.bare_alias);
-        sql.push_str(prefix);
-        sql.push_str(&table_ref.map_or_else(
-            || qualify_and_quote_table_ref(&rj.bare_alias, def),
-            |t| table_source(t, def),
-        ));
+        // Phase 7.1: an ASOF relationship joins its referenced table with an
+        // `ASOF LEFT JOIN`. Walked the other way (the referencing table joined
+        // onto the referenced one), it joins the derived table
+        // `reverse_asof_source` builds instead.
+        let reverse_asof = rj
+            .join
+            .asof
+            .filter(|_| !rj.scoped && !rj.join.table.eq_ignore_ascii_case(&rj.bare_alias));
+        let reverse_source = reverse_asof.and_then(|i| reverse_asof_source(rj.join, def, i));
+        // Every caller passes a `LEFT JOIN ` prefix, and every reverse hop is
+        // a bare one whose two tables the view has. Anything else would render
+        // the ASOF pair as a plain inequality join, a silent wrong number, so
+        // it is a bug to catch in tests rather than SQL to emit.
+        debug_assert!(
+            rj.join.asof.is_none() || prefix.ends_with("LEFT JOIN "),
+            "an ASOF relationship joined with the prefix {prefix:?}"
+        );
+        debug_assert!(
+            reverse_asof.is_none() || reverse_source.is_some(),
+            "an ASOF relationship walked backwards has no derived table"
+        );
+        debug_assert!(
+            rj.join.asof.is_none()
+                || !rj.scoped
+                || rj.join.table.eq_ignore_ascii_case(&rj.bare_alias),
+            "a role-played ASOF hop walked backwards"
+        );
+        match (&reverse_source, rj.join.asof) {
+            (None, Some(_)) => match prefix.strip_suffix("LEFT JOIN ") {
+                Some(lead) => {
+                    sql.push_str(lead);
+                    sql.push_str("ASOF LEFT JOIN ");
+                }
+                None => sql.push_str(prefix),
+            },
+            _ => sql.push_str(prefix),
+        }
+        sql.push_str(&match (&reverse_source, table_ref) {
+            (Some(source), _) => source.clone(),
+            (None, Some(t)) => table_source(t, def),
+            (None, None) => qualify_and_quote_table_ref(&rj.bare_alias, def),
+        });
         sql.push_str(" AS ");
         // A scoped alias is a logical value; a bare one is stored as written.
         sql.push_str(&if rj.scoped {
@@ -169,6 +324,14 @@ pub(super) fn push_join_clauses(
                 &def.tables,
                 rj.from_emit.as_deref(),
                 &rj.emit_alias,
+            ));
+        } else if reverse_source.is_some() {
+            sql.push_str(&on_clause(
+                rj.join,
+                &def.tables,
+                None,
+                &quote_stored_ident(&rj.join.table),
+                AsofSide::Reverse,
             ));
         } else {
             sql.push_str(&synthesize_on_clause(rj.join, &def.tables));
@@ -597,7 +760,100 @@ pub(super) fn resolve_joins_pkfk<'a>(
 mod tests {
     use super::*;
     use crate::expand::test_helpers::{orders_view, TestFixtureExt};
-    use crate::model::{Join, TableRef};
+    use crate::model::{Join, SemanticViewDefinition, TableRef};
+
+    /// Phase 7.1: the orders -> addresses ASOF relationship used below.
+    fn asof_def(orders_first: bool) -> SemanticViewDefinition {
+        let o = TableRef {
+            alias: "o".to_string(),
+            table: "orders".to_string(),
+            pk_columns: vec!["id".to_string()],
+            ..Default::default()
+        };
+        let a = TableRef {
+            alias: "a".to_string(),
+            table: "addresses".to_string(),
+            pk_columns: vec!["cust".to_string(), "start_date".to_string()],
+            ..Default::default()
+        };
+        SemanticViewDefinition {
+            tables: if orders_first { vec![o, a] } else { vec![a, o] },
+            joins: vec![Join {
+                from_alias: "o".to_string(),
+                table: "a".to_string(),
+                fk_columns: vec!["cust".to_string(), "order_date".to_string()],
+                ref_columns: vec!["cust".to_string(), "start_date".to_string()],
+                name: Some("order_address".to_string()),
+                asof: Some(1),
+                ..Default::default()
+            }],
+            ..Default::default()
+        }
+    }
+
+    fn render(def: &SemanticViewDefinition, joined: &str) -> String {
+        let rj = ResolvedJoin {
+            emit_alias: joined.to_string(),
+            bare_alias: joined.to_string(),
+            join: &def.joins[0],
+            scoped: false,
+            from_emit: None,
+        };
+        let mut sql = String::new();
+        push_join_clauses(&mut sql, &[rj], def, "\nLEFT JOIN ");
+        sql
+    }
+
+    /// Joining the referenced table: an `ASOF LEFT JOIN` whose ASOF pair is
+    /// the `>=` match condition.
+    #[test]
+    fn asof_relationship_joins_its_referenced_table_with_asof_left_join() {
+        let def = asof_def(true);
+        assert_eq!(
+            render(&def, "a"),
+            "\nASOF LEFT JOIN \"addresses\" AS \"a\" ON \"o\".\"cust\" = \"a\".\"cust\" \
+             AND \"o\".\"order_date\" >= \"a\".\"start_date\""
+        );
+    }
+
+    /// Joining the referencing table onto the referenced one: the derived
+    /// table carrying each row's ASOF match, joined on equality.
+    #[test]
+    fn asof_relationship_walked_backwards_joins_the_matched_rows() {
+        let def = asof_def(false);
+        let sql = render(&def, "o");
+        assert!(
+            sql.starts_with("\nLEFT JOIN (SELECT \"__sv_asof_from\".*"),
+            "{sql}"
+        );
+        assert!(
+            sql.contains(
+                "ASOF JOIN \"addresses\" AS \"__sv_asof_to\" ON \"__sv_asof_from\".\"cust\" = \
+                 \"__sv_asof_to\".\"cust\" AND \"__sv_asof_from\".\"order_date\" >= \
+                 \"__sv_asof_to\".\"start_date\")"
+            ),
+            "{sql}"
+        );
+        assert!(
+            sql.ends_with(
+                " AS \"o\" ON \"o\".\"cust\" = \"a\".\"cust\" AND \
+                 \"o\".\"__sv_asof_match\" = \"a\".\"start_date\""
+            ),
+            "{sql}"
+        );
+    }
+
+    /// A plain relationship is unchanged.
+    #[test]
+    fn plain_relationship_still_joins_with_left_join() {
+        let mut def = asof_def(true);
+        def.joins[0].asof = None;
+        assert_eq!(
+            render(&def, "a"),
+            "\nLEFT JOIN \"addresses\" AS \"a\" ON \"o\".\"cust\" = \"a\".\"cust\" \
+             AND \"o\".\"order_date\" = \"a\".\"start_date\""
+        );
+    }
 
     #[test]
     fn test_synthesize_on_clause_single_column() {
@@ -834,6 +1090,63 @@ mod tests {
                 .any(|rj| rj.emit_alias == "airports__dep_airport" && rj.scoped),
             "Should include scoped alias airports__dep_airport, got: {:?}",
             result.iter().map(|rj| &rj.emit_alias).collect::<Vec<_>>()
+        );
+    }
+
+    /// A stored ASOF marker that names no referenced column (an index past
+    /// the key, or a key that is empty) cannot be emitted as an ASOF join.
+    /// Expansion refuses the definition instead of rendering a plain
+    /// equality join, or tripping the emission asserts (the fuzz crash on
+    /// PR #336).
+    fn asof_query(def: &SemanticViewDefinition, dim_table: &str) -> Result<String, ExpandError> {
+        use crate::expand::{expand, DimensionName, QueryRequest};
+        use crate::model::Dimension;
+        let mut def = def.clone();
+        def.dimensions = vec![Dimension {
+            name: "d".to_string(),
+            expr: format!("{dim_table}.cust"),
+            source_table: Some(dim_table.to_string()),
+            ..Default::default()
+        }];
+        let req = QueryRequest {
+            dimensions: vec![DimensionName::new("d")],
+            ..Default::default()
+        };
+        expand("v", &def, &req)
+    }
+
+    #[test]
+    fn asof_index_past_the_key_is_refused_forward() {
+        let mut def = asof_def(true);
+        def.joins[0].asof = Some(7);
+        let err = asof_query(&def, "a").expect_err("out-of-range ASOF index expanded");
+        assert!(
+            matches!(err, ExpandError::UncheckableDefinition { .. }),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn asof_index_past_the_key_is_refused_backwards() {
+        let mut def = asof_def(false);
+        def.joins[0].asof = Some(7);
+        let err = asof_query(&def, "o").expect_err("out-of-range ASOF index expanded");
+        assert!(
+            matches!(err, ExpandError::UncheckableDefinition { .. }),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn asof_on_an_empty_key_is_refused() {
+        let mut def = asof_def(false);
+        def.joins[0].ref_columns.clear();
+        def.tables[0].pk_columns.clear();
+        def.joins[0].asof = Some(0);
+        let err = asof_query(&def, "o").expect_err("ASOF on an empty key expanded");
+        assert!(
+            matches!(err, ExpandError::UncheckableDefinition { .. }),
+            "{err}"
         );
     }
 }

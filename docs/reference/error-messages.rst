@@ -378,6 +378,36 @@ Tables defined by a query
    TABLES (paid AS (SELECT * FROM orders WHERE amount > 0) PRIMARY KEY (id))
 
 
+.. _ref-err-asof:
+
+ASOF relationships
+------------------
+
+.. versionadded:: 0.19.0
+
+.. code-block:: text
+
+   Relationship '<rel>' has more than one ASOF column; at most one referenced column can be ASOF.
+
+   ASOF in relationship '<rel>' must mark a column of the REFERENCES list, not a foreign-key column: write 'REFERENCES t (key, ASOF column)'.
+
+   semantic view '<view>': relationship '<rel>': ASOF column <alias>.<column> has type <type>; an ASOF column must be numeric, a date, a time or a timestamp
+
+   semantic view '<view>': relationship '<rel>' does not bind: <DuckDB's error>
+
+**Cause:** An :ref:`ASOF relationship <ref-create-relationships>` marks one column of its ``REFERENCES`` list with ``ASOF``. Its pair of columns must both be numbers, dates, times or timestamps, as in Snowflake, and of types DuckDB can compare (a ``DATE`` does not compare with an ``INTEGER``). ``CREATE`` checks the types against the tables, so the last two errors name the column or show DuckDB's comparison error.
+
+**Fix:** Mark one referenced column, and give the ``ASOF`` pair comparable numeric or temporal types, casting in a :ref:`table defined by a query <ref-create-inline-query>` if needed.
+
+.. code-block:: sql
+
+   -- This will fail: "an ASOF column must be numeric, a date, a time or a timestamp"
+   RELATIONSHIPS (r AS o(cust_id, city) REFERENCES a(cust_id, ASOF city))
+
+   -- Fix: match on the date
+   RELATIONSHIPS (r AS o(cust_id, order_date) REFERENCES a(cust_id, ASOF start_date))
+
+
 .. _ref-err-create-or-alter:
 
 CREATE OR ALTER

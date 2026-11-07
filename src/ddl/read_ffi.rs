@@ -464,6 +464,35 @@ pub fn check_create_members(
             }
         }
     }
+    // Phase 7.1: an ASOF column pair must be of a type Snowflake's ASOF match
+    // accepts, numeric or temporal (010279). DuckDB's ASOF join would also
+    // take a string, which orders differently from what a user means.
+    // The types are checked first, so a string column is refused as one
+    // rather than as a pair that does not compare.
+    for (join, compare) in def.joins.iter().flat_map(|j| [(j, false), (j, true)]) {
+        if let Some(probe) = asof_type_probe(join, &def, compare) {
+            let rel = join.name.as_deref().unwrap_or("?");
+            match caller_describe(database, schema, &probe) {
+                Ok(cols) => {
+                    if let Some((col, data_type)) =
+                        cols.iter().find(|(_, t)| !asof_type_supported(t))
+                    {
+                        return Err(format!(
+                            "semantic view '{view_name}': relationship '{rel}': ASOF column \
+                             {col} has type {data_type}; an ASOF column must be numeric, a \
+                             date, a time or a timestamp"
+                        ));
+                    }
+                }
+                Err(CallerError::Interrupted(m)) => return Err(m),
+                Err(CallerError::Failed(m)) => {
+                    return Err(format!(
+                        "semantic view '{view_name}': relationship '{rel}' does not bind: {m}"
+                    ));
+                }
+            }
+        }
+    }
     let unbound = crate::query::member_types::first_unbound_member(
         view_name,
         &def,
@@ -484,6 +513,78 @@ pub fn check_create_members(
             u.kind, u.name, u.error
         )),
     }
+}
+
+/// The probe `check_create_members` describes for an ASOF relationship: its
+/// two ASOF columns, named `<alias>.<column>`, over the two tables, and with
+/// `compare`, compared as the join compares them, so a pair that cannot be
+/// compared fails to bind here rather than at query time. `None` for
+/// a relationship that is not ASOF or names a table the view does not have
+/// (which graph validation has already refused).
+fn asof_type_probe(
+    join: &crate::model::Join,
+    def: &crate::model::SemanticViewDefinition,
+    compare: bool,
+) -> Option<String> {
+    use crate::expand::{quote_ident, quote_stored_ident, table_source};
+    let i = join.asof?;
+    let find = |alias: &str| {
+        def.tables
+            .iter()
+            .find(|t| t.alias.eq_ignore_ascii_case(alias))
+    };
+    let (from, to) = (find(&join.from_alias)?, find(&join.table)?);
+    let (fk, rf) = (join.fk_columns.get(i)?, join.ref_columns.get(i)?);
+    Some(format!(
+        "SELECT \"__sv_f\".{fk_sql} AS {fk_name}, \"__sv_t\".{rf_sql} AS {rf_name} \
+         FROM {from_src} AS \"__sv_f\", {to_src} AS \"__sv_t\"{filter} LIMIT 0",
+        fk_sql = quote_stored_ident(fk),
+        rf_sql = quote_stored_ident(rf),
+        fk_name = quote_ident(&format!("{}.{fk}", join.from_alias)),
+        rf_name = quote_ident(&format!("{}.{rf}", join.table)),
+        from_src = table_source(from, def),
+        to_src = table_source(to, def),
+        filter = if compare {
+            format!(
+                " WHERE \"__sv_f\".{} >= \"__sv_t\".{}",
+                quote_stored_ident(fk),
+                quote_stored_ident(rf)
+            )
+        } else {
+            String::new()
+        },
+    ))
+}
+
+/// Whether `data_type`, as `DESCRIBE` names it, is a type an ASOF column may
+/// have: a number, a date, a time or a timestamp.
+fn asof_type_supported(data_type: &str) -> bool {
+    let t = data_type.trim().to_ascii_uppercase();
+    let base = t.split('(').next().unwrap_or("").trim();
+    matches!(
+        base,
+        "TINYINT"
+            | "SMALLINT"
+            | "INTEGER"
+            | "BIGINT"
+            | "HUGEINT"
+            | "UTINYINT"
+            | "USMALLINT"
+            | "UINTEGER"
+            | "UBIGINT"
+            | "UHUGEINT"
+            | "FLOAT"
+            | "DOUBLE"
+            | "DECIMAL"
+            | "DATE"
+            | "TIME"
+            | "TIMESTAMP"
+            | "TIMESTAMP_S"
+            | "TIMESTAMP_MS"
+            | "TIMESTAMP_NS"
+            | "TIMESTAMP WITH TIME ZONE"
+            | "TIME WITH TIME ZONE"
+    )
 }
 
 /// Write a NUL-terminated error message into the C-side `error_buf`,
