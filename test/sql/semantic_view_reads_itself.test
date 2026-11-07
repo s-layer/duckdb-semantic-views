@@ -1,0 +1,315 @@
+# A semantic view whose definition reads the view itself, directly or through
+# other semantic views, is refused when queried, at the second expansion of the
+# view. Before, the expansion recursed until DuckDB's expression depth limit,
+# about 200 expansions deep, and on Windows the 1 MB stack overflowed first and
+# the process crashed (the v0.18.0 registry build).
+#
+# Each refusal is checked on its own view, and the views that read other
+# semantic views without a cycle are checked to still answer.
+
+require semantic_views
+
+statement ok
+CREATE TABLE ri_orders (id INTEGER, amount INTEGER);
+
+statement ok
+INSERT INTO ri_orders VALUES (1, 5), (2, 7);
+
+statement ok
+CREATE SEMANTIC VIEW ri_base TABLES (o AS ri_orders PRIMARY KEY (id)) METRICS (o.m AS SUM(o.amount));
+
+# --- no cycle: a view reading another semantic view still answers ------------
+
+statement ok
+CREATE SEMANTIC VIEW ri_top
+  TABLES (t AS (SELECT 1 AS id, m FROM semantic_view('ri_base', metrics := ['m'])) PRIMARY KEY (id))
+  METRICS (t.total AS SUM(t.m));
+
+query I
+SELECT * FROM semantic_view('ri_top', metrics := ['total']);
+----
+12
+
+# The same view twice in one query, and a view reading another view twice,
+# are not cycles.
+
+query II
+SELECT a.total, b.total
+FROM semantic_view('ri_top', metrics := ['total']) a,
+     semantic_view('ri_top', metrics := ['total']) b;
+----
+12	12
+
+statement ok
+CREATE SEMANTIC VIEW ri_twice
+  TABLES (t AS (
+    SELECT 1 AS id, x.m + y.m AS m
+    FROM semantic_view('ri_base', metrics := ['m']) x, semantic_view('ri_base', metrics := ['m']) y
+  ) PRIMARY KEY (id))
+  METRICS (t.total AS SUM(t.m));
+
+query I
+SELECT * FROM semantic_view('ri_twice', metrics := ['total']);
+----
+24
+
+# A chain three views deep with no cycle.
+
+statement ok
+CREATE SEMANTIC VIEW ri_chain
+  TABLES (t AS (SELECT 1 AS id, total AS m FROM semantic_view('ri_top', metrics := ['total'])) PRIMARY KEY (id))
+  METRICS (t.total AS SUM(t.m));
+
+query I
+SELECT * FROM semantic_view('ri_chain', metrics := ['total']);
+----
+12
+
+# --- a view that reads itself -------------------------------------------------
+
+statement ok
+CREATE SEMANTIC VIEW ri_self TABLES (o AS ri_orders PRIMARY KEY (id)) METRICS (o.m AS SUM(o.amount));
+
+statement ok
+CREATE OR REPLACE SEMANTIC VIEW ri_self
+  TABLES (t AS (SELECT 1 AS id, m FROM semantic_view('ri_self', metrics := ['m'])) PRIMARY KEY (id))
+  METRICS (t.m AS SUM(t.m));
+
+statement error
+SELECT * FROM semantic_view('ri_self', metrics := ['m']);
+----
+semantic view 'ri_self' reads itself
+
+# The construct form and the standard-SQL form expand the same way.
+
+statement error
+SELECT * FROM SEMANTIC_VIEW(ri_self METRICS m);
+----
+semantic view 'ri_self' reads itself
+
+# --- the same, with the view named another way inside ------------------------
+
+statement ok
+CREATE SEMANTIC VIEW ri_spelled TABLES (o AS ri_orders PRIMARY KEY (id)) METRICS (o.m AS SUM(o.amount));
+
+statement ok
+CREATE OR REPLACE SEMANTIC VIEW ri_spelled
+  TABLES (t AS (SELECT 1 AS id, m FROM semantic_view('MAIN.RI_SPELLED', metrics := ['m'])) PRIMARY KEY (id))
+  METRICS (t.m AS SUM(t.m));
+
+statement error
+SELECT * FROM semantic_view('ri_spelled', metrics := ['m']);
+----
+semantic view 'ri_spelled' reads itself
+
+# --- two views that read each other -------------------------------------------
+
+statement ok
+CREATE SEMANTIC VIEW ri_a TABLES (o AS ri_orders PRIMARY KEY (id)) METRICS (o.m AS SUM(o.amount));
+
+statement ok
+CREATE SEMANTIC VIEW ri_b
+  TABLES (t AS (SELECT 1 AS id, m FROM semantic_view('ri_a', metrics := ['m'])) PRIMARY KEY (id))
+  METRICS (t.m AS SUM(t.m));
+
+statement ok
+CREATE OR REPLACE SEMANTIC VIEW ri_a
+  TABLES (t AS (SELECT 1 AS id, m FROM semantic_view('ri_b', metrics := ['m'])) PRIMARY KEY (id))
+  METRICS (t.m AS SUM(t.m));
+
+statement error
+SELECT * FROM semantic_view('ri_a', metrics := ['m']);
+----
+semantic view 'ri_a' reads itself
+
+statement error
+SELECT * FROM semantic_view('ri_b', metrics := ['m']);
+----
+semantic view 'ri_b' reads itself
+
+# The standard-SQL form, and a call inside a subquery with an enclosing scope
+# (whose expansion is also bound on a binder of its own first).
+
+statement error
+SELECT AGG(m) FROM ri_self;
+----
+semantic view 'ri_self' reads itself
+
+statement error
+SELECT (SELECT m FROM semantic_view('ri_self', metrics := ['m'])) FROM ri_orders;
+----
+semantic view 'ri_self' reads itself
+
+# A self-read is caught with aliased items too: they wrap the expansion in a
+# projection (SELECT ... FROM (<expansion>) __sv_inner), and the mark sits
+# inside it.
+
+statement error
+SELECT * FROM semantic_view('ri_self', metrics := ['m AS x']);
+----
+semantic view 'ri_self' reads itself
+
+# --- where_clause may read the view it filters --------------------------------
+# Its subqueries are bound apart from the expansion's tables, so a predicate
+# that queries the same view is not a cycle, with or without aliased items
+# (which put the hoisted subqueries one level down).
+
+statement ok
+CREATE TABLE ri_sales (id INTEGER, region VARCHAR, amount INTEGER);
+
+statement ok
+INSERT INTO ri_sales VALUES (1, 'E', 5), (2, 'W', 7), (3, 'N', 1);
+
+statement ok
+CREATE SEMANTIC VIEW ri_dim TABLES (s AS ri_sales PRIMARY KEY (id))
+  DIMENSIONS (s.region AS s.region) METRICS (s.m AS SUM(s.amount));
+
+query TI rowsort
+SELECT * FROM semantic_view('ri_dim', dimensions := ['region'], metrics := ['m'],
+  where_clause := 'region IN (SELECT region FROM semantic_view(''ri_dim'', dimensions := [''region''], metrics := [''m'']) WHERE m > 4)');
+----
+E	5
+W	7
+
+query TI rowsort
+SELECT * FROM semantic_view('ri_dim', dimensions := ['region AS r'], metrics := ['m'],
+  where_clause := 'region IN (SELECT region FROM semantic_view(''ri_dim'', dimensions := [''region''], metrics := [''m'']) WHERE m > 4)');
+----
+E	5
+W	7
+
+query TI rowsort
+SELECT * FROM SEMANTIC_VIEW(ri_dim DIMENSIONS region AS r METRICS m
+  WHERE region IN (SELECT region FROM SEMANTIC_VIEW(ri_dim DIMENSIONS region METRICS m) WHERE m > 4));
+----
+E	5
+W	7
+
+query TI rowsort
+SELECT region, AGG(m) FROM ri_dim
+WHERE region IN (SELECT region FROM ri_dim GROUP BY region HAVING AGG(m) > 4)
+GROUP BY region;
+----
+E	5
+W	7
+
+# --- shapes whose expansion has CTEs of its own ---------------------------------
+# A window metric's, a semi-additive metric's and a multi-grain query's
+# expansion puts its FROM, query-defined tables included, in a CTE of its own
+# (__sv_agg, __sv_snapshot, __sv_grain_N). The self-read inside it is still
+# caught.
+
+statement ok
+CREATE TABLE ri_days (id INTEGER, d INTEGER, amount INTEGER);
+
+statement ok
+INSERT INTO ri_days VALUES (1, 1, 5), (2, 2, 7);
+
+statement ok
+CREATE SEMANTIC VIEW ri_win TABLES (o AS ri_days PRIMARY KEY (id)) DIMENSIONS (o.d AS o.d)
+  METRICS (o.m AS SUM(o.amount), o.running AS SUM(m) OVER (ORDER BY d));
+
+statement ok
+CREATE OR REPLACE SEMANTIC VIEW ri_win
+  TABLES (o AS (SELECT d AS id, d, running AS amount
+                FROM semantic_view('ri_win', dimensions := ['d'], metrics := ['running'])) PRIMARY KEY (id))
+  DIMENSIONS (o.d AS o.d)
+  METRICS (o.m AS SUM(o.amount), o.running AS SUM(m) OVER (ORDER BY d));
+
+statement error
+SELECT * FROM semantic_view('ri_win', dimensions := ['d'], metrics := ['running']);
+----
+semantic view 'ri_win' reads itself
+
+statement ok
+CREATE SEMANTIC VIEW ri_semi TABLES (o AS ri_days PRIMARY KEY (id)) DIMENSIONS (o.d AS o.d)
+  METRICS (o.latest NON ADDITIVE BY (d) AS SUM(o.amount));
+
+statement ok
+CREATE OR REPLACE SEMANTIC VIEW ri_semi
+  TABLES (o AS (SELECT 1 AS id, 1 AS d, latest AS amount
+                FROM semantic_view('ri_semi', metrics := ['latest'])) PRIMARY KEY (id))
+  DIMENSIONS (o.d AS o.d)
+  METRICS (o.latest NON ADDITIVE BY (d) AS SUM(o.amount));
+
+statement error
+SELECT * FROM semantic_view('ri_semi', metrics := ['latest']);
+----
+semantic view 'ri_semi' reads itself
+
+statement ok
+CREATE TABLE ri_lines (lid INTEGER, oid INTEGER, qty INTEGER);
+
+statement ok
+INSERT INTO ri_lines VALUES (1, 1, 1), (2, 1, 2), (3, 2, 3);
+
+statement ok
+CREATE SEMANTIC VIEW ri_grain
+  TABLES (o AS ri_days PRIMARY KEY (id), l AS ri_lines PRIMARY KEY (lid))
+  RELATIONSHIPS (lo AS l (oid) REFERENCES o)
+  DIMENSIONS (o.d AS o.d)
+  METRICS (o.m AS SUM(o.amount), l.q AS SUM(l.qty));
+
+statement ok
+CREATE OR REPLACE SEMANTIC VIEW ri_grain
+  TABLES (o AS (SELECT d AS id, d, m AS amount
+                FROM semantic_view('ri_grain', dimensions := ['d'], metrics := ['m', 'q'])) PRIMARY KEY (id),
+          l AS ri_lines PRIMARY KEY (lid))
+  RELATIONSHIPS (lo AS l (oid) REFERENCES o)
+  DIMENSIONS (o.d AS o.d)
+  METRICS (o.m AS SUM(o.amount), l.q AS SUM(l.qty));
+
+statement error
+SELECT * FROM semantic_view('ri_grain', dimensions := ['d'], metrics := ['m', 'q']);
+----
+semantic view 'ri_grain' reads itself
+
+# --- a cycle through three views ------------------------------------------------
+
+statement ok
+CREATE SEMANTIC VIEW ri_c1 TABLES (o AS ri_orders PRIMARY KEY (id)) METRICS (o.m AS SUM(o.amount));
+
+statement ok
+CREATE SEMANTIC VIEW ri_c2
+  TABLES (t AS (SELECT 1 AS id, m FROM semantic_view('ri_c1', metrics := ['m'])) PRIMARY KEY (id))
+  METRICS (t.m AS SUM(t.m));
+
+statement ok
+CREATE SEMANTIC VIEW ri_c3
+  TABLES (t AS (SELECT 1 AS id, m FROM semantic_view('ri_c2', metrics := ['m'])) PRIMARY KEY (id))
+  METRICS (t.m AS SUM(t.m));
+
+statement ok
+CREATE OR REPLACE SEMANTIC VIEW ri_c1
+  TABLES (t AS (SELECT 1 AS id, m FROM semantic_view('ri_c3', metrics := ['m'])) PRIMARY KEY (id))
+  METRICS (t.m AS SUM(t.m));
+
+statement error
+SELECT * FROM semantic_view('ri_c1', metrics := ['m']);
+----
+semantic view 'ri_c1' reads itself
+
+# --- a call with where_clause inside a subquery with an enclosing scope ---------
+# (its isolated bind expands with the where_clause fence, and is marked too)
+
+statement error
+SELECT (SELECT m FROM semantic_view('ri_self', metrics := ['m'], where_clause := '1 = 1')) FROM ri_orders;
+----
+semantic view 'ri_self' reads itself
+
+# --- a view of the same name in another schema is another view ------------------
+# Both are created from main, so their bodies resolve in the same schema; the
+# view's own schema tells them apart.
+
+statement ok
+CREATE SCHEMA ri_analytics;
+
+statement ok
+CREATE SEMANTIC VIEW ri_analytics.ri_base
+  TABLES (t AS (SELECT 1 AS id, m FROM semantic_view('main.ri_base', metrics := ['m'])) PRIMARY KEY (id))
+  METRICS (t.total AS SUM(t.m));
+
+query I
+SELECT * FROM semantic_view('ri_analytics.ri_base', metrics := ['total']);
+----
+12
