@@ -9,6 +9,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+_No unreleased changes yet._
+
+## [0.18.0] - 2026-11-07
+
 ### Added
 
 - **Snowflake DDL pastes as written.** `CREATE SEMANTIC VIEW sales TABLES (...)` works without `AS` before `TABLES`, as Snowflake writes it, including with `OR REPLACE`, `IF NOT EXISTS` and a view `COMMENT` before `TABLES`. `AS` is still accepted. On a fact or dimension, `LABELS = (FILTER)` may sit between the name and `AS` (`o.is_large LABELS = (FILTER) AS o.amount > 100`), Snowflake's placement; the trailing placement after the expression still works, but not both on one entry. `GET_DDL('SEMANTIC VIEW', ...)`, the spelling in Snowflake's `GET_DDL` reference, is accepted alongside `'SEMANTIC_VIEW'`.
@@ -1132,7 +1136,8 @@ Connection-lifecycle and ADBC fixes. Two downstream regressions reported against
 - `list_semantic_views()` and `describe_semantic_view()` introspection functions
 - Fuzz targets for FFI boundary testing
 
-[Unreleased]: https://github.com/s-layer/duckdb-semantic-views/compare/v0.17.0...HEAD
+[Unreleased]: https://github.com/s-layer/duckdb-semantic-views/compare/v0.18.0...HEAD
+[0.18.0]: https://github.com/s-layer/duckdb-semantic-views/compare/v0.17.0...v0.18.0
 [0.17.0]: https://github.com/s-layer/duckdb-semantic-views/compare/v0.16.0...v0.17.0
 [0.16.0]: https://github.com/s-layer/duckdb-semantic-views/compare/v0.15.0...v0.16.0
 [0.15.0]: https://github.com/s-layer/duckdb-semantic-views/compare/v0.14.1...v0.15.0
