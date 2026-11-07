@@ -1029,7 +1029,7 @@ Two columns with the same name
 View that reads itself
 ----------------------
 
-.. versionadded:: 0.18.1
+.. versionadded:: 0.18.0
 
 .. code-block:: text
 
