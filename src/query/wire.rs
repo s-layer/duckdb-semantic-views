@@ -145,29 +145,51 @@ pub fn build_projected_sql(
     )
 }
 
+/// The identity of the view `def` stored as `name`: its schema and name as
+/// stored, which the catalog's `(schema_name, name)` key makes unique. Not the
+/// schema its body resolves in (`expand::body_qualifier`), which two views in
+/// different schemas can share. Written `<schema byte length>:<schema>.<name>`,
+/// so no two (schema, name) pairs share a key whatever characters they hold;
+/// the shim reads the name back for its message.
+#[must_use]
+pub fn view_key(def: &crate::model::SemanticViewDefinition, name: &str) -> String {
+    let schema = def.schema_name.as_deref().unwrap_or("");
+    format!("{}:{schema}.{name}", schema.len())
+}
+
 /// Frame `semantic_view()`'s bind payload: the database and schema stamped at
-/// CREATE, then the SQL to plan.
+/// CREATE, the view's own identity, then the SQL to plan.
 ///
 /// ```text
 /// u32 db_len     | db_len UTF-8 bytes      (empty: none stamped)
 /// u32 schema_len | schema_len UTF-8 bytes  (empty: none stamped)
+/// u32 key_len    | key_len UTF-8 bytes     (the view's identity, `view_key`)
 /// the SQL, UTF-8, to the end of the buffer
 /// ```
+///
+/// The identity is what the shim marks an expansion with to refuse a view
+/// that reads itself; any two different views have different keys.
 ///
 /// The shim (`sv_semantic_view_bind_replace`) pins a table that a member
 /// expression names by a bare name to the catalog entry it resolves to,
 /// looking in this database and schema first, as the `TABLES` entries are
 /// qualified with them (`expand::body_qualifier`).
 #[must_use]
-pub fn frame_bind_payload(database: Option<&str>, schema: Option<&str>, sql: &str) -> Vec<u8> {
+pub fn frame_bind_payload(
+    database: Option<&str>,
+    schema: Option<&str>,
+    view_key: &str,
+    sql: &str,
+) -> Vec<u8> {
     fn push(out: &mut Vec<u8>, part: &str) {
         let len = u32::try_from(part.len()).expect("an identifier is shorter than 4 GiB");
         out.extend_from_slice(&len.to_le_bytes());
         out.extend_from_slice(part.as_bytes());
     }
-    let mut out = Vec::with_capacity(8 + sql.len());
+    let mut out = Vec::with_capacity(12 + view_key.len() + sql.len());
     push(&mut out, database.unwrap_or(""));
     push(&mut out, schema.unwrap_or(""));
+    push(&mut out, view_key);
     out.extend_from_slice(sql.as_bytes());
     out
 }
@@ -278,21 +300,48 @@ mod tests {
 
     #[test]
     fn the_bind_payload_carries_the_stamp_before_the_sql() {
-        let framed = frame_bind_payload(Some("db"), Some("main"), "SELECT 1");
+        let framed = frame_bind_payload(Some("db"), Some("main"), "k", "SELECT 1");
         let mut expected = vec![2, 0, 0, 0];
         expected.extend_from_slice(b"db");
         expected.extend_from_slice(&[4, 0, 0, 0]);
         expected.extend_from_slice(b"main");
+        expected.extend_from_slice(&[1, 0, 0, 0]);
+        expected.extend_from_slice(b"k");
         expected.extend_from_slice(b"SELECT 1");
         assert_eq!(framed, expected);
     }
 
     #[test]
     fn an_absent_stamp_is_framed_as_empty() {
-        let framed = frame_bind_payload(None, None, "SELECT 1");
-        let mut expected = vec![0, 0, 0, 0, 0, 0, 0, 0];
+        let framed = frame_bind_payload(None, None, "", "SELECT 1");
+        let mut expected = vec![0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0];
         expected.extend_from_slice(b"SELECT 1");
         assert_eq!(framed, expected);
+    }
+
+    #[test]
+    fn views_in_different_schemas_have_different_keys() {
+        let a = crate::model::SemanticViewDefinition {
+            schema_name: Some("main".to_string()),
+            ..Default::default()
+        };
+        let b = crate::model::SemanticViewDefinition {
+            schema_name: Some("analytics".to_string()),
+            ..Default::default()
+        };
+        assert_ne!(view_key(&a, "sales"), view_key(&b, "sales"));
+        assert_ne!(view_key(&a, "sales"), view_key(&a, "orders"));
+        assert_eq!(view_key(&a, "sales"), "4:main.sales");
+        // A dot in a name cannot make two pairs collide.
+        let dotted = crate::model::SemanticViewDefinition {
+            schema_name: Some("a.b".to_string()),
+            ..Default::default()
+        };
+        let plain = crate::model::SemanticViewDefinition {
+            schema_name: Some("a".to_string()),
+            ..Default::default()
+        };
+        assert_ne!(view_key(&dotted, "c"), view_key(&plain, "b.c"));
     }
 
     // -- build_projected_sql ---------------------------------------------

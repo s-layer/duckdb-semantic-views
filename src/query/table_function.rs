@@ -7,7 +7,7 @@ use crate::util::suggest_closest;
 use super::error::QueryError;
 use super::expr_items::{lower_expression_items, ItemError};
 use super::items::{aliases_for, Item, OutputColumns, RequestItems};
-use super::wire::{build_projected_sql, frame_bind_payload, parse_varchar_list};
+use super::wire::{build_projected_sql, frame_bind_payload, parse_varchar_list, view_key};
 
 // ---------------------------------------------------------------------------
 // Phase 65 Plan 05 Task 6 (Wave 6) — sv_semantic_view_bind_rust
@@ -294,6 +294,7 @@ unsafe fn semantic_view_bind_body(
     Ok(frame_bind_payload(
         database,
         schema,
+        &view_key(stored, &view_name),
         &build_projected_sql(&expanded_sql, &column_names, &output),
     ))
 }
