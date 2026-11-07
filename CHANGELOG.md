@@ -9,7 +9,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-_No unreleased changes yet._
+### Added
+
+- ASOF relationships, written as in Snowflake: `o(cust_id, order_date) REFERENCES a(cust_id, ASOF start_date)` joins each order to its customer's latest address starting on or before the order date, with the answers Snowflake gives. An order with no such address keeps its row with `NULL` address dimensions, a metric on the address table is counted over that table, and the address table is the "one" side for fan traps. One column per relationship can be `ASOF`, and `CREATE` checks that the pair is numeric or temporal. `DESCRIBE` shows Snowflake's `REF_KEY` object for the column, and `GET_DDL` and the YAML export (`asof:`) write it back. A view with an ASOF relationship can't be read by an older release.
 
 ## [0.18.0] - 2026-11-07
 

@@ -145,6 +145,29 @@ struct DescribeRow {
 /// DESCRIBE output documents as a JSON array. `serde_json` writes no space
 /// after the comma and passes UTF-8 through unescaped, so all-ASCII inputs
 /// stay byte-identical to the prior hand-rolled format.
+/// A relationship's `REF_KEY` value: the referenced columns as a JSON array,
+/// with an ASOF column written `{"type":"ASOF","column":"<col>"}` as
+/// Snowflake writes it (Phase 7.1).
+fn ref_key_json(join: &crate::model::Join) -> String {
+    let Some(asof) = join.asof else {
+        return format_json_array(&join.ref_columns);
+    };
+    let items: Vec<String> = join
+        .ref_columns
+        .iter()
+        .enumerate()
+        .map(|(i, c)| {
+            let col = serde_json::to_string(c).expect("serializing a &str to JSON is infallible");
+            if i == asof {
+                format!(r#"{{"type":"ASOF","column":{col}}}"#)
+            } else {
+                col
+            }
+        })
+        .collect();
+    format!("[{}]", items.join(","))
+}
+
 pub(crate) fn format_json_array(items: &[String]) -> String {
     // Serializing a slice of `String` to JSON is infallible (no floats, no
     // non-string map keys, in-memory writer), so `expect` documents an
@@ -414,7 +437,7 @@ fn collect_relationship_rows(
             object_name: rel_name,
             parent_entity: from_table,
             property: "REF_KEY".to_string(),
-            property_value: format_json_array(&join.ref_columns),
+            property_value: ref_key_json(join),
         });
     }
 }
@@ -735,6 +758,22 @@ fn collect_materialization_rows(def: &SemanticViewDefinition, rows: &mut Vec<Des
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Phase 7.1: Snowflake's REF_KEY shape for an ASOF column.
+    #[test]
+    fn ref_key_json_writes_the_asof_column_as_an_object() {
+        let join = crate::model::Join {
+            ref_columns: vec!["cust".into(), "start".into()],
+            asof: Some(1),
+            ..Default::default()
+        };
+        assert_eq!(
+            ref_key_json(&join),
+            r#"["cust",{"type":"ASOF","column":"start"}]"#
+        );
+        let plain = crate::model::Join { asof: None, ..join };
+        assert_eq!(ref_key_json(&plain), r#"["cust","start"]"#);
+    }
 
     #[test]
     fn format_json_array_single() {

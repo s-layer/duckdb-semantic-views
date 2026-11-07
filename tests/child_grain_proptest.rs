@@ -739,6 +739,7 @@ fn build_def() -> SemanticViewDefinition {
             ref_columns: vec!["id".to_string()],
             name: Some("li_o".to_string()),
             cardinality: Cardinality::ManyToOne,
+            asof: None,
         },
         Join {
             from_alias: "lid".to_string(),
@@ -747,6 +748,7 @@ fn build_def() -> SemanticViewDefinition {
             ref_columns: vec!["id".to_string()],
             name: Some("lid_li".to_string()),
             cardinality: Cardinality::ManyToOne,
+            asof: None,
         },
     ];
     SemanticViewDefinition {

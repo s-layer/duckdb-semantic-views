@@ -691,6 +691,11 @@ Each entry in the ``joins`` list declares a FK/PK relationship between tables. T
      - No
      - ``[]``
      - Referenced columns on the target table. Defaults to the target's primary key if omitted.
+   * - ``asof``
+     - integer
+     - No
+     -
+     - The 0-based position, in ``fk_columns`` and ``ref_columns``, of the column pair an :ref:`ASOF relationship <ref-create-relationships>` matches on (``REFERENCES a(cust_id, ASOF start_date)`` is ``asof: 1``). Omitted for a plain relationship. *(Added in 0.19.0.)*
    * - ``name``
      - string
      - Yes

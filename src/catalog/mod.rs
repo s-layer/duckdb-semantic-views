@@ -1677,7 +1677,7 @@ mod tests {
     #[cfg(not(feature = "extension"))]
     #[test]
     fn upgrade_stamps_complete_rows_and_skips_incomplete() {
-        use crate::model::{SemanticViewDefinition, CURRENT_SCHEMA_VERSION};
+        use crate::model::SemanticViewDefinition;
         let con = in_memory_con();
         init_catalog(&con, ":memory:", false).unwrap();
 
@@ -1752,12 +1752,12 @@ mod tests {
         );
         assert_eq!(
             SemanticViewDefinition::stored_schema_version(&stored("format_one_vars_v")),
-            CURRENT_SCHEMA_VERSION,
+            2,
             "a format-1 row with variables must be raised to the format it needs"
         );
         assert_eq!(
             SemanticViewDefinition::stored_schema_version(&stored("legacy_inline_v")),
-            CURRENT_SCHEMA_VERSION,
+            2,
             "an unstamped row with a query-defined table must be stamped with the format it needs"
         );
         assert_eq!(

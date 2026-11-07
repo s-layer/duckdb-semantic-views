@@ -144,7 +144,7 @@ Rows appear in definition order: the view-level comment, ``MAX_STALENESS`` and t
       * - ``FOREIGN_KEY``
         - JSON array of foreign key column names (e.g., ``["customer_id"]``).
       * - ``REF_KEY``
-        - JSON array of referenced key column names (e.g., ``["id"]``).
+        - JSON array of referenced key column names (e.g., ``["id"]``). The ``ASOF`` column of an :ref:`ASOF relationship <ref-create-relationships>` is an object, as in Snowflake: ``["cust_id",{"type":"ASOF","column":"start_date"}]``.
 
 **VARIABLE**
    .. versionadded:: 0.18.0

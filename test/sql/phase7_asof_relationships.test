@@ -1,0 +1,344 @@
+# Phase 7.1: ASOF relationships, `REFERENCES t (key, ASOF column)`.
+#
+# The data and the expected answers are the Phase 7.0 fixture's, as Snowflake
+# gave them (2026-11-07): each order takes the customer's latest address that
+# starts on or before the order date, an order with no such address keeps its
+# row with a NULL city, and a metric on the address table is counted over that
+# table itself.
+
+require semantic_views
+
+statement ok
+CREATE TABLE customer_address (ca_cust_id INTEGER, ca_start_date DATE, ca_city VARCHAR);
+
+statement ok
+CREATE TABLE asof_orders (o_id INTEGER, o_cust_id INTEGER, o_date DATE, amount DECIMAL(10,2));
+
+# Customer 2 has two addresses starting the same day, which breaks the
+# declared key (ca_cust_id, ca_start_date). Like any key the data breaks, it is
+# not checked: order 4 gets one of the two, and Snowflake also picks one.
+statement ok
+INSERT INTO customer_address VALUES
+  (1, '2024-01-01', 'London'), (1, '2024-06-01', 'Paris'),
+  (2, '2024-03-01', 'Oslo'),   (2, '2024-03-01', 'Rome'),
+  (3, '2024-05-01', 'Berlin');
+
+statement ok
+INSERT INTO asof_orders VALUES
+  (1, 1, '2024-02-10', 100), (2, 1, '2024-07-01', 200), (3, 1, '2023-12-01', 50),
+  (4, 2, '2024-04-01', 70),  (5, 1, NULL, 30),          (6, 3, '2024-05-01', 10),
+  (7, 9, '2024-01-01', 5);
+
+statement ok
+CREATE SEMANTIC VIEW p7_asof
+  TABLES (
+    o AS asof_orders      PRIMARY KEY (o_id),
+    a AS customer_address PRIMARY KEY (ca_cust_id, ca_start_date)
+  )
+  RELATIONSHIPS (
+    order_address AS o (o_cust_id, o_date) REFERENCES a (ca_cust_id, ASOF ca_start_date)
+  )
+  DIMENSIONS (
+    o.order_id AS o_id,
+    a.city     AS ca_city
+  )
+  METRICS (
+    o.revenue       AS SUM(amount),
+    o.order_count   AS COUNT(o_id),
+    a.address_count AS COUNT(ca_city)
+  );
+
+# A1: a date before the first address (3), a NULL date (5) and a customer with
+# no address (7) keep their rows with a NULL city; a date on a start date (6)
+# matches it.
+query IT
+SELECT order_id, CASE WHEN city IN ('Oslo', 'Rome') THEN 'Oslo|Rome' ELSE city END
+FROM SEMANTIC_VIEW(p7_asof DIMENSIONS o.order_id, a.city)
+ORDER BY 1;
+----
+1	London
+2	Paris
+3	NULL
+4	Oslo|Rome
+5	NULL
+6	Berlin
+7	NULL
+
+# A2: each order counts once.
+query TRI
+SELECT CASE WHEN city IN ('Oslo', 'Rome') THEN 'Oslo|Rome' ELSE city END, revenue, order_count
+FROM SEMANTIC_VIEW(p7_asof DIMENSIONS a.city METRICS o.revenue, o.order_count)
+ORDER BY 1 NULLS LAST;
+----
+Berlin	10.00	1
+London	100.00	1
+Oslo|Rome	70.00	1
+Paris	200.00	1
+NULL	85.00	3
+
+# A3: no dimension.
+query RI
+SELECT * FROM SEMANTIC_VIEW(p7_asof METRICS o.revenue, o.order_count);
+----
+465.00	7
+
+# A4: a metric on the referenced table is counted over that table.
+query TI
+SELECT * FROM SEMANTIC_VIEW(p7_asof DIMENSIONS a.city METRICS a.address_count) ORDER BY 1;
+----
+Berlin	1
+London	1
+Oslo	1
+Paris	1
+Rome	1
+
+query I
+SELECT * FROM SEMANTIC_VIEW(p7_asof METRICS a.address_count);
+----
+5
+
+# Both grains in one query.
+query TRI
+SELECT city, revenue, address_count
+FROM SEMANTIC_VIEW(p7_asof DIMENSIONS a.city METRICS o.revenue, a.address_count)
+WHERE city IN ('London', 'Paris', 'Berlin') OR city IS NULL
+ORDER BY 1 NULLS LAST;
+----
+Berlin	10.00	1
+London	100.00	1
+Paris	200.00	1
+NULL	85.00	NULL
+
+# A5: the referenced table is the "one" side whatever keys the orders have, so
+# its metric can't be grouped by an order dimension.
+statement error
+SELECT * FROM SEMANTIC_VIEW(p7_asof DIMENSIONS o.order_id METRICS a.address_count);
+----
+fan trap
+
+# A filter on the referenced table goes through the ASOF join.
+query R
+SELECT * FROM semantic_view('p7_asof', metrics := ['revenue'], where_clause := 'city = ''Paris''');
+----
+200.00
+
+# The standard SQL form.
+query TR
+SELECT city, AGG(revenue) FROM p7_asof WHERE city IN ('London', 'Paris') GROUP BY city ORDER BY city;
+----
+London	100.00
+Paris	200.00
+
+# --- the relationship walked the other way ---------------------------------
+# With the address table first in TABLES, a query with only dimensions starts
+# from it and joins the orders onto it. Each address gets exactly the orders
+# whose ASOF match it is: Berlin gets order 6 and not an order from another
+# date, and London gets only order 1.
+
+statement ok
+CREATE SEMANTIC VIEW p7_asof_rev
+  TABLES (
+    a AS customer_address PRIMARY KEY (ca_cust_id, ca_start_date),
+    o AS asof_orders      PRIMARY KEY (o_id)
+  )
+  RELATIONSHIPS (
+    order_address AS o (o_cust_id, o_date) REFERENCES a (ca_cust_id, ASOF ca_start_date)
+  )
+  DIMENSIONS (o.order_id AS o_id, a.city AS ca_city)
+  METRICS (o.revenue AS SUM(amount), a.address_count AS COUNT(ca_city));
+
+query TI
+SELECT city, order_id FROM SEMANTIC_VIEW(p7_asof_rev DIMENSIONS a.city, o.order_id)
+WHERE city IN ('London', 'Paris', 'Berlin')
+ORDER BY 1, 2;
+----
+Berlin	6
+London	1
+Paris	2
+
+query TR
+SELECT CASE WHEN city IN ('Oslo', 'Rome') THEN 'Oslo|Rome' ELSE city END, revenue
+FROM SEMANTIC_VIEW(p7_asof_rev DIMENSIONS a.city METRICS o.revenue)
+ORDER BY 1 NULLS LAST;
+----
+Berlin	10.00
+London	100.00
+Oslo|Rome	70.00
+Paris	200.00
+NULL	85.00
+
+# --- a hop past the ASOF table, and a TIMESTAMP ASOF column -----------------
+
+statement ok
+CREATE TABLE p7_cities (city VARCHAR, country VARCHAR);
+
+statement ok
+INSERT INTO p7_cities VALUES ('London', 'UK'), ('Paris', 'FR'), ('Berlin', 'DE'), ('Oslo', 'NO'), ('Rome', 'IT');
+
+statement ok
+CREATE TABLE p7_ts_address AS
+SELECT ca_cust_id, CAST(ca_start_date AS TIMESTAMP) AS ca_start, ca_city
+FROM customer_address WHERE ca_city <> 'Rome';
+
+statement ok
+CREATE TABLE p7_ts_orders AS
+SELECT o_id, o_cust_id, CAST(o_date AS TIMESTAMP) AS o_ts, amount FROM asof_orders;
+
+statement ok
+CREATE SEMANTIC VIEW p7_asof_hop
+  TABLES (
+    o AS p7_ts_orders  PRIMARY KEY (o_id),
+    a AS p7_ts_address PRIMARY KEY (ca_cust_id, ca_start),
+    c AS p7_cities     PRIMARY KEY (city)
+  )
+  RELATIONSHIPS (
+    order_address AS o (o_cust_id, o_ts) REFERENCES a (ca_cust_id, ASOF ca_start),
+    address_city  AS a (ca_city) REFERENCES c
+  )
+  DIMENSIONS (c.country AS country)
+  METRICS (o.revenue AS SUM(amount));
+
+query TR
+SELECT * FROM SEMANTIC_VIEW(p7_asof_hop DIMENSIONS c.country METRICS o.revenue) ORDER BY 1 NULLS LAST;
+----
+DE	10.00
+FR	200.00
+NO	70.00
+UK	100.00
+NULL	85.00
+
+# --- the ASOF keyword can precede any referenced column ---------------------
+
+statement ok
+CREATE SEMANTIC VIEW p7_asof_first
+  TABLES (
+    o AS asof_orders      PRIMARY KEY (o_id),
+    a AS customer_address PRIMARY KEY (ca_start_date, ca_cust_id)
+  )
+  RELATIONSHIPS (
+    order_address AS o (o_date, o_cust_id) REFERENCES a (ASOF ca_start_date, ca_cust_id)
+  )
+  DIMENSIONS (a.city AS ca_city)
+  METRICS (o.revenue AS SUM(amount));
+
+query TR
+SELECT * FROM SEMANTIC_VIEW(p7_asof_first DIMENSIONS a.city METRICS o.revenue)
+WHERE city IN ('London', 'Paris') OR city IS NULL ORDER BY 1 NULLS LAST;
+----
+London	100.00
+Paris	200.00
+NULL	85.00
+
+# --- DESCRIBE, GET_DDL, YAML and the storage format -------------------------
+
+# A6: Snowflake's REF_KEY shape.
+query TT
+SELECT property, property_value FROM describe_semantic_view('p7_asof')
+WHERE object_kind = 'RELATIONSHIP' AND property IN ('FOREIGN_KEY', 'REF_KEY') ORDER BY 1;
+----
+FOREIGN_KEY	["o_cust_id","o_date"]
+REF_KEY	["ca_cust_id",{"type":"ASOF","column":"ca_start_date"}]
+
+query I
+SELECT contains(GET_DDL('SEMANTIC_VIEW', 'p7_asof'), 'REFERENCES a(ca_cust_id, ASOF ca_start_date)');
+----
+true
+
+query I
+SELECT contains(read_yaml_from_semantic_view('p7_asof'), 'asof: 1');
+----
+true
+
+# An ASOF view needs storage format 3, which an older release refuses by
+# name instead of joining on equality.
+query I
+SELECT CAST(json_extract(definition, '$.schema_version') AS INTEGER)
+FROM semantic_layer._definitions WHERE name = 'p7_asof';
+----
+3
+
+# --- refusals ---------------------------------------------------------------
+
+# A7: two ASOF columns.
+statement error
+CREATE SEMANTIC VIEW p7_asof_two
+  TABLES (o AS asof_orders PRIMARY KEY (o_id), a AS customer_address PRIMARY KEY (ca_cust_id, ca_start_date))
+  RELATIONSHIPS (r AS o (o_date, o_cust_id) REFERENCES a (ASOF ca_start_date, ASOF ca_cust_id))
+  DIMENSIONS (a.city AS ca_city);
+----
+more than one ASOF column
+
+# A8: a VARCHAR ASOF column.
+statement error
+CREATE SEMANTIC VIEW p7_asof_varchar
+  TABLES (o AS asof_orders PRIMARY KEY (o_id), a AS customer_address PRIMARY KEY (ca_cust_id, ca_city))
+  RELATIONSHIPS (r AS o (o_cust_id, o_id) REFERENCES a (ca_cust_id, ASOF ca_city))
+  DIMENSIONS (a.city AS ca_city);
+----
+an ASOF column must be numeric, a date, a time or a timestamp
+
+# ASOF columns that can't be compared (a DATE with an INTEGER).
+statement error
+CREATE SEMANTIC VIEW p7_asof_mixed
+  TABLES (o AS asof_orders PRIMARY KEY (o_id), a AS customer_address PRIMARY KEY (ca_cust_id, ca_start_date))
+  RELATIONSHIPS (r AS o (o_cust_id, o_id) REFERENCES a (ca_cust_id, ASOF ca_start_date))
+  DIMENSIONS (a.city AS ca_city);
+----
+relationship 'r' does not bind
+
+# ASOF marks a referenced column, not a foreign-key one.
+statement error
+CREATE SEMANTIC VIEW p7_asof_fk
+  TABLES (o AS asof_orders PRIMARY KEY (o_id), a AS customer_address PRIMARY KEY (ca_cust_id, ca_start_date))
+  RELATIONSHIPS (r AS o (o_cust_id, ASOF o_date) REFERENCES a (ca_cust_id, ca_start_date))
+  DIMENSIONS (a.city AS ca_city);
+----
+must mark a column of the REFERENCES list
+
+# The referenced columns, ASOF one included, must be the table's key.
+statement error
+CREATE SEMANTIC VIEW p7_asof_nokey
+  TABLES (o AS asof_orders PRIMARY KEY (o_id), a AS customer_address PRIMARY KEY (ca_cust_id, ca_city))
+  RELATIONSHIPS (r AS o (o_cust_id, o_date) REFERENCES a (ca_cust_id, ASOF ca_start_date))
+  DIMENSIONS (a.city AS ca_city);
+----
+does not match any PRIMARY KEY or UNIQUE constraint
+
+# A column named asof (a reserved word in DuckDB, so quoted) is a column.
+statement ok
+CREATE TABLE p7_asof_named (k INTEGER, "asof" INTEGER, c VARCHAR);
+
+statement ok
+CREATE TABLE p7_asof_ref (k INTEGER, "asof" INTEGER, v INTEGER);
+
+statement ok
+INSERT INTO p7_asof_named VALUES (1, 1, 'x'), (1, 0, 'y');
+
+statement ok
+INSERT INTO p7_asof_ref VALUES (1, 1, 5);
+
+statement ok
+CREATE SEMANTIC VIEW p7_asof_colname
+  TABLES (r AS p7_asof_ref PRIMARY KEY (k, "asof"), n AS p7_asof_named PRIMARY KEY (k, "asof"))
+  RELATIONSHIPS (rel AS r (k, "asof") REFERENCES n (k, "asof"))
+  DIMENSIONS (n.c AS c)
+  METRICS (r.total AS SUM(v));
+
+query TI
+SELECT * FROM SEMANTIC_VIEW(p7_asof_colname DIMENSIONS n.c METRICS r.total);
+----
+x	5
+
+# And it can be the ASOF column.
+statement ok
+CREATE SEMANTIC VIEW p7_asof_colname_asof
+  TABLES (r AS p7_asof_ref PRIMARY KEY (k, "asof"), n AS p7_asof_named PRIMARY KEY (k, "asof"))
+  RELATIONSHIPS (rel AS r (k, "asof") REFERENCES n (k, ASOF "asof"))
+  DIMENSIONS (n.c AS c)
+  METRICS (r.total AS SUM(v));
+
+query TT
+SELECT property, property_value FROM describe_semantic_view('p7_asof_colname_asof')
+WHERE object_kind = 'RELATIONSHIP' AND property = 'REF_KEY';
+----
+REF_KEY	["k",{"type":"ASOF","column":"\"asof\""}]

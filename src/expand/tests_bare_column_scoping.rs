@@ -52,6 +52,7 @@ fn many_to_one(name: &str, from: &str, to: &str, key: &str) -> Join {
         ref_columns: vec![key.to_string()],
         name: Some(name.to_string()),
         cardinality: Cardinality::ManyToOne,
+        asof: None,
     }
 }
 

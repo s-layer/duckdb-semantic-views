@@ -295,6 +295,7 @@ fn build_def(case: &Case) -> SemanticViewDefinition {
                 ref_columns: vec!["id".to_string()],
                 name: Some(name.to_string()),
                 cardinality: Cardinality::ManyToOne,
+                asof: None,
             })
             .collect(),
         facts,

@@ -281,6 +281,21 @@ fn quote_list(names: &[&str]) -> String {
 /// - Rejects if neither matches (CARD-03/CARD-09: exact match required, subsets rejected)
 fn validate_fk_references(def: &SemanticViewDefinition) -> Result<(), String> {
     for join in &def.joins {
+        // Phase 7.1: the ASOF marker names one of the relationship's column
+        // pairs. The DDL parser can only produce such an index; a YAML
+        // definition can carry any.
+        if let Some(i) = join.asof {
+            if i >= join.fk_columns.len().min(join.ref_columns.len()) {
+                let rel_name = join.name.as_deref().unwrap_or("?");
+                return Err(format!(
+                    "relationship '{rel_name}' marks column {} as ASOF, but it has only {} \
+                     referenced column(s); asof is the 0-based position of the ASOF column \
+                     in the REFERENCES list.",
+                    i,
+                    join.ref_columns.len()
+                ));
+            }
+        }
         if join.fk_columns.is_empty() || join.ref_columns.is_empty() {
             continue;
         }

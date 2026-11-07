@@ -114,7 +114,58 @@ pub(crate) fn infer_cardinality(
                     Cardinality::ManyToOne
                 };
             }
+            // Phase 7.1: an ASOF relationship is many-to-one whatever keys the
+            // referencing side declares. Each referencing row matches at most
+            // one referenced row, but many referencing rows can match the same
+            // one, so the referenced table is never on a "one" side it could
+            // be grouped from (Snowflake refuses that query, 010956).
+            if join.asof.is_some() {
+                join.cardinality = Cardinality::ManyToOne;
+            }
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Phase 7.1: an ASOF relationship stays many-to-one even when its
+    /// foreign-key columns are the referencing table's key, since many
+    /// referencing rows can take the same referenced row.
+    #[test]
+    fn asof_relationship_is_many_to_one_even_on_a_unique_fk() {
+        let tables = vec![
+            TableRef {
+                alias: "o".into(),
+                table: "orders".into(),
+                pk_columns: vec!["cust".into(), "d".into()],
+                ..Default::default()
+            },
+            TableRef {
+                alias: "a".into(),
+                table: "addresses".into(),
+                pk_columns: vec!["cust".into(), "s".into()],
+                ..Default::default()
+            },
+        ];
+        let mut joins = vec![Join {
+            from_alias: "o".into(),
+            table: "a".into(),
+            fk_columns: vec!["cust".into(), "d".into()],
+            ref_columns: vec!["cust".into(), "s".into()],
+            asof: Some(1),
+            ..Default::default()
+        }];
+        infer_cardinality(&tables, &mut joins).unwrap();
+        assert_eq!(joins[0].cardinality, Cardinality::ManyToOne);
+        joins[0].asof = None;
+        infer_cardinality(&tables, &mut joins).unwrap();
+        assert_eq!(
+            joins[0].cardinality,
+            Cardinality::OneToOne,
+            "control: no ASOF"
+        );
+    }
 }

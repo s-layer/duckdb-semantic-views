@@ -112,7 +112,7 @@ fn parse_single_relationship_entry(entry: &str, entry_offset: usize) -> Result<J
             ));
         }
     };
-    let ref_columns = if cur.peek_is_symbol(b'(') {
+    let mut ref_columns = if cur.peek_is_symbol(b'(') {
         take_columns(
             &mut cur,
             entry_offset,
@@ -121,6 +121,16 @@ fn parse_single_relationship_entry(entry: &str, entry_offset: usize) -> Result<J
     } else {
         vec![]
     };
+    let asof = take_asof_marker(&mut ref_columns, rel_name, entry_offset)?;
+    if fk_columns.iter().any(|c| strip_asof(c).is_some()) {
+        return Err(ParseError {
+            message: format!(
+                "ASOF in relationship '{rel_name}' must mark a column of the REFERENCES list, \
+                 not a foreign-key column: write 'REFERENCES t (key, ASOF column)'."
+            ),
+            position: Some(entry_offset),
+        });
+    }
 
     // Anything left is trailing garbage (retired cardinality keywords, etc.).
     let leftover = cur.rest().trim();
@@ -141,7 +151,46 @@ fn parse_single_relationship_entry(entry: &str, entry_offset: usize) -> Result<J
         ref_columns,
         name: Some(rel_name.to_string()),
         cardinality: Cardinality::default(), // will be set by inference
+        asof,
     })
+}
+
+/// The column text after a leading `ASOF` keyword, or `None` when `col` does
+/// not start with one. A column that is itself named `asof` (bare, with
+/// nothing after it, or quoted) is a column, not the keyword.
+fn strip_asof(col: &str) -> Option<&str> {
+    let col = col.trim();
+    let (head, rest) = col.split_at(col.find(char::is_whitespace)?);
+    let rest = rest.trim_start();
+    (head.eq_ignore_ascii_case("ASOF") && !rest.is_empty()).then_some(rest)
+}
+
+/// Phase 7.1: find the one `ASOF` marker in a REFERENCES column list, strip
+/// it from its column and return that column's position. Snowflake allows the
+/// keyword before any column of the list, and at most once.
+fn take_asof_marker(
+    ref_columns: &mut [String],
+    rel_name: &str,
+    entry_offset: usize,
+) -> Result<Option<usize>, ParseError> {
+    let mut asof = None;
+    for (i, col) in ref_columns.iter_mut().enumerate() {
+        let Some(rest) = strip_asof(col) else {
+            continue;
+        };
+        if asof.is_some() {
+            return Err(ParseError {
+                message: format!(
+                    "Relationship '{rel_name}' has more than one ASOF column; \
+                     at most one referenced column can be ASOF."
+                ),
+                position: Some(entry_offset),
+            });
+        }
+        *col = rest.to_string();
+        asof = Some(i);
+    }
+    Ok(asof)
 }
 
 /// Capture the from-alias: a SINGLE value token (a table alias is one

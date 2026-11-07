@@ -102,6 +102,7 @@ fn child_def() -> SemanticViewDefinition {
             ref_columns: vec!["id".to_string()],
             name: Some("li_o".to_string()),
             cardinality: Cardinality::ManyToOne,
+            asof: None,
         }],
         facts: vec![],
         materializations: vec![],

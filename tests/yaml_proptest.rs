@@ -374,6 +374,7 @@ fn arb_join() -> impl Strategy<Value = Join> {
                 ref_columns,
                 name,
                 cardinality,
+                asof: None,
             },
         )
 }
