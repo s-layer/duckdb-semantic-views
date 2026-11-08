@@ -899,12 +899,18 @@ fn expand_unhoisted(
     // replaces that topology in exactly the same way, so it uses the same mode;
     // the retained metric × dimension check is what still reports a dimension
     // below the metric's own grain.
+    // Phase 7.3: only a per-grain plan that deduplicates its bridged groups
+    // may let a dimension or filter across a many-to-many bridge through.
+    let bridges = grain_plan
+        .as_ref()
+        .is_some_and(super::per_grain::Plan::crosses_bridge);
     check_fan_traps(
         view_name,
         def,
         &resolved_dims,
         &resolved_mets,
         grain_plan.is_some() || window_anchor.is_some() || snapshot_anchor.is_some(),
+        bridges,
     )?;
     // PAR-6 (TECH-DEBT #53): a member reaching a fact on another table now
     // pulls that table's join, so the fence has to rule out a fanning one.
@@ -928,7 +934,13 @@ fn expand_unhoisted(
         &where_tables,
     )?;
     if let Some(rw) = &resolved_where {
-        super::fan_trap::check_where_clause_fan_traps(view_name, def, &rw.members, &resolved_mets)?;
+        super::fan_trap::check_where_clause_fan_traps(
+            view_name,
+            def,
+            &rw.members,
+            &resolved_mets,
+            bridges,
+        )?;
         // EXP-10: and the role-playing seam the fan-trap check does not cover —
         // reaching the member's table is unambiguous only if no role-playing
         // table sits on the path. Runs on every emission path because it is

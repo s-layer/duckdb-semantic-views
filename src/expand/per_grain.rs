@@ -265,6 +265,12 @@ struct Group {
     /// expression, and storing names rather than `&Metric` keeps [`Plan`] free
     /// of a lifetime.
     metric_names: Vec<String>,
+    /// Phase 7.3: the anchor's key columns when a queried dimension or a
+    /// `where_clause` member is reached across a many-to-many bridge, `None`
+    /// otherwise. A bridged group counts each anchor row once per group by
+    /// joining it to the `SELECT DISTINCT` of its (key, dimensions) pairs; see
+    /// [`render_bridged_group`].
+    bridge_key: Option<Vec<String>>,
 }
 
 /// How one requested metric's output column is produced from the grain CTEs.
@@ -291,6 +297,12 @@ impl Plan {
     /// one-CTE wrapper.
     fn is_single_group(&self) -> bool {
         self.groups.len() == 1
+    }
+
+    /// Whether some group reaches a dimension or filter across a many-to-many
+    /// bridge, which tells the fan-trap fence to let those paths through.
+    pub(super) fn crosses_bridge(&self) -> bool {
+        self.groups.iter().any(|g| g.bridge_key.is_some())
     }
 }
 
@@ -345,6 +357,7 @@ impl Partition {
                     roles: roles.clone(),
                     exprs: Vec::new(),
                     metric_names: Vec::new(),
+                    bridge_key: None,
                 });
                 self.groups.len() - 1
             });
@@ -431,6 +444,18 @@ pub(super) fn plan(
         }
     }
 
+    // Per-grain only helps when every queried dimension is reachable from every
+    // anchor without fanning it, or (Phase 7.3) across a many-to-many bridge,
+    // which the group then deduplicates. Where neither holds, the fence's
+    // metric × dimension error is the right answer — decline and let it speak.
+    mark_bridged_groups(
+        def,
+        &graph,
+        &mut partition.groups,
+        &dim_tables,
+        where_tables,
+    )?;
+
     // TECH-DEBT #71 (D1, settled against Snowflake): every metric is aggregated
     // from its OWN home table, so a query needs this path whenever any grain is
     // not the root. Only an all-root query is left to the base-anchored path —
@@ -447,26 +472,14 @@ pub(super) fn plan(
     // Phase 6.3: an all-root query still needs this path when its metrics reach
     // a role-played dimension table through different relationships — the
     // base-anchored FROM can group the dimension through only one of them.
-    let anchors: Vec<&String> = partition.groups.iter().map(|g| &g.anchor).collect();
+    // Phase 7.3: and when it crosses a bridge, which only a grain CTE dedups.
     let one_role_set = partition
         .groups
         .iter()
         .all(|g| g.roles == partition.groups[0].roles);
-    if anchors.iter().all(|a| **a == root) && one_role_set {
+    let crosses_bridge = partition.groups.iter().any(|g| g.bridge_key.is_some());
+    if partition.groups.iter().all(|g| g.anchor == root) && one_role_set && !crosses_bridge {
         return None;
-    }
-
-    // Per-grain only helps when every queried dimension is reachable from every
-    // anchor without fanning it. Where it is not, the fence's metric ×
-    // dimension error is the right answer — decline and let it speak.
-    for anchor in &anchors {
-        for dim_table in &dim_tables {
-            if graph.path(anchor, dim_table).is_none()
-                || graph.fanning_relationship(anchor, dim_table).is_some()
-            {
-                return None;
-            }
-        }
     }
 
     // A query whose ONLY group is a snapshot group belongs to the base-anchored
@@ -483,11 +496,61 @@ pub(super) fn plan(
     {
         return None;
     }
+    // Phase 7.3: the snapshot CTE ranks the rows it is given before
+    // aggregating, and a bridged group's rows are only deduplicated by the
+    // key join this renderer adds, so an active semi-additive metric across a
+    // bridge is declined, and the fence refuses it as a fan trap.
+    if partition
+        .groups
+        .iter()
+        .any(|g| g.bridge_key.is_some() && is_snapshot_group(def, g, &queried_dim_keys))
+    {
+        return None;
+    }
 
     Some(Plan {
         groups: partition.groups,
         outputs,
     })
+}
+
+/// Set each group's [`Group::bridge_key`] when a queried dimension or a
+/// `where_clause` member is reached from its anchor across a many-to-many
+/// bridge. `None` declines the plan: a dimension the anchor cannot reach, or
+/// reaches only by fanning it some other way, or a bridged anchor with no key.
+/// A `where_clause` member on any other fanning path is left to the
+/// `where_clause` fence, which refuses it.
+fn mark_bridged_groups(
+    def: &SemanticViewDefinition,
+    graph: &GrainGraph,
+    groups: &mut [Group],
+    dim_tables: &[String],
+    where_tables: &[String],
+) -> Option<()> {
+    for group in groups {
+        let mut bridged = false;
+        for dim_table in dim_tables {
+            graph.path(&group.anchor, dim_table)?;
+            if graph
+                .fanning_relationship(&group.anchor, dim_table)
+                .is_some()
+            {
+                if !graph.is_bridge(&group.anchor, dim_table) {
+                    return None;
+                }
+                bridged = true;
+            }
+        }
+        bridged |= where_tables.iter().any(|t| {
+            let t = t.to_ascii_lowercase();
+            graph.fanning_relationship(&group.anchor, &t).is_some()
+                && graph.is_bridge(&group.anchor, &t)
+        });
+        if bridged {
+            group.bridge_key = Some(anchor_key(def, &group.anchor)?);
+        }
+    }
+    Some(())
 }
 
 /// Whether `group`'s metrics include an ACTIVE semi-additive one, in which case
@@ -1275,6 +1338,30 @@ fn render_plain_group(
     where_clause: Option<&ResolvedWhere>,
     where_tables: &[String],
 ) -> String {
+    if let Some(key) = &group.bridge_key {
+        let dims: Vec<(Option<String>, String)> = resolved_dims
+            .iter()
+            .enumerate()
+            .map(|(d, dim)| (dim.output_type.clone(), quote_ident(&dim_column(d))))
+            .collect();
+        let mets: Vec<SelectItem> = group
+            .exprs
+            .iter()
+            .enumerate()
+            .map(|(m, expr)| SelectItem::new(expr.clone(), None, quote_ident(&metric_column(m))))
+            .collect();
+        return render_bridged_group(
+            def,
+            resolved_dims,
+            group,
+            key,
+            &dims,
+            &mets,
+            where_clause,
+            where_tables,
+            "    ",
+        );
+    }
     // The group's own roles, threaded into both the join and the dimension
     // expression so they cannot disagree about which role a table plays.
     let roles = &group.roles;
@@ -1410,6 +1497,35 @@ fn render_single_grain(
     let where_tables = where_clause
         .map(|w| w.source_tables.clone())
         .unwrap_or_default();
+    if let Some(key) = &group.bridge_key {
+        let dims: Vec<(Option<String>, String)> = resolved_dims
+            .iter()
+            .map(|dim| (dim.output_type.clone(), quote_stored_ident(&dim.name)))
+            .collect();
+        let mets: Vec<SelectItem> = resolved_mets
+            .iter()
+            .zip(&plan.outputs)
+            .filter_map(|(met, output)| match output {
+                Output::Direct { column, .. } => Some(SelectItem::new(
+                    group.exprs[*column].clone(),
+                    met.output_type.clone(),
+                    quote_stored_ident(&met.name),
+                )),
+                Output::Derived { .. } => None, // Caller established every output is Direct.
+            })
+            .collect();
+        return render_bridged_group(
+            def,
+            resolved_dims,
+            group,
+            key,
+            &dims,
+            &mets,
+            where_clause,
+            &where_tables,
+            "",
+        );
+    }
     let mut items: Vec<SelectItem> = resolved_dims
         .iter()
         .map(|dim| {
@@ -1462,6 +1578,213 @@ fn render_single_grain(
         group_by,
     }
     .render()
+}
+
+/// The internal alias of the deduplicated (key, dimensions) derived table a
+/// bridged group joins its anchor to.
+const BRIDGE_ALIAS: &str = "__sv_bridge";
+
+/// The internal alias of the `i`th anchor key column inside [`BRIDGE_ALIAS`].
+fn key_column(index: usize) -> String {
+    format!("__sv_k{index}")
+}
+
+/// The key a bridged group deduplicates its anchor rows by: the anchor's
+/// PRIMARY KEY, else its first UNIQUE key. `None` when it declares neither,
+/// and the query is then declined. A bridge references its anchor (see
+/// `fan_trap::is_bridge_path`), so CREATE has already required one of the two.
+fn anchor_key(def: &SemanticViewDefinition, anchor: &str) -> Option<Vec<String>> {
+    let table = def
+        .tables
+        .iter()
+        .find(|t| t.alias.eq_ignore_ascii_case(anchor))?;
+    if !table.pk_columns.is_empty() {
+        return Some(table.pk_columns.clone());
+    }
+    table
+        .unique_constraints
+        .iter()
+        .find(|u| !u.is_empty())
+        .cloned()
+}
+
+/// Render a grain whose dimensions or `where_clause` members are reached across
+/// a many-to-many bridge (Phase 7.3).
+///
+/// Joining the bridge into the aggregation would count an anchor row once per
+/// bridge row. Snowflake counts it once per GROUP instead (the 7.0 fixture's
+/// B1-B10), which is what this emits:
+///
+/// ```sql
+/// SELECT "__sv_bridge"."__sv_d0" AS "country", SUM(pages) AS "total_pages"
+/// FROM "books" AS "b"
+/// JOIN (
+///     SELECT DISTINCT "b"."book_id" AS "__sv_k0", country AS "__sv_d0"
+///     FROM "books" AS "b"
+///     LEFT JOIN "book_authors" AS "ba" ON "ba"."book_id" = "b"."book_id"
+///     LEFT JOIN "authors" AS "a" ON "ba"."author_id" = "a"."author_id"
+///     WHERE <where_clause>
+/// ) AS "__sv_bridge" ON "b"."book_id" IS NOT DISTINCT FROM "__sv_bridge"."__sv_k0"
+/// GROUP BY 1
+/// ```
+///
+/// The inner query holds each (anchor row, group) pair once. An anchor row with
+/// no bridge rows keeps one pair with NULL bridged dimensions, so it lands in
+/// the NULL group and the total with no dimension is never inflated. The
+/// `where_clause` is evaluated there, row by row over the joined rows, so a
+/// filter across the bridge keeps an anchor row when ANY of its bridge rows
+/// matches, and still counts it once. The outer query re-reads the anchor by its
+/// key, so the aggregate sees each pair exactly once, and joins only what the
+/// metrics' own facts need.
+///
+/// `dims` gives each dimension's output cast and alias and `mets` the metric
+/// items, so the flat single-grain query and a multi-grain CTE body share this.
+#[allow(clippy::too_many_arguments)]
+fn render_bridged_group(
+    def: &SemanticViewDefinition,
+    resolved_dims: &[&Dimension],
+    group: &Group,
+    key: &[String],
+    dims: &[(Option<String>, String)],
+    mets: &[SelectItem],
+    where_clause: Option<&ResolvedWhere>,
+    where_tables: &[String],
+    indent: &str,
+) -> String {
+    let anchor_ref = quote_stored_ident(&stored_alias(def, &group.anchor));
+    let bridge = quote_ident(BRIDGE_ALIAS);
+    let mut sql = String::with_capacity(512);
+    sql.push_str(indent);
+    sql.push_str("SELECT\n");
+    let mut items: Vec<String> = Vec::new();
+    for (d, (cast, alias)) in dims.iter().enumerate() {
+        let item = SelectItem::new(
+            format!("{bridge}.{}", quote_ident(&dim_column(d))),
+            cast.clone(),
+            alias.clone(),
+        );
+        items.push(format!("{indent}    {}", item.render()));
+    }
+    for item in mets {
+        items.push(format!("{indent}    {}", item.render()));
+    }
+    sql.push_str(&items.join(",\n"));
+    let lead = format!("\n{indent}");
+    push_from_anchor(&mut sql, def, &group.anchor, &lead);
+    sql.push_str(&lead);
+    sql.push_str("JOIN (\n");
+    sql.push_str(&bridged_pairs_query(
+        def,
+        resolved_dims,
+        group,
+        key,
+        where_clause,
+        where_tables,
+        &format!("{indent}    "),
+    ));
+    sql.push_str(&lead);
+    sql.push_str(") AS ");
+    sql.push_str(&bridge);
+    let on: Vec<String> = key
+        .iter()
+        .enumerate()
+        .map(|(k, col)| {
+            format!(
+                "{anchor_ref}.{} IS NOT DISTINCT FROM {bridge}.{}",
+                quote_stored_ident(col),
+                quote_ident(&key_column(k))
+            )
+        })
+        .collect();
+    sql.push_str(" ON ");
+    sql.push_str(&on.join(" AND "));
+    // The metrics' own fact tables: never across the bridge, which the
+    // referenced-fact fence refuses, so these joins do not fan the anchor.
+    let met_needs = anchor_needs(def, &group_metrics(def, group), &[], &[]);
+    push_join_clauses(
+        &mut sql,
+        &anchor_joins(
+            def,
+            &group.anchor,
+            &[],
+            &met_needs.bare,
+            &group.roles,
+            &met_needs.scoped,
+        ),
+        def,
+        &format!("{lead}LEFT JOIN "),
+    );
+    push_group_by_ordinals(
+        &mut sql,
+        resolved_dims.len(),
+        &lead,
+        &format!("{indent}    "),
+    );
+    sql
+}
+
+/// The alias `anchor` (lowercased) was declared with.
+fn stored_alias(def: &SemanticViewDefinition, anchor: &str) -> String {
+    def.tables
+        .iter()
+        .find(|t| t.alias.eq_ignore_ascii_case(anchor))
+        .map_or_else(|| anchor.to_string(), |t| t.alias.clone())
+}
+
+/// The inner query of [`render_bridged_group`]: each (anchor key, dimensions)
+/// pair once, over the anchor joined to every queried dimension's and
+/// `where_clause` member's table, with the predicate applied row by row.
+fn bridged_pairs_query(
+    def: &SemanticViewDefinition,
+    resolved_dims: &[&Dimension],
+    group: &Group,
+    key: &[String],
+    where_clause: Option<&ResolvedWhere>,
+    where_tables: &[String],
+    indent: &str,
+) -> String {
+    let anchor_ref = quote_stored_ident(&stored_alias(def, &group.anchor));
+    let mut items: Vec<String> = Vec::new();
+    for (k, col) in key.iter().enumerate() {
+        items.push(format!(
+            "{indent}    {anchor_ref}.{} AS {}",
+            quote_stored_ident(col),
+            quote_ident(&key_column(k))
+        ));
+    }
+    for (d, dim) in resolved_dims.iter().enumerate() {
+        items.push(format!(
+            "{indent}    {} AS {}",
+            dim_expr(dim, &group.roles, def),
+            quote_ident(&dim_column(d))
+        ));
+    }
+    let mut sql = String::with_capacity(512);
+    sql.push_str(indent);
+    sql.push_str("SELECT DISTINCT\n");
+    sql.push_str(&items.join(",\n"));
+    let lead = format!("\n{indent}");
+    push_from_anchor(&mut sql, def, &group.anchor, &lead);
+    let needs = anchor_needs(def, &[], resolved_dims, where_tables);
+    push_join_clauses(
+        &mut sql,
+        &anchor_joins(
+            def,
+            &group.anchor,
+            resolved_dims,
+            &needs.bare,
+            &group.roles,
+            &[],
+        ),
+        def,
+        &format!("{lead}LEFT JOIN "),
+    );
+    if let Some(w) = where_clause {
+        sql.push_str(&lead);
+        sql.push_str("WHERE ");
+        sql.push_str(&w.sql);
+    }
+    sql
 }
 
 /// The general case: one CTE per grain, joined on the queried dimensions.

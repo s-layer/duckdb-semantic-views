@@ -298,6 +298,7 @@ fn fan_trap_error_message_format() {
             dimension_name: "status".to_string(),
             dimension_table: "li".to_string(),
             relationship_name: "li_to_order".to_string(),
+            across_bridge: false,
         }),
     };
     let msg = format!("{err}");

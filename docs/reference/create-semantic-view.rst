@@ -569,6 +569,34 @@ Each event takes the period with ``start_ts <= event_ts`` and ``event_ts < end_t
 - A range relationship is always many-to-one, since many rows can fall in the same period. A metric on the target is computed over the target's own rows, and grouping it by a dimension of the "from" table is refused as a :ref:`fan trap <howto-fan-traps>`.
 - ``DESCRIBE`` writes the range in ``REF_KEY`` as ``{"start_column":"<start>","end_column":"<end>","type":"RANGE"}`` and shows the table's constraint as a ``CONSTRAINT`` row, ``GET_DDL`` writes both back, and the YAML export writes the end column as ``range_end`` and the constraint under ``distinct_ranges``. A release of the extension older than 0.19.0 cannot read a view with a range relationship or a ``DISTINCT RANGE`` constraint.
 
+.. _ref-create-bridge-relationships:
+
+**Many-to-many relationships through a bridge:**
+
+.. versionadded:: 0.19.0
+
+A table that references two others links them many-to-many, as ``book_authors`` links books and authors. No new syntax is needed: declare the bridge's two relationships, as in Snowflake.
+
+.. code-block:: sql
+
+   TABLES (
+       a  AS authors      PRIMARY KEY (author_id),
+       b  AS books        PRIMARY KEY (book_id),
+       ba AS book_authors PRIMARY KEY (book_id, author_id)
+   )
+   RELATIONSHIPS (
+       ba_author AS ba(author_id) REFERENCES a,
+       ba_book   AS ba(book_id)   REFERENCES b
+   )
+
+A metric on books can then be grouped or filtered by an author dimension, and the other way round. Each book counts once per group, never once per bridge row, as in Snowflake: a book with two French authors counts once for ``FR``, a book with a French and a British author counts under both, and a book with no author counts in the ``NULL`` group. With no dimension the total is the books' own. A filter on an author dimension keeps a book when any of its authors matches, and counts it once.
+
+- The bridge must reference the metric's table directly, and from the bridge on every hop must be many-to-one, so a dimension on the bridge itself (``ba.role``), on the far table, or on a table past it (``authors`` to ``countries``) works. A fact table works as a bridge too: ``sales`` referencing ``customers`` and ``products`` lets a customer count be grouped by product category.
+- A table whose only relationship is the one to the metric's table is a plain child, not a bridge, and grouping by it is still refused as a :ref:`fan trap <howto-fan-traps>`. So is a path with two one-to-many hops, or one that goes up to a parent and then down into a bridge.
+- A window metric, or a semi-additive metric whose ``NON ADDITIVE BY`` dimension is left out of the query, can't be grouped across a bridge, and the fan trap error says so.
+- Two bridges between the same two tables make the second table reachable from two tables, which is refused as a diamond (see below). Snowflake cannot pick one of them with ``USING`` either, since a metric's ``USING`` must name a relationship from the metric's own table.
+- A query with only dimensions reads from the base table, as without a bridge. With ``authors`` first in ``TABLES``, an author with no book is listed with a ``NULL`` title; Snowflake lists only the pairs the bridge holds.
+
 **Cardinality inference:**
 
 The extension infers cardinality from the "from" table's constraints:

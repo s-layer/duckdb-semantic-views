@@ -317,6 +317,11 @@ pub struct FanTrapError {
     pub dimension_name: String,
     pub dimension_table: String,
     pub relationship_name: String,
+    /// Phase 7.3: the path is a many-to-many bridge, which the per-grain plan
+    /// answers once per group but could not for this query (a semi-additive
+    /// or window metric, or a member that names no table). The message then
+    /// says so, instead of only suggesting the dimension be removed.
+    pub across_bridge: bool,
 }
 
 /// Detail payload for [`ExpandError::ReferencedFactFanTrap`], boxed for the
@@ -725,6 +730,7 @@ impl fmt::Display for ExpandError {
                     dimension_name,
                     dimension_table,
                     relationship_name,
+                    across_bridge,
                 } = &**detail;
                 write!(
                     f,
@@ -735,7 +741,17 @@ impl fmt::Display for ExpandError {
                      This would inflate aggregation results. \
                      Remove the dimension, use a metric from the same table, or restructure the \
                      relationship."
-                )
+                )?;
+                if *across_bridge {
+                    write!(
+                        f,
+                        " The path crosses a many-to-many bridge, which is grouped once per row \
+                         only for ordinary metrics: not for a window metric, a semi-additive \
+                         metric whose NON ADDITIVE BY dimension is not queried, or a query with \
+                         a dimension or filter that names no table."
+                    )?;
+                }
+                Ok(())
             }
             Self::MetricFanTrap { detail } => {
                 let MetricFanTrapError {
