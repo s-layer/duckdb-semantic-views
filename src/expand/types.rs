@@ -746,9 +746,10 @@ impl fmt::Display for ExpandError {
                     write!(
                         f,
                         " The path crosses a many-to-many bridge, which is grouped once per row \
-                         only for ordinary metrics: not for a window metric, a semi-additive \
-                         metric whose NON ADDITIVE BY dimension is not queried, or a query with \
-                         a dimension or filter that names no table."
+                         only for ordinary metrics on a table with a PRIMARY KEY: not for a \
+                         window metric, a semi-additive metric whose NON ADDITIVE BY dimension \
+                         is not queried, a role-played table, a query with a dimension or filter \
+                         that names no table, or a metric table with no PRIMARY KEY."
                     )?;
                 }
                 Ok(())

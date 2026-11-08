@@ -72,6 +72,10 @@ pub(super) fn check_fan_traps(
     // dedupe them (silent double-count). Window metrics were never skipped
     // (their inner aggregate is computed over the fanned join before the window
     // function runs); semi-additive metrics are now treated the same way.
+    // Phase 7.3: a refused path across a bridge is reported only when no plain
+    // fan-out is refused too, since a plain fan-out is what blocks the query
+    // then, and the bridge note would name the wrong reason.
+    let mut bridge_trap: Option<ExpandError> = None;
     for met in resolved_mets {
         // EXP-8: a base metric with no source table and no base-metric
         // references has an empty grain set but sits at the root grain — the
@@ -104,7 +108,8 @@ pub(super) fn check_fan_traps(
                     continue;
                 }
                 if let Some(rel_name) = fanning_edge_on_path(&path, &card_map) {
-                    return Err(ExpandError::FanTrap {
+                    let across_bridge = is_bridge_path(&path, &card_map);
+                    let trap = ExpandError::FanTrap {
                         detail: Box::new(FanTrapError {
                             view_name: view_name.to_string(),
                             metric_name: met.name.clone(),
@@ -115,12 +120,19 @@ pub(super) fn check_fan_traps(
                             dimension_name: dim.name.clone(),
                             dimension_table: dim_table_raw.clone(),
                             relationship_name: rel_name,
-                            across_bridge: is_bridge_path(&path, &card_map),
+                            across_bridge,
                         }),
-                    });
+                    };
+                    if !across_bridge {
+                        return Err(trap);
+                    }
+                    bridge_trap.get_or_insert(trap);
                 }
             }
         }
+    }
+    if let Some(trap) = bridge_trap {
+        return Err(trap);
     }
 
     // EXP-9 (code-review 2026-08-03): the loop above pairs each metric with the

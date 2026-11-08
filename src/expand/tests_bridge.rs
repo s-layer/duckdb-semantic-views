@@ -445,29 +445,35 @@ fn fact_table_as_the_bridge() {
     );
 }
 
-/// The anchor's key may be a UNIQUE key instead of a PRIMARY KEY.
+/// A bridged group deduplicates its anchor rows by the anchor's PRIMARY KEY.
+/// A UNIQUE key can't stand in for it: it may hold any number of NULLs, and
+/// rows that share a NULL key would each join every NULL-key pair (code review
+/// on PR #339). Here Solo and Orphan both have a NULL isbn, so keyed by isbn
+/// each title would report 350 pages instead of its own. The query is refused,
+/// and the message names the missing PRIMARY KEY.
 #[test]
-fn bridge_dedups_by_a_unique_key() {
+fn bridge_without_a_primary_key_is_refused() {
     let mut def = bridge_def("a");
     let books = def.tables.iter_mut().find(|t| t.alias == "b").expect("b");
     books.pk_columns.clear();
     books.unique_constraints = vec![vec!["isbn".to_string()]];
+    books.definition = Some(
+        "SELECT book_id, title, pages, \
+         CASE WHEN book_id IN (12, 13) THEN NULL ELSE isbn END AS isbn FROM books"
+            .to_string(),
+    );
     def.joins[1].ref_columns = vec!["isbn".to_string()];
     def.joins[1].fk_columns = vec!["isbn".to_string()];
     // book_authors has no isbn column, so key the bridge rows through a
     // query-defined table that adds it.
     let ba = def.tables.iter_mut().find(|t| t.alias == "ba").expect("ba");
     ba.definition = Some("SELECT x.*, 'i' || x.book_id AS isbn FROM book_authors AS x".to_string());
-    let sql = expand("v", &def, &req(&["country"], &["total_pages"], None))
-        .unwrap_or_else(|e| panic!("{e}"));
+    let e = refusal(&def, &["title", "country"], &["total_pages"]);
     assert!(
-        sql.contains(r#""b"."isbn" AS "__sv_k0""#),
-        "keyed by the UNIQUE key:\n{sql}"
+        matches!(&e, ExpandError::FanTrap { detail } if detail.across_bridge),
+        "{e}"
     );
-    assert_eq!(
-        rows(&sql),
-        table_of(&[&["FR", "300"], &["UK", "500"], &["NULL", "50"]])
-    );
+    assert!(e.to_string().contains("PRIMARY KEY"), "{e}");
 }
 
 /// A dimension on a plain child, a table whose only relationship is to the
@@ -513,4 +519,64 @@ fn semi_additive_metric_across_the_bridge_is_refused() {
         "{e}"
     );
     assert!(e.to_string().contains("many-to-many bridge"), "{e}");
+}
+
+/// A window metric across the bridge is refused, and the message says a bridge
+/// is the reason: the window path does not deduplicate its inner aggregate.
+#[test]
+fn window_metric_across_the_bridge_is_refused() {
+    let mut def = bridge_def("b");
+    def.metrics.push(Metric {
+        name: "avg_pages".to_string(),
+        expr: "AVG(total_pages)".to_string(),
+        source_table: Some("b".to_string()),
+        window_spec: Some(crate::model::WindowSpec {
+            window_function: "AVG".to_string(),
+            inner_metric: "total_pages".to_string(),
+            extra_args: vec![],
+            excluding_dims: vec![],
+            partition_dims: vec!["country".to_string()],
+            order_by: vec![],
+            frame_clause: None,
+        }),
+        ..Default::default()
+    });
+    let e = refusal(&def, &["country"], &["avg_pages"]);
+    assert!(
+        matches!(&e, ExpandError::FanTrap { detail } if detail.across_bridge),
+        "{e}"
+    );
+    assert!(e.to_string().contains("many-to-many bridge"), "{e}");
+}
+
+/// When a query is refused for a plain fan-out and also crosses a bridge, the
+/// error names the plain fan-out: that is what blocks it (code review on PR
+/// #339). Here `stars` is on a plain child of books and `country` is across
+/// the bridge.
+#[test]
+fn plain_fan_out_is_reported_before_a_bridge() {
+    let e = refusal(&bridge_def("b"), &["country", "stars"], &["total_pages"]);
+    match &e {
+        ExpandError::FanTrap { detail } => {
+            assert_eq!(detail.dimension_name, "stars", "{e}");
+            assert!(!detail.across_bridge, "{e}");
+        }
+        other => panic!("expected a fan trap, got {other}"),
+    }
+}
+
+/// A dimension's output cast is applied before the bridge's dedup, so two
+/// raw values that cast to one value still count the book once (code review on
+/// PR #339). Each author id casts to `true`: Duo and Mixed each have two
+/// authors, and would count twice if the cast came after the DISTINCT.
+#[test]
+fn output_cast_applies_before_the_dedup() {
+    let mut def = bridge_def("b");
+    let mut has = dim("has_author", "a.author_id", "a");
+    has.output_type = Some("BOOLEAN".to_string());
+    def.dimensions.push(has);
+    assert_eq!(
+        run(&def, &["has_author"], &["total_pages"], None),
+        table_of(&[&["true", "600"], &["NULL", "50"]])
+    );
 }

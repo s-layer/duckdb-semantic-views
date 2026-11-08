@@ -163,9 +163,9 @@ UK	500
 
 # A dimension-only query reads from the base table (`a` here), as it does
 # without a bridge, so Dan, who has no book, is listed with a NULL title. This
-# is the dimension-only rule TECH-DEBT #67 (3) records as deliberate: the base
-# row is a member of the result even with no child. Snowflake lists only the
-# pairs the bridge holds (fixture B4), so it has no Dan row.
+# is the dimension-only rule TECH-DEBT #67 (3) records, bridge case included:
+# the base row is a member of the result even with no child. Snowflake lists
+# only the pairs the bridge holds (fixture B4), so it has no Dan row.
 query TT
 SELECT * FROM SEMANTIC_VIEW(p7_bridge DIMENSIONS b.title, a.country)
 ORDER BY 1 NULLS LAST, 2 NULLS LAST;

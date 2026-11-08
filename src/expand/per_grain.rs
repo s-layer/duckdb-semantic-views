@@ -1590,22 +1590,16 @@ fn key_column(index: usize) -> String {
 }
 
 /// The key a bridged group deduplicates its anchor rows by: the anchor's
-/// PRIMARY KEY, else its first UNIQUE key. `None` when it declares neither,
-/// and the query is then declined. A bridge references its anchor (see
-/// `fan_trap::is_bridge_path`), so CREATE has already required one of the two.
+/// PRIMARY KEY. `None` when it declares none, and the query is then declined
+/// and refused by the fan-trap fence. A UNIQUE key can't stand in for it: it
+/// may hold any number of NULLs, and anchor rows that share a NULL key would
+/// each join every NULL-key pair of the deduplicated table.
 fn anchor_key(def: &SemanticViewDefinition, anchor: &str) -> Option<Vec<String>> {
     let table = def
         .tables
         .iter()
         .find(|t| t.alias.eq_ignore_ascii_case(anchor))?;
-    if !table.pk_columns.is_empty() {
-        return Some(table.pk_columns.clone());
-    }
-    table
-        .unique_constraints
-        .iter()
-        .find(|u| !u.is_empty())
-        .cloned()
+    (!table.pk_columns.is_empty()).then(|| table.pk_columns.clone())
 }
 
 /// Render a grain whose dimensions or `where_clause` members are reached across
@@ -1657,10 +1651,12 @@ fn render_bridged_group(
     sql.push_str(indent);
     sql.push_str("SELECT\n");
     let mut items: Vec<String> = Vec::new();
-    for (d, (cast, alias)) in dims.iter().enumerate() {
+    // The output casts are applied inside, before the DISTINCT (see
+    // `bridged_pairs_query`), so they are not applied again here.
+    for (d, (_, alias)) in dims.iter().enumerate() {
         let item = SelectItem::new(
             format!("{bridge}.{}", quote_ident(&dim_column(d))),
-            cast.clone(),
+            None,
             alias.clone(),
         );
         items.push(format!("{indent}    {}", item.render()));
@@ -1733,7 +1729,9 @@ fn stored_alias(def: &SemanticViewDefinition, anchor: &str) -> String {
 
 /// The inner query of [`render_bridged_group`]: each (anchor key, dimensions)
 /// pair once, over the anchor joined to every queried dimension's and
-/// `where_clause` member's table, with the predicate applied row by row.
+/// `where_clause` member's table, with the predicate applied row by row. Each
+/// dimension's output cast is applied here, before the DISTINCT: two raw values
+/// that cast to one value are one group, and must count the anchor row once.
 fn bridged_pairs_query(
     def: &SemanticViewDefinition,
     resolved_dims: &[&Dimension],
@@ -1753,11 +1751,12 @@ fn bridged_pairs_query(
         ));
     }
     for (d, dim) in resolved_dims.iter().enumerate() {
-        items.push(format!(
-            "{indent}    {} AS {}",
+        let item = SelectItem::new(
             dim_expr(dim, &group.roles, def),
-            quote_ident(&dim_column(d))
-        ));
+            dim.output_type.clone(),
+            quote_ident(&dim_column(d)),
+        );
+        items.push(format!("{indent}    {}", item.render()));
     }
     let mut sql = String::with_capacity(512);
     sql.push_str(indent);
