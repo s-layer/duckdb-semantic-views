@@ -179,7 +179,7 @@ fn on_clause(
 /// NULL)`, above every one, whatever the bounds' type; otherwise the flags tie
 /// and the bound decides. A NULL value gives a NULL row, which matches
 /// nothing (a `(0, NULL)` would sort after every bound).
-fn range_condition(value: &str, start: &str, end: &str) -> String {
+pub(crate) fn range_condition(value: &str, start: &str, end: &str) -> String {
     let v = format!("(CASE WHEN {value} IS NOT NULL THEN ROW(0, {value}) END)");
     format!(
         "({v} >= ROW(CASE WHEN {start} IS NULL THEN -1 ELSE 0 END, {start}) \

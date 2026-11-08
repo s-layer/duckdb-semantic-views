@@ -626,16 +626,21 @@ fn range_probes(def: &crate::model::SemanticViewDefinition) -> Vec<(String, Stri
                 "range relationship '{}'",
                 join.name.as_deref().unwrap_or("?")
             ),
-            format!(
-                "SELECT 1 FROM {from_src} AS \"__sv_f\", {to_src} AS \"__sv_t\" \
-                 WHERE \"__sv_f\".{fk} >= \"__sv_t\".{s} AND \"__sv_f\".{fk} < \"__sv_t\".{e} \
-                 LIMIT 0",
-                fk = quote_stored_ident(fk),
-                s = quote_stored_ident(start),
-                e = quote_stored_ident(end),
-                from_src = table_source(from, def),
-                to_src = table_source(to, def),
-            ),
+            // The plain comparisons first, for DuckDB's clearer error on a
+            // pair that does not compare; then the condition the query
+            // emits, so the probe and the join cannot drift apart (PR #338).
+            {
+                let f = format!("\"__sv_f\".{}", quote_stored_ident(fk));
+                let s = format!("\"__sv_t\".{}", quote_stored_ident(start));
+                let e = format!("\"__sv_t\".{}", quote_stored_ident(end));
+                format!(
+                    "SELECT 1 FROM {from_src} AS \"__sv_f\", {to_src} AS \"__sv_t\" \
+                     WHERE {f} >= {s} AND {f} < {e} AND {cond} LIMIT 0",
+                    cond = crate::expand::range_condition(&f, &s, &e),
+                    from_src = table_source(from, def),
+                    to_src = table_source(to, def),
+                )
+            },
         ));
     }
     probes

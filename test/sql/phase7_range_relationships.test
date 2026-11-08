@@ -241,6 +241,34 @@ SELECT * FROM SEMANTIC_VIEW(p7_range_two_open DIMENSIONS e.event_id, p.label) OR
 5	NULL
 6	NULL
 
+# --- a DATE value against TIMESTAMP bounds ----------------------------------
+# The value and the bounds need only compare; the CREATE probe binds the
+# condition the query emits, so a pair it accepts is one the query can run
+# (PR #338 review).
+
+statement ok
+CREATE TABLE events_date (e_id INTEGER, e_day DATE, v INTEGER);
+
+statement ok
+INSERT INTO events_date VALUES (1, '2024-01-15', 3), (2, '2023-06-01', 4), (3, NULL, 5);
+
+statement ok
+CREATE SEMANTIC VIEW p7_range_date
+  TABLES (
+    e AS events_date PRIMARY KEY (e_id),
+    p AS periods     PRIMARY KEY (period_id)
+      CONSTRAINT period_range DISTINCT RANGE BETWEEN start_ts AND end_ts EXCLUSIVE
+  )
+  RELATIONSHIPS (event_period AS e (e_day) REFERENCES p (BETWEEN start_ts AND end_ts EXCLUSIVE))
+  DIMENSIONS (e.event_id AS e_id, p.label AS label);
+
+query IT
+SELECT * FROM SEMANTIC_VIEW(p7_range_date DIMENSIONS e.event_id, p.label) ORDER BY 1;
+----
+1	jan
+2	before
+3	NULL
+
 # --- DESCRIBE, GET_DDL, YAML and the storage format -------------------------
 
 # R4: Snowflake's REF_KEY shape and the CONSTRAINT object.
