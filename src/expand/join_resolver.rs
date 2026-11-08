@@ -170,10 +170,20 @@ fn on_clause(
 /// answers Snowflake gave on the Phase 7.0 fixture, R1 and R6). A NULL value
 /// is in no period. The condition names both sides, so it reads the same
 /// whichever table the join walks from.
+///
+/// It is written as two comparisons of rows, one per bound, so that the planner
+/// plans it as a range join (an inequality or piecewise merge join) rather than a
+/// nested loop, which `s IS NULL OR v >= s` forces (PR #338 review: 2M events
+/// against 10k periods, 34 s against 0.5 s). Each row leads with a flag: a
+/// NULL start is `(-1, NULL)`, below every `(0, v)`, and a NULL end `(1,
+/// NULL)`, above every one, whatever the bounds' type; otherwise the flags tie
+/// and the bound decides. A NULL value gives a NULL row, which matches
+/// nothing (a `(0, NULL)` would sort after every bound).
 fn range_condition(value: &str, start: &str, end: &str) -> String {
+    let v = format!("(CASE WHEN {value} IS NOT NULL THEN ROW(0, {value}) END)");
     format!(
-        "({value} IS NOT NULL AND ({start} IS NULL OR {value} >= {start}) \
-         AND ({end} IS NULL OR {value} < {end}))"
+        "({v} >= ROW(CASE WHEN {start} IS NULL THEN -1 ELSE 0 END, {start}) \
+         AND {v} < ROW(CASE WHEN {end} IS NULL THEN 1 ELSE 0 END, {end}))"
     )
 }
 
@@ -915,9 +925,12 @@ mod tests {
         }
     }
 
-    const RANGE_ON: &str = "(\"e\".\"e_ts\" IS NOT NULL AND (\"p\".\"start_ts\" IS NULL OR \
-                            \"e\".\"e_ts\" >= \"p\".\"start_ts\") AND (\"p\".\"end_ts\" IS NULL OR \
-                            \"e\".\"e_ts\" < \"p\".\"end_ts\"))";
+    const RANGE_ON: &str =
+        "((CASE WHEN \"e\".\"e_ts\" IS NOT NULL THEN ROW(0, \"e\".\"e_ts\") END) \
+                            >= ROW(CASE WHEN \"p\".\"start_ts\" IS NULL THEN -1 ELSE 0 END, \
+                            \"p\".\"start_ts\") AND (CASE WHEN \"e\".\"e_ts\" IS NOT NULL THEN \
+                            ROW(0, \"e\".\"e_ts\") END) < ROW(CASE WHEN \"p\".\"end_ts\" IS NULL \
+                            THEN 1 ELSE 0 END, \"p\".\"end_ts\"))";
 
     /// Phase 7.2: a range relationship joins the referenced table on its
     /// half-open period, a NULL bound open.
