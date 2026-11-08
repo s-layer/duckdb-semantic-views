@@ -1,0 +1,361 @@
+# Phase 7.2: range relationships, `REFERENCES p (BETWEEN s AND e EXCLUSIVE)`
+# against a table's `CONSTRAINT c DISTINCT RANGE BETWEEN s AND e EXCLUSIVE`.
+#
+# The data and the expected answers are the Phase 7.0 fixture's (section R),
+# as Snowflake gave them (2026-11-07): a period is half-open, the start
+# included and the end excluded; a NULL bound is open on its side; an event in
+# no period, or with a NULL timestamp, keeps its row with a NULL period; and a
+# metric on the period table is counted over that table itself.
+
+require semantic_views
+
+statement ok
+CREATE TABLE periods (period_id INTEGER, start_ts TIMESTAMP, end_ts TIMESTAMP, label VARCHAR);
+
+statement ok
+CREATE TABLE events (e_id INTEGER, e_ts TIMESTAMP, v INTEGER);
+
+statement ok
+INSERT INTO periods VALUES
+  (1, NULL,                  '2024-01-01 00:00:00', 'before'),
+  (2, '2024-01-01 00:00:00', '2024-02-01 00:00:00', 'jan'),
+  (3, '2024-02-01 00:00:00', '2024-02-15 00:00:00', 'early_feb'),
+  (4, '2024-03-01 00:00:00', NULL,                  'after');
+
+# e1 in the open-start period, e2 on a start bound, e3 on an end bound, e4 in
+# the gap, e5 in the open-end period, e6 with no timestamp.
+statement ok
+INSERT INTO events VALUES
+  (1, '2023-06-01 00:00:00', 1),
+  (2, '2024-01-01 00:00:00', 10),
+  (3, '2024-02-01 00:00:00', 100),
+  (4, '2024-02-20 00:00:00', 1000),
+  (5, '2025-01-01 00:00:00', 10000),
+  (6, NULL,                  100000);
+
+statement ok
+CREATE SEMANTIC VIEW p7_range
+  TABLES (
+    e AS events  PRIMARY KEY (e_id),
+    p AS periods PRIMARY KEY (period_id)
+      CONSTRAINT period_range DISTINCT RANGE BETWEEN start_ts AND end_ts EXCLUSIVE
+  )
+  RELATIONSHIPS (
+    event_period AS e (e_ts) REFERENCES p (BETWEEN start_ts AND end_ts EXCLUSIVE)
+  )
+  DIMENSIONS (
+    e.event_id AS e_id,
+    p.label    AS label
+  )
+  METRICS (
+    e.total_v      AS SUM(v),
+    p.period_count AS COUNT(period_id)
+  );
+
+# R1: the bounds. The start is included (e2 is jan) and the end excluded (e3 is
+# early_feb, not jan); open bounds match (e1, e5); e4 and e6 keep their rows.
+query IT
+SELECT * FROM SEMANTIC_VIEW(p7_range DIMENSIONS e.event_id, p.label) ORDER BY 1;
+----
+1	before
+2	jan
+3	early_feb
+4	NULL
+5	after
+6	NULL
+
+# R2: each event counts once; the NULL group is e4 + e6.
+query TI
+SELECT * FROM SEMANTIC_VIEW(p7_range DIMENSIONS p.label METRICS e.total_v) ORDER BY 1 NULLS LAST;
+----
+after	10000
+before	1
+early_feb	100
+jan	10
+NULL	101000
+
+# R3: no dimension, each metric over its own table.
+query II
+SELECT * FROM SEMANTIC_VIEW(p7_range METRICS e.total_v, p.period_count);
+----
+111111	4
+
+query TI
+SELECT * FROM SEMANTIC_VIEW(p7_range DIMENSIONS p.label METRICS p.period_count) ORDER BY 1;
+----
+after	1
+before	1
+early_feb	1
+jan	1
+
+# The period table is the "one" side, so its metric can't be grouped by an
+# event dimension.
+statement error
+SELECT * FROM SEMANTIC_VIEW(p7_range DIMENSIONS e.event_id METRICS p.period_count);
+----
+fan trap
+
+# A filter on the period table goes through the range join.
+query I
+SELECT * FROM semantic_view('p7_range', metrics := ['total_v'], where_clause := 'label = ''jan''');
+----
+10
+
+# The standard SQL form.
+query TI
+SELECT label, AGG(total_v) FROM p7_range WHERE label IN ('jan', 'after') GROUP BY label ORDER BY label;
+----
+after	10000
+jan	10
+
+# --- the relationship walked the other way ---------------------------------
+# With the period table first in TABLES, a query with only dimensions starts
+# from it and joins the events onto it, on the same condition.
+
+statement ok
+CREATE SEMANTIC VIEW p7_range_rev
+  TABLES (
+    p AS periods PRIMARY KEY (period_id)
+      CONSTRAINT period_range DISTINCT RANGE BETWEEN start_ts AND end_ts EXCLUSIVE,
+    e AS events  PRIMARY KEY (e_id)
+  )
+  RELATIONSHIPS (
+    event_period AS e (e_ts) REFERENCES p (BETWEEN start_ts AND end_ts EXCLUSIVE)
+  )
+  DIMENSIONS (
+    e.event_id AS e_id,
+    p.label    AS label
+  )
+  METRICS (
+    e.total_v AS SUM(v)
+  );
+
+query TI
+SELECT label, event_id FROM SEMANTIC_VIEW(p7_range_rev DIMENSIONS p.label, e.event_id) ORDER BY 2;
+----
+before	1
+jan	2
+early_feb	3
+after	5
+
+query TI
+SELECT * FROM SEMANTIC_VIEW(p7_range_rev DIMENSIONS p.label METRICS e.total_v) ORDER BY 1 NULLS LAST;
+----
+after	10000
+before	1
+early_feb	100
+jan	10
+NULL	101000
+
+# --- R5: overlapping periods -------------------------------------------------
+# DISTINCT RANGE is not checked against the data, as in Snowflake: an event in
+# two periods is counted under each, and the total without the period
+# dimension is not inflated.
+
+statement ok
+CREATE TABLE periods_overlap (period_id INTEGER, start_ts TIMESTAMP, end_ts TIMESTAMP, label VARCHAR);
+
+statement ok
+CREATE TABLE events_overlap (e_id INTEGER, e_ts TIMESTAMP, v INTEGER);
+
+statement ok
+INSERT INTO periods_overlap VALUES
+  (1, '2024-01-01 00:00:00', '2024-03-01 00:00:00', 'a'),
+  (2, '2024-02-01 00:00:00', '2024-04-01 00:00:00', 'b');
+
+statement ok
+INSERT INTO events_overlap VALUES (1, '2024-02-10 00:00:00', 5), (2, '2024-01-10 00:00:00', 7);
+
+statement ok
+CREATE SEMANTIC VIEW p7_range_overlap
+  TABLES (
+    e AS events_overlap  PRIMARY KEY (e_id),
+    p AS periods_overlap PRIMARY KEY (period_id)
+      CONSTRAINT period_range DISTINCT RANGE BETWEEN start_ts AND end_ts EXCLUSIVE
+  )
+  RELATIONSHIPS (
+    event_period AS e (e_ts) REFERENCES p (BETWEEN start_ts AND end_ts EXCLUSIVE)
+  )
+  DIMENSIONS (e.event_id AS e_id, p.label AS label)
+  METRICS (e.total_v AS SUM(v));
+
+query IT
+SELECT * FROM SEMANTIC_VIEW(p7_range_overlap DIMENSIONS e.event_id, p.label) ORDER BY 1, 2;
+----
+1	a
+1	b
+2	a
+
+query TI
+SELECT * FROM SEMANTIC_VIEW(p7_range_overlap DIMENSIONS p.label METRICS e.total_v) ORDER BY 1;
+----
+a	12
+b	5
+
+query I
+SELECT * FROM SEMANTIC_VIEW(p7_range_overlap METRICS e.total_v);
+----
+12
+
+# --- R6: two periods with a NULL start ---------------------------------------
+# Each open start is honoured on its own: e1 (2023-06-01) is before 2024 but
+# not before 2023, so it is in open1 only.
+
+statement ok
+CREATE TABLE periods_two_open (period_id INTEGER, start_ts TIMESTAMP, end_ts TIMESTAMP, label VARCHAR);
+
+statement ok
+INSERT INTO periods_two_open VALUES
+  (1, NULL, '2024-01-01 00:00:00', 'open1'),
+  (2, NULL, '2023-01-01 00:00:00', 'open2');
+
+statement ok
+CREATE SEMANTIC VIEW p7_range_two_open
+  TABLES (
+    e AS events           PRIMARY KEY (e_id),
+    p AS periods_two_open PRIMARY KEY (period_id)
+      CONSTRAINT period_range DISTINCT RANGE BETWEEN start_ts AND end_ts EXCLUSIVE
+  )
+  RELATIONSHIPS (
+    event_period AS e (e_ts) REFERENCES p (BETWEEN start_ts AND end_ts EXCLUSIVE)
+  )
+  DIMENSIONS (e.event_id AS e_id, p.label AS label)
+  METRICS (e.total_v AS SUM(v));
+
+query IT
+SELECT * FROM SEMANTIC_VIEW(p7_range_two_open DIMENSIONS e.event_id, p.label) ORDER BY 1;
+----
+1	open1
+2	NULL
+3	NULL
+4	NULL
+5	NULL
+6	NULL
+
+# --- DESCRIBE, GET_DDL, YAML and the storage format -------------------------
+
+# R4: Snowflake's REF_KEY shape and the CONSTRAINT object.
+query TT
+SELECT property, property_value FROM describe_semantic_view('p7_range')
+WHERE object_kind = 'RELATIONSHIP' AND property IN ('FOREIGN_KEY', 'REF_KEY') ORDER BY 1;
+----
+FOREIGN_KEY	["e_ts"]
+REF_KEY	[{"start_column":"start_ts","end_column":"end_ts","type":"RANGE"}]
+
+query TTTT
+SELECT object_name, parent_entity, property, property_value FROM describe_semantic_view('p7_range')
+WHERE object_kind = 'CONSTRAINT';
+----
+period_range	periods	CONSTRAINT_TYPE	DISTINCT_RANGE
+period_range	periods	START_COLUMN	start_ts
+period_range	periods	END_COLUMN	end_ts
+
+query I
+SELECT contains(GET_DDL('SEMANTIC_VIEW', 'p7_range'), 'CONSTRAINT period_range DISTINCT RANGE BETWEEN start_ts AND end_ts EXCLUSIVE');
+----
+true
+
+query I
+SELECT contains(GET_DDL('SEMANTIC_VIEW', 'p7_range'), 'REFERENCES p(BETWEEN start_ts AND end_ts EXCLUSIVE)');
+----
+true
+
+query I
+SELECT contains(read_yaml_from_semantic_view('p7_range'), 'range_end: end_ts');
+----
+true
+
+# A range view needs storage format 3, which an older release refuses by
+# name instead of joining on equality.
+query I
+SELECT CAST(json_extract(definition, '$.schema_version') AS INTEGER)
+FROM semantic_layer._definitions WHERE name = 'p7_range';
+----
+3
+
+# --- refusals ---------------------------------------------------------------
+
+# R7: no DISTINCT RANGE constraint.
+statement error
+CREATE SEMANTIC VIEW p7_range_no_constraint
+  TABLES (e AS events PRIMARY KEY (e_id), p AS periods PRIMARY KEY (period_id))
+  RELATIONSHIPS (event_period AS e (e_ts) REFERENCES p (BETWEEN start_ts AND end_ts EXCLUSIVE))
+  DIMENSIONS (p.label AS label);
+----
+no matching DISTINCT RANGE constraint
+
+# R8: the same column for start and end.
+statement error
+CREATE SEMANTIC VIEW p7_range_same_column
+  TABLES (
+    e AS events  PRIMARY KEY (e_id),
+    p AS periods PRIMARY KEY (period_id)
+      CONSTRAINT period_range DISTINCT RANGE BETWEEN start_ts AND start_ts EXCLUSIVE
+  )
+  RELATIONSHIPS (event_period AS e (e_ts) REFERENCES p (BETWEEN start_ts AND start_ts EXCLUSIVE))
+  DIMENSIONS (p.label AS label);
+----
+as both its start and its end
+
+# R9: bounds other than the constraint's.
+statement error
+CREATE SEMANTIC VIEW p7_range_other_bounds
+  TABLES (
+    e AS events  PRIMARY KEY (e_id),
+    p AS periods PRIMARY KEY (period_id)
+      CONSTRAINT period_range DISTINCT RANGE BETWEEN start_ts AND end_ts EXCLUSIVE
+  )
+  RELATIONSHIPS (event_period AS e (e_ts) REFERENCES p (BETWEEN end_ts AND start_ts EXCLUSIVE))
+  DIMENSIONS (p.label AS label);
+----
+no matching DISTINCT RANGE constraint
+
+# A value that does not compare with the bounds.
+statement error
+CREATE SEMANTIC VIEW p7_range_mixed
+  TABLES (
+    e AS events  PRIMARY KEY (e_id),
+    p AS periods PRIMARY KEY (period_id)
+      CONSTRAINT period_range DISTINCT RANGE BETWEEN start_ts AND end_ts EXCLUSIVE
+  )
+  RELATIONSHIPS (event_period AS e (e_id) REFERENCES p (BETWEEN start_ts AND end_ts EXCLUSIVE))
+  DIMENSIONS (p.label AS label);
+----
+range relationship 'event_period' does not bind
+
+# A constraint on a column the table does not have.
+statement error
+CREATE SEMANTIC VIEW p7_range_no_column
+  TABLES (
+    p AS periods PRIMARY KEY (period_id)
+      CONSTRAINT period_range DISTINCT RANGE BETWEEN start_ts AND finish_ts EXCLUSIVE
+  )
+  DIMENSIONS (p.label AS label);
+----
+constraint 'period_range' on table 'p' does not bind
+
+# Only half-open ranges.
+statement error
+CREATE SEMANTIC VIEW p7_range_inclusive
+  TABLES (
+    e AS events  PRIMARY KEY (e_id),
+    p AS periods PRIMARY KEY (period_id)
+      CONSTRAINT period_range DISTINCT RANGE BETWEEN start_ts AND end_ts EXCLUSIVE
+  )
+  RELATIONSHIPS (event_period AS e (e_ts) REFERENCES p (BETWEEN start_ts AND end_ts))
+  DIMENSIONS (p.label AS label);
+----
+only half-open ranges
+
+# A range relationship pairs one column with the range.
+statement error
+CREATE SEMANTIC VIEW p7_range_two_cols
+  TABLES (
+    e AS events  PRIMARY KEY (e_id),
+    p AS periods PRIMARY KEY (period_id)
+      CONSTRAINT period_range DISTINCT RANGE BETWEEN start_ts AND end_ts EXCLUSIVE
+  )
+  RELATIONSHIPS (event_period AS e (e_id, e_ts) REFERENCES p (period_id, BETWEEN start_ts AND end_ts EXCLUSIVE))
+  DIMENSIONS (p.label AS label);
+----
+pairs one column with one BETWEEN range

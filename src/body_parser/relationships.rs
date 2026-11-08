@@ -122,6 +122,13 @@ fn parse_single_relationship_entry(entry: &str, entry_offset: usize) -> Result<J
         vec![]
     };
     let asof = take_asof_marker(&mut ref_columns, rel_name, entry_offset)?;
+    let range_end =
+        take_range_reference(&mut ref_columns, &fk_columns, asof, rel_name).map_err(|message| {
+            ParseError {
+                message,
+                position: Some(entry_offset),
+            }
+        })?;
     if fk_columns.iter().any(|c| strip_asof(c).is_some()) {
         return Err(ParseError {
             message: format!(
@@ -152,7 +159,126 @@ fn parse_single_relationship_entry(entry: &str, entry_offset: usize) -> Result<J
         name: Some(rel_name.to_string()),
         cardinality: Cardinality::default(), // will be set by inference
         asof,
+        range_end,
     })
+}
+
+/// Phase 7.2: the `start AND end EXCLUSIVE` that follows a `BETWEEN` keyword
+/// (already consumed), as in a range relationship's `REFERENCES p (BETWEEN s
+/// AND e EXCLUSIVE)` and a table's `CONSTRAINT c DISTINCT RANGE BETWEEN s AND
+/// e EXCLUSIVE`. Each bound is one column, kept as written, and the two must
+/// differ. The cursor is left after `EXCLUSIVE`. `what` names the construct in
+/// the errors.
+pub(super) fn take_range_bounds(cur: &mut Cursor, what: &str) -> Result<(String, String), String> {
+    let usage = || format!("{what} must read 'BETWEEN start_column AND end_column EXCLUSIVE'");
+    let column = |cur: &mut Cursor| match cur.peek() {
+        Some(t) if cur.peek_is_value() && !cur.is_kw(t, "AND") && !cur.is_kw(t, "EXCLUSIVE") => {
+            cur.bump();
+            Ok(cur.text(t).to_string())
+        }
+        _ => Err(format!("{}.", usage())),
+    };
+    let start = column(cur)?;
+    match cur.peek() {
+        Some(t) if cur.is_kw(t, "AND") => {
+            cur.bump();
+        }
+        _ => return Err(format!("{}.", usage())),
+    }
+    let end = column(cur)?;
+    match cur.peek() {
+        Some(t) if cur.is_kw(t, "EXCLUSIVE") => {
+            cur.bump();
+        }
+        _ => {
+            return Err(format!(
+                "{}: only half-open ranges, which include the start and exclude the end, \
+                 are supported.",
+                usage()
+            ))
+        }
+    }
+    if crate::ident::ident_matches(&start, &end) {
+        return Err(format!(
+            "{what} names '{start}' as both its start and its end; a range needs two \
+             columns (use ASOF for one)."
+        ));
+    }
+    Ok((start, end))
+}
+
+/// The bounds of `col` when it is a `BETWEEN ...` item, `None` when it is a
+/// plain column. A column that is itself named `between` (bare, with nothing
+/// after it, or quoted) is a column, not the keyword.
+fn range_item(col: &str, what: &str) -> Result<Option<(String, String)>, String> {
+    let mut cur = Cursor::new(col.trim(), 0);
+    match cur.peek() {
+        Some(t) if cur.is_kw(t, "BETWEEN") => {
+            cur.bump();
+            if cur.peek().is_none() {
+                return Ok(None);
+            }
+            let bounds = take_range_bounds(&mut cur, what)?;
+            if !cur.rest().trim().is_empty() {
+                return Err(format!(
+                    "Unexpected text '{}' after EXCLUSIVE in {}.",
+                    cur.rest().trim(),
+                    what.to_ascii_lowercase()
+                ));
+            }
+            Ok(Some(bounds))
+        }
+        _ => Ok(None),
+    }
+}
+
+/// Phase 7.2: a range relationship, `REFERENCES p (BETWEEN s AND e
+/// EXCLUSIVE)`. Its REFERENCES list is that one item and its foreign-key list
+/// one column: the referenced table's `DISTINCT RANGE` constraint is the key,
+/// and it has no other columns to pair. On a match the item becomes the start
+/// column in `ref_columns`, and the end column is returned.
+fn take_range_reference(
+    ref_columns: &mut [String],
+    fk_columns: &[String],
+    asof: Option<usize>,
+    rel_name: &str,
+) -> Result<Option<String>, String> {
+    let what = format!("The range in relationship '{rel_name}'");
+    for fk in fk_columns {
+        if range_item(fk, &what)?.is_some() {
+            return Err(format!(
+                "BETWEEN in relationship '{rel_name}' must be the REFERENCES list, not a \
+                 foreign-key column: write 'e (ts) REFERENCES p (BETWEEN s AND e EXCLUSIVE)'."
+            ));
+        }
+    }
+    let mut found = None;
+    for (i, col) in ref_columns.iter().enumerate() {
+        if let Some(bounds) = range_item(col, &what)? {
+            found = Some((i, bounds));
+            break;
+        }
+    }
+    let Some((i, (start, end))) = found else {
+        return Ok(None);
+    };
+    if asof.is_some() {
+        return Err(format!(
+            "Relationship '{rel_name}' has both ASOF and BETWEEN; a relationship is either \
+             an ASOF relationship or a range relationship."
+        ));
+    }
+    if ref_columns.len() != 1 || fk_columns.len() != 1 {
+        return Err(format!(
+            "A range relationship pairs one column with one BETWEEN range: write \
+             'e (ts) REFERENCES p (BETWEEN s AND e EXCLUSIVE)'. Relationship '{rel_name}' has \
+             {} foreign-key column(s) and {} referenced item(s).",
+            fk_columns.len(),
+            ref_columns.len()
+        ));
+    }
+    ref_columns[i] = start;
+    Ok(Some(end))
 }
 
 /// The column text after a leading `ASOF` keyword, or `None` when `col` does

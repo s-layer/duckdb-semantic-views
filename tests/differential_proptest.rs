@@ -728,6 +728,7 @@ fn build_def(s: &Schema) -> SemanticViewDefinition {
             comment: None,
             synonyms: vec![],
             tags: Vec::new(),
+            distinct_ranges: vec![],
         }],
         dimensions,
         metrics,

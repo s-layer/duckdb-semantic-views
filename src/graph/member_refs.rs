@@ -140,6 +140,7 @@ mod tests {
             comment: None,
             synonyms: vec![],
             tags: Vec::new(),
+            distinct_ranges: vec![],
         }
     }
 
@@ -201,6 +202,7 @@ mod tests {
                 name: Some("o_to_c".to_string()),
                 cardinality: Cardinality::ManyToOne,
                 asof: None,
+                range_end: None,
             }],
             ..SemanticViewDefinition::default()
         }

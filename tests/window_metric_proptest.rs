@@ -297,6 +297,7 @@ fn build_def(func: WFunc, mode: &PartMode) -> SemanticViewDefinition {
         comment: None,
         synonyms: vec![],
         tags: Vec::new(),
+        distinct_ranges: vec![],
     }];
     let dimensions = (0..NDIMS)
         .map(|i| Dimension {

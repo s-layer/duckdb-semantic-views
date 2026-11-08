@@ -62,6 +62,25 @@ pub struct TableRef {
     /// Old stored JSON without this field deserializes to empty Vec.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub tags: Vec<Tag>,
+    /// Phase 7.2: the table's `CONSTRAINT name DISTINCT RANGE BETWEEN s AND e
+    /// EXCLUSIVE` declarations, in the order written. A range relationship
+    /// (`Join::range_end`) may reference this table only through one of them.
+    /// As with a primary key, the data is not checked: Snowflake does not
+    /// refuse overlapping rows either. Stored JSON without it has none.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub distinct_ranges: Vec<DistinctRange>,
+}
+
+/// Phase 7.2: a `CONSTRAINT name DISTINCT RANGE BETWEEN start AND end
+/// EXCLUSIVE` on a logical table: its rows are half-open periods
+/// `[start, end)` that are declared not to overlap, a NULL bound being open on
+/// that side. Columns are stored as written, like key columns.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "arbitrary", derive(arbitrary::Arbitrary))]
+pub struct DistinctRange {
+    pub name: String,
+    pub start: String,
+    pub end: String,
 }
 
 impl TableRef {
@@ -848,6 +867,14 @@ pub struct Join {
     /// join on equality.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub asof: Option<usize>,
+    /// Phase 7.2: the end column of a range relationship, `REFERENCES p
+    /// (BETWEEN s AND e EXCLUSIVE)`. Such a relationship has exactly one
+    /// column pair: `fk_columns` holds the value column and `ref_columns` the
+    /// start column `s`, and a row matches the referenced rows whose half-open
+    /// period `[s, e)` holds its value, a NULL bound being open. `None` is not
+    /// a range relationship. Like `asof`, it needs storage format 3.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub range_end: Option<String>,
 }
 
 /// Current storage-format version stamped into freshly written definitions
@@ -863,8 +890,8 @@ pub struct Join {
 /// 2 (v0.18.0): variables, query-defined tables and same-table metric
 /// references, which a version-1 reader misreads or cannot load.
 ///
-/// 3 (Phase 7.1): ASOF relationships (`Join::asof`), which a version-2 reader
-/// would join on equality. A stamp
+/// 3 (Phase 7.1, 7.2): ASOF and range relationships (`Join::asof`,
+/// `Join::range_end`), which a version-2 reader would join on equality. A stamp
 /// above this value is refused by [`SemanticViewDefinition::from_json`], so
 /// the next such change is reported instead of misread.
 ///
@@ -1040,7 +1067,11 @@ impl SemanticViewDefinition {
     /// a wrong number or a misleading error rather than refuse.
     #[must_use]
     pub fn required_schema_version(&self) -> u32 {
-        if self.joins.iter().any(|j| j.asof.is_some()) {
+        if self
+            .joins
+            .iter()
+            .any(|j| j.asof.is_some() || j.range_end.is_some())
+        {
             return 3;
         }
         let needs_two = !self.variables.is_empty()
@@ -3627,6 +3658,7 @@ metrics:
                 comment: None,
                 synonyms: vec![],
                 tags: Vec::new(),
+                distinct_ranges: vec![],
             };
             let json = serde_json::to_string(&tr).unwrap();
             assert!(json.contains("unique_constraints"));
@@ -3685,6 +3717,7 @@ metrics:
                 comment: None,
                 synonyms: vec![],
                 tags: Vec::new(),
+                distinct_ranges: vec![],
             };
             let json = serde_json::to_string(&tr).unwrap();
             assert!(
@@ -3720,6 +3753,7 @@ metrics:
                 comment: None,
                 synonyms: vec![],
                 tags: Vec::new(),
+                distinct_ranges: vec![],
             };
             assert_eq!(tr.alias, "f");
             assert_eq!(tr.table, "fact_table");
@@ -3984,6 +4018,7 @@ metrics:
                 comment: Some("Main orders table".to_string()),
                 synonyms: vec!["order_facts".to_string()],
                 tags: Vec::new(),
+                distinct_ranges: vec![],
             };
             let json = serde_json::to_string(&tr).unwrap();
             assert!(

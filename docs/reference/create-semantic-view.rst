@@ -26,6 +26,7 @@ Syntax
        { [ <alias> AS ] <table_name> | <alias> AS ( <query> ) }
            [ PRIMARY KEY ( <column> [, <column> ...] ) ]
            [ UNIQUE ( <column> [, <column> ...] ) ]
+           [ CONSTRAINT <constraint_name> DISTINCT RANGE BETWEEN <start_column> AND <end_column> EXCLUSIVE ]
            [ COMMENT = '<text>' ]
            [ WITH SYNONYMS = ( '<synonym>' [, '<synonym>' ...] ) ]
            [ [ WITH ] TAG ( <tag_name> = '<value>' [, ...] ) ]
@@ -34,6 +35,8 @@ Syntax
    [ RELATIONSHIPS (
        <rel_name> AS <from_alias>( <fk_column> [, <fk_column> ...] )
            REFERENCES <to_alias> [( [ ASOF ] <ref_column> [, [ ASOF ] <ref_column> ...] )]
+     | <rel_name> AS <from_alias>( <fk_column> )
+           REFERENCES <to_alias>( BETWEEN <start_column> AND <end_column> EXCLUSIVE )
        [, ... ]
    ) ]
    [ VARIABLES (
@@ -453,6 +456,19 @@ Declares the logical tables available to the semantic view. Each entry assigns a
 
 ``UNIQUE (<column>, ...)`` declares additional unique constraints. Used for cardinality inference: if a relationship's FK columns match a UNIQUE constraint, the relationship is inferred as one-to-one.
 
+**Optional: DISTINCT RANGE constraints:**
+
+.. versionadded:: 0.19.0
+
+.. code-block:: sql
+
+   TABLES (
+       p AS price_periods PRIMARY KEY (period_id)
+           CONSTRAINT period_range DISTINCT RANGE BETWEEN start_ts AND end_ts EXCLUSIVE
+   )
+
+``CONSTRAINT <name> DISTINCT RANGE BETWEEN <start> AND <end> EXCLUSIVE`` declares that each row of the table covers the half-open period from ``<start>`` (included) to ``<end>`` (excluded), and that the periods do not overlap. A :ref:`range relationship <ref-create-range-relationships>` needs it on its target. It comes after ``PRIMARY KEY`` and ``UNIQUE``, and a table can declare more than one. As with the other keys, the data is not checked against it.
+
 The first table in the ``TABLES`` clause is the **base table** (the root of the relationship graph). All other tables must be reachable from the base table through declared relationships.
 
 .. _ref-create-inline-query:
@@ -526,11 +542,38 @@ Each order takes the address of its customer with the greatest ``start_date`` on
 - An ``ASOF`` relationship is always many-to-one, whatever keys the "from" table declares, since many rows can match the same target row. A metric on the target is computed over the target's own rows, and grouping it by a dimension of the "from" table is refused as a :ref:`fan trap <howto-fan-traps>`.
 - ``DESCRIBE`` writes the column in ``REF_KEY`` as ``{"type":"ASOF","column":"<column>"}``, ``GET_DDL`` writes the keyword back, and the YAML export writes the column's 0-based position in the list as ``asof``. A release of the extension older than 0.19.0 cannot read a view with an ``ASOF`` relationship.
 
+.. _ref-create-range-relationships:
+
+**Range relationships:**
+
+.. versionadded:: 0.19.0
+
+Write ``BETWEEN <start> AND <end> EXCLUSIVE`` as the ``REFERENCES`` list to join each row of the "from" table to the target row whose period holds its value, as with price periods or fiscal quarters:
+
+.. code-block:: sql
+
+   TABLES (
+       e AS events        PRIMARY KEY (event_id),
+       p AS price_periods PRIMARY KEY (period_id)
+           CONSTRAINT period_range DISTINCT RANGE BETWEEN start_ts AND end_ts EXCLUSIVE
+   )
+   RELATIONSHIPS (
+       event_period AS e(event_ts) REFERENCES p(BETWEEN start_ts AND end_ts EXCLUSIVE)
+   )
+
+Each event takes the period with ``start_ts <= event_ts`` and ``event_ts < end_ts``, as in Snowflake. A ``NULL`` ``start_ts`` or ``end_ts`` leaves that side of the period open. An event with no such period, or with a ``NULL`` ``event_ts``, keeps its row, with ``NULL`` for the period's dimensions.
+
+- The relationship has one foreign-key column, and the ``REFERENCES`` list is the one ``BETWEEN`` item. Only half-open ranges (``EXCLUSIVE``) are accepted, and the start and end must be two different columns.
+- The target must declare a ``DISTINCT RANGE`` constraint on the same two columns, in the same order. ``CREATE`` checks that the three columns compare.
+- The data is not checked for overlapping periods, as in Snowflake. An event that falls in two periods is counted under each of them when grouped by the period, and once in a total.
+- A range relationship is always many-to-one, since many rows can fall in the same period. A metric on the target is computed over the target's own rows, and grouping it by a dimension of the "from" table is refused as a :ref:`fan trap <howto-fan-traps>`.
+- ``DESCRIBE`` writes the range in ``REF_KEY`` as ``{"start_column":"<start>","end_column":"<end>","type":"RANGE"}`` and shows the table's constraint as a ``CONSTRAINT`` row, ``GET_DDL`` writes both back, and the YAML export writes the end column as ``range_end`` and the constraint under ``distinct_ranges``. A release of the extension older than 0.19.0 cannot read a view with a range relationship.
+
 **Cardinality inference:**
 
 The extension infers cardinality from the "from" table's constraints:
 
-- If the FK columns match a ``PRIMARY KEY`` or ``UNIQUE`` constraint on the "from" table, the relationship is **one-to-one**, unless it is ``ASOF``.
+- If the FK columns match a ``PRIMARY KEY`` or ``UNIQUE`` constraint on the "from" table, the relationship is **one-to-one**, unless it is ``ASOF`` or a range relationship.
 - Otherwise, the relationship is **many-to-one** (the default).
 
 Cardinality is used for :ref:`fan trap detection <howto-fan-traps>`.

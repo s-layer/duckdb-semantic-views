@@ -136,9 +136,20 @@ struct DescribeRow {
 // C++ Catalog API path's wire format.
 
 /// A relationship's `REF_KEY` value: the referenced columns as a JSON array,
-/// with an ASOF column written `{"type":"ASOF","column":"<col>"}` as
-/// Snowflake writes it (Phase 7.1).
+/// with an ASOF column written `{"type":"ASOF","column":"<col>"}` (Phase 7.1)
+/// and a range written `{"start_column":..,"end_column":..,"type":"RANGE"}`
+/// (Phase 7.2), as Snowflake writes them.
 fn ref_key_json(join: &crate::model::Join) -> String {
+    let json =
+        |c: &str| serde_json::to_string(c).expect("serializing a &str to JSON is infallible");
+    // Phase 7.2: a range relationship's one item, as Snowflake writes it.
+    if let (Some(end), [start]) = (&join.range_end, join.ref_columns.as_slice()) {
+        return format!(
+            r#"[{{"start_column":{},"end_column":{},"type":"RANGE"}}]"#,
+            json(start),
+            json(end)
+        );
+    }
     let Some(asof) = join.asof else {
         return format_json_array(&join.ref_columns);
     };
@@ -147,7 +158,7 @@ fn ref_key_json(join: &crate::model::Join) -> String {
         .iter()
         .enumerate()
         .map(|(i, c)| {
-            let col = serde_json::to_string(c).expect("serializing a &str to JSON is infallible");
+            let col = json(c);
             if i == asof {
                 format!(r#"{{"type":"ASOF","column":{col}}}"#)
             } else {
@@ -382,6 +393,23 @@ fn collect_table_rows(def: &SemanticViewDefinition, rows: &mut Vec<DescribeRow>)
             });
         }
         push_tags_row(rows, "TABLE", &obj_name, "", &table.tags);
+        // Phase 7.2: each DISTINCT RANGE constraint is an object of its own
+        // under the table, as in Snowflake's DESCRIBE.
+        for range in &table.distinct_ranges {
+            for (property, property_value) in [
+                ("CONSTRAINT_TYPE", "DISTINCT_RANGE"),
+                ("START_COLUMN", range.start.as_str()),
+                ("END_COLUMN", range.end.as_str()),
+            ] {
+                rows.push(DescribeRow {
+                    object_kind: "CONSTRAINT".to_string(),
+                    object_name: range.name.clone(),
+                    parent_entity: obj_name.clone(),
+                    property: property.to_string(),
+                    property_value: property_value.to_string(),
+                });
+            }
+        }
     }
 }
 
@@ -758,6 +786,21 @@ fn collect_materialization_rows(def: &SemanticViewDefinition, rows: &mut Vec<Des
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Phase 7.2: Snowflake's REF_KEY shape for a range (fixture R4).
+    #[test]
+    fn ref_key_json_writes_a_range_as_an_object() {
+        let join = crate::model::Join {
+            fk_columns: vec!["e_ts".into()],
+            ref_columns: vec!["start_ts".into()],
+            range_end: Some("end_ts".into()),
+            ..Default::default()
+        };
+        assert_eq!(
+            ref_key_json(&join),
+            r#"[{"start_column":"start_ts","end_column":"end_ts","type":"RANGE"}]"#
+        );
+    }
 
     /// Phase 7.1: Snowflake's REF_KEY shape for an ASOF column.
     #[test]

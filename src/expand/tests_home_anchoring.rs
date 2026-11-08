@@ -33,6 +33,7 @@ fn table(alias: &str, pk: &[&str]) -> TableRef {
         comment: None,
         synonyms: vec![],
         tags: Vec::new(),
+        distinct_ranges: vec![],
     }
 }
 
@@ -45,6 +46,7 @@ fn many_to_one(name: &str, from: &str, to: &str, fk: &str, pk: &str) -> Join {
         name: Some(name.to_string()),
         cardinality: Cardinality::ManyToOne,
         asof: None,
+        range_end: None,
     }
 }
 

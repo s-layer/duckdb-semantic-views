@@ -25,6 +25,7 @@ pub(super) fn orders_view() -> SemanticViewDefinition {
             comment: None,
             synonyms: vec![],
             tags: Vec::new(),
+            distinct_ranges: vec![],
         }],
         dimensions: vec![
             Dimension {
@@ -121,6 +122,7 @@ pub(super) fn minimal_def(
             comment: None,
             synonyms: vec![],
             tags: Vec::new(),
+            distinct_ranges: vec![],
         }],
         dimensions: vec![Dimension {
             name: dim_name.to_string(),
@@ -244,6 +246,7 @@ impl TestFixtureExt for SemanticViewDefinition {
             comment: None,
             synonyms: vec![],
             tags: Vec::new(),
+            distinct_ranges: vec![],
         });
         self
     }

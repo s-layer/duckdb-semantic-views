@@ -44,11 +44,20 @@
 //! correlated `max(us)` over `u`, never with an ASOF join, so the expansion's
 //! `ASOF LEFT JOIN` is checked against an independent formulation. The hop is
 //! still many-to-one, so the fence and the per-grain oracle are unchanged.
+//!
+//! Phase 7.2 makes it a **range** relationship in about a third of the cases
+//! instead: `t (ts) REFERENCES u (BETWEEN rs AND re EXCLUSIVE)`, each `u` row
+//! a half-open period `[rs, re)`. The periods never overlap (the declared
+//! `DISTINCT RANGE` holds), leave gaps, and the first may have no start and
+//! the last no end. The oracle gives each `t` row the id of the period holding
+//! its `ts` by a correlated `min(id)` with the open bounds written as
+//! `COALESCE(.., TRUE)`, never with the expansion's join condition.
 
 use proptest::prelude::*;
 use semantic_views::expand::{expand, DimensionName, MetricName, QueryRequest};
 use semantic_views::model::{
-    AccessModifier, Cardinality, Dimension, Join, Metric, SemanticViewDefinition, TableRef,
+    AccessModifier, Cardinality, Dimension, DistinctRange, Join, Metric, SemanticViewDefinition,
+    TableRef,
 };
 
 /// A generated chain instance. Grandparent rows `w` have ids `0..n_w`; parent
@@ -62,13 +71,35 @@ struct Instance {
     u_rows: Vec<(Option<i64>, Option<i64>, Option<i64>)>,
     /// Child rows: `(fk_u, d, v)`.
     t_rows: Vec<(Option<i64>, Option<i64>, Option<i64>)>,
-    /// Phase 7.1: whether `t → u` is the ASOF relationship
-    /// `t (fk_u, ts) REFERENCES u (uk, ASOF us)` instead of `t (fk_u) REFERENCES u (id)`.
-    asof: bool,
+    /// Which relationship `t → u` is: plain `t (fk_u) REFERENCES u (id)`,
+    /// the ASOF `t (fk_u, ts) REFERENCES u (uk, ASOF us)` (Phase 7.1) or the
+    /// range `t (ts) REFERENCES u (BETWEEN rs AND re EXCLUSIVE)` (Phase 7.2).
+    hop: Hop,
     /// Per `u` row, the raw start offset [`u_key`] turns into `us`.
     u_starts: Vec<i64>,
     /// Per `t` row, its ASOF value `ts` (missing entries are NULL).
     t_ts: Vec<Option<i64>>,
+}
+
+/// The kind of the `t → u` relationship.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Hop {
+    Plain,
+    Asof,
+    Range,
+}
+
+/// The period `[rs, re)` of `u` row `i` under the range relationship, `None`
+/// an open bound. Row `i` starts at `3i` and ends one to three later, so the
+/// periods never overlap and some leave a gap before the next; the first has
+/// no start, and the last no end, when their drawn offset says so. A single
+/// period can be open at both ends, which a NULL `ts` must still not fall in.
+fn u_period(inst: &Instance, i: usize) -> (Option<i64>, Option<i64>) {
+    let offset = inst.u_starts.get(i).copied().unwrap_or(0);
+    let start = 3 * i as i64;
+    let rs = (!(i == 0 && offset == 0)).then_some(start);
+    let re = (!(i + 1 == inst.u_rows.len() && offset % 3 == 0)).then_some(start + 1 + offset % 3);
+    (rs, re)
 }
 
 /// The ASOF key `(uk, us)` of `u` row `i`. Rows `2j` and `2j + 1` share the
@@ -285,12 +316,13 @@ fn arb_instance() -> impl Strategy<Value = Instance> {
         let u_starts = prop::collection::vec(0i64..4, n_u);
         let ts_cell = prop_oneof![1 => Just(None), 5 => (-1i64..9).prop_map(Some)];
         let t_ts = prop::collection::vec(ts_cell, 20);
-        (w_rows, u_rows, t_rows, any::<bool>(), u_starts, t_ts).prop_map(
-            |(w_rows, u_rows, t_rows, asof, u_starts, t_ts)| Instance {
+        let hop = prop_oneof![Just(Hop::Plain), Just(Hop::Asof), Just(Hop::Range)];
+        (w_rows, u_rows, t_rows, hop, u_starts, t_ts).prop_map(
+            |(w_rows, u_rows, t_rows, hop, u_starts, t_ts)| Instance {
                 w_rows,
                 u_rows,
                 t_rows,
-                asof,
+                hop,
                 u_starts,
                 t_ts,
             },
@@ -325,7 +357,8 @@ fn arb_case() -> impl Strategy<Value = Case> {
 /// Build the semantic-view definition: a `ManyToOne` chain `t → u → w`, a
 /// dimension at each grain, root-grain safe metrics (`sum(t.v)`, `count(*)`),
 /// and ancestor metrics on `u` and `w`.
-fn build_def(asof: bool) -> SemanticViewDefinition {
+fn build_def(hop: Hop) -> SemanticViewDefinition {
+    let asof = hop == Hop::Asof;
     let table = |alias: &str, pk: &[&str]| TableRef {
         alias: alias.to_string(),
         table: alias.to_string(),
@@ -335,11 +368,19 @@ fn build_def(asof: bool) -> SemanticViewDefinition {
         comment: None,
         synonyms: vec![],
         tags: Vec::new(),
+        distinct_ranges: vec![],
     };
     // `t` is listed first: base_table() == the first declared table, and the
     // FROM is anchored there with LEFT JOINs outward along the chain.
     let u_pk: &[&str] = if asof { &["uk", "us"] } else { &["id"] };
-    let tables = vec![table("t", &[]), table("u", u_pk), table("w", &["id"])];
+    let mut tables = vec![table("t", &[]), table("u", u_pk), table("w", &["id"])];
+    if hop == Hop::Range {
+        tables[1].distinct_ranges = vec![DistinctRange {
+            name: "u_period".to_string(),
+            start: "rs".to_string(),
+            end: "re".to_string(),
+        }];
+    }
     let dim = |name: &str, expr: &str, source: &str| Dimension {
         cortex_search_service: None,
         is_enum: false,
@@ -398,7 +439,18 @@ fn build_def(asof: bool) -> SemanticViewDefinition {
         base_metric("sw", "sum(w.ww)", Some("w")),
     ];
     let joins = vec![
-        if asof {
+        if hop == Hop::Range {
+            Join {
+                from_alias: "t".to_string(),
+                table: "u".to_string(),
+                fk_columns: vec!["ts".to_string()],
+                ref_columns: vec!["rs".to_string()],
+                name: Some("t_u".to_string()),
+                cardinality: Cardinality::ManyToOne,
+                asof: None,
+                range_end: Some("re".to_string()),
+            }
+        } else if asof {
             Join {
                 from_alias: "t".to_string(),
                 table: "u".to_string(),
@@ -407,6 +459,7 @@ fn build_def(asof: bool) -> SemanticViewDefinition {
                 name: Some("t_u".to_string()),
                 cardinality: Cardinality::ManyToOne,
                 asof: Some(1),
+                range_end: None,
             }
         } else {
             Join {
@@ -417,6 +470,7 @@ fn build_def(asof: bool) -> SemanticViewDefinition {
                 name: Some("t_u".to_string()),
                 cardinality: Cardinality::ManyToOne,
                 asof: None,
+                range_end: None,
             }
         },
         Join {
@@ -427,6 +481,7 @@ fn build_def(asof: bool) -> SemanticViewDefinition {
             name: Some("u_w".to_string()),
             cardinality: Cardinality::ManyToOne,
             asof: None,
+            range_end: None,
         },
     ];
     SemanticViewDefinition {
@@ -456,7 +511,7 @@ fn make_db(inst: &Instance) -> duckdb::Connection {
     let conn = duckdb::Connection::open_in_memory().expect("in-memory DuckDB");
     conn.execute_batch(
         "CREATE TABLE w (id INTEGER, wcat INTEGER, ww INTEGER); \
-         CREATE TABLE u (id INTEGER, uk INTEGER, us INTEGER, fk_w INTEGER, ucat INTEGER, uw INTEGER); \
+         CREATE TABLE u (id INTEGER, uk INTEGER, us INTEGER, rs INTEGER, re INTEGER, fk_w INTEGER, ucat INTEGER, uw INTEGER); \
          CREATE TABLE t (fk_u INTEGER, ts INTEGER, d INTEGER, v INTEGER);",
     )
     .expect("create tables");
@@ -480,7 +535,15 @@ fn make_db(inst: &Instance) -> duckdb::Connection {
             .enumerate()
             .map(|(i, (fk_w, ucat, uw))| {
                 let (uk, us) = u_key(inst, i);
-                format!("({i},{uk},{us},{},{},{})", cell(fk_w), cell(ucat), cell(uw))
+                let (rs, re) = u_period(inst, i);
+                format!(
+                    "({i},{uk},{us},{},{},{},{},{})",
+                    cell(&rs),
+                    cell(&re),
+                    cell(fk_w),
+                    cell(ucat),
+                    cell(uw)
+                )
             })
             .collect();
         conn.execute_batch(&format!("INSERT INTO u VALUES {};", values.join(",")))
@@ -587,12 +650,20 @@ fn grain_sql(case: &Case, anchor: &str) -> String {
     // greatest `us` of its key at or before `ts`, found by a correlated
     // `max`, never by an ASOF join; `t` then joins that one `u` row by
     // equality.
-    let t_from = if case.inst.asof {
-        "FROM (SELECT t.*, (SELECT max(u2.us) FROM u u2 WHERE u2.uk = t.fk_u AND u2.us <= t.ts) \
-         AS asof_us FROM t) t LEFT JOIN u ON t.fk_u = u.uk AND t.asof_us = u.us \
-         LEFT JOIN w ON u.fk_w = w.id"
-    } else {
-        "FROM t LEFT JOIN u ON t.fk_u = u.id LEFT JOIN w ON u.fk_w = w.id"
+    // Phase 7.2: under the range relationship each `t` row's period is the
+    // one holding its `ts`, found by id with a correlated `min`.
+    let t_from = match case.inst.hop {
+        Hop::Asof => {
+            "FROM (SELECT t.*, (SELECT max(u2.us) FROM u u2 WHERE u2.uk = t.fk_u AND u2.us <= t.ts) \
+             AS asof_us FROM t) t LEFT JOIN u ON t.fk_u = u.uk AND t.asof_us = u.us \
+             LEFT JOIN w ON u.fk_w = w.id"
+        }
+        Hop::Range => {
+            "FROM (SELECT t.*, (SELECT min(u2.id) FROM u u2 WHERE t.ts IS NOT NULL \
+             AND COALESCE(u2.rs <= t.ts, TRUE) AND COALESCE(t.ts < u2.re, TRUE)) AS range_id \
+             FROM t) t LEFT JOIN u ON u.id = t.range_id LEFT JOIN w ON u.fk_w = w.id"
+        }
+        Hop::Plain => "FROM t LEFT JOIN u ON t.fk_u = u.id LEFT JOIN w ON u.fk_w = w.id",
     };
     let from = match anchor {
         "t" => t_from,
@@ -715,7 +786,7 @@ fn is_duckdb_group_by_bind_bug(msg: &str) -> bool {
 /// and matches the independent per-grain oracle. Shared by the proptest and the
 /// pinned cases below so a pinned case runs exactly the property's checks.
 fn check_case(case: &Case) -> Result<(), TestCaseError> {
-    let def = build_def(case.inst.asof);
+    let def = build_def(case.inst.hop);
     let req = QueryRequest {
         where_clause: case.where_pred.as_ref().map(Pred::to_member_sql),
         dimensions: case
@@ -996,7 +1067,7 @@ fn ci_or_of_ands_instance() -> Instance {
             (Some(3), Some(2), Some(-3)),
             (Some(1), Some(1), Some(1)),
         ],
-        asof: false,
+        hop: Hop::Plain,
         u_starts: vec![],
         t_ts: vec![],
     }
@@ -1093,7 +1164,7 @@ fn pinned_asof_hop_takes_the_latest_period() {
             .iter()
             .map(|&v| (Some(0), Some(0), Some(v)))
             .collect(),
-        asof: true,
+        hop: Hop::Asof,
         u_starts: vec![2, 1],
         t_ts: vec![Some(1), Some(2), Some(3), Some(4), Some(9), None],
     };
@@ -1113,7 +1184,7 @@ fn pinned_asof_hop_takes_the_latest_period() {
         // PIN: FACTS is a row-level shape with no per-grain meaning. TECH-DEBT #66
         facts: vec![],
     };
-    let sql = expand("multihop", &build_def(true), &req).unwrap();
+    let sql = expand("multihop", &build_def(Hop::Asof), &req).unwrap();
     let conn = make_db(&inst);
     let mut stmt = conn
         .prepare(&format!(
@@ -1167,9 +1238,9 @@ proptest! {
         sel_dims in prop::sample::subsequence(vec![0usize, 1, 2], 1..=3),
     ) {
         let mut inst = inst;
-        inst.asof = true;
+        inst.hop = Hop::Asof;
         let case = Case { inst, sel_dims, sel_metrics: vec![], where_pred: None };
-        let mut def = build_def(true);
+        let mut def = build_def(Hop::Asof);
         def.tables.swap(0, 1); // `u` first: the base table, so `t` is joined onto it.
         let req = QueryRequest {
             // PIN: this property checks which rows the reverse join pairs; dimensions-only queries are the shape that walks it, and `multi_hop_fence_and_aggregation` varies the filter over the forward hop.
@@ -1189,6 +1260,136 @@ proptest! {
             expanded
         );
         let oracle = reverse_asof_oracle(&case);
+        let proj = case.sel_dims.iter().map(|&i| DIMS[i]).collect::<Vec<_>>().join(", ");
+        let cmp = format!(
+            "SELECT \
+               (SELECT count(*) FROM (SELECT {proj} FROM ({expanded}) qa EXCEPT ALL \
+                                      SELECT {proj} FROM ({oracle}) qb) e1) \
+             + (SELECT count(*) FROM (SELECT {proj} FROM ({oracle}) qc EXCEPT ALL \
+                                      SELECT {proj} FROM ({expanded}) qd) e2)"
+        );
+        let conn = make_db(&case.inst);
+        let diff: i64 = conn.query_row(&cmp, [], |r| r.get(0)).unwrap_or_else(|e| {
+            panic!("comparison failed: {e}\n--- expanded:\n{expanded}\n--- oracle:\n{oracle}")
+        });
+        prop_assert_eq!(diff, 0, "--- expanded:\n{}\n--- oracle:\n{}", expanded, oracle);
+    }
+}
+
+/// Phase 7.2: a fixed range instance with the answer written out. `u` rows
+/// are the periods `[NULL, 1)`, `[3, 5)` and `[6, NULL)`: `ts` -1 falls in the
+/// first, 3 in the second (its start), 6 and 9 in the third; 1 and 5 (ends)
+/// and a NULL `ts` fall in none.
+#[test]
+fn pinned_range_hop_takes_the_period_holding_the_value() {
+    let inst = Instance {
+        w_rows: vec![(Some(0), Some(1))],
+        u_rows: vec![
+            (None, Some(0), Some(10)),
+            (None, Some(1), Some(20)),
+            (None, Some(2), Some(30)),
+        ],
+        t_rows: [1, 2, 4, 8, 16, 32, 64]
+            .iter()
+            .map(|&v| (None, Some(0), Some(v)))
+            .collect(),
+        hop: Hop::Range,
+        u_starts: vec![0, 1, 3],
+        t_ts: vec![Some(-1), Some(1), Some(3), Some(5), Some(6), Some(9), None],
+    };
+    assert_eq!(u_period(&inst, 0), (None, Some(1)));
+    assert_eq!(u_period(&inst, 1), (Some(3), Some(5)));
+    assert_eq!(u_period(&inst, 2), (Some(6), None));
+    let case = Case {
+        inst: inst.clone(),
+        sel_dims: vec![1],
+        sel_metrics: vec![0],
+        where_pred: None,
+    };
+    check_case(&case).unwrap();
+
+    let req = QueryRequest {
+        // PIN: a fixed query with its answer written out; the property above varies the filter.
+        where_clause: None,
+        dimensions: vec![DimensionName::new("ucat")],
+        metrics: vec![MetricName::new("sv")],
+        // PIN: FACTS is a row-level shape with no per-grain meaning. TECH-DEBT #66
+        facts: vec![],
+    };
+    let sql = expand("multihop", &build_def(Hop::Range), &req).unwrap();
+    let conn = make_db(&inst);
+    let mut stmt = conn
+        .prepare(&format!(
+            "SELECT CAST(ucat AS BIGINT), CAST(sv AS BIGINT) FROM ({sql}) ORDER BY 1 NULLS LAST"
+        ))
+        .unwrap();
+    let rows: Vec<(Option<i64>, Option<i64>)> = stmt
+        .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))
+        .unwrap()
+        .map(Result::unwrap)
+        .collect();
+    assert_eq!(
+        rows,
+        vec![
+            (Some(0), Some(1)),
+            (Some(1), Some(4)),
+            (Some(2), Some(48)),
+            (None, Some(74))
+        ],
+        "{sql}"
+    );
+}
+
+/// Phase 7.2: the range hop walked against its direction, as
+/// [`reverse_asof_oracle`] for ASOF: with `u` first, each period gets exactly
+/// the `t` rows it holds, found by the same correlated `min(id)` as
+/// [`grain_sql`].
+fn reverse_range_oracle(case: &Case) -> String {
+    let dims: Vec<String> = case
+        .sel_dims
+        .iter()
+        .map(|&i| match DIMS[i] {
+            "td" => "t.d AS td".to_string(),
+            "ucat" => "u.ucat AS ucat".to_string(),
+            "wcat" => "w.wcat AS wcat".to_string(),
+            other => unreachable!("unexpected dim {other}"),
+        })
+        .collect();
+    format!(
+        "SELECT DISTINCT {} FROM u \
+         LEFT JOIN (SELECT t.*, (SELECT min(u2.id) FROM u u2 WHERE t.ts IS NOT NULL \
+                    AND COALESCE(u2.rs <= t.ts, TRUE) AND COALESCE(t.ts < u2.re, TRUE)) \
+                    AS range_id FROM t) t \
+           ON t.range_id = u.id \
+         LEFT JOIN w ON u.fk_w = w.id",
+        dims.join(", ")
+    )
+}
+
+proptest! {
+    #![proptest_config(ProptestConfig { cases: 128, ..ProptestConfig::default() })]
+
+    #[test]
+    fn range_hop_walked_backwards_matches_oracle(
+        inst in arb_instance(),
+        sel_dims in prop::sample::subsequence(vec![0usize, 1, 2], 1..=3),
+    ) {
+        let mut inst = inst;
+        inst.hop = Hop::Range;
+        let case = Case { inst, sel_dims, sel_metrics: vec![], where_pred: None };
+        let mut def = build_def(Hop::Range);
+        def.tables.swap(0, 1); // `u` first: the base table, so `t` is joined onto it.
+        let req = QueryRequest {
+            // PIN: this property checks which rows the reverse join pairs; dimensions-only queries are the shape that walks it, and `multi_hop_fence_and_aggregation` varies the filter over the forward hop.
+            where_clause: None,
+            dimensions: case.sel_dims.iter().map(|&i| DimensionName::new(DIMS[i])).collect(),
+            metrics: vec![],
+            // PIN: FACTS is a row-level shape with no per-grain meaning. TECH-DEBT #66
+            facts: vec![],
+        };
+        let expanded = expand("multihop", &def, &req)
+            .map_err(|e| TestCaseError::fail(format!("rejected: {e}")))?;
+        let oracle = reverse_range_oracle(&case);
         let proj = case.sel_dims.iter().map(|&i| DIMS[i]).collect::<Vec<_>>().join(", ");
         let cmp = format!(
             "SELECT \

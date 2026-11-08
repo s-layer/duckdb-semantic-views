@@ -144,7 +144,25 @@ Rows appear in definition order: the view-level comment, ``MAX_STALENESS`` and t
       * - ``FOREIGN_KEY``
         - JSON array of foreign key column names (e.g., ``["customer_id"]``).
       * - ``REF_KEY``
-        - JSON array of referenced key column names (e.g., ``["id"]``). The ``ASOF`` column of an :ref:`ASOF relationship <ref-create-relationships>` is an object, as in Snowflake: ``["cust_id",{"type":"ASOF","column":"start_date"}]``.
+        - JSON array of referenced key column names (e.g., ``["id"]``). The ``ASOF`` column of an :ref:`ASOF relationship <ref-create-relationships>` is an object, as in Snowflake: ``["cust_id",{"type":"ASOF","column":"start_date"}]``. The range of a :ref:`range relationship <ref-create-range-relationships>` is one object: ``[{"start_column":"start_ts","end_column":"end_ts","type":"RANGE"}]``.
+
+**CONSTRAINT**
+   .. versionadded:: 0.19.0
+
+   One block per ``DISTINCT RANGE`` constraint declared in the ``TABLES`` clause, named by the constraint, with the table in ``parent_entity``:
+
+   .. list-table::
+      :header-rows: 1
+      :widths: 25 75
+
+      * - Property
+        - Description
+      * - ``CONSTRAINT_TYPE``
+        - ``DISTINCT_RANGE``.
+      * - ``START_COLUMN``
+        - The column that starts each period.
+      * - ``END_COLUMN``
+        - The column that ends each period.
 
 **VARIABLE**
    .. versionadded:: 0.18.0

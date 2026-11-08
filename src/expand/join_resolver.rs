@@ -134,6 +134,17 @@ fn on_clause(
     asof: AsofSide,
 ) -> String {
     let from_sql = from_alias.map_or_else(|| quote_stored_ident(&join.from_alias), quote_ident);
+    if let (Some(end), [fk], [start]) = (
+        &join.range_end,
+        join.fk_columns.as_slice(),
+        join.ref_columns.as_slice(),
+    ) {
+        return range_condition(
+            &format!("{from_sql}.{}", quote_stored_ident(fk)),
+            &format!("{to_sql}.{}", quote_stored_ident(start)),
+            &format!("{to_sql}.{}", quote_stored_ident(end)),
+        );
+    }
     let pairs: Vec<String> = join
         .fk_columns
         .iter()
@@ -152,6 +163,18 @@ fn on_clause(
         })
         .collect();
     pairs.join(" AND ")
+}
+
+/// Phase 7.2: the match condition of a range relationship, `value` in the
+/// half-open period `[start, end)`, a NULL bound open on its side (the
+/// answers Snowflake gave on the Phase 7.0 fixture, R1 and R6). A NULL value
+/// is in no period. The condition names both sides, so it reads the same
+/// whichever table the join walks from.
+fn range_condition(value: &str, start: &str, end: &str) -> String {
+    format!(
+        "({value} IS NOT NULL AND ({start} IS NULL OR {value} >= {start}) \
+         AND ({end} IS NULL OR {value} < {end}))"
+    )
 }
 
 /// The referencing table of the ASOF relationship `join`, as a derived table
@@ -195,7 +218,8 @@ fn reverse_asof_source(join: &Join, def: &SemanticViewDefinition, asof: usize) -
     ))
 }
 
-/// Refuse a stored ASOF marker that cannot be emitted.
+/// Refuse a stored ASOF marker, or range relationship (Phase 7.2), that
+/// cannot be emitted.
 ///
 /// CREATE only stores a marker that names one of the referenced columns of a
 /// relationship between two of the view's tables, but a definition can also
@@ -214,6 +238,21 @@ pub(super) fn check_asof_markers(
             .any(|t| t.alias.eq_ignore_ascii_case(alias))
     };
     for join in &def.joins {
+        // Phase 7.2: a range relationship renders its range only from one
+        // value column and one start column (`on_clause`); any other shape
+        // would render as equalities.
+        if join.range_end.is_some()
+            && (join.asof.is_some() || join.fk_columns.len() != 1 || join.ref_columns.len() != 1)
+        {
+            return Err(ExpandError::UncheckableDefinition {
+                view_name: view_name.to_string(),
+                reason: format!(
+                    "the range relationship from '{}' to '{}' does not pair one column \
+                     with one range",
+                    join.from_alias, join.table
+                ),
+            });
+        }
         let Some(asof) = join.asof else { continue };
         let fits = asof < join.fk_columns.len() && asof < ref_columns(join, &def.tables).len();
         if !fits || !has_table(&join.from_alias) || !has_table(&join.table) {
@@ -843,6 +882,62 @@ mod tests {
         );
     }
 
+    fn range_def(events_first: bool) -> SemanticViewDefinition {
+        let e = TableRef {
+            alias: "e".to_string(),
+            table: "events".to_string(),
+            pk_columns: vec!["e_id".to_string()],
+            ..Default::default()
+        };
+        let p = TableRef {
+            alias: "p".to_string(),
+            table: "periods".to_string(),
+            pk_columns: vec!["period_id".to_string()],
+            distinct_ranges: vec![crate::model::DistinctRange {
+                name: "period_range".to_string(),
+                start: "start_ts".to_string(),
+                end: "end_ts".to_string(),
+            }],
+            ..Default::default()
+        };
+        SemanticViewDefinition {
+            tables: if events_first { vec![e, p] } else { vec![p, e] },
+            joins: vec![Join {
+                from_alias: "e".to_string(),
+                table: "p".to_string(),
+                fk_columns: vec!["e_ts".to_string()],
+                ref_columns: vec!["start_ts".to_string()],
+                name: Some("event_period".to_string()),
+                range_end: Some("end_ts".to_string()),
+                ..Default::default()
+            }],
+            ..Default::default()
+        }
+    }
+
+    const RANGE_ON: &str = "(\"e\".\"e_ts\" IS NOT NULL AND (\"p\".\"start_ts\" IS NULL OR \
+                            \"e\".\"e_ts\" >= \"p\".\"start_ts\") AND (\"p\".\"end_ts\" IS NULL OR \
+                            \"e\".\"e_ts\" < \"p\".\"end_ts\"))";
+
+    /// Phase 7.2: a range relationship joins the referenced table on its
+    /// half-open period, a NULL bound open.
+    #[test]
+    fn range_relationship_joins_on_its_half_open_period() {
+        assert_eq!(
+            render(&range_def(true), "p"),
+            format!("\nLEFT JOIN \"periods\" AS \"p\" ON {RANGE_ON}")
+        );
+    }
+
+    /// Walked the other way, the same condition: it names both sides.
+    #[test]
+    fn range_relationship_walked_backwards_has_the_same_condition() {
+        assert_eq!(
+            render(&range_def(false), "e"),
+            format!("\nLEFT JOIN \"events\" AS \"e\" ON {RANGE_ON}")
+        );
+    }
+
     /// A plain relationship is unchanged.
     #[test]
     fn plain_relationship_still_joins_with_left_join() {
@@ -1131,6 +1226,18 @@ mod tests {
         let mut def = asof_def(false);
         def.joins[0].asof = Some(7);
         let err = asof_query(&def, "o").expect_err("out-of-range ASOF index expanded");
+        assert!(
+            matches!(err, ExpandError::UncheckableDefinition { .. }),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn range_relationship_with_two_columns_is_refused() {
+        let mut def = range_def(true);
+        def.joins[0].fk_columns.push("x".to_string());
+        def.joins[0].ref_columns.push("y".to_string());
+        let err = asof_query(&def, "e").expect_err("two-column range expanded");
         assert!(
             matches!(err, ExpandError::UncheckableDefinition { .. }),
             "{err}"

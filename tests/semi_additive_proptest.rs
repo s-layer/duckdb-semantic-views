@@ -340,6 +340,7 @@ fn build_def(order: SortOrder, na: NaKey, unit: &str) -> SemanticViewDefinition 
         comment: None,
         synonyms: vec![],
         tags: Vec::new(),
+        distinct_ranges: vec![],
     }];
     let dimensions = vec![
         Dimension {
@@ -1327,6 +1328,7 @@ fn role_def(order: SortOrder) -> SemanticViewDefinition {
         comment: None,
         synonyms: vec![],
         tags: Vec::new(),
+        distinct_ranges: vec![],
     };
     let rel = |name: &str, from: &str| Join {
         from_alias: from.to_string(),
@@ -1336,6 +1338,7 @@ fn role_def(order: SortOrder) -> SemanticViewDefinition {
         name: Some(name.to_string()),
         cardinality: Cardinality::ManyToOne,
         asof: None,
+        range_end: None,
     };
     let dim = |name: &str, expr: &str, table: &str| Dimension {
         cortex_search_service: None,

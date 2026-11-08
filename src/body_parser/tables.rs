@@ -15,9 +15,10 @@
 use super::annotations::parse_trailing_annotations;
 use super::cursor::Cursor;
 use super::lexer::TokenKind;
+use super::relationships::take_range_bounds;
 use super::split_at_depth0_commas;
 use crate::errors::ParseError;
-use crate::model::TableRef;
+use crate::model::{DistinctRange, TableRef};
 
 /// Parse the content inside TABLES (...).
 ///
@@ -170,6 +171,31 @@ enum Source<'a> {
     Query(&'a str),
 }
 
+/// Step 5b of [`parse_single_table_entry`]: the table's `DISTINCT RANGE`
+/// constraints, each immediately after the previous constraint.
+fn take_distinct_ranges(
+    cur: &mut Cursor<'_>,
+    entry: &str,
+    alias: &str,
+) -> Result<Vec<DistinctRange>, ParseError> {
+    let mut distinct_ranges: Vec<DistinctRange> = Vec::new();
+    while let Some(c_tok) = cur.find_kw("CONSTRAINT") {
+        let between = entry[cur.byte_pos()..c_tok.start].trim();
+        if !between.is_empty() {
+            let off = cur.peek().map_or(c_tok.start, |t| t.start);
+            return Err(cur.err(
+                    off,
+                    format!(
+                        "Unexpected text '{between}' before CONSTRAINT for alias '{alias}' in TABLES clause. Constraints must immediately follow the table name or the preceding constraint; COMMENT / WITH SYNONYMS come after constraints.",
+                    ),
+                ));
+        }
+        cur.bump(); // CONSTRAINT
+        distinct_ranges.push(take_distinct_range(cur, alias, c_tok.start)?);
+    }
+    Ok(distinct_ranges)
+}
+
 /// Parse a single TABLES clause entry.
 ///
 /// Supports:
@@ -246,6 +272,11 @@ fn parse_single_table_entry(entry: &str, entry_offset: usize) -> Result<TableRef
         unique_constraints.push(cols);
     }
 
+    // Step 5b (Phase 7.2): zero or more `CONSTRAINT name DISTINCT RANGE
+    // BETWEEN s AND e EXCLUSIVE`, after the key constraints as in Snowflake's
+    // grammar.
+    let distinct_ranges = take_distinct_ranges(&mut cur, entry, alias)?;
+
     // Step 6: trailing COMMENT / WITH SYNONYMS annotations. The shared parser
     // tiles the region exactly; any non-annotation text left in front of it is
     // reported here rather than silently dropped (PA-9 companion).
@@ -289,7 +320,46 @@ fn parse_single_table_entry(entry: &str, entry_offset: usize) -> Result<TableRef
         comment: annotations.comment,
         synonyms: annotations.synonyms,
         tags: annotations.tags,
+        distinct_ranges,
     })
+}
+
+/// Phase 7.2: the rest of a `CONSTRAINT name DISTINCT RANGE BETWEEN s AND e
+/// EXCLUSIVE` table constraint, after `CONSTRAINT`. `at` is the keyword's
+/// offset in the entry, for the carets.
+fn take_distinct_range(
+    cur: &mut Cursor,
+    alias: &str,
+    at: usize,
+) -> Result<DistinctRange, ParseError> {
+    let usage = format!(
+        "A table constraint on '{alias}' must read 'CONSTRAINT name DISTINCT RANGE BETWEEN \
+         start_column AND end_column EXCLUSIVE'; DISTINCT RANGE is the only named constraint."
+    );
+    let name = match cur.peek() {
+        Some(t) if cur.peek_is_value() && !cur.is_kw(t, "DISTINCT") => {
+            cur.bump();
+            cur.text(t).to_string()
+        }
+        _ => return Err(cur.err(at, usage)),
+    };
+    if let Some(reason) = super::scan::ddl_identifier_slot_error(&name) {
+        return Err(cur.err(
+            at,
+            format!("Invalid constraint name '{name}' on table '{alias}': {reason}."),
+        ));
+    }
+    for kw in ["DISTINCT", "RANGE", "BETWEEN"] {
+        match cur.peek() {
+            Some(t) if cur.is_kw(t, kw) => {
+                cur.bump();
+            }
+            _ => return Err(cur.err(at, usage)),
+        }
+    }
+    let what = format!("Constraint '{name}' on table '{alias}'");
+    let (start, end) = take_range_bounds(cur, &what).map_err(|m| cur.err(at, m))?;
+    Ok(DistinctRange { name, start, end })
 }
 
 /// Why `query` cannot be the query of an inline-query table, if it cannot.
