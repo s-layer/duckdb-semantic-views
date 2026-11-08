@@ -327,6 +327,31 @@ fn parse_single_table_entry(entry: &str, entry_offset: usize) -> Result<TableRef
 /// Phase 7.2: the rest of a `CONSTRAINT name DISTINCT RANGE BETWEEN s AND e
 /// EXCLUSIVE` table constraint, after `CONSTRAINT`. `at` is the keyword's
 /// offset in the entry, for the carets.
+/// Why a stored `DISTINCT RANGE` constraint would not read back from
+/// `GET_DDL`'s `CONSTRAINT name DISTINCT RANGE BETWEEN s AND e EXCLUSIVE` as
+/// the same constraint, if it would not. The name and bounds are taken to be
+/// single identifiers already, which `GET_DDL` writes as stored (PR #338
+/// review).
+pub(crate) fn distinct_range_error(alias: &str, range: &DistinctRange) -> Option<String> {
+    let text = format!(
+        "{} DISTINCT RANGE BETWEEN {} AND {} EXCLUSIVE",
+        range.name, range.start, range.end
+    );
+    let mut cur = Cursor::new(&text, 0);
+    match take_distinct_range(&mut cur, alias, 0) {
+        Ok(back) if back == *range && cur.rest().trim().is_empty() => None,
+        Ok(_) => Some(format!(
+            "table '{alias}' constraint '{}' does not read back from GET_DDL as written; \
+             quote a name or bound that is a keyword",
+            range.name
+        )),
+        Err(e) => Some(format!(
+            "table '{alias}' constraint '{}' does not read back from GET_DDL as written: {}",
+            range.name, e.message
+        )),
+    }
+}
+
 fn take_distinct_range(
     cur: &mut Cursor,
     alias: &str,

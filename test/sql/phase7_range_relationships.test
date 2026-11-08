@@ -197,6 +197,15 @@ SELECT * FROM SEMANTIC_VIEW(p7_range_overlap METRICS e.total_v);
 ----
 12
 
+# Overlapping data breaks the declared DISTINCT RANGE, and a query that joins
+# the period table, here for a filter on it, meets event 1 once per period it
+# falls in, as the docs say (PR #338 review). The fixture did not ask
+# Snowflake this; the answer is pinned so a change to it is seen.
+query I
+SELECT * FROM semantic_view('p7_range_overlap', metrics := ['total_v'], where_clause := 'label IN (''a'', ''b'')');
+----
+17
+
 # --- R6: two periods with a NULL start ---------------------------------------
 # Each open start is honoured on its own: e1 (2023-06-01) is before 2024 but
 # not before 2023, so it is in open1 only.
@@ -359,3 +368,31 @@ CREATE SEMANTIC VIEW p7_range_two_cols
   DIMENSIONS (p.label AS label);
 ----
 pairs one column with one BETWEEN range
+
+# The target needs a key as well as its constraint, and the error says so.
+statement error
+CREATE SEMANTIC VIEW p7_range_no_key
+  TABLES (
+    e AS events PRIMARY KEY (e_id),
+    p AS periods
+      CONSTRAINT period_range DISTINCT RANGE BETWEEN start_ts AND end_ts EXCLUSIVE
+  )
+  RELATIONSHIPS (event_period AS e (e_ts) REFERENCES p (BETWEEN start_ts AND end_ts EXCLUSIVE))
+  DIMENSIONS (p.label AS label);
+----
+referenced by range relationship 'event_period'
+
+# Two constraints on one table can't share a name, compared as DuckDB
+# compares identifiers.
+statement error
+CREATE SEMANTIC VIEW p7_range_dup_name
+  TABLES (
+    e AS events  PRIMARY KEY (e_id),
+    p AS periods PRIMARY KEY (period_id)
+      CONSTRAINT period_range DISTINCT RANGE BETWEEN start_ts AND end_ts EXCLUSIVE
+      CONSTRAINT PERIOD_RANGE DISTINCT RANGE BETWEEN end_ts AND start_ts EXCLUSIVE
+  )
+  RELATIONSHIPS (event_period AS e (e_ts) REFERENCES p (BETWEEN start_ts AND end_ts EXCLUSIVE))
+  DIMENSIONS (p.label AS label);
+----
+more than one constraint named

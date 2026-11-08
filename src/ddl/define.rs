@@ -107,6 +107,20 @@ pub fn enrich_definition_for_create(
             continue;
         }
 
+        // Phase 7.2: a range relationship's target needs a key as well as
+        // its DISTINCT RANGE constraint, as every relationship target does;
+        // say so rather than name a foreign key it has not got (PR #338).
+        if join.range_end.is_some() {
+            return Err(crate::errors::ParseError::positionless(format!(
+                "Table '{target}' has no PRIMARY KEY declared but is referenced by range \
+                 relationship '{rel}'. A range relationship's target needs a PRIMARY KEY \
+                 (cols) or UNIQUE (cols) in the TABLES clause, as well as its DISTINCT \
+                 RANGE constraint.",
+                target = t.alias,
+                rel = join.name.as_deref().unwrap_or("?"),
+            )));
+        }
+
         // Target has NEITHER pk_columns NOR any unique_constraints
         // declared in the TABLES clause. This is unambiguously the D-06
         // case regardless of whether ref_columns is empty (implicit

@@ -32,12 +32,12 @@ pub(crate) use annotations::{parse_tag_assignments, parse_tag_names};
 pub(crate) use entries::parse_qualified_entries;
 pub(crate) use materializations::parse_materializations_clause;
 pub(crate) use metrics::{misplaced_metric_clause, parse_metrics_clause};
-pub(crate) use relationships::parse_relationships_clause;
+pub(crate) use relationships::{parse_relationships_clause, range_reference_error};
 pub(crate) use scan::{
     column_roundtrips_verbatim, identifier_slot_error, identifier_slot_roundtrips_verbatim,
     source_table_roundtrips_verbatim, split_at_depth0_commas,
 };
-pub(crate) use tables::{inline_query_error, parse_tables_clause};
+pub(crate) use tables::{distinct_range_error, inline_query_error, parse_tables_clause};
 pub(crate) use variables::{parse_variable_entry, parse_variables_clause};
 
 /// Re-parse a rendered window expression, returning just the `WindowSpec`.

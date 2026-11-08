@@ -427,7 +427,11 @@ Range relationships
 
    semantic view '<view>': range relationship '<rel>' does not bind: <DuckDB's error>
 
-**Cause:** A :ref:`range relationship <ref-create-range-relationships>` matches one column against a half-open period, ``BETWEEN start AND end EXCLUSIVE``, and its target must declare that period as a ``DISTINCT RANGE`` constraint on the same two columns, in the same order. ``CREATE`` also checks that the value and the two bounds compare, so the last error shows DuckDB's comparison error. A table's constraint whose columns are missing or do not compare is refused the same way, as ``constraint '<name>' on table '<alias>' does not bind``.
+   Table '<alias>' has no PRIMARY KEY declared but is referenced by range relationship '<rel>'. A range relationship's target needs a PRIMARY KEY (cols) or UNIQUE (cols) in the TABLES clause, as well as its DISTINCT RANGE constraint.
+
+   table '<alias>' has more than one constraint named '<name>'.
+
+**Cause:** A :ref:`range relationship <ref-create-range-relationships>` matches one column against a half-open period, ``BETWEEN start AND end EXCLUSIVE``, and its target must declare that period as a ``DISTINCT RANGE`` constraint on the same two columns, in the same order, and a key, as any relationship target does. The constraints on a table need different names. ``CREATE`` also checks that the value and the two bounds compare, so the last error shows DuckDB's comparison error. A table's constraint whose columns are missing or do not compare is refused the same way, as ``constraint '<name>' on table '<alias>' does not bind``.
 
 **Fix:** Write ``EXCLUSIVE``, use two different columns, declare the matching constraint on the target, and give the value and bounds comparable types.
 

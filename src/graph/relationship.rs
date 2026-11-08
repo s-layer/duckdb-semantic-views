@@ -280,6 +280,7 @@ fn quote_list(names: &[&str]) -> String {
 /// - Checks `ref_columns` against each of target's `unique_constraints` (exact set match)
 /// - Rejects if neither matches (CARD-03/CARD-09: exact match required, subsets rejected)
 fn validate_fk_references(def: &SemanticViewDefinition) -> Result<(), String> {
+    check_distinct_ranges(def)?;
     for join in &def.joins {
         // Phase 7.1: the ASOF marker names one of the relationship's column
         // pairs. The DDL parser can only produce such an index; a YAML
@@ -355,6 +356,35 @@ fn validate_fk_references(def: &SemanticViewDefinition) -> Result<(), String> {
              UNIQUE constraint on table '{}'. Available: {available_str}.",
             target.alias
         ));
+    }
+    Ok(())
+}
+
+/// Phase 7.2: a table's DISTINCT RANGE constraints each have two different
+/// bounds (fixture R8; `v >= s AND v < s` would match nothing) and names that no
+/// other constraint on the table shares, compared the way identifiers
+/// are. The DDL parser refuses the first; a YAML or stored definition
+/// can carry either (PR #338 review).
+fn check_distinct_ranges(def: &SemanticViewDefinition) -> Result<(), String> {
+    for t in &def.tables {
+        for (i, r) in t.distinct_ranges.iter().enumerate() {
+            if crate::ident::ident_matches(&r.start, &r.end) {
+                return Err(format!(
+                    "constraint '{}' on table '{}' names '{}' as both its start and its end; \
+                     a range needs two columns.",
+                    r.name, t.alias, r.start
+                ));
+            }
+            if t.distinct_ranges[..i]
+                .iter()
+                .any(|o| crate::ident::ident_matches(&o.name, &r.name))
+            {
+                return Err(format!(
+                    "table '{}' has more than one constraint named '{}'.",
+                    t.alias, r.name
+                ));
+            }
+        }
     }
     Ok(())
 }
@@ -2078,6 +2108,27 @@ mod tests {
                 err.contains("no matching DISTINCT RANGE constraint"),
                 "{err}"
             );
+        }
+
+        #[test]
+        fn distinct_range_with_one_column_for_both_bounds_is_refused() {
+            // A stored or YAML definition can carry what the DDL parser refuses
+            // (fixture R8): `v >= s AND v < s` would match nothing.
+            let def = range_def(Some(("s", "S")), "s", "S");
+            let err = validate_fk_references(&def).unwrap_err();
+            assert!(err.contains("both its start and its end"), "{err}");
+        }
+
+        #[test]
+        fn distinct_range_names_must_differ_on_a_table() {
+            let mut def = range_def(Some(("start_ts", "end_ts")), "start_ts", "end_ts");
+            let mut second = def.tables[1].distinct_ranges[0].clone();
+            second.name = "PERIOD_RANGE".to_string();
+            second.start = "a".to_string();
+            second.end = "b".to_string();
+            def.tables[1].distinct_ranges.push(second);
+            let err = validate_fk_references(&def).unwrap_err();
+            assert!(err.contains("more than one constraint named"), "{err}");
         }
 
         #[test]

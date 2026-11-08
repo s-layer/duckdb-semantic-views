@@ -207,6 +207,23 @@ pub(super) fn take_range_bounds(cur: &mut Cursor, what: &str) -> Result<(String,
     Ok((start, end))
 }
 
+/// Why a range relationship's stored bounds would not read back from
+/// `GET_DDL`'s `(BETWEEN start AND end EXCLUSIVE)` as the same pair, if they
+/// would not: a keyword or a repeated column a YAML definition can hold. The
+/// bounds are taken to be single columns already, which `GET_DDL` writes as
+/// stored (PR #338 review).
+pub(crate) fn range_reference_error(rel_name: &str, start: &str, end: &str) -> Option<String> {
+    let what = format!("The range in relationship '{rel_name}'");
+    match range_item(&format!("BETWEEN {start} AND {end} EXCLUSIVE"), &what) {
+        Ok(Some((s, e))) if s == start && e == end => None,
+        Ok(_) => Some(format!(
+            "relationship '{rel_name}' range BETWEEN {start} AND {end} does not read back \
+             from GET_DDL as written; quote a bound that is a keyword"
+        )),
+        Err(m) => Some(m),
+    }
+}
+
 /// The bounds of `col` when it is a `BETWEEN ...` item, `None` when it is a
 /// plain column. A column that is itself named `between` (bare, with nothing
 /// after it, or quoted) is a column, not the keyword.

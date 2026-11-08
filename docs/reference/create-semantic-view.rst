@@ -467,7 +467,7 @@ Declares the logical tables available to the semantic view. Each entry assigns a
            CONSTRAINT period_range DISTINCT RANGE BETWEEN start_ts AND end_ts EXCLUSIVE
    )
 
-``CONSTRAINT <name> DISTINCT RANGE BETWEEN <start> AND <end> EXCLUSIVE`` declares that each row of the table covers the half-open period from ``<start>`` (included) to ``<end>`` (excluded), and that the periods do not overlap. A :ref:`range relationship <ref-create-range-relationships>` needs it on its target. It comes after ``PRIMARY KEY`` and ``UNIQUE``, and a table can declare more than one. As with the other keys, the data is not checked against it.
+``CONSTRAINT <name> DISTINCT RANGE BETWEEN <start> AND <end> EXCLUSIVE`` declares that each row of the table covers the half-open period from ``<start>`` (included) to ``<end>`` (excluded), and that the periods do not overlap. A :ref:`range relationship <ref-create-range-relationships>` needs it on its target. It comes after ``PRIMARY KEY`` and ``UNIQUE``, and a table can declare more than one, each with its own name. As with the other keys, the data is not checked against it.
 
 The first table in the ``TABLES`` clause is the **base table** (the root of the relationship graph). All other tables must be reachable from the base table through declared relationships.
 
@@ -564,10 +564,10 @@ Write ``BETWEEN <start> AND <end> EXCLUSIVE`` as the ``REFERENCES`` list to join
 Each event takes the period with ``start_ts <= event_ts`` and ``event_ts < end_ts``, as in Snowflake. A ``NULL`` ``start_ts`` or ``end_ts`` leaves that side of the period open. An event with no such period, or with a ``NULL`` ``event_ts``, keeps its row, with ``NULL`` for the period's dimensions.
 
 - The relationship has one foreign-key column, and the ``REFERENCES`` list is the one ``BETWEEN`` item. Only half-open ranges (``EXCLUSIVE``) are accepted, and the start and end must be two different columns.
-- The target must declare a ``DISTINCT RANGE`` constraint on the same two columns, in the same order. ``CREATE`` checks that the three columns compare.
-- The data is not checked for overlapping periods, as in Snowflake. An event that falls in two periods is counted under each of them when grouped by the period, and once in a total.
+- The target must declare a ``DISTINCT RANGE`` constraint on the same two columns, in the same order, and, like any relationship target, a ``PRIMARY KEY`` or ``UNIQUE`` key. ``CREATE`` checks that the three columns compare.
+- The data is not checked for overlapping periods, as in Snowflake. An event that falls in two periods is counted under each of them when grouped by the period, and once in a total that does not use the period table. A query that does join it, for a filter on a period dimension say, meets the event once per period.
 - A range relationship is always many-to-one, since many rows can fall in the same period. A metric on the target is computed over the target's own rows, and grouping it by a dimension of the "from" table is refused as a :ref:`fan trap <howto-fan-traps>`.
-- ``DESCRIBE`` writes the range in ``REF_KEY`` as ``{"start_column":"<start>","end_column":"<end>","type":"RANGE"}`` and shows the table's constraint as a ``CONSTRAINT`` row, ``GET_DDL`` writes both back, and the YAML export writes the end column as ``range_end`` and the constraint under ``distinct_ranges``. A release of the extension older than 0.19.0 cannot read a view with a range relationship.
+- ``DESCRIBE`` writes the range in ``REF_KEY`` as ``{"start_column":"<start>","end_column":"<end>","type":"RANGE"}`` and shows the table's constraint as a ``CONSTRAINT`` row, ``GET_DDL`` writes both back, and the YAML export writes the end column as ``range_end`` and the constraint under ``distinct_ranges``. A release of the extension older than 0.19.0 cannot read a view with a range relationship or a ``DISTINCT RANGE`` constraint.
 
 **Cardinality inference:**
 
