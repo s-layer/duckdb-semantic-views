@@ -253,6 +253,15 @@ fn parse_single_table_entry(entry: &str, entry_offset: usize) -> Result<TableRef
     // discarded (P-1 companion).
     let mut unique_constraints: Vec<Vec<String>> = Vec::new();
     while let Some(u_tok) = cur.find_kw("UNIQUE") {
+        // Phase 7.2: a UNIQUE keyword past a CONSTRAINT keyword is a
+        // constraint's name or bound (`CONSTRAINT unique DISTINCT RANGE ...`),
+        // not a key, so the UNIQUE keys end there (PR #338 review).
+        if cur
+            .find_kw("CONSTRAINT")
+            .is_some_and(|c_tok| c_tok.start < u_tok.start)
+        {
+            break;
+        }
         let between = entry[cur.byte_pos()..u_tok.start].trim();
         if !between.is_empty() {
             let off = cur.peek().map_or(u_tok.start, |t| t.start);

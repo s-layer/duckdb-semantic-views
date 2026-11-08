@@ -2022,6 +2022,24 @@ mod tests {
         assert!(e.contains("constraint name"), "{e}");
     }
 
+    /// `unique` is not a keyword where GET_DDL writes it, so it imports, and
+    /// the DDL it renders reads back (PR #338 review).
+    #[test]
+    fn yaml_distinct_range_named_unique_round_trips() {
+        let def = SemanticViewDefinition::from_yaml_with_size_cap(
+            "v",
+            &range_yaml("unique", "start_ts", "end_ts", "end_ts"),
+        )
+        .unwrap();
+        let ddl = crate::render_ddl::render_create_ddl("v", &def).unwrap();
+        let body = &ddl[ddl.find("TABLES").unwrap()..];
+        let back = crate::body_parser::parse_keyword_body(body, 0).unwrap();
+        assert_eq!(
+            back.tables[1].distinct_ranges,
+            def.tables[1].distinct_ranges
+        );
+    }
+
     #[test]
     fn yaml_distinct_range_named_distinct_is_rejected() {
         let e = yaml_err(&range_yaml("distinct", "start_ts", "end_ts", "end_ts"));

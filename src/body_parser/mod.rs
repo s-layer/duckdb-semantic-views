@@ -3130,6 +3130,27 @@ mod tests {
         assert_eq!(t[0].comment.as_deref(), Some("periods"));
     }
 
+    /// A constraint name or bound spelled `unique` is the constraint's, not a
+    /// UNIQUE key the scan for one finds further on (PR #338 review).
+    #[test]
+    fn distinct_range_named_or_bounded_by_unique_parses() {
+        let t = parse_tables_clause(
+            "p AS periods PRIMARY KEY (id) UNIQUE (label) \
+             CONSTRAINT unique DISTINCT RANGE BETWEEN unique AND end_ts EXCLUSIVE",
+            0,
+        )
+        .unwrap();
+        assert_eq!(
+            t[0].distinct_ranges,
+            vec![crate::model::DistinctRange {
+                name: "unique".into(),
+                start: "unique".into(),
+                end: "end_ts".into(),
+            }]
+        );
+        assert_eq!(t[0].unique_constraints, vec![vec!["label"]]);
+    }
+
     #[test]
     fn malformed_table_constraints_refused() {
         for (entry, want) in [

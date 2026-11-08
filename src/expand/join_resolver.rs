@@ -929,6 +929,15 @@ mod tests {
         );
     }
 
+    /// Reached through a role-played alias, the condition names that alias,
+    /// not the table's own (PR #338 review).
+    #[test]
+    fn range_relationship_on_a_scoped_alias_names_the_alias() {
+        let def = range_def(true);
+        let on = synthesize_on_clause_scoped(&def.joins[0], &def.tables, None, "p__event_period");
+        assert_eq!(on, RANGE_ON.replace("\"p\".", "\"p__event_period\"."));
+    }
+
     /// Walked the other way, the same condition: it names both sides.
     #[test]
     fn range_relationship_walked_backwards_has_the_same_condition() {
