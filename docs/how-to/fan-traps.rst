@@ -206,7 +206,7 @@ The same applies to these shapes:
   it (metrics naming different ones are grouped separately and merged).
 - A dimension or filter across a many-to-many bridge table, such as a book
   metric grouped by author country through ``book_authors``. Each book counts
-  once per group (see :ref:`ref-create-bridge-relationships`).
+  once per group (see :ref:`Many-to-many relationships through a bridge <ref-create-bridge-relationships>`).
 
 A dimension group that exists at one grain but not another is kept, with
 ``NULL`` for the metrics that have no rows there. For example, a region with
