@@ -315,6 +315,15 @@ fn emit_tables(out: &mut String, def: &SemanticViewDefinition) {
             out.push_str(&emit_column_list(uc));
             out.push(')');
         }
+        for range in &table.distinct_ranges {
+            out.push_str(" CONSTRAINT ");
+            out.push_str(&emit_column(&range.name));
+            out.push_str(" DISTINCT RANGE BETWEEN ");
+            out.push_str(&emit_column(&range.start));
+            out.push_str(" AND ");
+            out.push_str(&emit_column(&range.end));
+            out.push_str(" EXCLUSIVE");
+        }
         emit_comment(out, table.comment.as_deref());
         emit_synonyms(out, &table.synonyms);
         emit_tags(out, &table.tags);
@@ -355,7 +364,14 @@ fn emit_relationships(out: &mut String, def: &SemanticViewDefinition) {
         // list is redundant and is omitted for the historical compact form.
         // Phase 7.1: an ASOF relationship always renders its list, since the
         // marker lives in it.
-        if !join.ref_columns.is_empty()
+        if let (Some(end), [start]) = (&join.range_end, join.ref_columns.as_slice()) {
+            // Phase 7.2: a range relationship's one item.
+            out.push_str("(BETWEEN ");
+            out.push_str(&emit_column(start));
+            out.push_str(" AND ");
+            out.push_str(&emit_column(end));
+            out.push_str(" EXCLUSIVE)");
+        } else if !join.ref_columns.is_empty()
             && (join.asof.is_some() || !ref_columns_match_target_pk(def, join))
         {
             out.push('(');
@@ -828,6 +844,55 @@ mod tests {
         let parsed = crate::body_parser::parse_relationships_clause(body, 0).unwrap();
         assert_eq!(parsed[0].asof, Some(1));
         assert_eq!(parsed[0].ref_columns, def.joins[0].ref_columns);
+    }
+
+    /// Phase 7.2: a range relationship and its table's DISTINCT RANGE
+    /// constraint render in Snowflake's form and parse back the same.
+    #[test]
+    fn range_relationship_renders_and_reparses() {
+        let mut def = minimal_def();
+        def.tables.push(TableRef {
+            alias: "p".to_string(),
+            table: "periods".to_string(),
+            pk_columns: vec!["period_id".to_string()],
+            distinct_ranges: vec![crate::model::DistinctRange {
+                name: "period_range".to_string(),
+                start: "start_ts".to_string(),
+                end: "end_ts".to_string(),
+            }],
+            ..Default::default()
+        });
+        def.joins.push(Join {
+            from_alias: "o".to_string(),
+            table: "p".to_string(),
+            fk_columns: vec!["ts".to_string()],
+            ref_columns: vec!["start_ts".to_string()],
+            name: Some("order_period".to_string()),
+            range_end: Some("end_ts".to_string()),
+            ..Default::default()
+        });
+        let ddl = render_create_ddl("v", &def).unwrap();
+        assert!(
+            ddl.contains(
+                "p AS periods PRIMARY KEY (period_id) CONSTRAINT period_range DISTINCT RANGE \
+                 BETWEEN start_ts AND end_ts EXCLUSIVE"
+            ),
+            "{ddl}"
+        );
+        assert!(
+            ddl.contains(
+                "order_period AS o(ts) REFERENCES p(BETWEEN start_ts AND end_ts EXCLUSIVE)"
+            ),
+            "{ddl}"
+        );
+        let rels = &ddl[ddl.find("RELATIONSHIPS (").unwrap() + "RELATIONSHIPS (".len()..];
+        let rels = &rels[..rels.find("\n)").unwrap()];
+        let parsed = crate::body_parser::parse_relationships_clause(rels, 0).unwrap();
+        assert_eq!(parsed[0], def.joins[0]);
+        let tables = &ddl[ddl.find("TABLES (").unwrap() + "TABLES (".len()..];
+        let tables = &tables[..tables.find("\n)").unwrap()];
+        let parsed = crate::body_parser::parse_tables_clause(tables, 0).unwrap();
+        assert_eq!(parsed[1].distinct_ranges, def.tables[1].distinct_ranges);
     }
 
     // -------------------------------------------------------------------

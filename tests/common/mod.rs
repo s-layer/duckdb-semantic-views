@@ -20,7 +20,7 @@
 
 use proptest::prelude::*;
 use semantic_views::model::{
-    AccessModifier, CortexSearchService, CustomInstructions, Dimension, Fact, Join,
+    AccessModifier, CortexSearchService, CustomInstructions, Dimension, DistinctRange, Fact, Join,
     Materialization, MaxStaleness, Metric, NonAdditiveDim, NullsOrder, SemanticViewDefinition,
     SortOrder, TableRef, Tag, TagName, VerifiedQuery,
 };
@@ -389,6 +389,18 @@ pub fn arb_canonical_def() -> impl Strategy<Value = SemanticViewDefinition> {
                         },
                     )
                     .collect();
+                let mut tables = tables;
+                // Phase 7.2: the base table declares a DISTINCT RANGE about
+                // half the time (drawn from its generated name), which the
+                // relationships below can reference.
+                let has_range = tables[0].table.len() % 2 == 0;
+                if has_range {
+                    tables[0].distinct_ranges = vec![DistinctRange {
+                        name: "t0_period".to_string(),
+                        start: "rng_start".to_string(),
+                        end: "rng_end".to_string(),
+                    }];
+                }
                 let n_tables = tables.len();
                 let base_pk = tables[0].pk_columns.clone();
 
@@ -432,6 +444,20 @@ pub fn arb_canonical_def() -> impl Strategy<Value = SemanticViewDefinition> {
                             // drawn from the generated name so it varies.
                             let asof = (!ref_columns.is_empty() && rel_name.len() % 2 == 0)
                                 .then(|| rel_name.len() / 2 % pk_arity);
+                            // Phase 7.2: otherwise, against a declared
+                            // range, a range relationship about a third of
+                            // the time.
+                            if asof.is_none() && has_range && rel_name.len() % 3 == 1 {
+                                return Some(Join {
+                                    name: Some(rel_name),
+                                    from_alias: format!("t{}", i + 1),
+                                    table: "t0".to_string(),
+                                    fk_columns: vec![format!("fk_{i}_ts")],
+                                    ref_columns: vec!["rng_start".to_string()],
+                                    range_end: Some("rng_end".to_string()),
+                                    ..Default::default()
+                                });
+                            }
                             Some(Join {
                                 name: Some(rel_name),
                                 from_alias: format!("t{}", i + 1),

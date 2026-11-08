@@ -47,6 +47,7 @@ fn child_def() -> SemanticViewDefinition {
                 comment: None,
                 synonyms: vec![],
                 tags: Vec::new(),
+                distinct_ranges: vec![],
             },
             TableRef {
                 alias: "li".to_string(),
@@ -57,6 +58,7 @@ fn child_def() -> SemanticViewDefinition {
                 comment: None,
                 synonyms: vec![],
                 tags: Vec::new(),
+                distinct_ranges: vec![],
             },
         ],
         dimensions: vec![
@@ -103,6 +105,7 @@ fn child_def() -> SemanticViewDefinition {
             name: Some("li_o".to_string()),
             cardinality: Cardinality::ManyToOne,
             asof: None,
+            range_end: None,
         }],
         facts: vec![],
         materializations: vec![],

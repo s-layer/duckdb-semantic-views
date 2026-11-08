@@ -62,6 +62,25 @@ pub struct TableRef {
     /// Old stored JSON without this field deserializes to empty Vec.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub tags: Vec<Tag>,
+    /// Phase 7.2: the table's `CONSTRAINT name DISTINCT RANGE BETWEEN s AND e
+    /// EXCLUSIVE` declarations, in the order written. A range relationship
+    /// (`Join::range_end`) may reference this table only through one of them.
+    /// As with a primary key, the data is not checked: Snowflake does not
+    /// refuse overlapping rows either. Stored JSON without it has none.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub distinct_ranges: Vec<DistinctRange>,
+}
+
+/// Phase 7.2: a `CONSTRAINT name DISTINCT RANGE BETWEEN start AND end
+/// EXCLUSIVE` on a logical table: its rows are half-open periods
+/// `[start, end)` that are declared not to overlap, a NULL bound being open on
+/// that side. Columns are stored as written, like key columns.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "arbitrary", derive(arbitrary::Arbitrary))]
+pub struct DistinctRange {
+    pub name: String,
+    pub start: String,
+    pub end: String,
 }
 
 impl TableRef {
@@ -848,6 +867,14 @@ pub struct Join {
     /// join on equality.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub asof: Option<usize>,
+    /// Phase 7.2: the end column of a range relationship, `REFERENCES p
+    /// (BETWEEN s AND e EXCLUSIVE)`. Such a relationship has exactly one
+    /// column pair: `fk_columns` holds the value column and `ref_columns` the
+    /// start column `s`, and a row matches the referenced rows whose half-open
+    /// period `[s, e)` holds its value, a NULL bound being open. `None` is not
+    /// a range relationship. Like `asof`, it needs storage format 3.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub range_end: Option<String>,
 }
 
 /// Current storage-format version stamped into freshly written definitions
@@ -863,8 +890,8 @@ pub struct Join {
 /// 2 (v0.18.0): variables, query-defined tables and same-table metric
 /// references, which a version-1 reader misreads or cannot load.
 ///
-/// 3 (Phase 7.1): ASOF relationships (`Join::asof`), which a version-2 reader
-/// would join on equality. A stamp
+/// 3 (Phase 7.1, 7.2): ASOF and range relationships (`Join::asof`,
+/// `Join::range_end`), which a version-2 reader would join on equality. A stamp
 /// above this value is refused by [`SemanticViewDefinition::from_json`], so
 /// the next such change is reported instead of misread.
 ///
@@ -1040,7 +1067,12 @@ impl SemanticViewDefinition {
     /// a wrong number or a misleading error rather than refuse.
     #[must_use]
     pub fn required_schema_version(&self) -> u32 {
-        if self.joins.iter().any(|j| j.asof.is_some()) {
+        if self
+            .joins
+            .iter()
+            .any(|j| j.asof.is_some() || j.range_end.is_some())
+            || self.tables.iter().any(|t| !t.distinct_ranges.is_empty())
+        {
             return 3;
         }
         let needs_two = !self.variables.is_empty()
@@ -1282,6 +1314,14 @@ fn validate_yaml_tables(def: &SemanticViewDefinition) -> Result<(), String> {
                 slot_column("table", "UNIQUE column", c)?;
             }
         }
+        for r in &t.distinct_ranges {
+            slot_single("table", "DISTINCT RANGE constraint name", &r.name)?;
+            slot_column("table", "DISTINCT RANGE start column", &r.start)?;
+            slot_column("table", "DISTINCT RANGE end column", &r.end)?;
+            if let Some(reason) = crate::body_parser::distinct_range_error(&t.alias, r) {
+                return Err(reason);
+            }
+        }
     }
     Ok(())
 }
@@ -1331,6 +1371,14 @@ fn validate_yaml_joins(def: &SemanticViewDefinition) -> Result<(), String> {
         }
         for c in &j.ref_columns {
             slot_column("relationship", "REFERENCES column", c)?;
+        }
+        if let Some(end) = &j.range_end {
+            slot_column("relationship", "range_end column", end)?;
+            if let [start] = j.ref_columns.as_slice() {
+                if let Some(reason) = crate::body_parser::range_reference_error(name, start, end) {
+                    return Err(reason);
+                }
+            }
         }
     }
     Ok(())
@@ -1908,6 +1956,94 @@ mod tests {
                     metrics:\n  - name: total\n    expr: sum(o.amount)\n    source_table: o\n";
         let e = yaml_err(yaml);
         assert!(e.contains("a--b"), "{e}");
+    }
+
+    // --- Phase 7.2 review (PR #338): YAML range fields ---
+    //
+    // `range_end` and a table's `distinct_ranges` reach GET_DDL like the key
+    // columns do, so they are held to the same rule: a definition that imports
+    // is one whose GET_DDL the DDL parser reads back.
+
+    /// A range view in YAML, with the constraint's `name`, `start` and `end`
+    /// and the relationship's `range_end` as given (the start is `start`).
+    fn range_yaml(name: &str, start: &str, end: &str, range_end: &str) -> String {
+        format!(
+            "tables:\n  - alias: e\n    table: events\n    pk_columns: [id]\n  \
+             - alias: p\n    table: periods\n    pk_columns: [pid]\n    \
+             distinct_ranges:\n      - {{name: '{name}', start: '{start}', end: '{end}'}}\n\
+             joins:\n  - name: ep\n    from_alias: e\n    table: p\n    fk_columns: [ts]\n    \
+             ref_columns: ['{start}']\n    range_end: '{range_end}'\n\
+             dimensions:\n  - name: label\n    expr: p.label\n    source_table: p\n\
+             metrics:\n  - name: total\n    expr: sum(e.v)\n    source_table: e\n"
+        )
+    }
+
+    #[test]
+    fn yaml_range_relationship_imports() {
+        let def = SemanticViewDefinition::from_yaml_with_size_cap(
+            "v",
+            &range_yaml("period_range", "start_ts", "end_ts", "end_ts"),
+        );
+        assert!(def.is_ok(), "{def:?}");
+    }
+
+    #[test]
+    fn yaml_range_with_one_column_for_both_bounds_is_rejected() {
+        let e = yaml_err(&range_yaml("period_range", "s", "s", "s"));
+        assert!(e.contains("both its start and its end"), "{e}");
+    }
+
+    #[test]
+    fn yaml_range_end_that_is_a_keyword_is_rejected() {
+        let e = yaml_err(&range_yaml(
+            "period_range",
+            "start_ts",
+            "exclusive",
+            "exclusive",
+        ));
+        assert!(e.contains("does not read back"), "{e}");
+    }
+
+    #[test]
+    fn yaml_range_end_with_a_space_is_rejected() {
+        let e = yaml_err(&range_yaml("period_range", "start_ts", "end_ts", "end ts"));
+        assert!(e.contains("range_end column 'end ts'"), "{e}");
+    }
+
+    #[test]
+    fn yaml_distinct_range_bound_with_a_space_is_rejected() {
+        let e = yaml_err(&range_yaml("period_range", "start ts", "end_ts", "end_ts"));
+        assert!(e.contains("DISTINCT RANGE start column 'start ts'"), "{e}");
+    }
+
+    #[test]
+    fn yaml_distinct_range_with_an_empty_name_is_rejected() {
+        let e = yaml_err(&range_yaml("", "start_ts", "end_ts", "end_ts"));
+        assert!(e.contains("constraint name"), "{e}");
+    }
+
+    /// `unique` is not a keyword where GET_DDL writes it, so it imports, and
+    /// the DDL it renders reads back (PR #338 review).
+    #[test]
+    fn yaml_distinct_range_named_unique_round_trips() {
+        let def = SemanticViewDefinition::from_yaml_with_size_cap(
+            "v",
+            &range_yaml("unique", "start_ts", "end_ts", "end_ts"),
+        )
+        .unwrap();
+        let ddl = crate::render_ddl::render_create_ddl("v", &def).unwrap();
+        let body = &ddl[ddl.find("TABLES").unwrap()..];
+        let back = crate::body_parser::parse_keyword_body(body, 0).unwrap();
+        assert_eq!(
+            back.tables[1].distinct_ranges,
+            def.tables[1].distinct_ranges
+        );
+    }
+
+    #[test]
+    fn yaml_distinct_range_named_distinct_is_rejected() {
+        let e = yaml_err(&range_yaml("distinct", "start_ts", "end_ts", "end_ts"));
+        assert!(e.contains("does not read back"), "{e}");
     }
 
     // --- PR #209 review + fuzz_render_roundtrip, 2026-08-07 ---
@@ -3179,6 +3315,20 @@ metrics:
         assert_eq!(def.required_schema_version(), 1);
     }
 
+    /// A DISTINCT RANGE constraint alone also needs format 3: an older reader
+    /// would load the view and drop the constraint, and a re-save there would
+    /// lose it (PR #338 review).
+    #[test]
+    fn required_schema_version_is_three_with_a_distinct_range_constraint() {
+        let mut def = format_test_def(FORMAT_ONE_YAML);
+        def.tables[0].distinct_ranges.push(DistinctRange {
+            name: "r".into(),
+            start: "s".into(),
+            end: "e".into(),
+        });
+        assert_eq!(def.required_schema_version(), 3);
+    }
+
     #[test]
     fn stored_schema_version_absent_or_bad_is_zero() {
         assert_eq!(
@@ -3627,6 +3777,7 @@ metrics:
                 comment: None,
                 synonyms: vec![],
                 tags: Vec::new(),
+                distinct_ranges: vec![],
             };
             let json = serde_json::to_string(&tr).unwrap();
             assert!(json.contains("unique_constraints"));
@@ -3685,6 +3836,7 @@ metrics:
                 comment: None,
                 synonyms: vec![],
                 tags: Vec::new(),
+                distinct_ranges: vec![],
             };
             let json = serde_json::to_string(&tr).unwrap();
             assert!(
@@ -3720,6 +3872,7 @@ metrics:
                 comment: None,
                 synonyms: vec![],
                 tags: Vec::new(),
+                distinct_ranges: vec![],
             };
             assert_eq!(tr.alias, "f");
             assert_eq!(tr.table, "fact_table");
@@ -3984,6 +4137,7 @@ metrics:
                 comment: Some("Main orders table".to_string()),
                 synonyms: vec!["order_facts".to_string()],
                 tags: Vec::new(),
+                distinct_ranges: vec![],
             };
             let json = serde_json::to_string(&tr).unwrap();
             assert!(

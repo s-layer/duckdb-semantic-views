@@ -32,12 +32,12 @@ pub(crate) use annotations::{parse_tag_assignments, parse_tag_names};
 pub(crate) use entries::parse_qualified_entries;
 pub(crate) use materializations::parse_materializations_clause;
 pub(crate) use metrics::{misplaced_metric_clause, parse_metrics_clause};
-pub(crate) use relationships::parse_relationships_clause;
+pub(crate) use relationships::{parse_relationships_clause, range_reference_error};
 pub(crate) use scan::{
     column_roundtrips_verbatim, identifier_slot_error, identifier_slot_roundtrips_verbatim,
     source_table_roundtrips_verbatim, split_at_depth0_commas,
 };
-pub(crate) use tables::{inline_query_error, parse_tables_clause};
+pub(crate) use tables::{distinct_range_error, inline_query_error, parse_tables_clause};
 pub(crate) use variables::{parse_variable_entry, parse_variables_clause};
 
 /// Re-parse a rendered window expression, returning just the `WindowSpec`.
@@ -3038,6 +3038,146 @@ mod tests {
         assert_eq!(r[0].fk_columns, vec!["k", "asof"]);
         assert_eq!(r[0].ref_columns, vec!["k", "\"ASOF\""]);
         assert_eq!(r[0].asof, None);
+    }
+
+    // Phase 7.2: range relationships and DISTINCT RANGE constraints.
+    #[test]
+    fn references_between_is_a_range_relationship() {
+        let r = parse_relationships_clause(
+            "rel AS e(e_ts) REFERENCES p(between start_ts and end_ts exclusive)",
+            0,
+        )
+        .unwrap();
+        assert_eq!(r[0].fk_columns, vec!["e_ts"]);
+        assert_eq!(r[0].ref_columns, vec!["start_ts"]);
+        assert_eq!(r[0].range_end.as_deref(), Some("end_ts"));
+        assert_eq!(r[0].asof, None);
+    }
+
+    /// A column named `between`, bare or quoted, is a column.
+    #[test]
+    fn a_column_named_between_is_a_column() {
+        let r =
+            parse_relationships_clause(r#"rel AS o(between) REFERENCES a("BETWEEN")"#, 0).unwrap();
+        assert_eq!(r[0].ref_columns, vec!["\"BETWEEN\""]);
+        assert_eq!(r[0].range_end, None);
+    }
+
+    /// Each malformed range relationship, with a piece of its message.
+    #[test]
+    fn malformed_range_relationships_refused() {
+        for (entry, want) in [
+            (
+                "rel AS e(t) REFERENCES p(BETWEEN s AND e)",
+                "only half-open ranges",
+            ),
+            (
+                "rel AS e(t) REFERENCES p(BETWEEN s AND e INCLUSIVE)",
+                "only half-open ranges",
+            ),
+            (
+                "rel AS e(t) REFERENCES p(BETWEEN s e EXCLUSIVE)",
+                "must read 'BETWEEN",
+            ),
+            (
+                "rel AS e(t) REFERENCES p(BETWEEN s AND s EXCLUSIVE)",
+                "both its start and its end",
+            ),
+            (
+                "rel AS e(t) REFERENCES p(BETWEEN s AND e EXCLUSIVE x)",
+                "after EXCLUSIVE",
+            ),
+            (
+                "rel AS e(k, t) REFERENCES p(k, BETWEEN s AND e EXCLUSIVE)",
+                "pairs one column",
+            ),
+            (
+                "rel AS e(t, u) REFERENCES p(BETWEEN s AND e EXCLUSIVE)",
+                "pairs one column",
+            ),
+            (
+                "rel AS e(t) REFERENCES p(ASOF BETWEEN s AND e EXCLUSIVE)",
+                "both ASOF and BETWEEN",
+            ),
+            (
+                "rel AS e(BETWEEN s AND e EXCLUSIVE) REFERENCES p(s)",
+                "not a foreign-key column",
+            ),
+        ] {
+            let err = parse_relationships_clause(entry, 0).unwrap_err();
+            assert!(err.message.contains(want), "{entry}: {}", err.message);
+        }
+    }
+
+    #[test]
+    fn table_distinct_range_constraint_parses() {
+        let t = parse_tables_clause(
+            "p AS periods PRIMARY KEY (id) UNIQUE (label) \
+             constraint period_range distinct range between start_ts and end_ts exclusive \
+             COMMENT = 'periods'",
+            0,
+        )
+        .unwrap();
+        assert_eq!(
+            t[0].distinct_ranges,
+            vec![crate::model::DistinctRange {
+                name: "period_range".into(),
+                start: "start_ts".into(),
+                end: "end_ts".into(),
+            }]
+        );
+        assert_eq!(t[0].unique_constraints, vec![vec!["label"]]);
+        assert_eq!(t[0].comment.as_deref(), Some("periods"));
+    }
+
+    /// A constraint name or bound spelled `unique` is the constraint's, not a
+    /// UNIQUE key the scan for one finds further on (PR #338 review).
+    #[test]
+    fn distinct_range_named_or_bounded_by_unique_parses() {
+        let t = parse_tables_clause(
+            "p AS periods PRIMARY KEY (id) UNIQUE (label) \
+             CONSTRAINT unique DISTINCT RANGE BETWEEN unique AND end_ts EXCLUSIVE",
+            0,
+        )
+        .unwrap();
+        assert_eq!(
+            t[0].distinct_ranges,
+            vec![crate::model::DistinctRange {
+                name: "unique".into(),
+                start: "unique".into(),
+                end: "end_ts".into(),
+            }]
+        );
+        assert_eq!(t[0].unique_constraints, vec![vec!["label"]]);
+    }
+
+    #[test]
+    fn malformed_table_constraints_refused() {
+        for (entry, want) in [
+            (
+                "p AS periods CONSTRAINT DISTINCT RANGE BETWEEN s AND e EXCLUSIVE",
+                "must read",
+            ),
+            (
+                "p AS periods CONSTRAINT c CHECK (x > 0)",
+                "DISTINCT RANGE is the only",
+            ),
+            (
+                "p AS periods CONSTRAINT c DISTINCT RANGE BETWEEN s AND e",
+                "only half-open",
+            ),
+            (
+                "p AS periods CONSTRAINT c DISTINCT RANGE BETWEEN s AND s EXCLUSIVE",
+                "both its",
+            ),
+            (
+                "p AS periods junk CONSTRAINT c DISTINCT RANGE BETWEEN s AND e EXCLUSIVE",
+                "before CONSTRAINT",
+            ),
+        ] {
+            let err = parse_tables_clause(entry, 0).unwrap_err();
+            assert!(err.message.contains(want), "{entry}: {}", err.message);
+        }
     }
 
     #[test]

@@ -1,8 +1,9 @@
 use proptest::prelude::*;
 use semantic_views::model::{
-    AccessModifier, Cardinality, CortexSearchService, CustomInstructions, Dimension, Fact, Join,
-    Materialization, MaxStaleness, Metric, NonAdditiveDim, NullsOrder, SemanticViewDefinition,
-    SortOrder, TableRef, Tag, TagName, Variable, VerifiedQuery, WindowOrderBy, WindowSpec,
+    AccessModifier, Cardinality, CortexSearchService, CustomInstructions, Dimension, DistinctRange,
+    Fact, Join, Materialization, MaxStaleness, Metric, NonAdditiveDim, NullsOrder,
+    SemanticViewDefinition, SortOrder, TableRef, Tag, TagName, Variable, VerifiedQuery,
+    WindowOrderBy, WindowSpec,
 };
 
 // ---------------------------------------------------------------------------
@@ -156,6 +157,15 @@ fn arb_table_ref() -> impl Strategy<Value = TableRef> {
             Just("SELECT * FROM orders".to_string()),
             Just("SELECT id, ' – ☕' AS note\nFROM orders\nWHERE amount > 0".to_string()),
         ]),
+        // Phase 7.2: DISTINCT RANGE constraints.
+        proptest::collection::vec(
+            (arb_name(), arb_name(), arb_name()).prop_map(|(name, start, end)| DistinctRange {
+                name,
+                start,
+                end,
+            }),
+            0..=2,
+        ),
     )
         .prop_map(
             |(
@@ -167,6 +177,7 @@ fn arb_table_ref() -> impl Strategy<Value = TableRef> {
                 synonyms,
                 tags,
                 definition,
+                distinct_ranges,
             )| {
                 TableRef {
                     // An inline-query table (Phase 6.4) has no table name.
@@ -182,6 +193,7 @@ fn arb_table_ref() -> impl Strategy<Value = TableRef> {
                     comment,
                     synonyms,
                     tags,
+                    distinct_ranges,
                 }
             },
         )
@@ -366,17 +378,24 @@ fn arb_join() -> impl Strategy<Value = Join> {
         proptest::collection::vec(arb_name(), 0..=2),
         proptest::option::of(arb_name()),
         proptest::option::of(0usize..2),
+        proptest::option::of(arb_name()),
     )
         .prop_map(
-            |(table, from_alias, fk_columns, cardinality, ref_columns, name, asof)| Join {
-                // Phase 7.1: an ASOF position within the generated lists.
-                asof: asof.filter(|i| *i < fk_columns.len().min(ref_columns.len())),
-                table,
-                from_alias,
-                fk_columns,
-                ref_columns,
-                name,
-                cardinality,
+            |(table, from_alias, fk_columns, cardinality, ref_columns, name, asof, range_end)| {
+                Join {
+                    // Phase 7.1: an ASOF position within the generated lists.
+                    asof: asof.filter(|i| *i < fk_columns.len().min(ref_columns.len())),
+                    // Phase 7.2: a range end, on the shape a range relationship has.
+                    range_end: range_end.filter(|_| {
+                        asof.is_none() && fk_columns.len() == 1 && ref_columns.len() == 1
+                    }),
+                    table,
+                    from_alias,
+                    fk_columns,
+                    ref_columns,
+                    name,
+                    cardinality,
+                }
             },
         )
 }

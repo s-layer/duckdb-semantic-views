@@ -389,6 +389,61 @@ pub fn view_present(name: &str, schema: &str) -> Result<bool, String> {
         }))
 }
 
+/// The relationship checks of [`check_create_members`]: an ASOF pair's types
+/// (Phase 7.1) and a range's bounds (Phase 7.2) bind against the tables.
+fn check_relationship_types(
+    view_name: &str,
+    def: &crate::model::SemanticViewDefinition,
+    database: Option<&str>,
+    schema: Option<&str>,
+) -> Result<(), String> {
+    // Phase 7.1: an ASOF column pair must be of a type Snowflake's ASOF match
+    // accepts, numeric or temporal (010279). DuckDB's ASOF join would also
+    // take a string, which orders differently from what a user means.
+    // The types are checked first, so a string column is refused as one
+    // rather than as a pair that does not compare.
+    for (join, compare) in def.joins.iter().flat_map(|j| [(j, false), (j, true)]) {
+        if let Some(probe) = asof_type_probe(join, def, compare) {
+            let rel = join.name.as_deref().unwrap_or("?");
+            match caller_describe(database, schema, &probe) {
+                Ok(cols) => {
+                    if let Some((col, data_type)) =
+                        cols.iter().find(|(_, t)| !asof_type_supported(t))
+                    {
+                        return Err(format!(
+                            "semantic view '{view_name}': relationship '{rel}': ASOF column \
+                             {col} has type {data_type}; an ASOF column must be numeric, a \
+                             date, a time or a timestamp"
+                        ));
+                    }
+                }
+                Err(CallerError::Interrupted(m)) => return Err(m),
+                Err(CallerError::Failed(m)) => {
+                    return Err(format!(
+                        "semantic view '{view_name}': relationship '{rel}' does not bind: {m}"
+                    ));
+                }
+            }
+        }
+    }
+    // Phase 7.2: a DISTINCT RANGE constraint's bounds must be columns of its
+    // table that compare with each other, and a range relationship's value
+    // must compare with the bounds, so either mistake fails here rather than
+    // at query time.
+    for (what, probe) in range_probes(def) {
+        match caller_describe(database, schema, &probe) {
+            Ok(_) => {}
+            Err(CallerError::Interrupted(m)) => return Err(m),
+            Err(CallerError::Failed(m)) => {
+                return Err(format!(
+                    "semantic view '{view_name}': {what} does not bind: {m}"
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
 /// Refuse a CREATE whose definition has a member `DuckDB` cannot bind, as
 /// Snowflake compiles every member expression at CREATE.
 ///
@@ -464,35 +519,7 @@ pub fn check_create_members(
             }
         }
     }
-    // Phase 7.1: an ASOF column pair must be of a type Snowflake's ASOF match
-    // accepts, numeric or temporal (010279). DuckDB's ASOF join would also
-    // take a string, which orders differently from what a user means.
-    // The types are checked first, so a string column is refused as one
-    // rather than as a pair that does not compare.
-    for (join, compare) in def.joins.iter().flat_map(|j| [(j, false), (j, true)]) {
-        if let Some(probe) = asof_type_probe(join, &def, compare) {
-            let rel = join.name.as_deref().unwrap_or("?");
-            match caller_describe(database, schema, &probe) {
-                Ok(cols) => {
-                    if let Some((col, data_type)) =
-                        cols.iter().find(|(_, t)| !asof_type_supported(t))
-                    {
-                        return Err(format!(
-                            "semantic view '{view_name}': relationship '{rel}': ASOF column \
-                             {col} has type {data_type}; an ASOF column must be numeric, a \
-                             date, a time or a timestamp"
-                        ));
-                    }
-                }
-                Err(CallerError::Interrupted(m)) => return Err(m),
-                Err(CallerError::Failed(m)) => {
-                    return Err(format!(
-                        "semantic view '{view_name}': relationship '{rel}' does not bind: {m}"
-                    ));
-                }
-            }
-        }
-    }
+    check_relationship_types(view_name, &def, database, schema)?;
     let unbound = crate::query::member_types::first_unbound_member(
         view_name,
         &def,
@@ -554,6 +581,69 @@ fn asof_type_probe(
             String::new()
         },
     ))
+}
+
+/// Phase 7.2: the probes `check_create_members` describes for ranges, each
+/// with what it checks: one per `DISTINCT RANGE` constraint, comparing its
+/// two bounds over its table, and one per range relationship, applying its
+/// match condition over the two tables. A relationship naming a table the
+/// view does not have is left to graph validation, which has refused it.
+fn range_probes(def: &crate::model::SemanticViewDefinition) -> Vec<(String, String)> {
+    use crate::expand::{quote_stored_ident, table_source};
+    let mut probes = Vec::new();
+    for t in &def.tables {
+        for r in &t.distinct_ranges {
+            probes.push((
+                format!("constraint '{}' on table '{}'", r.name, t.alias),
+                format!(
+                    "SELECT \"__sv_t\".{s}, \"__sv_t\".{e} FROM {src} AS \"__sv_t\" \
+                     WHERE \"__sv_t\".{s} < \"__sv_t\".{e} LIMIT 0",
+                    s = quote_stored_ident(&r.start),
+                    e = quote_stored_ident(&r.end),
+                    src = table_source(t, def),
+                ),
+            ));
+        }
+    }
+    let find = |alias: &str| {
+        def.tables
+            .iter()
+            .find(|t| t.alias.eq_ignore_ascii_case(alias))
+    };
+    for join in &def.joins {
+        let (Some(end), [fk], [start]) = (
+            &join.range_end,
+            join.fk_columns.as_slice(),
+            join.ref_columns.as_slice(),
+        ) else {
+            continue;
+        };
+        let (Some(from), Some(to)) = (find(&join.from_alias), find(&join.table)) else {
+            continue;
+        };
+        probes.push((
+            format!(
+                "range relationship '{}'",
+                join.name.as_deref().unwrap_or("?")
+            ),
+            // The plain comparisons first, for DuckDB's clearer error on a
+            // pair that does not compare; then the condition the query
+            // emits, so the probe and the join cannot drift apart (PR #338).
+            {
+                let f = format!("\"__sv_f\".{}", quote_stored_ident(fk));
+                let s = format!("\"__sv_t\".{}", quote_stored_ident(start));
+                let e = format!("\"__sv_t\".{}", quote_stored_ident(end));
+                format!(
+                    "SELECT 1 FROM {from_src} AS \"__sv_f\", {to_src} AS \"__sv_t\" \
+                     WHERE {f} >= {s} AND {f} < {e} AND {cond} LIMIT 0",
+                    cond = crate::expand::range_condition(&f, &s, &e),
+                    from_src = table_source(from, def),
+                    to_src = table_source(to, def),
+                )
+            },
+        ));
+    }
+    probes
 }
 
 /// Whether `data_type`, as `DESCRIBE` names it, is a type an ASOF column may

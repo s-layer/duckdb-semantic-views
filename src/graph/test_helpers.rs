@@ -24,6 +24,7 @@ pub(super) fn make_def(
                 comment: None,
                 synonyms: vec![],
                 tags: Vec::new(),
+                distinct_ranges: vec![],
             })
             .collect(),
         joins: joins
@@ -101,6 +102,7 @@ pub(super) fn make_def_with_facts(
                 comment: None,
                 synonyms: vec![],
                 tags: Vec::new(),
+                distinct_ranges: vec![],
             })
             .collect(),
         facts: facts
@@ -183,6 +185,7 @@ pub(super) fn make_def_with_derived_metrics(
             comment: None,
             synonyms: vec![],
             tags: Vec::new(),
+            distinct_ranges: vec![],
         }],
         metrics,
         dimensions: vec![],
@@ -222,6 +225,7 @@ pub(super) fn make_def_with_named_joins(
                 comment: None,
                 synonyms: vec![],
                 tags: Vec::new(),
+                distinct_ranges: vec![],
             })
             .collect(),
         joins: joins

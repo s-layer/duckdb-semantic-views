@@ -305,6 +305,11 @@ Each entry in the ``tables`` list declares a physical table, or a table defined 
      - No
      - ``[]``
      - UNIQUE constraint column lists. Each inner list is one constraint. Used for cardinality inference.
+   * - ``distinct_ranges``
+     - list of mappings
+     - No
+     - ``[]``
+     - The table's ``DISTINCT RANGE`` constraints (see :ref:`Range relationships <ref-create-range-relationships>`), each a mapping with ``name``, ``start`` and ``end``: ``{name: period_range, start: start_ts, end: end_ts}``. *(Added in 0.19.0.)*
    * - ``comment``
      - string
      - No
@@ -696,6 +701,11 @@ Each entry in the ``joins`` list declares a FK/PK relationship between tables. T
      - No
      -
      - The 0-based position, in ``fk_columns`` and ``ref_columns``, of the column pair an :ref:`ASOF relationship <ref-create-relationships>` matches on (``REFERENCES a(cust_id, ASOF start_date)`` is ``asof: 1``). Omitted for a plain relationship. *(Added in 0.19.0.)*
+   * - ``range_end``
+     - string
+     - No
+     -
+     - The end column of a :ref:`range relationship <ref-create-range-relationships>`, whose start column is its one ``ref_columns`` entry (``REFERENCES p(BETWEEN start_ts AND end_ts EXCLUSIVE)`` is ``ref_columns: [start_ts]`` and ``range_end: end_ts``). Omitted for any other relationship. *(Added in 0.19.0.)*
    * - ``name``
      - string
      - Yes

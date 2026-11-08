@@ -21,6 +21,7 @@ fn simple_definition() -> SemanticViewDefinition {
             comment: None,
             synonyms: vec![],
             tags: Vec::new(),
+            distinct_ranges: vec![],
         }],
         dimensions: vec![
             Dimension {
@@ -141,6 +142,7 @@ fn joined_definition() -> SemanticViewDefinition {
                 comment: None,
                 synonyms: vec![],
                 tags: Vec::new(),
+                distinct_ranges: vec![],
             },
             semantic_views::model::TableRef {
                 alias: "customers".to_string(),
@@ -151,6 +153,7 @@ fn joined_definition() -> SemanticViewDefinition {
                 comment: None,
                 synonyms: vec![],
                 tags: Vec::new(),
+                distinct_ranges: vec![],
             },
             semantic_views::model::TableRef {
                 alias: "products".to_string(),
@@ -161,6 +164,7 @@ fn joined_definition() -> SemanticViewDefinition {
                 comment: None,
                 synonyms: vec![],
                 tags: Vec::new(),
+                distinct_ranges: vec![],
             },
         ],
         dimensions: vec![

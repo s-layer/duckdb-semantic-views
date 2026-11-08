@@ -280,6 +280,7 @@ fn quote_list(names: &[&str]) -> String {
 /// - Checks `ref_columns` against each of target's `unique_constraints` (exact set match)
 /// - Rejects if neither matches (CARD-03/CARD-09: exact match required, subsets rejected)
 fn validate_fk_references(def: &SemanticViewDefinition) -> Result<(), String> {
+    check_distinct_ranges(def)?;
     for join in &def.joins {
         // Phase 7.1: the ASOF marker names one of the relationship's column
         // pairs. The DDL parser can only produce such an index; a YAML
@@ -295,6 +296,10 @@ fn validate_fk_references(def: &SemanticViewDefinition) -> Result<(), String> {
                     join.ref_columns.len()
                 ));
             }
+        }
+        if let Some(end) = &join.range_end {
+            check_range_reference(def, join, end)?;
+            continue;
         }
         if join.fk_columns.is_empty() || join.ref_columns.is_empty() {
             continue;
@@ -353,6 +358,102 @@ fn validate_fk_references(def: &SemanticViewDefinition) -> Result<(), String> {
         ));
     }
     Ok(())
+}
+
+/// Phase 7.2: a table's DISTINCT RANGE constraints each have two different
+/// bounds (fixture R8; `v >= s AND v < s` would match nothing) and names that no
+/// other constraint on the table shares, compared the way identifiers
+/// are. The DDL parser refuses the first; a YAML or stored definition
+/// can carry either (PR #338 review).
+fn check_distinct_ranges(def: &SemanticViewDefinition) -> Result<(), String> {
+    for t in &def.tables {
+        for (i, r) in t.distinct_ranges.iter().enumerate() {
+            if crate::ident::ident_matches(&r.start, &r.end) {
+                return Err(format!(
+                    "constraint '{}' on table '{}' names '{}' as both its start and its end; \
+                     a range needs two columns.",
+                    r.name, t.alias, r.start
+                ));
+            }
+            if t.distinct_ranges[..i]
+                .iter()
+                .any(|o| crate::ident::ident_matches(&o.name, &r.name))
+            {
+                return Err(format!(
+                    "table '{}' has more than one constraint named '{}'.",
+                    t.alias, r.name
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Phase 7.2: a range relationship pairs one value column with one range,
+/// and the range must be one the referenced table declares as `DISTINCT
+/// RANGE`, with the same start and end in the same order (Snowflake refuses
+/// both a missing constraint and swapped bounds, 010300). The constraint, not
+/// a primary key, is what makes the referenced table the "one" side. The DDL
+/// parser already holds the shape; a YAML definition can carry any.
+fn check_range_reference(
+    def: &SemanticViewDefinition,
+    join: &crate::model::Join,
+    end: &str,
+) -> Result<(), String> {
+    let rel_name = join.name.as_deref().unwrap_or("?");
+    if join.asof.is_some() {
+        return Err(format!(
+            "relationship '{rel_name}' is both an ASOF and a range relationship; it can be \
+             one or the other."
+        ));
+    }
+    let [_] = join.fk_columns.as_slice() else {
+        return Err(format!(
+            "range relationship '{rel_name}' must have exactly one foreign-key column, the \
+             value matched against the range; it has {}.",
+            join.fk_columns.len()
+        ));
+    };
+    let [start] = join.ref_columns.as_slice() else {
+        return Err(format!(
+            "range relationship '{rel_name}' must have exactly one referenced column, the \
+             range's start; it has {}.",
+            join.ref_columns.len()
+        ));
+    };
+    let Some(target) = def
+        .tables
+        .iter()
+        .find(|t| t.alias.eq_ignore_ascii_case(&join.table))
+    else {
+        return Ok(()); // An unknown target is reported by the reachability check.
+    };
+    let matches = |r: &crate::model::DistinctRange| {
+        crate::ident::ident_matches(&r.start, start) && crate::ident::ident_matches(&r.end, end)
+    };
+    if target.distinct_ranges.iter().any(matches) {
+        return Ok(());
+    }
+    let declared = if target.distinct_ranges.is_empty() {
+        "it declares none".to_string()
+    } else {
+        format!(
+            "it declares {}",
+            target
+                .distinct_ranges
+                .iter()
+                .map(|r| format!("'{}' (BETWEEN {} AND {})", r.name, r.start, r.end))
+                .collect::<Vec<_>>()
+                .join(", ")
+        )
+    };
+    Err(format!(
+        "range relationship '{rel_name}' references BETWEEN {start} AND {end} on table '{}', \
+         which has no matching DISTINCT RANGE constraint: {declared}. Declare \
+         'CONSTRAINT name DISTINCT RANGE BETWEEN {start} AND {end} EXCLUSIVE' on the table, \
+         with the same columns in the same order.",
+        target.alias
+    ))
 }
 
 /// Check that all dim/metric `source_table` aliases are declared in the graph.
@@ -1439,6 +1540,7 @@ mod tests {
                 comment: None,
                 synonyms: vec![],
                 tags: Vec::new(),
+                distinct_ranges: vec![],
             }],
             joins: vec![Join {
                 table: "customers".to_string(),
@@ -1695,6 +1797,7 @@ mod tests {
                         comment: None,
                         synonyms: vec![],
                         tags: Vec::new(),
+                        distinct_ranges: vec![],
                     },
                     TableRef {
                         alias: "c".to_string(),
@@ -1705,6 +1808,7 @@ mod tests {
                         comment: None,
                         synonyms: vec![],
                         tags: Vec::new(),
+                        distinct_ranges: vec![],
                     },
                 ],
                 vec![Join {
@@ -1735,6 +1839,7 @@ mod tests {
                         comment: None,
                         synonyms: vec![],
                         tags: Vec::new(),
+                        distinct_ranges: vec![],
                     },
                     TableRef {
                         alias: "c".to_string(),
@@ -1745,6 +1850,7 @@ mod tests {
                         comment: None,
                         synonyms: vec![],
                         tags: Vec::new(),
+                        distinct_ranges: vec![],
                     },
                 ],
                 vec![Join {
@@ -1775,6 +1881,7 @@ mod tests {
                         comment: None,
                         synonyms: vec![],
                         tags: Vec::new(),
+                        distinct_ranges: vec![],
                     },
                     TableRef {
                         alias: "c".to_string(),
@@ -1785,6 +1892,7 @@ mod tests {
                         comment: None,
                         synonyms: vec![],
                         tags: Vec::new(),
+                        distinct_ranges: vec![],
                     },
                 ],
                 vec![Join {
@@ -1819,6 +1927,7 @@ mod tests {
                         comment: None,
                         synonyms: vec![],
                         tags: Vec::new(),
+                        distinct_ranges: vec![],
                     },
                     TableRef {
                         alias: "c".to_string(),
@@ -1829,6 +1938,7 @@ mod tests {
                         comment: None,
                         synonyms: vec![],
                         tags: Vec::new(),
+                        distinct_ranges: vec![],
                     },
                 ],
                 vec![Join {
@@ -1861,6 +1971,7 @@ mod tests {
                         comment: None,
                         synonyms: vec![],
                         tags: Vec::new(),
+                        distinct_ranges: vec![],
                     },
                     TableRef {
                         alias: "c".to_string(),
@@ -1871,6 +1982,7 @@ mod tests {
                         comment: None,
                         synonyms: vec![],
                         tags: Vec::new(),
+                        distinct_ranges: vec![],
                     },
                 ],
                 vec![Join {
@@ -1902,6 +2014,7 @@ mod tests {
                         comment: None,
                         synonyms: vec![],
                         tags: Vec::new(),
+                        distinct_ranges: vec![],
                     },
                     TableRef {
                         alias: "c".to_string(),
@@ -1912,6 +2025,7 @@ mod tests {
                         comment: None,
                         synonyms: vec![],
                         tags: Vec::new(),
+                        distinct_ranges: vec![],
                     },
                 ],
                 vec![Join {
@@ -1927,6 +2041,106 @@ mod tests {
                 validate_fk_references(&def).is_ok(),
                 "Empty ref_columns should skip validation"
             );
+        }
+
+        /// Phase 7.2: a range relationship needs the referenced table's
+        /// matching DISTINCT RANGE constraint (fixture R7, R9), not a key.
+        fn range_def(
+            constraint: Option<(&str, &str)>,
+            start: &str,
+            end: &str,
+        ) -> SemanticViewDefinition {
+            make_fk_ref_def(
+                vec![
+                    TableRef {
+                        alias: "e".to_string(),
+                        table: "events".to_string(),
+                        ..Default::default()
+                    },
+                    TableRef {
+                        alias: "p".to_string(),
+                        table: "periods".to_string(),
+                        pk_columns: vec!["period_id".to_string()],
+                        distinct_ranges: constraint
+                            .map(|(s, e)| crate::model::DistinctRange {
+                                name: "period_range".to_string(),
+                                start: s.to_string(),
+                                end: e.to_string(),
+                            })
+                            .into_iter()
+                            .collect(),
+                        ..Default::default()
+                    },
+                ],
+                vec![Join {
+                    table: "p".to_string(),
+                    from_alias: "e".to_string(),
+                    fk_columns: vec!["e_ts".to_string()],
+                    ref_columns: vec![start.to_string()],
+                    range_end: Some(end.to_string()),
+                    name: Some("event_period".to_string()),
+                    ..Default::default()
+                }],
+            )
+        }
+
+        #[test]
+        fn range_relationship_with_its_constraint_passes() {
+            let def = range_def(Some(("start_ts", "end_ts")), "START_TS", "end_ts");
+            assert!(validate_fk_references(&def).is_ok());
+        }
+
+        #[test]
+        fn range_relationship_without_a_constraint_is_refused() {
+            let err = validate_fk_references(&range_def(None, "start_ts", "end_ts")).unwrap_err();
+            assert!(
+                err.contains("no matching DISTINCT RANGE constraint"),
+                "{err}"
+            );
+            assert!(err.contains("it declares none"), "{err}");
+        }
+
+        #[test]
+        fn range_relationship_with_swapped_bounds_is_refused() {
+            let def = range_def(Some(("start_ts", "end_ts")), "end_ts", "start_ts");
+            let err = validate_fk_references(&def).unwrap_err();
+            assert!(
+                err.contains("no matching DISTINCT RANGE constraint"),
+                "{err}"
+            );
+        }
+
+        #[test]
+        fn distinct_range_with_one_column_for_both_bounds_is_refused() {
+            // A stored or YAML definition can carry what the DDL parser refuses
+            // (fixture R8): `v >= s AND v < s` would match nothing.
+            let def = range_def(Some(("s", "S")), "s", "S");
+            let err = validate_fk_references(&def).unwrap_err();
+            assert!(err.contains("both its start and its end"), "{err}");
+        }
+
+        #[test]
+        fn distinct_range_names_must_differ_on_a_table() {
+            let mut def = range_def(Some(("start_ts", "end_ts")), "start_ts", "end_ts");
+            let mut second = def.tables[1].distinct_ranges[0].clone();
+            second.name = "PERIOD_RANGE".to_string();
+            second.start = "a".to_string();
+            second.end = "b".to_string();
+            def.tables[1].distinct_ranges.push(second);
+            let err = validate_fk_references(&def).unwrap_err();
+            assert!(err.contains("more than one constraint named"), "{err}");
+        }
+
+        #[test]
+        fn range_relationship_of_another_shape_is_refused() {
+            let mut def = range_def(Some(("start_ts", "end_ts")), "start_ts", "end_ts");
+            def.joins[0].fk_columns.push("x".to_string());
+            let err = validate_fk_references(&def).unwrap_err();
+            assert!(err.contains("exactly one foreign-key column"), "{err}");
+            let mut def = range_def(Some(("start_ts", "end_ts")), "start_ts", "end_ts");
+            def.joins[0].asof = Some(0);
+            let err = validate_fk_references(&def).unwrap_err();
+            assert!(err.contains("both an ASOF and a range"), "{err}");
         }
     }
 }

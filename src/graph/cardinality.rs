@@ -119,7 +119,9 @@ pub(crate) fn infer_cardinality(
             // one referenced row, but many referencing rows can match the same
             // one, so the referenced table is never on a "one" side it could
             // be grouped from (Snowflake refuses that query, 010956).
-            if join.asof.is_some() {
+            // Phase 7.2: so is a range relationship, whose referenced rows are
+            // periods that many referencing rows can fall in.
+            if join.asof.is_some() || join.range_end.is_some() {
                 join.cardinality = Cardinality::ManyToOne;
             }
         }

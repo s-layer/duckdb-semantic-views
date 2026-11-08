@@ -513,6 +513,7 @@ fn build_def() -> SemanticViewDefinition {
             comment: None,
             synonyms: vec![],
             tags: Vec::new(),
+            distinct_ranges: vec![],
         },
         TableRef {
             alias: "u".to_string(),
@@ -523,6 +524,7 @@ fn build_def() -> SemanticViewDefinition {
             comment: None,
             synonyms: vec![],
             tags: Vec::new(),
+            distinct_ranges: vec![],
         },
         // Phase 6.3: the role-played table, reached from `t` twice.
         TableRef {
@@ -534,6 +536,7 @@ fn build_def() -> SemanticViewDefinition {
             comment: None,
             synonyms: vec![],
             tags: Vec::new(),
+            distinct_ranges: vec![],
         },
         // Phase 6.3b: reached only through `p`.
         TableRef {
@@ -545,6 +548,7 @@ fn build_def() -> SemanticViewDefinition {
             comment: None,
             synonyms: vec![],
             tags: Vec::new(),
+            distinct_ranges: vec![],
         },
         // Phase 6.3b: reached only through `q`, two hops past `p`.
         TableRef {
@@ -556,6 +560,7 @@ fn build_def() -> SemanticViewDefinition {
             comment: None,
             synonyms: vec![],
             tags: Vec::new(),
+            distinct_ranges: vec![],
         },
     ];
     let dimensions = vec![
@@ -730,6 +735,7 @@ fn build_def() -> SemanticViewDefinition {
         name: Some(name.to_string()),
         cardinality: Cardinality::ManyToOne,
         asof: None,
+        range_end: None,
     };
     let joins = vec![
         Join {
@@ -740,6 +746,7 @@ fn build_def() -> SemanticViewDefinition {
             name: Some("t_u".to_string()),
             cardinality: Cardinality::ManyToOne,
             asof: None,
+            range_end: None,
         },
         role("t_p1", "p1"),
         role("t_p2", "p2"),
@@ -751,6 +758,7 @@ fn build_def() -> SemanticViewDefinition {
             name: Some("p_q".to_string()),
             cardinality: Cardinality::ManyToOne,
             asof: None,
+            range_end: None,
         },
         Join {
             from_alias: "q".to_string(),
@@ -760,6 +768,7 @@ fn build_def() -> SemanticViewDefinition {
             name: Some("q_s".to_string()),
             cardinality: Cardinality::ManyToOne,
             asof: None,
+            range_end: None,
         },
     ];
     SemanticViewDefinition {

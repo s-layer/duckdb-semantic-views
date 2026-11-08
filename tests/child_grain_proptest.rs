@@ -602,6 +602,7 @@ fn build_def() -> SemanticViewDefinition {
             comment: None,
             synonyms: vec![],
             tags: Vec::new(),
+            distinct_ranges: vec![],
         },
         TableRef {
             alias: "li".to_string(),
@@ -612,6 +613,7 @@ fn build_def() -> SemanticViewDefinition {
             comment: None,
             synonyms: vec![],
             tags: Vec::new(),
+            distinct_ranges: vec![],
         },
         // TC2: the grandchild, two descending hops from the base.
         TableRef {
@@ -623,6 +625,7 @@ fn build_def() -> SemanticViewDefinition {
             comment: None,
             synonyms: vec![],
             tags: Vec::new(),
+            distinct_ranges: vec![],
         },
     ];
     let dimension = |name: &str, expr: &str, source: &str, is_filter: bool| Dimension {
@@ -740,6 +743,7 @@ fn build_def() -> SemanticViewDefinition {
             name: Some("li_o".to_string()),
             cardinality: Cardinality::ManyToOne,
             asof: None,
+            range_end: None,
         },
         Join {
             from_alias: "lid".to_string(),
@@ -749,6 +753,7 @@ fn build_def() -> SemanticViewDefinition {
             name: Some("lid_li".to_string()),
             cardinality: Cardinality::ManyToOne,
             asof: None,
+            range_end: None,
         },
     ];
     SemanticViewDefinition {

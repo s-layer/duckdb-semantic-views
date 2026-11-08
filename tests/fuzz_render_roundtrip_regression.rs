@@ -35,6 +35,7 @@ fn ci_crash_input_no_longer_breaks_the_fixpoint() {
             comment: Some(String::new()),
             synonyms: vec![],
             tags: Vec::new(),
+            distinct_ranges: vec![],
         }],
         metrics: vec![
             Metric {

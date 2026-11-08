@@ -1,6 +1,8 @@
 mod facts;
 mod fan_trap;
 mod join_resolver;
+#[cfg(feature = "extension")]
+pub(crate) use join_resolver::range_condition;
 mod materialization;
 mod per_grain;
 mod resolution;
