@@ -54,7 +54,7 @@
 //! `COALESCE(.., TRUE)`, never with the expansion's join condition.
 
 use proptest::prelude::*;
-use semantic_views::expand::{expand, DimensionName, MetricName, QueryRequest};
+use semantic_views::expand::{expand, DimensionName, FactName, MetricName, QueryRequest};
 use semantic_views::model::{
     AccessModifier, Cardinality, Dimension, DistinctRange, Join, Metric, SemanticViewDefinition,
     TableRef,
@@ -705,7 +705,17 @@ fn oracle_sql(case: &Case) -> String {
         }
     }
     if anchors.is_empty() {
-        anchors.push("t"); // Dimensions-only: the base-anchored DISTINCT shape.
+        // Dimensions-only: the rows of the lowest table any queried dimension
+        // or filter member lives on, joined up from there (Snowflake's answer
+        // in the 2026-11-09 dims-only fixture). `ucat` alone lists `u`'s own
+        // values, the `u` rows no `t` row reaches included and no NULL for an
+        // orphan `t` row.
+        let mut members: Vec<&str> = case.sel_dims.iter().map(|&d| dim_table(DIMS[d])).collect();
+        if let Some(p) = &case.where_pred {
+            p.tables(&mut members);
+        }
+        let lowest = members.into_iter().min_by_key(|t| level(t)).unwrap_or("t");
+        anchors.push(lowest);
     }
     let mut sql = format!(
         "SELECT {} FROM ({}) g0",
@@ -1204,8 +1214,9 @@ fn pinned_asof_hop_takes_the_latest_period() {
 }
 
 /// Phase 7.1: the ASOF hop walked against its direction. With `u` listed
-/// first, a dimensions-only query starts from `u` and joins `t` onto it, so
-/// each `u` row must get exactly the `t` rows whose ASOF match it is. The
+/// first, a FACTS list starts from `u` and joins `t` onto it, so each `u` row
+/// must get exactly the `t` rows whose ASOF match it is, one output row per
+/// pair (a `u` row with none keeps one row with NULL `t` columns). The
 /// oracle finds each `t` row's match by the same correlated `max` as
 /// [`grain_sql`] and joins it to `u` by equality.
 fn reverse_asof_oracle(case: &Case) -> String {
@@ -1219,12 +1230,18 @@ fn reverse_asof_oracle(case: &Case) -> String {
             other => unreachable!("unexpected dim {other}"),
         })
         .collect();
-    format!(
-        "SELECT DISTINCT {} FROM u \
-         LEFT JOIN (SELECT t.*, (SELECT max(u2.us) FROM u u2 WHERE u2.uk = t.fk_u \
+    // `t` is joined only when `td` is asked for, as the expansion does: a
+    // FACTS list keeps one row per row of the joined set, so an unasked
+    // `t` would multiply the `u` rows.
+    let t_join = if case.sel_dims.contains(&0) {
+        "LEFT JOIN (SELECT t.*, (SELECT max(u2.us) FROM u u2 WHERE u2.uk = t.fk_u \
                     AND u2.us <= t.ts) AS asof_us FROM t) t \
-           ON t.fk_u = u.uk AND t.asof_us = u.us \
-         LEFT JOIN w ON u.fk_w = w.id",
+           ON t.fk_u = u.uk AND t.asof_us = u.us "
+    } else {
+        ""
+    };
+    format!(
+        "SELECT {} FROM u {t_join}LEFT JOIN w ON u.fk_w = w.id",
         dims.join(", ")
     )
 }
@@ -1243,12 +1260,14 @@ proptest! {
         let mut def = build_def(Hop::Asof);
         def.tables.swap(0, 1); // `u` first: the base table, so `t` is joined onto it.
         let req = QueryRequest {
-            // PIN: this property checks which rows the reverse join pairs; dimensions-only queries are the shape that walks it, and `multi_hop_fence_and_aggregation` varies the filter over the forward hop.
+            // PIN: this property checks which rows the reverse join pairs; a FACTS list is the shape that walks it, and `multi_hop_fence_and_aggregation` varies the filter over the forward hop.
             where_clause: None,
-            dimensions: case.sel_dims.iter().map(|&i| DimensionName::new(DIMS[i])).collect(),
+            // A dimensions-only query no longer walks the hop backwards: it reads
+            // from `t` whenever `td` is asked for. A FACTS list still reads the
+            // base table's rows, so it is what joins `t` onto `u` now.
+            dimensions: vec![],
             metrics: vec![],
-            // PIN: FACTS is a row-level shape with no per-grain meaning. TECH-DEBT #66
-            facts: vec![],
+            facts: case.sel_dims.iter().map(|&i| FactName::new(DIMS[i])).collect(),
         };
         let expanded = expand("multihop", &def, &req)
             .map_err(|e| TestCaseError::fail(format!("rejected: {e}")))?;
@@ -1355,13 +1374,19 @@ fn reverse_range_oracle(case: &Case) -> String {
             other => unreachable!("unexpected dim {other}"),
         })
         .collect();
-    format!(
-        "SELECT DISTINCT {} FROM u \
-         LEFT JOIN (SELECT t.*, (SELECT min(u2.id) FROM u u2 WHERE t.ts IS NOT NULL \
+    // `t` is joined only when `td` is asked for, as the expansion does: a
+    // FACTS list keeps one row per row of the joined set, so an unasked
+    // `t` would multiply the `u` rows.
+    let t_join = if case.sel_dims.contains(&0) {
+        "LEFT JOIN (SELECT t.*, (SELECT min(u2.id) FROM u u2 WHERE t.ts IS NOT NULL \
                     AND COALESCE(u2.rs <= t.ts, TRUE) AND COALESCE(t.ts < u2.re, TRUE)) \
                     AS range_id FROM t) t \
-           ON t.range_id = u.id \
-         LEFT JOIN w ON u.fk_w = w.id",
+           ON t.range_id = u.id "
+    } else {
+        ""
+    };
+    format!(
+        "SELECT {} FROM u {t_join}LEFT JOIN w ON u.fk_w = w.id",
         dims.join(", ")
     )
 }
@@ -1380,12 +1405,14 @@ proptest! {
         let mut def = build_def(Hop::Range);
         def.tables.swap(0, 1); // `u` first: the base table, so `t` is joined onto it.
         let req = QueryRequest {
-            // PIN: this property checks which rows the reverse join pairs; dimensions-only queries are the shape that walks it, and `multi_hop_fence_and_aggregation` varies the filter over the forward hop.
+            // PIN: this property checks which rows the reverse join pairs; a FACTS list is the shape that walks it, and `multi_hop_fence_and_aggregation` varies the filter over the forward hop.
             where_clause: None,
-            dimensions: case.sel_dims.iter().map(|&i| DimensionName::new(DIMS[i])).collect(),
+            // A dimensions-only query no longer walks the hop backwards: it reads
+            // from `t` whenever `td` is asked for. A FACTS list still reads the
+            // base table's rows, so it is what joins `t` onto `u` now.
+            dimensions: vec![],
             metrics: vec![],
-            // PIN: FACTS is a row-level shape with no per-grain meaning. TECH-DEBT #66
-            facts: vec![],
+            facts: case.sel_dims.iter().map(|&i| FactName::new(DIMS[i])).collect(),
         };
         let expanded = expand("multihop", &def, &req)
             .map_err(|e| TestCaseError::fail(format!("rejected: {e}")))?;

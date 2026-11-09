@@ -248,6 +248,89 @@ fn phantom_row_filter(
     ))
 }
 
+/// The table a dimensions-only query reads from, when it is not the base table.
+///
+/// Snowflake lists the rows of the one table that every queried dimension's
+/// table, every table a dimension's facts live on, and every filtered table can
+/// be reached from by following foreign keys (many-to-one), and joins up from
+/// it (the 2026-11-09 dims-only fixture). So one table lists its own values, a
+/// parent and a child list the child's rows, and the two sides of a bridge list
+/// the bridge's rows, whichever table is declared first. Reading from the base
+/// table instead made the answer depend on declaration order.
+///
+/// Of the tables that reach every member, the one closest to them is chosen:
+/// the candidate no other candidate sits above. `None` keeps the base-anchored
+/// emission, which is what it already answers when:
+///
+/// - that table is the base table;
+/// - a dimension or a filter member names no table, so its rows cannot be
+///   placed;
+/// - no table reaches every member (two children of one parent, say), or two
+///   do equally well (two bridges between the same tables);
+/// - a path from the anchor crosses a role-played table, which no relationship
+///   picks here.
+pub(super) fn dims_only_anchor(
+    def: &SemanticViewDefinition,
+    resolved_dims: &[&Dimension],
+    where_tables: &[String],
+    where_has_unqualified_member: bool,
+) -> Option<String> {
+    if where_has_unqualified_member {
+        return None;
+    }
+    let mut members: Vec<String> = Vec::new();
+    for dim in resolved_dims {
+        members.push(dim.source_table.as_ref()?.to_ascii_lowercase());
+        members.extend(
+            super::facts::collect_referenced_fact_tables(&dim.expr, &def.facts)
+                .iter()
+                .map(|t| t.to_ascii_lowercase()),
+        );
+    }
+    members.extend(where_tables.iter().map(|t| t.to_ascii_lowercase()));
+    members.sort();
+    members.dedup();
+    let reaches = |from: &str, to: &str| from == to || reaches_base_by_foreign_key(def, from, to);
+    let candidates: Vec<String> = def
+        .tables
+        .iter()
+        .map(|t| t.alias.to_ascii_lowercase())
+        .filter(|t| members.iter().all(|m| reaches(t, m)))
+        .collect();
+    let closest: Vec<&String> = candidates
+        .iter()
+        .filter(|t| !candidates.iter().any(|o| o != *t && reaches(t, o)))
+        .collect();
+    let [anchor] = closest.as_slice() else {
+        return None;
+    };
+    let base = def.tables.first()?.alias.to_ascii_lowercase();
+    if **anchor == base {
+        return None;
+    }
+    let graph = super::fan_trap::GrainGraph::build(def)?;
+    for member in &members {
+        let path = graph.path(anchor, member)?;
+        for pair in path.windows(2) {
+            let edges = def
+                .joins
+                .iter()
+                .filter(|j| {
+                    let (f, t) = (
+                        j.from_alias.to_ascii_lowercase(),
+                        j.table.to_ascii_lowercase(),
+                    );
+                    (f == pair[0] && t == pair[1]) || (f == pair[1] && t == pair[0])
+                })
+                .count();
+            if edges != 1 {
+                return None;
+            }
+        }
+    }
+    Some((*anchor).clone())
+}
+
 /// Whether `alias` sits BELOW `base` in the relationship graph — i.e. following
 /// its declared foreign keys upwards (`from_alias` -> `table`, the referencing
 /// side to the referenced side) reaches the base table.
@@ -1080,6 +1163,41 @@ fn expand_unhoisted(
     } else {
         GroupBy::None
     };
+
+    // A dimensions-only query reads from the table under all its members, not
+    // from whichever table is declared first (see `dims_only_anchor`). Every
+    // hop from there is many-to-one, so there is no phantom row to filter.
+    if distinct && resolved.iter().all(|rd| rd.scoped_alias.is_none()) {
+        if let Some(anchor) = dims_only_anchor(
+            def,
+            &resolved_dims,
+            &where_tables,
+            where_has_unqualified_member,
+        ) {
+            let mut extra = where_tables.clone();
+            for dim in &resolved_dims {
+                extra.extend(super::facts::collect_referenced_fact_tables(
+                    &dim.expr, &def.facts,
+                ));
+            }
+            let joins = super::per_grain::anchor_joins(
+                def,
+                &anchor,
+                &resolved_dims,
+                &extra,
+                &std::collections::HashMap::new(),
+                &[],
+            );
+            return Ok(SelectSpec {
+                where_clause: resolved_where.map(|rw| rw.sql),
+                distinct,
+                items,
+                from: FromSource::AnchorTable { def, anchor, joins },
+                group_by: GroupBy::None,
+            }
+            .render());
+        }
+    }
 
     // EXP-29: a dimensions-only `SELECT DISTINCT` emits rows directly, so it has
     // the same phantom-row exposure as a fact query — a childless parent

@@ -91,9 +91,8 @@ GROUP BY
         "ON clause must not reference the never-joined p: {sql}"
     );
 
-    // The base-anchored resolver the test was written for still emits the
-    // dimensions-only path, which is where SG-2's edge choice now lives for a
-    // query reaching `li` from the base.
+    // A dimensions-only query reads from the table under its members, `li`
+    // here, and joins up to `o` through the li -> o edge as well.
     let def = def.with_dimension("item_qty", "li.qty", Some("li"));
     let dims_only = QueryRequest {
         where_clause: None,
@@ -104,10 +103,10 @@ GROUP BY
     let sql = expand("test", &def, &dims_only).unwrap();
     assert!(
         sql.contains(
-            "FROM \"orders\" AS \"o\"\nLEFT JOIN \"line_items\" AS \"li\" \
+            "FROM \"line_items\" AS \"li\"\nLEFT JOIN \"orders\" AS \"o\" \
              ON \"li\".\"order_id\" = \"o\".\"id\""
         ),
-        "the resolver must join li via li->o: {sql}"
+        "the dims-only query must join o via li->o: {sql}"
     );
     assert!(
         !sql.contains("\"p\"."),

@@ -538,7 +538,7 @@ Each order takes the address of its customer with the greatest ``start_date`` on
 
 - At most one column of a relationship can be ``ASOF``, and it can be any column of the list.
 - The two ``ASOF`` columns must be numbers, dates, times or timestamps, of types that compare. ``CREATE`` checks this against the tables.
-- As for any relationship, the referenced columns, the ``ASOF`` one included, must be the target's ``PRIMARY KEY`` or a ``UNIQUE`` key. The data is not checked against it, and the answer for data that breaks the key is not defined, as for any key here. If two target rows share a key and a start value, an order that matches them is joined to one of the two when the query joins from the orders (Snowflake also picks one), and to both when it joins from the addresses, as a query with only dimensions does when the address table is first in ``TABLES``.
+- As for any relationship, the referenced columns, the ``ASOF`` one included, must be the target's ``PRIMARY KEY`` or a ``UNIQUE`` key. The data is not checked against it, and the answer for data that breaks the key is not defined, as for any key here. If two target rows share a key and a start value, an order that matches them is joined to one of the two when the query joins from the orders (Snowflake also picks one), and to both when it joins from the addresses, as a ``FACTS`` query does when the address table is first in ``TABLES``.
 - An ``ASOF`` relationship is always many-to-one, whatever keys the "from" table declares, since many rows can match the same target row. A metric on the target is computed over the target's own rows, and grouping it by a dimension of the "from" table is refused as a :ref:`fan trap <howto-fan-traps>`.
 - ``DESCRIBE`` writes the column in ``REF_KEY`` as ``{"type":"ASOF","column":"<column>"}``, ``GET_DDL`` writes the keyword back, and the YAML export writes the column's 0-based position in the list as ``asof``. A release of the extension older than 0.19.0 cannot read a view with an ``ASOF`` relationship.
 
@@ -596,7 +596,7 @@ A metric on books can then be grouped or filtered by an author dimension, and th
 - A window metric, or a semi-additive metric whose ``NON ADDITIVE BY`` dimension is left out of the query, can't be grouped across a bridge, and the fan trap error says so.
 - The metric's table needs a ``PRIMARY KEY``, which each of its rows is counted once by. A ``UNIQUE`` key is not enough, because it can hold more than one ``NULL``, and without a ``PRIMARY KEY`` the query is refused as a fan trap.
 - Two bridges between the same two tables make the second table reachable from two tables, which is refused as a diamond (see below). Snowflake cannot pick one of them with ``USING`` either, since a metric's ``USING`` must name a relationship from the metric's own table.
-- A query with only dimensions reads from the base table, as without a bridge. With ``authors`` first in ``TABLES``, an author with no book is listed with a ``NULL`` title; Snowflake lists only the pairs the bridge holds.
+- A query with only dimensions on the two sides lists the pairs the bridge holds, as in Snowflake: ``DIMENSIONS b.title, a.country`` reads ``book_authors`` and joins up to both, so an author with no book and a book with no author are not listed. A dimension on one table alone, such as ``b.title``, lists all of that table's values (see :ref:`Dimensions only <ref-sv-modes>`).
 
 **Cardinality inference:**
 

@@ -148,6 +148,7 @@ struct Wide<'a> {
     z: Option<usize>,
     y: Option<usize>,
     bt: Option<usize>,
+    c: Option<usize>,
 }
 
 impl Wide<'_> {
@@ -159,6 +160,7 @@ impl Wide<'_> {
             "rcat" => self.bt.and_then(|i| inst.bt[i].2),
             "zcat" => self.z.and_then(|i| inst.z[i]),
             "ycat" => self.y.and_then(|i| inst.y[i]),
+            "ccat" => self.c.and_then(|i| inst.c[i].1),
             other => unreachable!("{other} is never oracled"),
         }
     }
@@ -597,6 +599,189 @@ proptest! {
     fn bridge_counts_each_row_once_per_group(case in arb_case()) {
         check(&case)?;
     }
+}
+
+/// The tables each table reaches by following foreign keys (itself included),
+/// restated from the topology.
+fn up(table: &str) -> &'static [&'static str] {
+    match table {
+        "h" => &["h", "z"],
+        "x" => &["x", "y"],
+        "bt" => &["bt", "h", "x", "z", "y"],
+        "z" => &["z"],
+        "y" => &["y"],
+        "c" => &["c", "h", "z"],
+        other => unreachable!("unexpected table {other}"),
+    }
+}
+
+/// The table a dimensions-only query reads from: of the tables that reach every
+/// member's table, the one no other such table sits above (Snowflake's answer
+/// in the 2026-11-09 dims-only fixture). `None` when no single table does, as
+/// for a member on `c` beside one across the bridge.
+fn dims_only_anchor(members: &[usize]) -> Option<&'static str> {
+    let candidates: Vec<&'static str> = TABLES
+        .iter()
+        .copied()
+        .filter(|t| members.iter().all(|d| up(t).contains(&DIMS[*d].1)))
+        .collect();
+    let closest: Vec<&'static str> = candidates
+        .iter()
+        .copied()
+        .filter(|t| !candidates.iter().any(|o| o != t && up(t).contains(o)))
+        .collect();
+    match closest.as_slice() {
+        [one] => Some(*one),
+        _ => None,
+    }
+}
+
+/// The rows of `anchor`, each with the row it reaches on every table above it.
+fn anchor_rows<'a>(inst: &'a Instance, anchor: &str) -> Vec<Wide<'a>> {
+    let base = Wide {
+        inst: Some(inst),
+        ..Wide::default()
+    };
+    let h_up = |w: &mut Wide, i: Option<usize>| {
+        w.h = i;
+        w.z = i.and_then(|i| lookup(inst.h[i].0, inst.z.len()));
+    };
+    let x_up = |w: &mut Wide, i: Option<usize>| {
+        w.x = i;
+        w.y = i.and_then(|i| lookup(inst.x[i].0, inst.y.len()));
+    };
+    let one = |f: &dyn Fn(&mut Wide, usize), n: usize| -> Vec<Wide<'a>> {
+        (0..n)
+            .map(|i| {
+                let mut w = base.clone();
+                f(&mut w, i);
+                w
+            })
+            .collect()
+    };
+    match anchor {
+        "h" => one(&|w, i| h_up(w, Some(i)), inst.h.len()),
+        "x" => one(&|w, i| x_up(w, Some(i)), inst.x.len()),
+        "z" => one(&|w, i| w.z = Some(i), inst.z.len()),
+        "y" => one(&|w, i| w.y = Some(i), inst.y.len()),
+        "bt" => one(
+            &|w, b| {
+                w.bt = Some(b);
+                h_up(w, lookup(inst.bt[b].0, inst.h.len()));
+                x_up(w, lookup(inst.bt[b].1, inst.x.len()));
+            },
+            inst.bt.len(),
+        ),
+        "c" => one(
+            &|w, i| {
+                w.c = Some(i);
+                h_up(w, lookup(inst.c[i].0, inst.h.len()));
+            },
+            inst.c.len(),
+        ),
+        other => unreachable!("unexpected anchor {other}"),
+    }
+}
+
+/// The distinct dimension tuples of the anchor's rows the predicate is TRUE on.
+fn dims_only_oracle(inst: &Instance, case: &Case, anchor: &str) -> Vec<Vec<Option<i128>>> {
+    let rows: BTreeSet<Vec<Option<i128>>> = anchor_rows(inst, anchor)
+        .into_iter()
+        .filter(|w| case.pred.as_ref().is_none_or(|p| p.eval(w) == Some(true)))
+        .map(|w| {
+            case.dims
+                .iter()
+                .map(|d| w.dim(*d).map(i128::from))
+                .collect()
+        })
+        .collect();
+    rows.into_iter().collect()
+}
+
+fn arb_dims_only_case() -> impl Strategy<Value = Case> {
+    (
+        arb_instance(),
+        prop::sample::select(vec!["h", "x", "bt", "z"]),
+    )
+        .prop_flat_map(|(inst, first)| {
+            let n_dims = if first == "h" { 6 } else { 5 };
+            (
+                Just(inst),
+                Just(first),
+                prop::sample::subsequence((0..n_dims).collect::<Vec<usize>>(), 1..=3),
+                prop::option::weighted(0.4, arb_pred(n_dims)),
+            )
+        })
+        .prop_map(|(inst, first, dims, pred)| Case {
+            inst,
+            first,
+            dims,
+            mets: vec![],
+            pred,
+        })
+}
+
+/// The members a dims-only case names: its dimensions and its filter's.
+fn dims_only_members(case: &Case) -> Vec<usize> {
+    let mut members = case.dims.clone();
+    if let Some(p) = &case.pred {
+        p.dims(&mut members);
+    }
+    members
+}
+
+proptest! {
+    #![proptest_config(ProptestConfig::with_cases(512))]
+
+    /// A dimensions-only query lists the rows of the table under all its
+    /// members, joined up from there, whichever table is declared first: one
+    /// table's own values, a child's rows beside its parent, the bridge's rows
+    /// across it. Dangling and NULL foreign keys give NULL parent columns.
+    #[test]
+    fn dims_only_lists_the_rows_of_the_table_under_its_members(case in arb_dims_only_case()) {
+        let members = dims_only_members(&case);
+        // A member on `c` beside one across the bridge has no table under both;
+        // that shape is not oracled here.
+        let Some(anchor) = dims_only_anchor(&members) else {
+            return Ok(());
+        };
+        let def = build_def(&case);
+        let sql = expand("v", &def, &request(&case))
+            .map_err(|e| TestCaseError::fail(format!("refused: {e}")))?;
+        let got = run(&make_db(&case.inst), &sql);
+        let want = dims_only_oracle(&case.inst, &case, anchor);
+        prop_assert_eq!(got, want, "anchor {}, SQL:\n{}", anchor, sql);
+    }
+}
+
+/// The dims-only generator reaches every anchor, a filter, and most declared
+/// orders for an anchor that is not the base table.
+#[test]
+fn dims_only_generator_reaches_every_anchor() {
+    use proptest::strategy::ValueTree;
+    use proptest::test_runner::TestRunner;
+    let mut runner = TestRunner::deterministic();
+    let mut anchors: BTreeSet<&str> = BTreeSet::new();
+    let mut off_base = 0;
+    let mut filtered = 0;
+    for _ in 0..2000 {
+        let case = arb_dims_only_case()
+            .new_tree(&mut runner)
+            .unwrap()
+            .current();
+        let Some(anchor) = dims_only_anchor(&dims_only_members(&case)) else {
+            continue;
+        };
+        anchors.insert(anchor);
+        if anchor != case.first {
+            off_base += 1;
+        }
+        if case.pred.is_some() {
+            filtered += 1;
+        }
+    }
+    assert_eq!(anchors.len(), TABLES.len(), "{anchors:?}");
+    assert!(off_base > 500 && filtered > 300, "{off_base} {filtered}");
 }
 
 /// The fixture's B1 in this harness's terms, pinned so a regression names the

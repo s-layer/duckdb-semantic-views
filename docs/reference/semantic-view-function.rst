@@ -215,6 +215,28 @@ Generates ``SELECT <dims>, <metrics> FROM ... GROUP BY <dims>``.
 
 Generates ``SELECT DISTINCT <dims> FROM ...``.
 
+.. versionchanged:: 0.19.0
+
+   The rows come from the one table that every queried dimension, and every
+   member the ``WHERE`` names, can be reached from by following relationships
+   toward the referenced table. The query reads that table and joins up from
+   it, as Snowflake does, so the answer doesn't depend on the order of
+   ``TABLES``:
+
+   - Dimensions on one table list that table's own values, including values
+     no other table refers to.
+   - A parent and a child dimension list the child's rows. A child row with a
+     ``NULL`` or dangling foreign key gives a ``NULL`` parent value, and a
+     parent with no child is not listed.
+   - Dimensions on the two sides of a :ref:`bridge <ref-create-bridge-relationships>`
+     list the pairs the bridge holds.
+
+   Before 0.19.0 the query read the table declared first in ``TABLES``, so the
+   same dimensions could list other rows when the tables were declared in
+   another order. When no single table reaches every member, such as
+   dimensions on two children of one parent, the query still reads the table
+   declared first.
+
 **Metrics only** (grand total, global aggregate):
 
 .. code-block:: sql

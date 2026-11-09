@@ -161,11 +161,10 @@ SELECT country, AGG(total_pages) FROM p7_bridge WHERE country <> 'DE' GROUP BY c
 FR	300
 UK	500
 
-# A dimension-only query reads from the base table (`a` here), as it does
-# without a bridge, so Dan, who has no book, is listed with a NULL title. This
-# is the dimension-only rule TECH-DEBT #67 (3) records, bridge case included:
-# the base row is a member of the result even with no child. Snowflake lists
-# only the pairs the bridge holds (fixture B4), so it has no Dan row.
+# B4: a dimension-only query across the bridge lists the pairs the bridge
+# holds, as Snowflake does: it reads from the bridge, the one table both
+# dimensions are reached from by foreign key. Dan, who has no book, and
+# Orphan, which has no author, are not listed.
 query TT
 SELECT * FROM SEMANTIC_VIEW(p7_bridge DIMENSIONS b.title, a.country)
 ORDER BY 1 NULLS LAST, 2 NULLS LAST;
@@ -174,7 +173,15 @@ Duo	FR
 Mixed	FR
 Mixed	UK
 Solo	UK
-NULL	DE
+
+# One table lists its own values: Orphan too, though no bridge row reaches it.
+query T
+SELECT * FROM SEMANTIC_VIEW(p7_bridge DIMENSIONS b.title) ORDER BY 1;
+----
+Duo
+Mixed
+Orphan
+Solo
 
 # B10: the fact table as the bridge. Cleo bought nothing, so the NULL group
 # has a customer and no revenue.

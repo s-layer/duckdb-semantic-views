@@ -109,8 +109,8 @@ after	10000
 jan	10
 
 # --- the relationship walked the other way ---------------------------------
-# With the period table first in TABLES, a query with only dimensions starts
-# from it and joins the events onto it, on the same condition.
+# With the period table first in TABLES, a FACTS list starts from it and joins
+# the events onto it, on the same condition.
 
 statement ok
 CREATE SEMANTIC VIEW p7_range_rev
@@ -131,12 +131,25 @@ CREATE SEMANTIC VIEW p7_range_rev
   );
 
 query TI
-SELECT label, event_id FROM SEMANTIC_VIEW(p7_range_rev DIMENSIONS p.label, e.event_id) ORDER BY 2;
+SELECT label, event_id FROM SEMANTIC_VIEW(p7_range_rev FACTS p.label, e.event_id) ORDER BY 2;
 ----
 before	1
 jan	2
 early_feb	3
 after	5
+
+# The same two dimensions in DIMENSIONS read from the events whatever the order
+# of TABLES, as Snowflake reads them, so the events in no period are listed
+# with a NULL label.
+query TI
+SELECT label, event_id FROM SEMANTIC_VIEW(p7_range_rev DIMENSIONS p.label, e.event_id) ORDER BY 2;
+----
+before	1
+jan	2
+early_feb	3
+NULL	4
+after	5
+NULL	6
 
 query TI
 SELECT * FROM SEMANTIC_VIEW(p7_range_rev DIMENSIONS p.label METRICS e.total_v) ORDER BY 1 NULLS LAST;

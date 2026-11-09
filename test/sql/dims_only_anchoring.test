@@ -1,0 +1,109 @@
+# A query with dimensions and no metrics reads from the one table every queried
+# dimension's table (and every filtered table) is reached from by foreign key,
+# and LEFT JOINs up from it, so its rows never depend on the order of the
+# TABLES clause. The data and answers are Snowflake's (2026-11-09 dims-only
+# fixture, S1-S5): each question is asked of a view declared customers first
+# and one declared orders first. Cleo has no orders; order 4 has no customer
+# and order 5 a customer that does not exist.
+
+require semantic_views
+
+statement ok
+CREATE TABLE customers (cust_id INTEGER, cust_name VARCHAR);
+
+statement ok
+CREATE TABLE orders (order_id INTEGER, cust_id INTEGER, status VARCHAR);
+
+statement ok
+INSERT INTO customers VALUES (1, 'Ana'), (2, 'Ben'), (3, 'Cleo');
+
+statement ok
+INSERT INTO orders VALUES (1, 1, 'open'), (2, 1, 'shipped'), (3, 2, 'open'), (4, NULL, 'lost'), (5, 9, 'stray');
+
+statement ok
+CREATE SEMANTIC VIEW sv_cust
+  TABLES (cu AS customers PRIMARY KEY (cust_id), o AS orders PRIMARY KEY (order_id))
+  RELATIONSHIPS (o_cust AS o (cust_id) REFERENCES cu)
+  DIMENSIONS (cu.cust_name AS cust_name, o.status AS status)
+  METRICS (o.order_count AS COUNT(order_id));
+
+statement ok
+CREATE SEMANTIC VIEW sv_ord
+  TABLES (o AS orders PRIMARY KEY (order_id), cu AS customers PRIMARY KEY (cust_id))
+  RELATIONSHIPS (o_cust AS o (cust_id) REFERENCES cu)
+  DIMENSIONS (cu.cust_name AS cust_name, o.status AS status)
+  METRICS (o.order_count AS COUNT(order_id));
+
+# S1: the parent alone lists every customer, Cleo too, and no NULL.
+query T
+SELECT * FROM SEMANTIC_VIEW(sv_cust DIMENSIONS cu.cust_name) ORDER BY 1;
+----
+Ana
+Ben
+Cleo
+
+query T
+SELECT * FROM SEMANTIC_VIEW(sv_ord DIMENSIONS cu.cust_name) ORDER BY 1;
+----
+Ana
+Ben
+Cleo
+
+# S2: the child alone lists every order's status.
+query T
+SELECT * FROM SEMANTIC_VIEW(sv_cust DIMENSIONS o.status) ORDER BY 1;
+----
+lost
+open
+shipped
+stray
+
+query T
+SELECT * FROM SEMANTIC_VIEW(sv_ord DIMENSIONS o.status) ORDER BY 1;
+----
+lost
+open
+shipped
+stray
+
+# S3: parent and child list the orders' rows. Cleo has none, so she is not
+# listed; the orders with no or a missing customer have a NULL name.
+query TT
+SELECT * FROM SEMANTIC_VIEW(sv_cust DIMENSIONS cu.cust_name, o.status) ORDER BY 1 NULLS LAST, 2;
+----
+Ana	open
+Ana	shipped
+Ben	open
+NULL	lost
+NULL	stray
+
+query TT
+SELECT * FROM SEMANTIC_VIEW(sv_ord DIMENSIONS cu.cust_name, o.status) ORDER BY 1 NULLS LAST, 2;
+----
+Ana	open
+Ana	shipped
+Ben	open
+NULL	lost
+NULL	stray
+
+# S4 / S5: a filter on the other table.
+query T
+SELECT * FROM SEMANTIC_VIEW(sv_cust DIMENSIONS cu.cust_name WHERE o.status = 'open') ORDER BY 1;
+----
+Ana
+Ben
+
+query T
+SELECT * FROM SEMANTIC_VIEW(sv_ord DIMENSIONS o.status WHERE cu.cust_name = 'Ana') ORDER BY 1;
+----
+open
+shipped
+
+# The standard SQL form takes the same path.
+query T
+SELECT status FROM sv_cust GROUP BY status ORDER BY status;
+----
+lost
+open
+shipped
+stray
