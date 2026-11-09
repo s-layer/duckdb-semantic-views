@@ -514,6 +514,15 @@ pub enum ExpandError {
         table_a: String,
         table_b: String,
     },
+    /// A query with no metrics names members on two tables that no table
+    /// reaches both of by following relationships many-to-one (two children of
+    /// one parent), so there are no rows that hold them together. Snowflake
+    /// refuses it: "The entities ... are not related".
+    UnrelatedTables {
+        view_name: String,
+        table_a: String,
+        table_b: String,
+    },
     /// The `where_clause` predicate references a metric. Snowflake's rule for
     /// the `WHERE` inside `SEMANTIC_VIEW(…)`: "you can only refer to dimensions,
     /// facts, and expressions that use dimensions and facts". A metric is an
@@ -969,6 +978,18 @@ impl fmt::Display for ExpandError {
                      table paths -- neither table '{table_a}' nor '{table_b}' can be reached from \
                      the other without crossing a one-to-many relationship, so joining them would \
                      duplicate the rows returned"
+                )
+            }
+            Self::UnrelatedTables {
+                view_name,
+                table_a,
+                table_b,
+            } => {
+                write!(
+                    f,
+                    "semantic view '{view_name}': tables '{table_a}' and '{table_b}' are not \
+                     related -- no table reaches both by following relationships many-to-one, so \
+                     no rows hold their members together. Query them separately"
                 )
             }
             Self::WhereClauseReferencesMetric {

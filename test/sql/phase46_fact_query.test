@@ -232,15 +232,16 @@ true
 
 # Phase 67 A4: tighten FACTS shape — pin qualified 3-part FROM/JOIN over the
 # unaggregated FACTS-path emission (src/expand/sql_gen.rs:179, 222, 242).
-# The base table (p46f_orders) anchors the FROM; the LEFT JOIN brings in
-# the FACT-bearing line_items table. Both must be qualified.
+# Phase 7.3: the FACT-bearing line_items table anchors the FROM (a FACTS
+# query reads the table its facts are on, as Snowflake does); the LEFT JOIN
+# brings in the base table (p46f_orders) for `o.region`. Both must be qualified.
 query I
-SELECT count(*) > 0 FROM explain_semantic_view('p46f_sales', facts := ['o.region', 'net_price']) WHERE explain_output LIKE '%FROM "memory"."main"."p46f_orders"%';
+SELECT count(*) > 0 FROM explain_semantic_view('p46f_sales', facts := ['o.region', 'net_price']) WHERE explain_output LIKE '%FROM "memory"."main"."p46f_line_items"%';
 ----
 true
 
 query I
-SELECT count(*) > 0 FROM explain_semantic_view('p46f_sales', facts := ['o.region', 'net_price']) WHERE explain_output LIKE '%LEFT JOIN "memory"."main"."p46f_line_items"%';
+SELECT count(*) > 0 FROM explain_semantic_view('p46f_sales', facts := ['o.region', 'net_price']) WHERE explain_output LIKE '%LEFT JOIN "memory"."main"."p46f_orders"%';
 ----
 true
 

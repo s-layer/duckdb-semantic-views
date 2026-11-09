@@ -307,8 +307,16 @@ SELECT city, AGG(total) FROM ssr_fl GROUP BY city;
 New York	3
 San Francisco	3
 
-statement error
+# Phase 7.3: the role-played table's dimension alone lists its own rows, as
+# Snowflake does; beside a flights dimension it must pick a role.
+query T rowsort
 SELECT city FROM ssr_fl GROUP BY city;
+----
+New York
+San Francisco
+
+statement error
+SELECT city, carrier FROM ssr_fl GROUP BY city, carrier;
 ----
 dimension 'city' is ambiguous
 

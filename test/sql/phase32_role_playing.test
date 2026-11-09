@@ -202,12 +202,21 @@ New York	1
 San Francisco	1
 
 # ============================================================
-# Test 9: city dimension alone (no metrics) with role-playing
-# should produce ambiguity error
+# Test 9: city dimension alone (no metrics) with role-playing.
+# Phase 7.3: no role is crossed, so it lists the airports' own
+# cities, as Snowflake does. Beside a flights dimension the query
+# reads from flights and must pick a role, so it is ambiguous.
 # ============================================================
 
-statement error
+query T rowsort
 SELECT * FROM SEMANTIC_VIEW(p32_flights_view DIMENSIONS city);
+----
+London
+New York
+San Francisco
+
+statement error
+SELECT * FROM SEMANTIC_VIEW(p32_flights_view DIMENSIONS city, carrier);
 ----
 ambiguous
 

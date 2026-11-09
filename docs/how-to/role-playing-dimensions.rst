@@ -474,12 +474,20 @@ Troubleshooting
 
 **"dimension is ambiguous" error**
    This occurs when a dimension comes from a role-playing table and some metric in the
-   query (or the query itself, with no metrics) names no ``USING`` path to it. Solutions:
+   query names no ``USING`` path to it, or, with no metrics, the query also names a
+   member on the referencing table. Solutions:
 
    - Give every queried metric a ``USING`` that targets the desired relationship, for
      example by writing ``f.departures USING (dep_airport) AS f.flight_count`` over the
      plain metric.
    - Use a dimension from a non-ambiguous table (like the base table).
+
+   .. versionchanged:: 0.19.0
+
+   A query with no metrics whose members are all on the role-playing table, or on
+   tables above it, such as ``DIMENSIONS city`` or ``DIMENSIONS city, region_name``,
+   reads the airports' own rows and needs no path, as in Snowflake. It used to be
+   refused as ambiguous.
 
 **Multiple USING paths for the same table**
    .. versionchanged:: 0.18.0
@@ -504,12 +512,17 @@ Troubleshooting
 **Facts on a role-playing table**
    .. versionchanged:: 0.11.0
 
-   Querying a fact sourced on a role-playing table (or a descendant of one)
-   directly, as in ``FACTS airport_city``, is refused as ambiguous. A fact
-   query carries no ``USING`` context, so the role cannot be resolved --
-   previously such a fact silently read the first-declared relationship's
-   rows. A ``USING`` metric that aggregates the fact works (see
-   :ref:`howto-rp-facts`).
+   A fact query that has to reach a role-playing table (or a descendant of
+   one) through its relationships, as in ``FACTS airport_city`` beside a
+   ``flights`` member, is refused as ambiguous. A fact query carries no
+   ``USING`` context, so the role cannot be resolved -- previously such a fact
+   silently read the first-declared relationship's rows. A ``USING`` metric
+   that aggregates the fact works (see :ref:`howto-rp-facts`).
+
+   .. versionchanged:: 0.19.0
+
+   ``FACTS airport_city`` alone, or with other members on ``airports`` or the
+   tables above it, reads the airports' own rows and is answered.
 
 **A member references a fact on a role-playing table**
    .. versionchanged:: 0.14.0

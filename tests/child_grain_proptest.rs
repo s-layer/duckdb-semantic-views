@@ -998,11 +998,12 @@ fn grain_oracle_sql(case: &Case, grain: Grain, sel_metrics: &[usize]) -> String 
     }
 }
 
-/// The oracle for a FACTS request (EXP-28): one row per REAL line item whose
-/// parent exists, scanned straight off `li` with the parent reached by
-/// correlated subquery. A childless order contributes nothing — it has no row
-/// at line-item grain — which is exactly what the base-anchored
-/// `FROM o LEFT JOIN li` manufactured.
+/// The oracle for a FACTS request: one row per line item, scanned straight
+/// off `li` with the parent reached by correlated subquery (NULL when the
+/// line item has no parent). A FACTS query reads the rows of the table under
+/// its members, as Snowflake does (2026-11-09 second dims-only fixture, F1:
+/// an order with no or a missing customer is listed). A childless order
+/// contributes nothing (EXP-28): it has no row at line-item grain.
 fn facts_oracle_sql(case: &Case) -> String {
     let mut items: Vec<String> = case
         .sel_dims
@@ -1017,22 +1018,16 @@ fn facts_oracle_sql(case: &Case) -> String {
     let and_pred = case.where_pred.as_ref().map_or_else(String::new, |p| {
         format!(" AND {}", p.to_raw_sql(WMember::raw_from_child))
     });
-    format!(
-        "SELECT {} FROM li WHERE EXISTS (SELECT 1 FROM o oe WHERE oe.id = li.order_id){and_pred}",
-        items.join(", ")
-    )
+    format!("SELECT {} FROM li WHERE TRUE{and_pred}", items.join(", "))
 }
 
-/// The oracle for [`Ask::ChildDims`]: one row per child row whose parent
-/// exists, as for a child fact (EXP-28), read from the child table directly.
+/// The oracle for [`Ask::ChildDims`]: one row per child row, as for a child
+/// fact, read from the child table directly.
 fn child_dims_oracle_sql(case: &Case) -> String {
     let and_pred = case.where_pred.as_ref().map_or_else(String::new, |p| {
         format!(" AND {}", p.to_raw_sql(WMember::raw_from_child))
     });
-    format!(
-        "SELECT li.amount AS lamt FROM li \
-         WHERE EXISTS (SELECT 1 FROM o oe WHERE oe.id = li.order_id){and_pred}"
-    )
+    format!("SELECT li.amount AS lamt FROM li WHERE TRUE{and_pred}")
 }
 
 fn oracle_sql(case: &Case) -> String {

@@ -245,10 +245,22 @@ fn a_co_queried_metric_without_using_keeps_the_query_ambiguous() {
     );
 }
 
-/// A dimension alone names no path at all: still ambiguous.
+/// A dimension alone needs no path: it lists the role-played table's own
+/// values (Snowflake, 2026-11-09 second dims-only fixture, R1).
 #[test]
-fn a_role_played_dimension_alone_is_still_ambiguous() {
-    let err = expand("v", &flights_def(), &req(&["city"], &[])).unwrap_err();
+fn a_role_played_dimension_alone_lists_its_own_values() {
+    assert_eq!(
+        run(&flights_def(), &["city"], &[]),
+        table_of(&[&["Alpha"], &["Beta"], &["Gamma"]])
+    );
+}
+
+/// Beside a dimension on the referencing table, with no metric to name a
+/// path, it is still ambiguous (R5: "Multi-path relationship ... is not
+/// supported").
+#[test]
+fn a_role_played_dimension_beside_its_referencing_table_is_still_ambiguous() {
+    let err = expand("v", &flights_def(), &req(&["city", "carrier"], &[])).unwrap_err();
     assert!(
         matches!(err, ExpandError::AmbiguousPath { .. }),
         "expected AmbiguousPath, got: {err}"

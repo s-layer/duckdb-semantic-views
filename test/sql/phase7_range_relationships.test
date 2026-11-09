@@ -108,9 +108,10 @@ SELECT label, AGG(total_v) FROM p7_range WHERE label IN ('jan', 'after') GROUP B
 after	10000
 jan	10
 
-# --- the relationship walked the other way ---------------------------------
-# With the period table first in TABLES, a FACTS list starts from it and joins
-# the events onto it, on the same condition.
+# --- the period table first in TABLES ----------------------------------------
+# A FACTS list reads from the events whatever the order of TABLES (Phase 7.3:
+# it reads the table every queried member is reached from, as Snowflake
+# does), so the events in no period are listed with a NULL label.
 
 statement ok
 CREATE SEMANTIC VIEW p7_range_rev
@@ -136,11 +137,11 @@ SELECT label, event_id FROM SEMANTIC_VIEW(p7_range_rev FACTS p.label, e.event_id
 before	1
 jan	2
 early_feb	3
+NULL	4
 after	5
+NULL	6
 
-# The same two dimensions in DIMENSIONS read from the events whatever the order
-# of TABLES, as Snowflake reads them, so the events in no period are listed
-# with a NULL label.
+# The same two dimensions in DIMENSIONS read from the events too.
 query TI
 SELECT label, event_id FROM SEMANTIC_VIEW(p7_range_rev DIMENSIONS p.label, e.event_id) ORDER BY 2;
 ----

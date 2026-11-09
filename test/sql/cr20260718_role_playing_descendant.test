@@ -9,6 +9,8 @@
 #   EXP-5 — a FACT sourced on `a` or on a descendant of it (facts carry no
 #           USING context at all).
 # Both must now error at query time, like a directly-queried role-playing dim.
+# Phase 7.3 narrows EXP-5 to a query read from below the role-playing table:
+# a fact queried alone is read from its own table (see the end of this file).
 #
 # Phase 6.3b (Snowflake's transitive hop): a descendant dimension follows the
 # role a metric's USING names, so EXP-4's query is answered through that
@@ -108,18 +110,38 @@ FROM SEMANTIC_VIEW(cr718rp DIMENSIONS city METRICS departure_count);
 London	1
 San Francisco	1
 
-# EXP-5: a fact sourced on the role-playing table `a` has no USING context to
-# pick a role -> reject (before the fix it silently read the departure airport).
+# EXP-5: a fact sourced on the role-playing table `a`, read from below (the
+# filter on `f` puts the query at flights), has no USING context to pick a
+# role -> reject (before the fix it silently read the departure airport).
 statement error
-SELECT airport_city FROM SEMANTIC_VIEW(cr718rp FACTS airport_city);
+SELECT airport_city FROM SEMANTIC_VIEW(cr718rp FACTS airport_city WHERE carrier = 'AA');
 ----
 ambiguous
 
-# EXP-5: a fact on a DESCENDANT of the role-playing table is equally ambiguous.
+# EXP-5: a fact on a DESCENDANT of the role-playing table, read from below, is
+# equally ambiguous.
 statement error
-SELECT fact_region FROM SEMANTIC_VIEW(cr718rp FACTS fact_region);
+SELECT fact_region FROM SEMANTIC_VIEW(cr718rp FACTS fact_region WHERE carrier = 'AA');
 ----
 ambiguous
+
+# Phase 7.3: queried alone, the facts are read from their own table, as
+# Snowflake reads a role-played table's dimensions alone. No role is crossed,
+# so nothing is ambiguous: every airport's row, and every region's row.
+query T rowsort
+SELECT airport_city FROM SEMANTIC_VIEW(cr718rp FACTS airport_city);
+----
+Boston
+London
+New York
+San Francisco
+
+query T rowsort
+SELECT fact_region FROM SEMANTIC_VIEW(cr718rp FACTS fact_region);
+----
+Europe
+Northeast
+West
 
 statement ok
 DROP SEMANTIC VIEW cr718rp;

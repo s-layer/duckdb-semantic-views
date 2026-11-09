@@ -737,15 +737,20 @@ proptest! {
     /// members, joined up from there, whichever table is declared first: one
     /// table's own values, a child's rows beside its parent, the bridge's rows
     /// across it. Dangling and NULL foreign keys give NULL parent columns.
+    /// Members no single table is under are refused.
     #[test]
     fn dims_only_lists_the_rows_of_the_table_under_its_members(case in arb_dims_only_case()) {
         let members = dims_only_members(&case);
-        // A member on `c` beside one across the bridge has no table under both;
-        // that shape is not oracled here.
+        let def = build_def(&case);
+        // A member on `c` beside one across the bridge has no table under both:
+        // Snowflake refuses it, the two "are not related".
         let Some(anchor) = dims_only_anchor(&members) else {
+            let err = expand("v", &def, &request(&case))
+                .err()
+                .ok_or_else(|| TestCaseError::fail("no table under every member, yet answered"))?;
+            prop_assert!(err.to_string().contains("are not related"), "{}", err);
             return Ok(());
         };
-        let def = build_def(&case);
         let sql = expand("v", &def, &request(&case))
             .map_err(|e| TestCaseError::fail(format!("refused: {e}")))?;
         let got = run(&make_db(&case.inst), &sql);
@@ -754,8 +759,9 @@ proptest! {
     }
 }
 
-/// The dims-only generator reaches every anchor, a filter, and most declared
-/// orders for an anchor that is not the base table.
+/// The dims-only generator reaches every anchor, a filter, most declared
+/// orders for an anchor that is not the base table, and members no table is
+/// under.
 #[test]
 fn dims_only_generator_reaches_every_anchor() {
     use proptest::strategy::ValueTree;
@@ -764,12 +770,14 @@ fn dims_only_generator_reaches_every_anchor() {
     let mut anchors: BTreeSet<&str> = BTreeSet::new();
     let mut off_base = 0;
     let mut filtered = 0;
+    let mut unrelated = 0;
     for _ in 0..2000 {
         let case = arb_dims_only_case()
             .new_tree(&mut runner)
             .unwrap()
             .current();
         let Some(anchor) = dims_only_anchor(&dims_only_members(&case)) else {
+            unrelated += 1;
             continue;
         };
         anchors.insert(anchor);
@@ -781,7 +789,10 @@ fn dims_only_generator_reaches_every_anchor() {
         }
     }
     assert_eq!(anchors.len(), TABLES.len(), "{anchors:?}");
-    assert!(off_base > 500 && filtered > 300, "{off_base} {filtered}");
+    assert!(
+        off_base > 500 && filtered > 300 && unrelated > 50,
+        "{off_base} {filtered} {unrelated}"
+    );
 }
 
 /// The fixture's B1 in this harness's terms, pinned so a regression names the

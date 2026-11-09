@@ -62,16 +62,21 @@ fn fact_on_role_playing_table_errors_ambiguous() {
     // role-playing table `a` (orders reach it via dep_airport AND arr_airport).
     // Facts carry no USING context, so which airport instance the fact reads is
     // unresolvable -- previously it silently bound to the first-declared
-    // (departure) relationship. It must error instead.
+    // (departure) relationship. It must error instead. Read from below, that
+    // is: the filter on an `orders` dimension makes the query read the orders' rows and
+    // cross one of the two relationships (Snowflake refuses it, 2026-11-09
+    // second dims-only fixture, R7). Alone, see
+    // `fact_on_role_playing_table_alone_lists_its_own_rows`.
     let def = orders_view()
         .clear_dimensions()
         .clear_metrics()
         .with_table("a", "airports", &["code"])
+        .with_dimension("note", "orders.note", Some("orders"))
         .with_fact("airport_city", "a.city", "a")
         .with_pkfk_join("dep_airport", "orders", "a", &["dep_code"], &["code"])
         .with_pkfk_join("arr_airport", "orders", "a", &["arr_code"], &["code"]);
     let req = QueryRequest {
-        where_clause: None,
+        where_clause: Some("note = 'x'".to_string()),
         facts: vec![FactName::new("airport_city")],
         dimensions: vec![],
         metrics: vec![],
@@ -99,22 +104,66 @@ fn fact_on_role_playing_table_errors_ambiguous() {
     }
 }
 
-#[test]
-fn fact_on_descendant_of_role_playing_table_errors_ambiguous() {
-    // EXP-5 also covers a fact on a DESCENDANT of a role-playing table: `r`
-    // (regions) is reached only through the role-playing `a`, so a fact on it
-    // is just as unresolvable.
-    let def = orders_view()
+fn role_played_region_def() -> crate::model::SemanticViewDefinition {
+    orders_view()
         .clear_dimensions()
         .clear_metrics()
         .with_table("a", "airports", &["code"])
         .with_table("r", "regions", &["region_id"])
+        .with_dimension("note", "orders.note", Some("orders"))
+        .with_fact("airport_city", "a.city", "a")
         .with_fact("region_name", "r.name", "r")
         .with_pkfk_join("dep_airport", "orders", "a", &["dep_code"], &["code"])
         .with_pkfk_join("arr_airport", "orders", "a", &["arr_code"], &["code"])
-        .with_pkfk_join("airport_region", "a", "r", &["region_id"], &["region_id"]);
+        .with_pkfk_join("airport_region", "a", "r", &["region_id"], &["region_id"])
+}
+
+/// A fact on a role-played table, queried alone, reads that table's own rows:
+/// no relationship has to be crossed, so there is no role to pick. Snowflake
+/// answers a dimension there this way (2026-11-09 second dims-only fixture,
+/// R1), and a FACTS query reads the table a dimensions-only one does (F1, F2).
+#[test]
+fn fact_on_role_playing_table_alone_lists_its_own_rows() {
     let req = QueryRequest {
         where_clause: None,
+        facts: vec![FactName::new("airport_city")],
+        dimensions: vec![],
+        metrics: vec![],
+    };
+    let sql = expand("orders", &role_played_region_def(), &req).unwrap();
+    assert_eq!(
+        sql,
+        "SELECT\n    a.city AS \"airport_city\"\nFROM \"airports\" AS \"a\""
+    );
+}
+
+/// And a fact past it, with the role-played table's own fact: the airports'
+/// rows, joined up to their region (R3).
+#[test]
+fn fact_past_a_role_playing_table_from_it_lists_its_rows() {
+    let req = QueryRequest {
+        where_clause: None,
+        facts: vec![FactName::new("airport_city"), FactName::new("region_name")],
+        dimensions: vec![],
+        metrics: vec![],
+    };
+    let sql = expand("orders", &role_played_region_def(), &req).unwrap();
+    assert_eq!(
+        sql,
+        "SELECT\n    a.city AS \"airport_city\",\n    r.name AS \"region_name\"\n\
+         FROM \"airports\" AS \"a\"\n\
+         LEFT JOIN \"regions\" AS \"r\" ON \"a\".\"region_id\" = \"r\".\"region_id\""
+    );
+}
+
+#[test]
+fn fact_on_descendant_of_role_playing_table_errors_ambiguous() {
+    // EXP-5 also covers a fact on a DESCENDANT of a role-playing table: `r`
+    // (regions) is reached only through the role-playing `a`, so a fact on it
+    // is just as unresolvable, read from below (the filter on an `orders` dimension).
+    let def = role_played_region_def();
+    let req = QueryRequest {
+        where_clause: Some("note = 'x'".to_string()),
         facts: vec![FactName::new("region_name")],
         dimensions: vec![],
         metrics: vec![],

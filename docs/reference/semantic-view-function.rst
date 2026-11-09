@@ -231,11 +231,20 @@ Generates ``SELECT DISTINCT <dims> FROM ...``.
    - Dimensions on the two sides of a :ref:`bridge <ref-create-bridge-relationships>`
      list the pairs the bridge holds.
 
+   - A dimension on a role-played table (one another table references
+     through several relationships), or on a table above it, lists that
+     table's own rows. Beside a member on the referencing table it is refused
+     as ambiguous, since no metric names a relationship to follow.
+   - When no single table reaches every member, such as dimensions on two
+     children of one parent, the query is refused: the two tables are not
+     related, as Snowflake says.
+
+   A ``FACTS`` query reads the same table and joins up from it the same way,
+   but lists every row of it rather than each distinct one.
+
    Before 0.19.0 the query read the table declared first in ``TABLES``, so the
-   same dimensions could list other rows when the tables were declared in
-   another order. When no single table reaches every member, such as
-   dimensions on two children of one parent, the query still reads the table
-   declared first.
+   same dimensions or facts could list other rows when the tables were
+   declared in another order.
 
 **Metrics only** (grand total, global aggregate):
 

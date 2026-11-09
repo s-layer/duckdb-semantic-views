@@ -131,11 +131,12 @@ SELECT city, AGG(revenue) FROM p7_asof WHERE city IN ('London', 'Paris') GROUP B
 London	100.00
 Paris	200.00
 
-# --- the relationship walked the other way ---------------------------------
-# With the address table first in TABLES, a FACTS list starts from it and
-# joins the orders onto it. Each address gets exactly the orders
-# whose ASOF match it is: Berlin gets order 6 and not an order from another
-# date, and London gets only order 1.
+# --- the address table first in TABLES ---------------------------------------
+# A FACTS list reads from the orders whatever the order of TABLES (Phase 7.3:
+# it reads the table every queried member is reached from, as Snowflake
+# does), so each order gets the one address that is its ASOF match: Berlin
+# gets order 6 and not an order from another date, and London gets only
+# order 1.
 
 statement ok
 CREATE SEMANTIC VIEW p7_asof_rev
@@ -158,17 +159,14 @@ Berlin	6
 London	1
 Paris	2
 
-# The tie, joined from the addresses: order 4 goes to both tied addresses.
-query TI
-SELECT city, order_id FROM SEMANTIC_VIEW(p7_asof_rev FACTS a.city, o.order_id)
-WHERE city IN ('Oslo', 'Rome')
-ORDER BY 1, 2;
+# The tie: order 4 gets one of its two tied addresses, not both.
+query I
+SELECT count(*) FROM SEMANTIC_VIEW(p7_asof_rev FACTS a.city, o.order_id)
+WHERE order_id = 4;
 ----
-Oslo	4
-Rome	4
+1
 
-# The same two dimensions in DIMENSIONS read from the orders whatever the
-# order of TABLES, as Snowflake reads them, so order 4 gets one address.
+# The same two dimensions in DIMENSIONS read from the orders too.
 query I
 SELECT count(*) FROM SEMANTIC_VIEW(p7_asof_rev DIMENSIONS a.city, o.order_id)
 WHERE order_id = 4;

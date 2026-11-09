@@ -282,13 +282,16 @@ fn dimension_rewritten_to_scoped_alias() {
     );
 }
 
+/// A role-played dimension beside one on the referencing table, with no
+/// metric to name the role. (Alone it needs no role, and lists the airports'
+/// own cities: `a_role_played_dimension_alone_lists_its_own_values`.)
 #[test]
 fn ambiguous_dimension_without_using_produces_error() {
     let def = flights_airports_def();
     let req = QueryRequest {
         where_clause: None,
         facts: vec![],
-        dimensions: vec![DimensionName::new("city")],
+        dimensions: vec![DimensionName::new("city"), DimensionName::new("carrier")],
         metrics: vec![],
     };
     let result = expand("test_flights", &def, &req);
@@ -1678,22 +1681,28 @@ fn base_table_exemption_resolves_a_metrics_dimension_in_any_spelling() {
 }
 
 /// KNOWN GAP (TECH-DEBT #86): the same base-table dimension with only a
-/// metric on the base table, or with no metric, needs no join and so has no
-/// role to pick (the answer is each airport's own city), but the dimension
-/// check still reports it as ambiguous. Pinned so the fix flips it on purpose:
-/// it should then return one row per city with `n_airports` = 1.
+/// metric on the base table needs no join and so has no role to pick (the
+/// answer is each airport's own city), but the dimension check still reports
+/// it as ambiguous. Pinned so the fix flips it on purpose: it should then
+/// return one row per city with `n_airports` = 1. With no metric it is
+/// answered already (the airports' own cities, Snowflake's R1 in the
+/// 2026-11-09 second dims-only fixture).
 #[test]
 fn known_gap_base_table_dimension_without_a_joined_metric_is_rejected() {
     let mut def = role_played_fact_def();
     def.tables.reverse();
+    let sql = expand("v", &def, &metrics_req(&["city"], &[])).unwrap_or_else(|e| panic!("{e}"));
+    assert!(sql.contains("SELECT DISTINCT"), "{sql}");
+    assert!(
+        !sql.contains("JOIN"),
+        "the airports alone need no join: {sql}"
+    );
     def.metrics.push(metric_on("a", "n_airports", "COUNT(*)"));
-    for mets in [&["n_airports"][..], &[][..]] {
-        match expand("v", &def, &metrics_req(&["city"], mets)) {
-            Err(ExpandError::AmbiguousPath {
-                dimension_table, ..
-            }) => assert_eq!(dimension_table, "a"),
-            other => panic!("TECH-DEBT #86 changed ({mets:?}); update the entry: {other:?}"),
-        }
+    match expand("v", &def, &metrics_req(&["city"], &["n_airports"])) {
+        Err(ExpandError::AmbiguousPath {
+            dimension_table, ..
+        }) => assert_eq!(dimension_table, "a"),
+        other => panic!("TECH-DEBT #86 changed; update the entry: {other:?}"),
     }
     // The same fence rejects a semi-additive base-table metric whose snapshot
     // dimension is on the base table, though nothing is joined: when #86 is

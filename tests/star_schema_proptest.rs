@@ -1243,6 +1243,76 @@ fn role_oracle_sql(case: &Case) -> String {
     format!("SELECT {items} FROM {from}")
 }
 
+/// A query of dimensions on `p`, `q` and `s` alone: no metric, no filter.
+fn is_role_only(case: &Case) -> bool {
+    case.sel_metrics.is_empty()
+        && case.where_pred.is_none()
+        && !case.sel_dims.is_empty()
+        && case.sel_dims.iter().all(|&i| is_role_dim(DIMS[i]))
+}
+
+/// The rows of the lowest of `p`, `q` and `s` a role-only query names, joined
+/// up to the others: a query with no metrics reads the table under its
+/// members (Snowflake, 2026-11-09 second dims-only fixture, R1-R3).
+fn role_only_oracle_sql(case: &Case) -> String {
+    let dims: Vec<&str> = case.sel_dims.iter().map(|&i| DIMS[i]).collect();
+    let from = if dims.contains(&"pcat") {
+        "p LEFT JOIN q ON p.qid = q.id LEFT JOIN s ON q.sid = s.id"
+    } else if dims.contains(&"qcat") {
+        "q LEFT JOIN s ON q.sid = s.id"
+    } else {
+        "s"
+    };
+    let items: Vec<String> = dims
+        .iter()
+        .map(|d| format!("{}.{d} AS {d}", &d[..1]))
+        .collect();
+    format!("SELECT DISTINCT {} FROM {from}", items.join(", "))
+}
+
+proptest! {
+    #![proptest_config(ProptestConfig { cases: 128, ..ProptestConfig::default() })]
+
+    /// Dimensions on the role-played `p`, or past it on `q` and `s`, queried
+    /// alone list the rows of the lowest of them, a `p` row no `t` row
+    /// references included. No relationship from `t` is crossed, so no path is
+    /// needed.
+    #[test]
+    fn role_played_tables_alone_list_their_own_rows(
+        inst in arb_instance(),
+        sel_dims in prop::sample::subsequence(vec![7usize, 8, 9], 1..=3),
+        inline in prop::collection::vec(prop::bool::weighted(0.35), TABLES.len()),
+    ) {
+        let case = Case { inst, sel_dims, sel_metrics: vec![], where_pred: None, inline };
+        prop_assert!(is_role_only(&case));
+        let def = with_inline_tables(build_def(), &case.inline);
+        let req = QueryRequest {
+            // PIN: every filterable member is on `t` or `u`, below `p`, so a filter would make the query cross one of `t`'s two relationships to `p` (refused as ambiguous, Snowflake's R7); `star_join_fence_and_aggregation` varies the filter.
+            where_clause: None,
+            dimensions: case.sel_dims.iter().map(|&i| DimensionName::new(DIMS[i])).collect(),
+            metrics: vec![],
+            // PIN: FACTS is oracled by child_grain_proptest; this property checks which rows a dimensions-only query reads.
+            facts: vec![],
+        };
+        let expanded = expand("star", &def, &req)
+            .map_err(|e| TestCaseError::fail(format!("refused: {e}")))?;
+        let oracle = oracle_over(role_only_oracle_sql(&case), &case.inline);
+        let proj = case.sel_dims.iter().map(|&i| DIMS[i]).collect::<Vec<_>>().join(", ");
+        let cmp = format!(
+            "SELECT \
+               (SELECT count(*) FROM (SELECT {proj} FROM ({expanded}) qa EXCEPT ALL \
+                                      SELECT {proj} FROM ({oracle}) qb) e1) \
+             + (SELECT count(*) FROM (SELECT {proj} FROM ({oracle}) qc EXCEPT ALL \
+                                      SELECT {proj} FROM ({expanded}) qd) e2)"
+        );
+        let conn = make_db(&case.inst, &case.inline);
+        let diff: i64 = conn.query_row(&cmp, [], |r| r.get(0)).unwrap_or_else(|e| {
+            panic!("comparison failed: {e}\n--- expanded:\n{expanded}\n--- oracle:\n{oracle}")
+        });
+        prop_assert_eq!(diff, 0, "--- expanded:\n{}\n--- oracle:\n{}", expanded, oracle);
+    }
+}
+
 proptest! {
     #![proptest_config(ProptestConfig { cases: 128, ..ProptestConfig::default() })]
 
@@ -1287,6 +1357,11 @@ proptest! {
         let every_metric_names_p = !case.sel_metrics.is_empty()
             && case.sel_metrics.iter().all(|&i| names_p_path(METS[i]));
         let result = expand("star", &def, &req);
+        // Dimensions on `p` and above alone are answered from `p`'s rows and
+        // need no path: `role_played_tables_alone_list_their_own_rows`.
+        if is_role_only(&case) {
+            return Ok(());
+        }
 
         if selects_pcat && !every_metric_names_p {
             // Phase 6.3 (Snowflake parity): `p` is reached two ways, so a
@@ -1462,7 +1537,7 @@ fn generator_reaches_both_where_clause_branches() {
         let selects_pcat = case.sel_dims.iter().any(|&i| is_role_dim(DIMS[i]));
         let every_metric_names_p =
             !case.sel_metrics.is_empty() && case.sel_metrics.iter().all(|&i| names_p_path(METS[i]));
-        let pcat_refused_here = selects_pcat && !every_metric_names_p;
+        let pcat_refused_here = selects_pcat && !every_metric_names_p && !is_role_only(&case);
         let oracled = !pcat_refused_here;
         let has = |name: &str| case.sel_metrics.iter().any(|&i| METS[i] == name);
         let selects_qcat = case.sel_dims.iter().any(|&i| DIMS[i] == "qcat");

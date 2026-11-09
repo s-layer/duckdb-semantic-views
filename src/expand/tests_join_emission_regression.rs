@@ -166,23 +166,36 @@ GROUP BY
 /// `li` join was missing entirely.
 #[test]
 fn sg10_fact_source_chain_includes_intermediate_join() {
-    let req = QueryRequest {
+    // A fact on `ld` alone reads `ld`'s rows and joins nothing (Snowflake's
+    // FACTS anchoring, 2026-11-09 second dims-only fixture).
+    let alone = QueryRequest {
         where_clause: None,
         facts: vec![FactName::new("detail_amount")],
         dimensions: vec![],
         metrics: vec![],
     };
-    let sql = expand("test", &ld_li_o_def(), &req).unwrap();
-    // EXP-28: the queried fact lives on `ld` alone, so `ld` is the query's
-    // grain and the two LEFT JOINs above it would otherwise manufacture one
-    // all-NULL row per orderless/detail-less ancestor.
+    let sql = expand("test", &ld_li_o_def(), &alone).unwrap();
+    assert_eq!(
+        sql,
+        "\
+SELECT
+    ld.amount AS \"detail_amount\"
+FROM \"line_item_details\" AS \"ld\""
+    );
+    // Filtered on `o`, two hops up, it walks up through the intermediate `li`,
+    // each ON clause naming only tables already joined.
+    let filtered = QueryRequest {
+        where_clause: Some("o.region = 'E'".to_string()),
+        ..alone
+    };
+    let sql = expand("test", &ld_li_o_def(), &filtered).unwrap();
     let expected = "\
 SELECT
     ld.amount AS \"detail_amount\"
-FROM \"orders\" AS \"o\"
-LEFT JOIN \"line_items\" AS \"li\" ON \"li\".\"order_id\" = \"o\".\"id\"
-LEFT JOIN \"line_item_details\" AS \"ld\" ON \"ld\".\"line_item_id\" = \"li\".\"id\"
-WHERE \"ld\".\"id\" IS NOT NULL";
+FROM \"line_item_details\" AS \"ld\"
+LEFT JOIN \"line_items\" AS \"li\" ON \"ld\".\"line_item_id\" = \"li\".\"id\"
+LEFT JOIN \"orders\" AS \"o\" ON \"li\".\"order_id\" = \"o\".\"id\"
+WHERE (o.region) = 'E'";
     assert_eq!(sql, expected);
 }
 

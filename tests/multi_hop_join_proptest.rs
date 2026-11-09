@@ -1213,8 +1213,20 @@ fn pinned_asof_hop_takes_the_latest_period() {
     );
 }
 
+/// A dimension that names no table, always true: a filter on it keeps a query
+/// on the base table (`member_anchor` cannot place its rows).
+fn unplaced_dimension() -> Dimension {
+    Dimension {
+        name: "always".to_string(),
+        expr: "TRUE".to_string(),
+        source_table: None,
+        ..Default::default()
+    }
+}
+
 /// Phase 7.1: the ASOF hop walked against its direction. With `u` listed
-/// first, a FACTS list starts from `u` and joins `t` onto it, so each `u` row
+/// first and a filter on a member that names no table, a FACTS list starts
+/// from `u` and joins `t` onto it, so each `u` row
 /// must get exactly the `t` rows whose ASOF match it is, one output row per
 /// pair (a `u` row with none keeps one row with NULL `t` columns). The
 /// oracle finds each `t` row's match by the same correlated `max` as
@@ -1259,12 +1271,14 @@ proptest! {
         let case = Case { inst, sel_dims, sel_metrics: vec![], where_pred: None };
         let mut def = build_def(Hop::Asof);
         def.tables.swap(0, 1); // `u` first: the base table, so `t` is joined onto it.
+        def.dimensions.push(unplaced_dimension());
         let req = QueryRequest {
-            // PIN: this property checks which rows the reverse join pairs; a FACTS list is the shape that walks it, and `multi_hop_fence_and_aggregation` varies the filter over the forward hop.
-            where_clause: None,
-            // A dimensions-only query no longer walks the hop backwards: it reads
-            // from `t` whenever `td` is asked for. A FACTS list still reads the
-            // base table's rows, so it is what joins `t` onto `u` now.
+            // A query reads the table under its members (`t` whenever `td` is
+            // asked for), so the one shape left that walks the hop backwards is
+            // a filter on a member that names no table: its rows can't be
+            // placed, so the query reads the base table's. The filter is always
+            // true, so it changes no row.
+            where_clause: Some("always".to_string()),
             dimensions: vec![],
             metrics: vec![],
             facts: case.sel_dims.iter().map(|&i| FactName::new(DIMS[i])).collect(),
@@ -1404,12 +1418,14 @@ proptest! {
         let case = Case { inst, sel_dims, sel_metrics: vec![], where_pred: None };
         let mut def = build_def(Hop::Range);
         def.tables.swap(0, 1); // `u` first: the base table, so `t` is joined onto it.
+        def.dimensions.push(unplaced_dimension());
         let req = QueryRequest {
-            // PIN: this property checks which rows the reverse join pairs; a FACTS list is the shape that walks it, and `multi_hop_fence_and_aggregation` varies the filter over the forward hop.
-            where_clause: None,
-            // A dimensions-only query no longer walks the hop backwards: it reads
-            // from `t` whenever `td` is asked for. A FACTS list still reads the
-            // base table's rows, so it is what joins `t` onto `u` now.
+            // A query reads the table under its members (`t` whenever `td` is
+            // asked for), so the one shape left that walks the hop backwards is
+            // a filter on a member that names no table: its rows can't be
+            // placed, so the query reads the base table's. The filter is always
+            // true, so it changes no row.
+            where_clause: Some("always".to_string()),
             dimensions: vec![],
             metrics: vec![],
             facts: case.sel_dims.iter().map(|&i| FactName::new(DIMS[i])).collect(),

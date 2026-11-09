@@ -2,9 +2,10 @@
 # dimension's table (and every filtered table) is reached from by foreign key,
 # and LEFT JOINs up from it, so its rows never depend on the order of the
 # TABLES clause. The data and answers are Snowflake's (2026-11-09 dims-only
-# fixture, S1-S5): each question is asked of a view declared customers first
-# and one declared orders first. Cleo has no orders; order 4 has no customer
-# and order 5 a customer that does not exist.
+# fixture, S1-S5; the second fixture below for two children of one parent, a
+# role-played table and FACTS queries): each question is asked of a view
+# declared customers first and one declared orders first. Cleo has no orders;
+# order 4 has no customer and order 5 a customer that does not exist.
 
 require semantic_views
 
@@ -107,3 +108,273 @@ lost
 open
 shipped
 stray
+
+# ---------------------------------------------------------------------------
+# The second dims-only fixture (2026-11-09). Two children of one parent: no
+# table reaches both, so Snowflake refuses their dimensions together ("The
+# entities 'T' and 'O' are not related"), with or without the parent's.
+# ---------------------------------------------------------------------------
+
+statement ok
+CREATE TABLE wcustomers (cust_id INTEGER, cust_name VARCHAR);
+
+statement ok
+CREATE TABLE worders (order_id INTEGER, cust_id INTEGER, status VARCHAR);
+
+statement ok
+CREATE TABLE tickets (ticket_id INTEGER, cust_id INTEGER, topic VARCHAR);
+
+statement ok
+INSERT INTO wcustomers VALUES (1, 'Ana'), (2, 'Ben'), (3, 'Cleo'), (4, 'Dee');
+
+statement ok
+INSERT INTO worders VALUES (1, 1, 'open'), (2, 1, 'shipped'), (3, 2, 'open'), (4, NULL, 'lost');
+
+statement ok
+INSERT INTO tickets VALUES (1, 1, 'billing'), (2, 1, 'login'), (3, 3, 'billing'), (4, NULL, 'spam');
+
+statement ok
+CREATE SEMANTIC VIEW wv_c
+  TABLES (
+    cu AS wcustomers PRIMARY KEY (cust_id),
+    o  AS worders    PRIMARY KEY (order_id),
+    t  AS tickets    PRIMARY KEY (ticket_id)
+  )
+  RELATIONSHIPS (o_cust AS o (cust_id) REFERENCES cu, t_cust AS t (cust_id) REFERENCES cu)
+  DIMENSIONS (cu.cust_name AS cust_name, o.status AS status, t.topic AS topic)
+  METRICS (o.order_count AS COUNT(order_id), t.ticket_count AS COUNT(ticket_id));
+
+# W1
+statement error
+SELECT * FROM SEMANTIC_VIEW(wv_c DIMENSIONS o.status, t.topic);
+----
+are not related
+
+# W2
+statement error
+SELECT * FROM SEMANTIC_VIEW(wv_c DIMENSIONS cu.cust_name, o.status, t.topic);
+----
+are not related
+
+# W3
+statement error
+SELECT * FROM SEMANTIC_VIEW(wv_c DIMENSIONS o.status WHERE t.topic = 'login');
+----
+are not related
+
+# W4
+statement error
+SELECT * FROM SEMANTIC_VIEW(wv_c DIMENSIONS cu.cust_name WHERE o.status = 'open' AND t.topic = 'billing');
+----
+are not related
+
+# The standard SQL form takes the same path.
+statement error
+SELECT status, topic FROM wv_c GROUP BY status, topic;
+----
+are not related
+
+# W5: one child and the parent list the child's rows.
+query TT
+SELECT * FROM SEMANTIC_VIEW(wv_c DIMENSIONS cu.cust_name, o.status) ORDER BY 1 NULLS LAST, 2;
+----
+Ana	open
+Ana	shipped
+Ben	open
+NULL	lost
+
+# ---------------------------------------------------------------------------
+# A role-played table: each flight references airports twice. Queried from
+# itself or from above it crosses neither relationship, so it is answered;
+# from below it has to pick one, and is refused (Snowflake: "Multi-path
+# relationship ... is not supported"). SFO has no flights; APAC no airport.
+# ---------------------------------------------------------------------------
+
+statement ok
+CREATE TABLE regions (region_id INTEGER, region VARCHAR);
+
+statement ok
+CREATE TABLE airports (code VARCHAR, city VARCHAR, region_id INTEGER);
+
+statement ok
+CREATE TABLE flights (flight_no VARCHAR, origin VARCHAR, dest VARCHAR);
+
+statement ok
+INSERT INTO regions VALUES (1, 'NA'), (2, 'EU'), (3, 'APAC');
+
+statement ok
+INSERT INTO airports VALUES ('JFK', 'NYC', 1), ('LHR', 'London', 2), ('CDG', 'Paris', 2), ('SFO', 'SF', 1);
+
+statement ok
+INSERT INTO flights VALUES ('F1', 'JFK', 'LHR'), ('F2', 'LHR', 'CDG'), ('F3', 'CDG', NULL), ('F4', 'JFK', 'XXX');
+
+statement ok
+CREATE SEMANTIC VIEW rv_f
+  TABLES (
+    f  AS flights  PRIMARY KEY (flight_no),
+    ap AS airports PRIMARY KEY (code),
+    rg AS regions  PRIMARY KEY (region_id)
+  )
+  RELATIONSHIPS (
+    f_origin  AS f (origin)     REFERENCES ap,
+    f_dest    AS f (dest)       REFERENCES ap,
+    ap_region AS ap (region_id) REFERENCES rg
+  )
+  DIMENSIONS (f.flight_no AS flight_no, ap.city AS city, rg.region AS region)
+  METRICS (
+    f.departures USING (f_origin) AS COUNT(flight_no),
+    f.arrivals   USING (f_dest)   AS COUNT(flight_no)
+  );
+
+statement ok
+CREATE SEMANTIC VIEW rv_a
+  TABLES (
+    ap AS airports PRIMARY KEY (code),
+    rg AS regions  PRIMARY KEY (region_id),
+    f  AS flights  PRIMARY KEY (flight_no)
+  )
+  RELATIONSHIPS (
+    f_origin  AS f (origin)     REFERENCES ap,
+    f_dest    AS f (dest)       REFERENCES ap,
+    ap_region AS ap (region_id) REFERENCES rg
+  )
+  DIMENSIONS (f.flight_no AS flight_no, ap.city AS city, rg.region AS region)
+  METRICS (
+    f.departures USING (f_origin) AS COUNT(flight_no),
+    f.arrivals   USING (f_dest)   AS COUNT(flight_no)
+  );
+
+# R1: the role-played table alone, SF too.
+query T
+SELECT * FROM SEMANTIC_VIEW(rv_f DIMENSIONS ap.city) ORDER BY 1;
+----
+London
+NYC
+Paris
+SF
+
+query T
+SELECT * FROM SEMANTIC_VIEW(rv_a DIMENSIONS ap.city) ORDER BY 1;
+----
+London
+NYC
+Paris
+SF
+
+# R2: past it, alone. APAC too.
+query T
+SELECT * FROM SEMANTIC_VIEW(rv_f DIMENSIONS rg.region) ORDER BY 1;
+----
+APAC
+EU
+NA
+
+# R3: the airports' rows, up to their region.
+query TT
+SELECT * FROM SEMANTIC_VIEW(rv_a DIMENSIONS ap.city, rg.region) ORDER BY 1;
+----
+London	EU
+NYC	NA
+Paris	EU
+SF	NA
+
+query TT
+SELECT city, region FROM rv_f GROUP BY city, region ORDER BY 1;
+----
+London	EU
+NYC	NA
+Paris	EU
+SF	NA
+
+# R5-R7: from below, refused in either order.
+statement error
+SELECT * FROM SEMANTIC_VIEW(rv_f DIMENSIONS f.flight_no, ap.city);
+----
+ambiguous
+
+statement error
+SELECT * FROM SEMANTIC_VIEW(rv_a DIMENSIONS f.flight_no, rg.region);
+----
+ambiguous
+
+statement error
+SELECT * FROM SEMANTIC_VIEW(rv_a DIMENSIONS ap.city WHERE f.flight_no = 'F1');
+----
+ambiguous
+
+# ---------------------------------------------------------------------------
+# FACTS queries read the same table, every row of it. Orders 1 and 2 have the
+# same amount; Ana and Ben the same credit.
+# ---------------------------------------------------------------------------
+
+statement ok
+CREATE TABLE fcustomers (cust_id INTEGER, cust_name VARCHAR, credit INTEGER);
+
+statement ok
+CREATE TABLE forders (order_id INTEGER, cust_id INTEGER, status VARCHAR, amount INTEGER);
+
+statement ok
+INSERT INTO fcustomers VALUES (1, 'Ana', 100), (2, 'Ben', 100), (3, 'Cleo', 50);
+
+statement ok
+INSERT INTO forders VALUES (1, 1, 'open', 10), (2, 1, 'shipped', 10), (3, 2, 'open', 20), (4, NULL, 'lost', 5), (5, 9, 'stray', 7);
+
+statement ok
+CREATE SEMANTIC VIEW fv_c
+  TABLES (cu AS fcustomers PRIMARY KEY (cust_id), o AS forders PRIMARY KEY (order_id))
+  RELATIONSHIPS (o_cust AS o (cust_id) REFERENCES cu)
+  FACTS (o.amount AS amount, cu.credit AS credit)
+  DIMENSIONS (cu.cust_name AS cust_name, o.status AS status)
+  METRICS (o.total AS SUM(o.amount));
+
+statement ok
+CREATE SEMANTIC VIEW fv_o
+  TABLES (o AS forders PRIMARY KEY (order_id), cu AS fcustomers PRIMARY KEY (cust_id))
+  RELATIONSHIPS (o_cust AS o (cust_id) REFERENCES cu)
+  FACTS (o.amount AS amount, cu.credit AS credit)
+  DIMENSIONS (cu.cust_name AS cust_name, o.status AS status)
+  METRICS (o.total AS SUM(o.amount));
+
+# F1: a child fact alone, every order.
+query I
+SELECT * FROM SEMANTIC_VIEW(fv_c FACTS o.amount) ORDER BY 1;
+----
+5
+7
+10
+10
+20
+
+# F2: a parent fact alone, every customer.
+query I
+SELECT * FROM SEMANTIC_VIEW(fv_o FACTS cu.credit) ORDER BY 1;
+----
+50
+100
+100
+
+# F6: both, the orders' rows.
+query II
+SELECT * FROM SEMANTIC_VIEW(fv_c FACTS o.amount, cu.credit) ORDER BY 1;
+----
+5	NULL
+7	NULL
+10	100
+10	100
+20	100
+
+query II
+SELECT * FROM SEMANTIC_VIEW(fv_o FACTS o.amount, cu.credit) ORDER BY 1;
+----
+5	NULL
+7	NULL
+10	100
+10	100
+20	100
+
+# F8: a parent fact filtered by the child, once per matching order.
+query I
+SELECT * FROM SEMANTIC_VIEW(fv_c FACTS cu.credit WHERE o.status = 'open') ORDER BY 1;
+----
+100
+100
