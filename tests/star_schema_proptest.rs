@@ -1115,6 +1115,9 @@ fn parent_metric_names(case: &Case) -> Vec<&'static str> {
 /// dimensionless case (one row each), `FULL OUTER JOIN` on the NULL-safe
 /// dimension key otherwise, so a `ucat` present at only one grain survives.
 fn oracle_sql(case: &Case) -> String {
+    if case.sel_metrics.is_empty() && !crosses_bridge(case) {
+        return parent_rows_sql(case);
+    }
     let parent_metrics = parent_metric_names(case);
     if parent_metrics.is_empty() {
         return child_grain_sql(case);
@@ -1243,6 +1246,23 @@ fn role_oracle_sql(case: &Case) -> String {
     format!("SELECT {items} FROM {from}")
 }
 
+/// A query with no metrics whose members all live on `u`, filter included,
+/// lists `u`'s own rows: a query with no metrics reads the table under its
+/// members (Snowflake, 2026-11-09 dims-only fixture), so a `u` row no `t` row
+/// references is listed, and a `t` row with a NULL or dangling `fk` adds no
+/// NULL group. [`child_grain_sql`] reads `t LEFT JOIN u`, which is right
+/// only once a member or a metric is on `t`.
+fn parent_rows_sql(case: &Case) -> String {
+    let where_sql = case
+        .where_pred
+        .as_ref()
+        .map_or_else(String::new, |p| format!(" WHERE {}", p.to_raw_sql()));
+    format!(
+        "SELECT DISTINCT {} FROM u{where_sql}",
+        parent_dim_items(case).join(", ")
+    )
+}
+
 /// A query of dimensions on `p`, `q` and `s` alone: no metric, no filter.
 fn is_role_only(case: &Case) -> bool {
     case.sel_metrics.is_empty()
@@ -1315,6 +1335,74 @@ proptest! {
 
 proptest! {
     #![proptest_config(ProptestConfig { cases: 128, ..ProptestConfig::default() })]
+
+    /// Dimensions on `u` queried with no metric, unfiltered or filtered on `u`,
+    /// list `u`'s own rows ([`parent_rows_sql`]). `arb_case` draws no metric
+    /// once in about a thousand cases, so `star_join_fence_and_aggregation`
+    /// reaches this shape too rarely to cover it.
+    #[test]
+    fn parent_dimensions_alone_list_their_own_rows(
+        inst in arb_instance(),
+        sel_dims in prop::sample::subsequence(vec![1usize, 2, 4, 5], 1..=4),
+        where_pred in prop_oneof![
+            1 => Just(None),
+            2 => arb_pred().prop_filter("a filter on u", |p| !p.touches_child()).prop_map(Some),
+        ],
+        inline in prop::collection::vec(prop::bool::weighted(0.35), TABLES.len()),
+    ) {
+        let case = Case { inst, sel_dims, sel_metrics: vec![], where_pred, inline };
+        let items = RequestItems::parse(
+            &case.sel_dims.iter().map(|&i| item_text(DIMS[i])).collect::<Vec<_>>(),
+            &[],
+            &[],
+            &[],
+        )
+        .expect("the pool's items parse");
+        let stored = with_inline_tables(build_def(), &case.inline);
+        let lowered = lower_expression_items("star", &stored, items, &Default::default())
+            .unwrap_or_else(|e| panic!("the pool's expression items lower: {e:?}"));
+        let def = lowered.def.clone().unwrap_or(stored);
+        let req = QueryRequest {
+            where_clause: case.where_pred.as_ref().map(Pred::to_member_sql),
+            dimensions: lowered
+                .items
+                .dimensions
+                .iter()
+                .map(|it| DimensionName::new(it.member.clone()))
+                .collect(),
+            metrics: vec![],
+            // PIN: FACTS is oracled by child_grain_proptest; this property checks which rows a dimensions-only query reads.
+            facts: vec![],
+        };
+        let expanded = expand("star", &def, &req)
+            .map_err(|e| TestCaseError::fail(format!("refused: {e}")))?;
+        let renamed = lowered
+            .items
+            .dimensions
+            .iter()
+            .map(|it| {
+                let member = it.member.trim_matches('"');
+                let name = it.alias.as_deref().unwrap_or(member);
+                format!("\"{member}\" AS {name}")
+            })
+            .collect::<Vec<_>>()
+            .join(", ");
+        let expanded = format!("SELECT {renamed} FROM ({expanded}) ex");
+        let oracle = oracle_over(parent_rows_sql(&case), &case.inline);
+        let proj = case.sel_dims.iter().map(|&i| DIMS[i]).collect::<Vec<_>>().join(", ");
+        let cmp = format!(
+            "SELECT \
+               (SELECT count(*) FROM (SELECT {proj} FROM ({expanded}) qa EXCEPT ALL \
+                                      SELECT {proj} FROM ({oracle}) qb) e1) \
+             + (SELECT count(*) FROM (SELECT {proj} FROM ({oracle}) qc EXCEPT ALL \
+                                      SELECT {proj} FROM ({expanded}) qd) e2)"
+        );
+        let conn = make_db(&case.inst, &case.inline);
+        let diff: i64 = conn.query_row(&cmp, [], |r| r.get(0)).unwrap_or_else(|e| {
+            panic!("comparison failed: {e}\n--- expanded:\n{expanded}\n--- oracle:\n{oracle}")
+        });
+        prop_assert_eq!(diff, 0, "--- expanded:\n{}\n--- oracle:\n{}", expanded, oracle);
+    }
 
     #[test]
     fn star_join_fence_and_aggregation(case in arb_case()) {

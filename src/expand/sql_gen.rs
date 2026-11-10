@@ -707,7 +707,12 @@ fn expand_facts(
     // check above.
     if anchored.is_none() {
         for fact in &resolved_facts {
-            check_fact_role_playing_path(view_name, def, fact)?;
+            check_fact_role_playing_path(
+                view_name,
+                def,
+                &super::role_playing::query_starts(def, &[]),
+                fact,
+            )?;
         }
         // TECH-DEBT #69: a queried dimension's expression may reach a fact on a
         // role-playing path too (#54 inlines it), and a fact query has no USING.
@@ -725,7 +730,7 @@ fn expand_facts(
     // spliced as the member's own expression, never rewritten to a scoped
     // alias. Same reasoning as 3b/3c.
     if let Some(rw) = resolved_where.as_ref().filter(|_| anchored.is_none()) {
-        check_where_clause_role_playing_path(view_name, def, &rw.members)?;
+        check_where_clause_role_playing_path(view_name, def, &rw.members, &[])?;
     }
 
     // 4. Resolve fact expressions via DAG inlining (fact-to-fact dependencies).
@@ -1398,7 +1403,7 @@ fn expand_unhoisted(
         // reaching the member's table is unambiguous only if no role-playing
         // table sits on the path. Runs on every emission path because it is
         // decided here, above the per-grain / anchored / base-anchored split.
-        check_where_clause_role_playing_path(view_name, def, &rw.members)?;
+        check_where_clause_role_playing_path(view_name, def, &rw.members, &resolved_mets)?;
     }
 
     if let Some(plan) = grain_plan {

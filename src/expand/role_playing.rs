@@ -58,16 +58,54 @@ pub(super) fn is_role_playing_target(def: &SemanticViewDefinition, target_alias:
     false
 }
 
-/// The role-playing target on the join path from `table` up to the root
-/// (inclusive of `table` itself), if any — the lowercased alias of a table that
-/// `table` *is*, or is reachable only *through*. Such a table has an ambiguous
-/// join path: which of the role-playing target's several relationship instances
-/// does it hang off? Used to reject dimensions on descendants of a role-playing
-/// table (EXP-4) and facts on/through one (EXP-5), one hop past the direct
-/// `AmbiguousPath` case.
+/// The first table in TABLES, lowercased: the table the base-anchored
+/// emission reads rows from.
+fn first_table(def: &SemanticViewDefinition) -> String {
+    def.tables
+        .first()
+        .map(|t| t.alias.to_ascii_lowercase())
+        .unwrap_or_default()
+}
+
+/// The tables a query with `mets` reads rows from, each lowercased once: the
+/// table of every metric each one is computed from (a derived metric's base
+/// metrics, a window metric's inner one).
 ///
-/// A table referenced by several tables has several ancestors; all of them are
-/// walked, nearest first, so the answer does not depend on declaration order.
+/// Empty for a query with no metrics, which [`role_playing_on_path`] reads as
+/// "any table": such a query reaches these checks only when no single table
+/// can be read for its members (`member_anchor` placed none), and falls to the
+/// base-anchored emission, so any role-played table on the way to a member is
+/// a role nothing in the query picks.
+pub(super) fn query_starts(
+    def: &SemanticViewDefinition,
+    mets: &[&crate::model::Metric],
+) -> Vec<String> {
+    let root = first_table(def);
+    let mut out: Vec<String> = Vec::new();
+    for met in mets {
+        for (_, home) in super::multi_path::base_components(def, met, &root) {
+            if !out.contains(&home) {
+                out.push(home);
+            }
+        }
+    }
+    out
+}
+
+/// The role-playing target on the join path from one of `from`, the tables a
+/// query reads rows from ([`query_starts`]), to `table` (inclusive of `table`
+/// itself), if any: the lowercased alias of a table that `table` *is*, or is
+/// reached *through*. Such a table has an ambiguous join path: which of the
+/// role-playing target's several relationship instances does it hang off? Used
+/// to reject dimensions on descendants of a role-playing table (EXP-4) and
+/// facts on/through one (EXP-5), one hop past the direct `AmbiguousPath` case.
+///
+/// A table is on the path when a start reaches it by a chain of relationships
+/// and it reaches `table` by one; a start itself is not (its rows are read
+/// once, whatever references it). A role-played table beside the path, which
+/// also references `table`, is not on it: with any `TABLES` order accepted,
+/// walking up to the first-declared table instead made the answer depend on
+/// that order. An empty `from` counts every table as a start.
 ///
 /// A definition whose relationship graph cannot be rebuilt (missing FK metadata
 /// or otherwise malformed), or one that contains a cycle, is reported as
@@ -78,6 +116,7 @@ pub(super) fn is_role_playing_target(def: &SemanticViewDefinition, target_alias:
 pub(super) fn role_playing_on_path(
     view_name: &str,
     def: &SemanticViewDefinition,
+    from: &[String],
     table: &str,
 ) -> Result<Option<String>, ExpandError> {
     let table_lower = table.to_ascii_lowercase();
@@ -106,21 +145,39 @@ pub(super) fn role_playing_on_path(
             view_name: view_name.to_string(),
             reason,
         })?;
-    // Walk every table that references `table`, transitively, nearest first,
-    // stopping at the root. A table referenced by two different tables (a
-    // diamond, two children of one parent) has several, so all of them are
-    // walked: the first-declared one alone would make the answer depend on
-    // declaration order. A table no relationship reaches is disconnected from
-    // the root (an orphan, rejected at define time), so there is nothing to find.
+    // The tables some start reaches without passing through `table`, over
+    // relationships in either direction (a path may step back along one, as
+    // `u <- t -> p` does), the starts themselves left out.
+    let reached: Option<HashSet<String>> = (!from.is_empty()).then(|| {
+        let starts: HashSet<String> = from.iter().map(|s| s.to_ascii_lowercase()).collect();
+        let mut seen: HashSet<String> = starts.clone();
+        seen.insert(table_lower.clone());
+        let mut stack: Vec<String> = starts.iter().cloned().collect();
+        let mut reached: HashSet<String> = HashSet::new();
+        while let Some(current) = stack.pop() {
+            let forward = graph.edges.get(&current).into_iter().flatten();
+            let backward = graph.reverse.get(&current).into_iter().flatten();
+            for next in forward.chain(backward) {
+                let next = next.to_ascii_lowercase();
+                if seen.insert(next.clone()) {
+                    reached.insert(next.clone());
+                    stack.push(next);
+                }
+            }
+        }
+        reached
+    });
+    // Walk every table that references `table`, transitively, nearest first.
+    // A table referenced by two different tables (a diamond, two children of
+    // one parent) has several, so all of them are walked, each level sorted:
+    // the first-declared one alone would make the answer depend on declaration
+    // order.
     let mut visited: HashSet<String> = HashSet::new();
     visited.insert(table_lower.clone());
     let mut frontier = vec![table_lower];
     while !frontier.is_empty() {
         let mut next: Vec<String> = Vec::new();
         for current in &frontier {
-            if *current == graph.root {
-                continue;
-            }
             for parent in graph.reverse.get(current).into_iter().flatten() {
                 let parent = parent.to_ascii_lowercase();
                 if visited.insert(parent.clone()) {
@@ -129,7 +186,9 @@ pub(super) fn role_playing_on_path(
             }
         }
         next.sort_unstable();
-        if let Some(rp) = next.iter().find(|p| is_role_playing_target(def, p)) {
+        if let Some(rp) = next.iter().find(|p| {
+            is_role_playing_target(def, p) && reached.as_ref().is_none_or(|r| r.contains(*p))
+        }) {
             return Ok(Some(rp.clone()));
         }
         frontier = next;
@@ -144,12 +203,13 @@ pub(super) fn role_playing_on_path(
 pub(super) fn check_fact_role_playing_path(
     view_name: &str,
     def: &SemanticViewDefinition,
+    from: &[String],
     fact: &crate::model::Fact,
 ) -> Result<(), ExpandError> {
     let Some(ref fact_table) = fact.source_table else {
         return Ok(());
     };
-    if let Some(rp) = role_playing_on_path(view_name, def, fact_table)? {
+    if let Some(rp) = role_playing_on_path(view_name, def, from, fact_table)? {
         let available_relationships = relationships_to_table(def, &rp);
         return Err(ExpandError::AmbiguousFactPath {
             view_name: view_name.to_string(),
@@ -199,14 +259,16 @@ pub(super) fn check_where_clause_role_playing_path(
     view_name: &str,
     def: &SemanticViewDefinition,
     where_members: &[super::where_clause::WhereMember],
+    resolved_mets: &[&crate::model::Metric],
 ) -> Result<(), ExpandError> {
+    let from = query_starts(def, resolved_mets);
     for member in where_members {
         // A member declared without a table is base-table grain and picks no
         // role of its own — but its fact chain still can, so the chain is
         // walked either way.
         let joined_tables = member.table.iter().chain(member.fact_tables.iter());
         for member_table in joined_tables {
-            if let Some(rp) = role_playing_on_path(view_name, def, member_table)? {
+            if let Some(rp) = role_playing_on_path(view_name, def, &from, member_table)? {
                 let available_relationships = relationships_to_table(def, &rp);
                 return Err(ExpandError::AmbiguousWhereClausePath {
                     view_name: view_name.to_string(),
@@ -315,6 +377,10 @@ pub(super) fn check_member_fact_role_playing_path(
     if def.joins.is_empty() {
         return Ok(());
     }
+    let from = query_starts(def, resolved_mets);
+    // The base-anchored emission joins a metric's own table from the first
+    // table in TABLES, so that is where the walk to it starts.
+    let base_start = vec![first_table(def)];
     let ambiguous = |member_name: &str, fact_name: String, fact_table: String, rp: String| {
         let available_relationships = relationships_to_table(def, &rp);
         ExpandError::AmbiguousMemberFactPath {
@@ -335,7 +401,7 @@ pub(super) fn check_member_fact_role_playing_path(
             if own.as_deref() == Some(fact_table.as_str()) {
                 continue;
             }
-            if let Some(rp) = role_playing_on_path(view_name, def, &fact_table)? {
+            if let Some(rp) = role_playing_on_path(view_name, def, &from, &fact_table)? {
                 return Err(ambiguous(&dim.name, fact_name, fact_table, rp));
             }
         }
@@ -379,7 +445,7 @@ pub(super) fn check_member_fact_role_playing_path(
             .as_deref()
             .filter(|t| Some(*t) != exempt_base.as_deref())
         {
-            if let Some(rp) = role_playing_on_path(view_name, def, own_table)? {
+            if let Some(rp) = role_playing_on_path(view_name, def, &base_start, own_table)? {
                 let available_relationships = relationships_to_table(def, &rp);
                 return Err(ExpandError::AmbiguousMetricPath {
                     detail: Box::new(AmbiguousMetricPathError {
@@ -396,7 +462,7 @@ pub(super) fn check_member_fact_role_playing_path(
             if own.as_deref() == Some(fact_table.as_str()) {
                 continue;
             }
-            let Some(rp) = role_playing_on_path(view_name, def, &fact_table)? else {
+            let Some(rp) = role_playing_on_path(view_name, def, &from, &fact_table)? else {
                 continue;
             };
             // The one legal shape: the fact sits ON the role-playing table and
@@ -460,16 +526,24 @@ pub(super) fn find_using_context(
 
     // Find all relationships pointing to this table
     let rels = relationships_to_table(def, &dim_table_lower);
-    if rels.len() <= 1 {
-        // EXP-4: the dimension's own table has a single inbound relationship,
-        // but if it is reachable only THROUGH a role-playing table, its join
+    if rels.len() <= 1 || !is_role_playing_target(def, &dim_table_lower) {
+        // The dimension's own table is not role-played: one inbound
+        // relationship, or several from different tables (a convergent
+        // parent), each the only way there from its table. Its dimension stays
+        // on the bare alias, which `resolve_joins_pkfk` joins; a `USING` naming
+        // one of those relationships scopes only the facts its metric reads
+        // there (TECH-DEBT #81). A query reaching it along two paths was
+        // refused by `multi_path` unless a `USING` picks one.
+        //
+        // EXP-4: but if it is reachable only THROUGH a role-playing table, its join
         // path is ambiguous: which instance of the role-played table does it
         // hang off? Phase 6.3b (Snowflake's transitive hop): the metrics' `USING`
         // answers that as it does for the role-played table itself, and the
         // chain onward is followed under scoped aliases (`r__dep`) joined off
         // that instance (`descendant_chain`). Without a single role it is
         // refused rather than silently bound to the first-declared relationship.
-        if let Some(rp) = role_playing_on_path(view_name, def, &dim_table_lower)? {
+        let from = query_starts(def, resolved_mets);
+        if let Some(rp) = role_playing_on_path(view_name, def, &from, &dim_table_lower)? {
             if descendant_chain(def, &rp, &dim_table_lower).is_some()
                 && resolved_mets
                     .iter()
@@ -515,14 +589,6 @@ pub(super) fn find_using_context(
         // Exactly one USING path disambiguates -> return scoped alias
         let scoped = scoped_join_alias(&dim_table_lower, &using_rels_for_table[0].1);
         Ok(Some(scoped))
-    } else if using_rels_for_table.is_empty() && !is_role_playing_target(def, &dim_table_lower) {
-        // Multiple inbound relationships but each from a DIFFERENT source
-        // table, and no USING context in the query: a convergent parent,
-        // not a role-playing target. It joins as one bare instance and the
-        // path walk picks the unique connecting edge. A query that reaches
-        // it along two paths was refused by `multi_path` unless a `USING`
-        // picks one, and then only the per-grain plan answers it.
-        Ok(None)
     } else {
         // No (or conflicting) USING context for a role-playing target ->
         // ambiguous.
@@ -532,6 +598,27 @@ pub(super) fn find_using_context(
             dimension_table: dim_table_lower,
             available_relationships: rels,
         })
+    }
+}
+
+/// For a dimension on a table several *different* tables reference (a
+/// convergent parent, not role-played), the scoped alias of the one
+/// relationship into it that `mets`' `USING` names, or `None`.
+/// [`find_using_context`] leaves such a dimension on the bare alias; a
+/// semi-additive snapshot ranks over its metric's own rows instead, so it
+/// joins the table under this alias off the metric's table.
+pub(super) fn convergent_using_alias(
+    def: &SemanticViewDefinition,
+    dim: &crate::model::Dimension,
+    mets: &[&crate::model::Metric],
+) -> Option<String> {
+    let table = dim.source_table.as_ref()?.to_ascii_lowercase();
+    if relationships_to_table(def, &table).len() <= 1 || is_role_playing_target(def, &table) {
+        return None;
+    }
+    match using_edges_to(def, &table, mets).as_slice() {
+        [(_, rel)] => Some(scoped_join_alias(&table, rel)),
+        _ => None,
     }
 }
 
@@ -710,7 +797,7 @@ mod tests {
         // report "no role-playing on path" — the latter would re-open the
         // declaration-order-dependent mis-binding this check exists to close.
         let def = incomplete_rel_def();
-        let err = role_playing_on_path("v", &def, "c").unwrap_err();
+        let err = role_playing_on_path("v", &def, &[], "c").unwrap_err();
         assert!(
             matches!(err, ExpandError::UncheckableDefinition { .. }),
             "expected UncheckableDefinition, got: {err:?}"
@@ -728,7 +815,7 @@ mod tests {
             source_table: Some("c".to_string()),
             ..Default::default()
         };
-        let err = check_fact_role_playing_path("v", &def, &fact).unwrap_err();
+        let err = check_fact_role_playing_path("v", &def, &[], &fact).unwrap_err();
         assert!(
             matches!(err, ExpandError::UncheckableDefinition { .. }),
             "expected UncheckableDefinition, got: {err:?}"

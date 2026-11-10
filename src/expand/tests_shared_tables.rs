@@ -69,7 +69,25 @@ fn db() -> duckdb::Connection {
          INSERT INTO x_regions VALUES (1, 'EU'), (2, 'US');
          INSERT INTO x_customers VALUES (1, 'Ana', 1), (2, 'Bo', 2);
          INSERT INTO x_stores VALUES (1, 'S-US', 2), (2, 'S-EU', 1);
-         INSERT INTO x_orders VALUES (1, 1, 1, 10), (2, 2, 1, 20), (3, 1, 2, 40);",
+         INSERT INTO x_orders VALUES (1, 1, 1, 10), (2, 2, 1, 20), (3, 1, 2, 40);
+         CREATE TABLE s_cust (id INT, name VARCHAR);
+         CREATE TABLE s_orders (id INT, c_id INT, amount INT);
+         CREATE TABLE s_tickets (id INT, c_id INT);
+         CREATE TABLE s_visits (id INT, c_id INT);
+         CREATE TABLE s_pairs (id INT, x1 INT, x2 INT);
+         INSERT INTO s_cust VALUES (1, 'A'), (2, 'B');
+         INSERT INTO s_orders VALUES (1, 1, 10), (2, 1, 20), (3, 2, 5), (4, NULL, 7);
+         INSERT INTO s_tickets VALUES (1, 1);
+         INSERT INTO s_visits VALUES (1, 2);
+         INSERT INTO s_pairs VALUES (1, 1, 1);
+         CREATE TABLE b_orders (id INT, c_id INT, amount INT);
+         CREATE TABLE b_cust (id INT, r_id INT);
+         CREATE TABLE b_regions (id INT, name VARCHAR);
+         CREATE TABLE b_shipments (id INT, o_id INT, r_id INT);
+         INSERT INTO b_orders VALUES (1, 1, 10);
+         INSERT INTO b_cust VALUES (1, 1);
+         INSERT INTO b_regions VALUES (1, 'R1'), (2, 'R2');
+         INSERT INTO b_shipments VALUES (1, 1, 2);",
     )
     .expect("fixture data");
     con
@@ -716,5 +734,133 @@ fn order_metric_by_customer_and_store_is_answered() {
             &["Ana", "S-US", "10"],
             &["Bo", "S-US", "20"],
         ],
+    );
+}
+
+/// `cv`: customers referenced by orders and by tickets, two different tables.
+/// With `visits`, also referenced twice by `pairs` (so `x` is role-played),
+/// `x` references customers too: a role-played table beside the orders'
+/// path, not on it.
+fn cv(with_role_played_sibling: bool) -> SemanticViewDefinition {
+    let mut by_cust = metric("rev_by_cust", "SUM(o.amount)", "o");
+    by_cust.using_relationships = vec!["o_c".to_string()];
+    let mut def = SemanticViewDefinition {
+        tables: vec![
+            table("o", "s_orders", &["id"]),
+            table("t", "s_tickets", &["id"]),
+            table("c", "s_cust", &["id"]),
+        ],
+        joins: vec![
+            rel("o_c", "o", "c", "c_id", "id"),
+            rel("t_c", "t", "c", "c_id", "id"),
+        ],
+        dimensions: vec![dim("name", "c.name", "c")],
+        metrics: vec![metric("rev", "SUM(o.amount)", "o"), by_cust],
+        ..Default::default()
+    };
+    if with_role_played_sibling {
+        def.tables.push(table("x", "s_visits", &["id"]));
+        def.tables.push(table("p", "s_pairs", &["id"]));
+        def.joins.push(rel("x_c", "x", "c", "c_id", "id"));
+        def.joins.push(rel("p_x1", "p", "x", "x1", "id"));
+        def.joins.push(rel("p_x2", "p", "x", "x2", "id"));
+    }
+    def
+}
+
+/// A `USING` naming the one relationship from the metric's table to a table
+/// another table references too, by a qualified dimension on that table
+/// (review of #342): the dimension was rewritten to the scoped alias
+/// `c__o_c`, which was not joined ("Referenced table ... not found").
+#[test]
+fn using_into_a_shared_table_by_a_qualified_dimension_is_answered() {
+    assert_answer(
+        &cv(false),
+        &req(&["name"], &["rev_by_cust"], None),
+        &[&["A", "30"], &["B", "5"], &["NULL", "7"]],
+    );
+}
+
+/// The same with the lead-author view's dimension written qualified.
+#[test]
+fn p2_using_the_only_relationship_by_a_qualified_dimension_is_answered() {
+    let mut view = pv();
+    view.dimensions[0].expr = "a.country".to_string();
+    assert_answer(
+        &view,
+        &req(&["country"], &["pages_by_lead"], None),
+        &[&["FR", "100"], &["UK", "500"], &["NULL", "50"]],
+    );
+}
+
+/// A role-played table beside the metric's path, not on it (review of #342):
+/// orders reach customers directly, and `x`, which `pairs` references twice,
+/// also references customers. Refused as an ambiguous role when orders were
+/// declared first, answered when customers were.
+#[test]
+fn a_role_played_table_off_the_metrics_path_does_not_refuse_it() {
+    assert_answer(
+        &cv(true),
+        &req(&["name"], &["rev"], None),
+        &[&["A", "30"], &["B", "5"], &["NULL", "7"]],
+    );
+}
+
+/// The role-played table is on the path from its referencing table: a metric
+/// on `pairs` by a customer dimension still needs a role, in every order.
+#[test]
+fn a_role_played_table_on_the_metrics_path_still_needs_a_role() {
+    let mut view = cv(true);
+    view.metrics.push(metric("pair_count", "COUNT(p.id)", "p"));
+    for (order, def) in every_order(&view) {
+        let e = expand("v", &def, &req(&["name"], &["pair_count"], None))
+            .expect_err("x is role-played on the path from p to c");
+        assert!(
+            matches!(e, ExpandError::AmbiguousDescendantPath { .. }),
+            "TABLES ({order}): {e}"
+        );
+    }
+}
+
+/// The same off-path role-played table, with customers only filtered on.
+#[test]
+fn a_role_played_table_off_the_metrics_path_does_not_refuse_its_filter() {
+    assert_answer(
+        &cv(true),
+        &req(&[], &["rev"], Some("c.name = 'A'")),
+        &[&["30"]],
+    );
+}
+
+/// Orders reach regions by one chain, through their customer. Each order also
+/// has one shipment (`s_o`, one-to-one, declared first), which references a
+/// region of its own (review of #342). The join walk stepped back along the
+/// one-to-one relationship before following the chain, and grouped revenue by
+/// the shipment's region: R2 where the chain gives R1.
+#[test]
+fn a_chain_is_followed_before_a_step_back_along_a_one_to_one_relationship() {
+    let mut s_o = rel("s_o", "s", "o", "o_id", "id");
+    s_o.cardinality = Cardinality::OneToOne;
+    let view = SemanticViewDefinition {
+        tables: vec![
+            table("o", "b_orders", &["id"]),
+            table("c", "b_cust", &["id"]),
+            table("r", "b_regions", &["id"]),
+            table("s", "b_shipments", &["id"]),
+        ],
+        joins: vec![
+            s_o,
+            rel("o_c", "o", "c", "c_id", "id"),
+            rel("c_r", "c", "r", "r_id", "id"),
+            rel("s_r", "s", "r", "r_id", "id"),
+        ],
+        dimensions: vec![dim("region", "r.name", "r")],
+        metrics: vec![metric("revenue", "SUM(o.amount)", "o")],
+        ..Default::default()
+    };
+    assert_answer(
+        &view,
+        &req(&["region"], &["revenue"], None),
+        &[&["R1", "10"]],
     );
 }

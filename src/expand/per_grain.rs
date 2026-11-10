@@ -781,7 +781,8 @@ fn dimension_role(
     // between them, so `anchor_joins` joins the whole chain off that instance.
     // `role_playing_on_path` finds no role-played table above the view's root,
     // which can itself be role-played (reached back from two child tables).
-    let rp = super::role_playing::role_playing_on_path("", def, &table)
+    let starts = super::role_playing::query_starts(def, mets);
+    let rp = super::role_playing::role_playing_on_path("", def, &starts, &table)
         .map_err(|_| ())?
         .unwrap_or_else(|| table.clone());
     let rel = def.joins.iter().find_map(|j| {
@@ -898,11 +899,12 @@ fn role_playing_affects_query(
     // error discarded here: a definition too malformed to walk declines
     // per-grain, and the base-anchored path it falls back to reports the real
     // diagnostic.
-    let ambiguity = |table: &String| match super::role_playing::role_playing_on_path("", def, table)
-    {
-        Ok(v) => v,
-        Err(_) => Some(table.clone()), // Unwalkable: treat as ambiguous, decline.
-    };
+    let starts = super::role_playing::query_starts(def, resolved_mets);
+    let ambiguity =
+        |table: &String| match super::role_playing::role_playing_on_path("", def, &starts, table) {
+            Ok(v) => v,
+            Err(_) => Some(table.clone()), // Unwalkable: treat as ambiguous, decline.
+        };
 
     // Tables that CANNOT be rescued by `USING`, so any role-playing on their
     // path declines outright. Deduplicated: several metrics commonly share a

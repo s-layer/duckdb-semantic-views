@@ -600,13 +600,13 @@ Graph validation errors
 
    unknown source table '<alias>'; did you mean '<suggestion>'?
 
-**Cause:** The relationship graph violates tree structure requirements.
+**Cause:** The relationship graph is invalid: a self-reference, a cycle, an unnamed or unconnected relationship, or a naming clash.
 
 **Fix:**
 
 - **Self-reference:** A table cannot have a relationship pointing to itself.
 - **Cycle:** Follow the chain in the error message to find the circular dependency and remove it.
-- **Diamond:** One target table is reached from two different source tables. Naming the relationships does not help; declare the shared table a second time under another alias (for example ``s_a AS stores`` and ``s_b AS stores``) so each path has its own copy. Several relationships from the *same* source table to one target are allowed; that is the role-playing pattern (see :ref:`howto-role-playing`).
+- **Diamond:** One table references another twice and at least one of the relationships has no name. Name each one, so each is joined under its own alias; that is the role-playing pattern (see :ref:`howto-role-playing`). A table referenced by two *different* tables is accepted since 0.19.0, in any ``TABLES`` order; a query that would have to pick one of its paths is refused instead (see :ref:`err-multi-path`).
 - **Orphan:** Add a relationship that connects the table, or remove it from ``TABLES``.
 - **Not connected / not reachable:** Every table must be reachable from the first table in ``TABLES``. Add the missing relationship, or remove the table. A view that lists several tables but no ``RELATIONSHIPS`` at all gets the base-table form of this error.
 - **No foreign-key columns:** A YAML ``joins`` entry needs ``fk_columns`` (the DDL form always has them).

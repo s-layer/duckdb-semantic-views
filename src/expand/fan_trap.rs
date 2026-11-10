@@ -623,6 +623,12 @@ fn build_adjacency(def: &SemanticViewDefinition) -> HashMap<String, Vec<String>>
 /// of the first `PATH_CAP` found (shortest first).
 const PATH_CAP: usize = 256;
 
+/// How many partial paths [`simple_paths`] extends before it stops, found or
+/// not: [`PATH_CAP`] bounds only the paths that reach the goal, and a dense
+/// cluster of tables has many more that never do. Shortest first, so the paths
+/// found by then are the ones a query prefers.
+const PARTIAL_PATH_CAP: usize = 4096;
+
 /// Find the join path between two table aliases, treating relationship edges
 /// as undirected. Returns `None` when the tables are not connected (e.g.
 /// legacy joins carrying no FK metadata).
@@ -633,10 +639,12 @@ const PATH_CAP: usize = 256;
 /// one a check looks at must not depend on declaration order. The path chosen
 /// is, in order of preference:
 ///
-/// 1. one with no edge traversed in the fan-out direction (it joins
-///    many-to-one only, the path the query is answered along);
-/// 2. one shaped like a many-to-many bridge ([`is_bridge_path`]);
-/// 3. any other, for the error that refuses it.
+/// 1. a chain of foreign keys, every step to a referenced table, the path
+///    `multi_path` counts and the join walk follows first;
+/// 2. one with no edge traversed in the fan-out direction (a step back along a
+///    one-to-one relationship is allowed);
+/// 3. one shaped like a many-to-many bridge ([`is_bridge_path`]);
+/// 4. any other, for the error that refuses it.
 ///
 /// Within each, the shortest, then the first by alias order. Whether a member
 /// is reached by more than one admissible path (a diamond, two bridges) is
@@ -656,7 +664,12 @@ fn find_path(
     let mut paths = simple_paths(start, goal, adjacency);
     paths.sort_by(|a, b| a.len().cmp(&b.len()).then_with(|| a.cmp(b)));
     let pick = |pred: &dyn Fn(&[String]) -> bool| paths.iter().position(|p| pred(p));
-    let at = pick(&|p| fanning_edge_on_path(p, card_map).is_none())
+    let chain = |p: &[String]| {
+        p.windows(2)
+            .all(|w| card_map.contains_key(&(w[0].clone(), w[1].clone())))
+    };
+    let at = pick(&chain)
+        .or_else(|| pick(&|p| fanning_edge_on_path(p, card_map).is_none()))
         .or_else(|| pick(&|p| is_bridge_path(p, card_map)))
         .unwrap_or(0);
     (!paths.is_empty()).then(|| paths.swap_remove(at))
@@ -671,7 +684,12 @@ fn simple_paths(
 ) -> Vec<Vec<String>> {
     let mut found: Vec<Vec<String>> = Vec::new();
     let mut queue: VecDeque<Vec<String>> = VecDeque::from([vec![start.to_string()]]);
+    let mut budget = PARTIAL_PATH_CAP;
     while let Some(path) = queue.pop_front() {
+        if budget == 0 {
+            break;
+        }
+        budget -= 1;
         let last = path.last().expect("paths are never empty");
         for neighbor in adjacency.get(last).into_iter().flatten() {
             if path.contains(neighbor) {
@@ -1917,5 +1935,35 @@ mod tests {
         let dim_tables = vec!["customers".to_string()];
         let result = validate_fact_table_path("test", &def, &fact_tables, &dim_tables);
         assert!(result.is_ok(), "No joins should be OK");
+    }
+
+    /// Twelve tables all linked to each other have about 10^8 simple paths
+    /// from `t0`, and none of them reaches a goal linked to `t0` alone (a path
+    /// does not come back through its start), so the one path to it never
+    /// fills `PATH_CAP`. The walk stops after `PARTIAL_PATH_CAP` partial paths
+    /// and still has the shortest one.
+    #[test]
+    fn simple_paths_stops_in_a_dense_cluster() {
+        let names: Vec<String> = (0..12).map(|i| format!("t{i}")).collect();
+        let mut adjacency: HashMap<String, Vec<String>> = HashMap::new();
+        for a in &names {
+            for b in &names {
+                if a != b {
+                    adjacency.entry(a.clone()).or_default().push(b.clone());
+                }
+            }
+        }
+        adjacency
+            .entry("t0".to_string())
+            .or_default()
+            .push("goal".to_string());
+        adjacency
+            .entry("goal".to_string())
+            .or_default()
+            .push("t0".to_string());
+        let started = std::time::Instant::now();
+        let paths = simple_paths("t0", "goal", &adjacency);
+        assert!(started.elapsed() < std::time::Duration::from_secs(5));
+        assert_eq!(paths, [vec!["t0".to_string(), "goal".to_string()]]);
     }
 }

@@ -398,10 +398,13 @@ pub(super) fn push_join_clauses(
 /// the FK side of the root (SG-10).
 ///
 /// A table referenced by several tables can be reached by more than one path,
-/// so the tree prefers the paths `fan_trap::find_path` prefers, in three
-/// rounds: first steps that do not fan out (to a referenced table, or across a
-/// one-to-one relationship); then one step to a table that references the
-/// root, followed by such steps (across a bridge); then any step. With
+/// so the tree prefers the paths `fan_trap::find_path` prefers, in four
+/// rounds: first chains of foreign keys (to a referenced table); then steps
+/// back along a one-to-one relationship, which do not fan out either; then one
+/// step to a table that references the root, followed by such steps (across a
+/// bridge); then any step. With a chain `o -> c -> r` beside a one-to-one
+/// `s -> o` and `s -> r`, walking both kinds of step at once could join `r`
+/// through `s`, off the one chain the multi-path check counted. With
 /// `t3 -> t2 -> t1` beside `t3 -> t0 <- t1`, a plain walk could reach `t1`
 /// through `t0`, fanning out, and read no `t1` row where the chain the query
 /// follows reads one. In a tree there is one path either way. Each round
@@ -410,6 +413,13 @@ fn build_tree_parents<'a>(
     def: &'a SemanticViewDefinition,
     root: &str,
 ) -> HashMap<String, (String, &'a Join)> {
+    /// Which steps a round of the walk takes.
+    #[derive(Clone, Copy, PartialEq)]
+    enum Step {
+        Forward,
+        Safe,
+        Any,
+    }
     let mut tree_parent: HashMap<String, (String, &'a Join)> = HashMap::new();
     let mut visited: HashSet<String> = HashSet::new();
     visited.insert(root.to_string());
@@ -426,24 +436,29 @@ fn build_tree_parents<'a>(
             )
         })
         .collect();
-    // `current -> neighbor` along `join`, when the step is taken in this round.
-    let step = |join: &Join, from: &str, to: &str, current: &str, any: bool| -> Option<String> {
+    // `current -> neighbor` along `join`, when the step is taken in this round:
+    // forward along a foreign key always, back along a one-to-one one from
+    // `Step::Safe`, back along any from `Step::Any`.
+    let step = |join: &Join, from: &str, to: &str, current: &str, mode: Step| -> Option<String> {
         if from == current {
             Some(to.to_string())
-        } else if to == current && (any || join.cardinality == Cardinality::OneToOne) {
+        } else if to == current
+            && (mode == Step::Any
+                || (mode == Step::Safe && join.cardinality == Cardinality::OneToOne))
+        {
             Some(from.to_string())
         } else {
             None
         }
     };
     let walk = |start: Vec<String>,
-                any: bool,
+                mode: Step,
                 tree_parent: &mut HashMap<String, (String, &'a Join)>,
                 visited: &mut HashSet<String>| {
         let mut queue: VecDeque<String> = start.into();
         while let Some(current) = queue.pop_front() {
             for (join, from, to) in &joins {
-                let Some(neighbor) = step(join, from, to, &current, any) else {
+                let Some(neighbor) = step(join, from, to, &current, mode) else {
                     continue;
                 };
                 if visited.insert(neighbor.clone()) {
@@ -453,14 +468,27 @@ fn build_tree_parents<'a>(
             }
         }
     };
-    // Round 1: steps that do not fan out.
+    // Every table reached so far, the root first and the rest sorted, so a
+    // later round starts from all of them in an order declaration does not set.
+    let reached = |tree_parent: &HashMap<String, (String, &'a Join)>| {
+        let mut rest: Vec<String> = tree_parent.keys().cloned().collect();
+        rest.sort();
+        std::iter::once(root.to_string())
+            .chain(rest)
+            .collect::<Vec<_>>()
+    };
+    // Round 1: chains of foreign keys, which the multi-path check counts. A
+    // table one chain reaches is joined along it, before any step back.
     walk(
         vec![root.to_string()],
-        false,
+        Step::Forward,
         &mut tree_parent,
         &mut visited,
     );
-    // Round 2: across a bridge, one step to a table referencing the root.
+    // Round 2: steps back along one-to-one relationships, which do not fan out.
+    let start = reached(&tree_parent);
+    walk(start, Step::Safe, &mut tree_parent, &mut visited);
+    // Round 3: across a bridge, one step to a table referencing the root.
     let mut bridges: Vec<String> = Vec::new();
     for (join, from, to) in &joins {
         if to == root && visited.insert(from.clone()) {
@@ -468,13 +496,10 @@ fn build_tree_parents<'a>(
             bridges.push(from.clone());
         }
     }
-    walk(bridges, false, &mut tree_parent, &mut visited);
-    // Round 3: any step, from every table reached so far.
-    let mut reached: Vec<String> = vec![root.to_string()];
-    let mut rest: Vec<String> = tree_parent.keys().cloned().collect();
-    rest.sort();
-    reached.extend(rest);
-    walk(reached, true, &mut tree_parent, &mut visited);
+    walk(bridges, Step::Safe, &mut tree_parent, &mut visited);
+    // Round 4: any step, from every table reached so far.
+    let start = reached(&tree_parent);
+    walk(start, Step::Any, &mut tree_parent, &mut visited);
     tree_parent
 }
 
@@ -659,10 +684,11 @@ pub(super) fn resolve_joins_pkfk<'a>(
     // bare: a bare walk would hang it off the first-declared relationship.
     // `find_using_context` has already required a single role for it.
     let mut descendant_tables: Vec<(String, String)> = Vec::new();
+    let starts = super::role_playing::query_starts(def, resolved_mets);
     for dim in resolved_dims {
         if let Some(ref st) = dim.source_table {
             let alias = st.to_ascii_lowercase();
-            if let Some(rp) = super::role_playing::role_playing_on_path("", def, &alias)
+            if let Some(rp) = super::role_playing::role_playing_on_path("", def, &starts, &alias)
                 .ok()
                 .flatten()
                 .filter(|rp| *rp != alias && role_playing_bare_aliases.contains(rp))

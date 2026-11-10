@@ -49,6 +49,11 @@ struct Case {
     n: usize,
     /// `(from, to)` with `from > to`: `t{from}.f{to} REFERENCES t{to}(id)`.
     edges: Vec<(usize, usize)>,
+    /// Aligned with `edges`: the relationship is declared one-to-one, so a
+    /// step back along it does not fan out. The data does not keep it one to
+    /// one, so an answer that steps back along one where a chain of foreign
+    /// keys leads gives other rows than the oracle's.
+    one_to_one: Vec<bool>,
     rows: Vec<Rows>,
     /// Two TABLES orders, each a permutation of `0..n`.
     orders: [Vec<usize>; 2],
@@ -122,6 +127,7 @@ fn arb_case() -> impl Strategy<Value = Case> {
             (n, seeded, edges)
         })
         .prop_flat_map(|(n, seeded, edges)| {
+            let one_to_one = prop::collection::vec(prop::bool::weighted(0.25), edges.len());
             let out_degree: Vec<usize> = (0..n)
                 .map(|k| edges.iter().filter(|(f, _)| *f == k).count())
                 .collect();
@@ -147,6 +153,7 @@ fn arb_case() -> impl Strategy<Value = Case> {
             (
                 Just(n),
                 Just(edges),
+                one_to_one,
                 rows,
                 order(),
                 order(),
@@ -157,21 +164,47 @@ fn arb_case() -> impl Strategy<Value = Case> {
         })
         .prop_filter(
             "a query with no metric names a dimension",
-            |(_, _, _, _, _, metric, dims, _)| metric.is_some() || !dims.is_empty(),
+            |(_, _, _, _, _, _, metric, dims, _)| metric.is_some() || !dims.is_empty(),
         )
-        .prop_map(|(n, edges, rows, o1, o2, metric, dims, filter)| Case {
-            n,
-            edges,
-            rows,
-            orders: [o1, o2],
-            metric,
-            dims,
-            filter,
-        })
+        .prop_map(
+            |(n, edges, one_to_one, rows, o1, o2, metric, dims, filter)| Case {
+                n,
+                edges,
+                one_to_one,
+                rows,
+                orders: [o1, o2],
+                metric,
+                dims,
+                filter,
+            },
+        )
 }
 
-fn build_def(case: &Case, order: &[usize]) -> SemanticViewDefinition {
+/// The view, its TABLES in `order`, its RELATIONSHIPS reversed when
+/// `reverse_relationships` (so the two declarations differ in both).
+fn build_def(case: &Case, order: &[usize], reverse_relationships: bool) -> SemanticViewDefinition {
     let t = |k: usize| format!("t{k}");
+    let mut joins: Vec<Join> = case
+        .edges
+        .iter()
+        .zip(&case.one_to_one)
+        .map(|(&(from, to), &one)| Join {
+            table: t(to),
+            from_alias: t(from),
+            fk_columns: vec![format!("f{to}")],
+            ref_columns: vec!["id".to_string()],
+            name: Some(format!("r{from}_{to}")),
+            cardinality: if one {
+                Cardinality::OneToOne
+            } else {
+                Cardinality::ManyToOne
+            },
+            ..Default::default()
+        })
+        .collect();
+    if reverse_relationships {
+        joins.reverse();
+    }
     SemanticViewDefinition {
         tables: order
             .iter()
@@ -182,19 +215,7 @@ fn build_def(case: &Case, order: &[usize]) -> SemanticViewDefinition {
                 ..Default::default()
             })
             .collect(),
-        joins: case
-            .edges
-            .iter()
-            .map(|&(from, to)| Join {
-                table: t(to),
-                from_alias: t(from),
-                fk_columns: vec![format!("f{to}")],
-                ref_columns: vec!["id".to_string()],
-                name: Some(format!("r{from}_{to}")),
-                cardinality: Cardinality::ManyToOne,
-                ..Default::default()
-            })
-            .collect(),
+        joins,
         dimensions: (0..case.n)
             .map(|k| Dimension {
                 name: format!("g{k}"),
@@ -428,8 +449,8 @@ fn check_case(case: &Case) -> Result<(), TestCaseError> {
     let req = request(case);
     let conn = make_db(case);
     let mut answers: Vec<Result<Vec<String>, String>> = Vec::new();
-    for order in &case.orders {
-        let def = build_def(case, order);
+    for (i, order) in case.orders.iter().enumerate() {
+        let def = build_def(case, order, i == 1);
         if let Err(e) = semantic_views::graph::validate_graph(&def) {
             return Err(TestCaseError::fail(format!(
                 "CREATE must accept every acyclic graph in any order: {}",
@@ -553,6 +574,7 @@ fn a_chain_is_followed_beside_a_shorter_path_that_fans_out() {
     let case = Case {
         n: 4,
         edges: vec![(1, 0), (2, 1), (3, 0), (3, 2)],
+        one_to_one: vec![false; 4],
         rows: vec![
             vec![(None, None, vec![])],
             vec![(Some(0), None, vec![None])],

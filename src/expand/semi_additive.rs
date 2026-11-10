@@ -113,7 +113,11 @@ fn na_dim_scoped_alias(
         // arm at the ORDER BY site; no role to resolve here.
         return Ok(None);
     };
-    super::role_playing::find_using_context(view_name, def, dim, std::slice::from_ref(&met))
+    let mets = std::slice::from_ref(&met);
+    Ok(
+        super::role_playing::find_using_context(view_name, def, dim, mets)?
+            .or_else(|| super::role_playing::convergent_using_alias(def, dim, mets)),
+    )
 }
 
 /// Returns true when `met` is an ACTIVE semi-additive metric for a query over
@@ -874,7 +878,7 @@ fn with_na_dims_reached_through_a_role<'a>(
         };
         let reached_through_a_role = scoped.is_some()
             && dim.source_table.as_deref().is_some_and(|t| {
-                super::role_playing::role_playing_on_path("", def, t)
+                super::role_playing::role_playing_on_path("", def, &[], t)
                     .ok()
                     .flatten()
                     .is_some_and(|rp| !rp.eq_ignore_ascii_case(t))

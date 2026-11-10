@@ -39,6 +39,8 @@ fn referenced(def: &SemanticViewDefinition, table: &str) -> Vec<String> {
             out.push(to);
         }
     }
+    // Sorted, so a walk over references does not depend on declaration order.
+    out.sort_unstable();
     out
 }
 
@@ -269,8 +271,12 @@ pub(super) fn component_paths(
         .collect()
 }
 
+/// Each path as `o -> c -> r`, sorted, so a message does not depend on the
+/// order relationships are declared in.
 fn render(paths: &[Vec<String>]) -> Vec<String> {
-    paths.iter().map(|p| p.join(" -> ")).collect()
+    let mut out: Vec<String> = paths.iter().map(|p| p.join(" -> ")).collect();
+    out.sort();
+    out
 }
 
 /// The tables `table` shares a relationship with, in either direction, each
