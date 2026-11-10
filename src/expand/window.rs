@@ -266,6 +266,7 @@ pub(super) fn expand_window_metrics(
             &dims,
             &needs.bare,
             &std::collections::HashMap::new(),
+            &std::collections::HashMap::new(),
             &needs.scoped,
         )
     } else {

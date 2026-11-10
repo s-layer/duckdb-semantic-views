@@ -34,9 +34,9 @@ pub(super) fn relationships_to_table(
 /// Multiple relationships converging from *different* source tables
 /// (`li -> o`, `p -> o`) are NOT role-playing: the target joins as a single
 /// bare instance and path resolution picks the unique connecting edge for
-/// whichever source the query actually reaches it from. (Queries that pull
-/// in both divergent sources are rejected separately by path validation /
-/// fan-trap checks.) Treating that shape as ambiguous broke plain
+/// whichever source the query actually reaches it from. (A query that reaches
+/// it along two such paths is refused by `multi_path`, unless a `USING` picks
+/// one.) Treating that shape as ambiguous broke plain
 /// child-fact + parent-dimension queries.
 pub(super) fn is_role_playing_target(def: &SemanticViewDefinition, target_alias: &str) -> bool {
     let target_lower = target_alias.to_ascii_lowercase();
@@ -509,8 +509,9 @@ pub(super) fn find_using_context(
         // Multiple inbound relationships but each from a DIFFERENT source
         // table, and no USING context in the query: a convergent parent,
         // not a role-playing target. It joins as one bare instance and the
-        // path walk picks the unique connecting edge; divergent-source
-        // queries are rejected by path validation / fan-trap checks.
+        // path walk picks the unique connecting edge. A query that reaches
+        // it along two paths was refused by `multi_path` unless a `USING`
+        // picks one, and then only the per-grain plan answers it.
         Ok(None)
     } else {
         // No (or conflicting) USING context for a role-playing target ->

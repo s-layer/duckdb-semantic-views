@@ -256,6 +256,13 @@ struct Group {
     /// metrics reach it by, as declared. Empty when no queried dimension is on a
     /// role-played table.
     roles: HashMap<String, String>,
+    /// Lowercased table -> the path `[anchor, …, table]` this group's metrics
+    /// reach it by, for each table the anchor reaches by several paths through
+    /// different tables (a diamond) of which their `USING` picks one
+    /// ([`multi_path::pinned_path`](super::multi_path::pinned_path)). Empty
+    /// when the query reaches no such table. Metrics that pick different
+    /// paths are separate groups, outer-merged like different roles.
+    paths: HashMap<String, Vec<String>>,
     /// Aggregate expressions, in emission order. The `i`th is aliased
     /// [`metric_column(i)`](metric_column).
     exprs: Vec<String>,
@@ -317,10 +324,15 @@ struct Partition {
 /// role it plays, sorted. Built from the scoped alias rather than the declared
 /// relationship name because `scoped_join_alias` normalizes the spelling, so
 /// `dep` and `"Dep"` key one group.
-fn group_key(anchor: &str, roles: &HashMap<String, String>) -> String {
+fn group_key(
+    anchor: &str,
+    roles: &HashMap<String, String>,
+    paths: &HashMap<String, Vec<String>>,
+) -> String {
     let mut scoped: Vec<String> = roles
         .iter()
         .map(|(table, rel)| super::join_resolver::scoped_join_alias(table, rel))
+        .chain(paths.values().map(|path| path.join("\u{1}")))
         .collect();
     scoped.sort();
     let mut key = anchor.to_string();
@@ -345,16 +357,18 @@ impl Partition {
         &mut self,
         anchor: &str,
         roles: &HashMap<String, String>,
+        paths: &HashMap<String, Vec<String>>,
         expr: String,
         metric_name: String,
     ) -> (usize, usize) {
         let group = *self
             .index
-            .entry(group_key(anchor, roles))
+            .entry(group_key(anchor, roles, paths))
             .or_insert_with(|| {
                 self.groups.push(Group {
                     anchor: anchor.to_string(),
                     roles: roles.clone(),
+                    paths: paths.clone(),
                     exprs: Vec::new(),
                     metric_names: Vec::new(),
                     bridge_key: None,
@@ -403,6 +417,12 @@ pub(super) fn plan(
         .iter()
         .filter_map(|d| d.source_table.as_ref().map(|t| t.to_ascii_lowercase()))
         .collect();
+    // Every table a grain CTE joins for a member: the dimensions', the facts
+    // their expressions reach, and the `where_clause` members'. A metric's
+    // path to each is pinned where the metric's `USING` picks one of several.
+    let member_tables: Vec<String> = touched_tables(def, resolved_dims, &[], where_tables, false)
+        .into_iter()
+        .collect();
 
     // Partition the metrics into grains, decomposing a metric whose own grain
     // spans several tables into one component per referenced base metric.
@@ -420,8 +440,11 @@ pub(super) fn plan(
         // different relationships has no one role, so it is decomposed like a
         // multi-grain metric: each component is grouped through its own.
         let roles = metric_roles(def, resolved_dims, met);
-        match (grains.len(), roles) {
-            (1, Some(roles)) => {
+        // Likewise a derived metric whose components follow different paths
+        // to a table reached several ways.
+        let paths = metric_paths(def, met, &root, &member_tables);
+        match (grains.len(), roles, paths) {
+            (1, Some(roles), Some(paths)) => {
                 let expr = resolved_exprs
                     .get(&crate::ident::normalize_ident_part(&met.name))
                     .cloned()
@@ -429,6 +452,7 @@ pub(super) fn plan(
                 let (group, column) = partition.push(
                     &grains[0],
                     &roles,
+                    &paths,
                     expr,
                     crate::ident::normalize_ident_part(&met.name),
                 );
@@ -437,6 +461,7 @@ pub(super) fn plan(
             _ => outputs.push(decompose(
                 def,
                 resolved_dims,
+                &member_tables,
                 met,
                 resolved_exprs,
                 &mut partition,
@@ -478,7 +503,14 @@ pub(super) fn plan(
         .iter()
         .all(|g| g.roles == partition.groups[0].roles);
     let crosses_bridge = partition.groups.iter().any(|g| g.bridge_key.is_some());
-    if partition.groups.iter().all(|g| g.anchor == root) && one_role_set && !crosses_bridge {
+    // Phase 7 (diamonds): and when a `USING` picks one of several paths to a
+    // table, which the base-anchored join tree does not follow.
+    let pins_a_path = partition.groups.iter().any(|g| !g.paths.is_empty());
+    if partition.groups.iter().all(|g| g.anchor == root)
+        && one_role_set
+        && !crosses_bridge
+        && !pins_a_path
+    {
         return None;
     }
 
@@ -493,6 +525,15 @@ pub(super) fn plan(
         .collect();
     if partition.groups.len() == 1
         && is_snapshot_group(def, &partition.groups[0], &queried_dim_keys)
+    {
+        return None;
+    }
+    // The snapshot CTE joins along the usual join walk, so a snapshot group
+    // that must follow a pinned path is declined, and the caller refuses it.
+    if partition
+        .groups
+        .iter()
+        .any(|g| !g.paths.is_empty() && is_snapshot_group(def, g, &queried_dim_keys))
     {
         return None;
     }
@@ -580,6 +621,7 @@ fn is_snapshot_group(
 fn decompose(
     def: &SemanticViewDefinition,
     resolved_dims: &[&Dimension],
+    member_tables: &[String],
     met: &Metric,
     resolved_exprs: &HashMap<String, String>,
     partition: &mut Partition,
@@ -620,10 +662,12 @@ fn decompose(
         // Each component is grouped through its OWN role: a component with no
         // one role for a queried role-played table declines the whole query.
         let roles = metric_roles(def, resolved_dims, base)?;
+        // And through its OWN path to a table reached several ways.
+        let home = source.to_ascii_lowercase();
+        let paths = super::multi_path::component_paths(def, base, &home, member_tables);
         // A component always has an empty `non_additive_by` (rejected above), so a
         // decomposed derived metric never lands in a snapshot group.
-        let (group, column) =
-            partition.push(&source.to_ascii_lowercase(), &roles, expr, name.clone());
+        let (group, column) = partition.push(&home, &roles, &paths, expr, name.clone());
         let reference = column_ref(group, &metric_column(column));
         // A base metric may be referenced bare (`revenue`) or qualified by its
         // own source table (`o.revenue`) — the same two spellings
@@ -778,6 +822,28 @@ fn metric_roles(
         }
     }
     Some(roles)
+}
+
+/// The paths ONE metric follows to the tables in `member_tables` that its
+/// table reaches several ways (see [`Group::paths`]), or `None` when its
+/// components follow different ones, in which case it is decomposed and each
+/// component grouped through its own.
+fn metric_paths(
+    def: &SemanticViewDefinition,
+    met: &Metric,
+    root: &str,
+    member_tables: &[String],
+) -> Option<HashMap<String, Vec<String>>> {
+    let mut agreed: Option<HashMap<String, Vec<String>>> = None;
+    for (component, home) in super::multi_path::base_components(def, met, root) {
+        let paths = super::multi_path::component_paths(def, component, &home, member_tables);
+        match &agreed {
+            Some(seen) if *seen != paths => return None,
+            Some(_) => {}
+            None => agreed = Some(paths),
+        }
+    }
+    Some(agreed.unwrap_or_default())
 }
 
 /// Whether every queried metric can be grouped through a single role per
@@ -1147,10 +1213,8 @@ fn is_eligible(
     // A metric's `USING` is honoured only in the one shape this emitter threads:
     // every relationship it names targets a role-played table whose role was
     // resolved for THAT metric ([`metric_roles`], the role its group is emitted
-    // with) and is therefore emitted as a scoped join. `USING` naming anything
-    // else — a relationship to a table reached only one way, where the
-    // base-anchored path still scopes the alias — is left on that path,
-    // unchanged, rather than guessed at here.
+    // with) and is therefore emitted as a scoped join, or targets a table
+    // reached by one relationship, which needs no role (see below).
     // TECH-DEBT #71: a `USING` relationship whose target table this query
     // never reaches scopes nothing — the base-anchored path emits its scoped
     // join, but no member names the scoped alias, so it only widens the FROM.
@@ -1177,16 +1241,21 @@ fn is_eligible(
     // For a view stored before #249 with `dep` and `"dep"` to one table, both
     // share the scoped alias and `roles` holds the first-declared; a `USING`
     // naming the other one is not threaded, and the base-anchored path keeps it.
+    // A relationship to a table reached by ONE relationship is threaded too:
+    // it picks no role, the group joins that table bare for its dimensions
+    // (and, in a diamond, along the path the `USING` starts, see
+    // [`Group::paths`]), and `anchor_needs` joins its scoped instance for the
+    // facts the metric inlines (TECH-DEBT #81).
     let using_is_threaded = |m: &Metric| {
         let roles = metric_roles(def, resolved_dims, m).unwrap_or_default();
         m.using_relationships.iter().all(|rel| {
             let named = crate::graph::RelNameMatch::new(&def.joins, rel);
             def.joins.iter().any(|j| {
+                let target = j.table.to_ascii_lowercase();
                 named.matches_join(j)
-                    && (roles
-                        .get(&j.table.to_ascii_lowercase())
-                        .is_some_and(|role| named.matches(role))
-                        || !touched.contains(&j.table.to_ascii_lowercase()))
+                    && (roles.get(&target).is_some_and(|role| named.matches(role))
+                        || !touched.contains(&target)
+                        || !super::role_playing::is_role_playing_target(def, &target))
             })
         })
     };
@@ -1394,6 +1463,7 @@ fn render_plain_group(
             resolved_dims,
             &needs.bare,
             roles,
+            &group.paths,
             &needs.scoped,
         ),
         def,
@@ -1572,6 +1642,7 @@ fn render_single_grain(
                 resolved_dims,
                 &needs.bare,
                 roles,
+                &group.paths,
                 &needs.scoped,
             ),
         },
@@ -1705,6 +1776,7 @@ fn render_bridged_group(
             &[],
             &met_needs.bare,
             &group.roles,
+            &group.paths,
             &met_needs.scoped,
         ),
         def,
@@ -1773,6 +1845,7 @@ fn bridged_pairs_query(
             resolved_dims,
             &needs.bare,
             &group.roles,
+            &group.paths,
             &[],
         ),
         def,
@@ -1908,12 +1981,14 @@ fn coalesced_key(groups: usize, d: usize) -> String {
 /// introduces and one already in scope. The planner has already established
 /// that none of these paths fans the anchor, so the anchor's row count — and
 /// therefore its aggregate — is unaffected by them.
+#[allow(clippy::too_many_lines)]
 pub(super) fn anchor_joins<'a>(
     def: &'a SemanticViewDefinition,
     anchor: &str,
     resolved_dims: &[&Dimension],
     extra_tables: &[String],
     roles: &HashMap<String, String>,
+    paths: &HashMap<String, Vec<String>>,
     scoped_facts: &[&'a Join],
 ) -> Vec<ResolvedJoin<'a>> {
     let Some(graph) = GrainGraph::build(def) else {
@@ -1932,7 +2007,16 @@ pub(super) fn anchor_joins<'a>(
     let dim_sources = resolved_dims.iter().filter_map(|d| d.source_table.clone());
     let sources: Vec<String> = dim_sources.chain(extra_tables.iter().cloned()).collect();
     for source in &sources {
-        let Some(path) = graph.path(anchor, &source.to_ascii_lowercase()) else {
+        let source = source.to_ascii_lowercase();
+        // A table reached several ways is joined along the path the group's
+        // `USING` picked ([`Group::paths`]); the planner refused the query if
+        // none was picked. Any other table has one path up from the anchor,
+        // which the walk finds.
+        let pinned = paths
+            .get(&source)
+            .filter(|p| p.first().is_some_and(|f| f == anchor))
+            .cloned();
+        let Some(path) = pinned.or_else(|| graph.path(anchor, &source)) else {
             continue;
         };
         for pair in path.windows(2) {

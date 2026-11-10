@@ -293,6 +293,7 @@ pub(super) fn build_snapshot_block(
                 &dims,
                 &needs.bare,
                 &std::collections::HashMap::new(),
+                &std::collections::HashMap::new(),
                 &needs.scoped,
             );
             joins.extend(chains);

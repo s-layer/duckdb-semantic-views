@@ -53,6 +53,19 @@
 //! its `ts` by a correlated `min(id)` with the open bounds written as
 //! `COALESCE(.., TRUE)`, never with the expansion's join condition.
 
+//! Phase 7 adds a **second path** to `w` in about half the cases: a diamond
+//! `t → x → w` beside `t → u → w`, declared after it, so following the
+//! first-declared relationship would go through `u`. A metric on `t` with no
+//! `USING` grouped or filtered by `w` must then be refused as multi-path (as
+//! Snowflake refuses it, 010246), and so must a query with no metrics that
+//! reads `t`'s rows and names `w`. `svu USING (t_u)` and `svx USING (t_x)`
+//! sum `t.v` along their own path, which the oracle states by joining `w`
+//! through `u` or through `x`. The diamond cases query only the metrics on
+//! `t` (see [`metric_exists`]). The diamond is declared with `w` first in
+//! about half of those cases, the shape CREATE accepts (its shared table is
+//! the base table), and with `t` first in the rest, the shape it refuses
+//! until it accepts any acyclic graph; each case checks which.
+
 use proptest::prelude::*;
 use semantic_views::expand::{expand, DimensionName, FactName, MetricName, QueryRequest};
 use semantic_views::model::{
@@ -79,6 +92,16 @@ struct Instance {
     u_starts: Vec<i64>,
     /// Per `t` row, its ASOF value `ts` (missing entries are NULL).
     t_ts: Vec<Option<i64>>,
+    /// Phase 7: whether the view has the second path `t → x → w`.
+    diamond: bool,
+    /// The second path's middle rows: `fk_w` for ids `0..n_x`.
+    x_rows: Vec<Option<i64>>,
+    /// Per `t` row, its foreign key `fk_x` into `x` (missing entries are NULL).
+    t_fk_x: Vec<Option<i64>>,
+    /// With the second path, whether `w` is declared first. CREATE accepts a
+    /// diamond only then (its shared table is the base table), so this is the
+    /// shape users can create; `t` first is the shape CREATE refuses today.
+    w_first: bool,
 }
 
 /// The kind of the `t → u` relationship.
@@ -119,7 +142,29 @@ fn u_key(inst: &Instance, i: usize) -> (i64, i64) {
 /// three grains; `sv`/`ct` are root-grain metrics; `su`/`sw` are the
 /// parent/grandparent (ancestor) metrics, each computed at its own grain.
 const DIMS: [&str; 3] = ["td", "ucat", "wcat"];
-const METS: [&str; 4] = ["sv", "ct", "su", "sw"];
+/// `svu` / `svx` (Phase 7, diamond cases only) sum `t.v` like `sv`, with a
+/// `USING` naming the first relationship of the path through `u` or `x`.
+const METS: [&str; 6] = ["sv", "ct", "su", "sw", "svu", "svx"];
+
+/// Whether metric `METS[i]` is queried in a view of `inst`'s shape. With the
+/// second path `t` references both `u` and `x`, which makes it a bridge
+/// between them (Phase 7.3), so a metric on `u` or `w` grouped or filtered by
+/// `t` is answered once per group rather than refused; `bridge_proptest`
+/// oracles that. The diamond cases therefore query only the metrics on `t`,
+/// whose question is which path to `w` they follow.
+///
+/// With `w` declared first, the source-less `count(*)` (`ct`) counts the base
+/// table `w`, and grouped by `t` it would cross the same bridge, so those
+/// cases leave it out too.
+fn metric_exists(inst: &Instance, i: usize) -> bool {
+    if inst.diamond && inst.w_first {
+        !matches!(METS[i], "su" | "sw" | "ct")
+    } else if inst.diamond {
+        !matches!(METS[i], "su" | "sw")
+    } else {
+        !matches!(METS[i], "svu" | "svx")
+    }
+}
 
 /// Members a generated `where_clause` may name (PBT-6), one per grain plus a
 /// `LABELS = (FILTER)` member per grain whose expression is a compound `OR`.
@@ -317,16 +362,61 @@ fn arb_instance() -> impl Strategy<Value = Instance> {
         let ts_cell = prop_oneof![1 => Just(None), 5 => (-1i64..9).prop_map(Some)];
         let t_ts = prop::collection::vec(ts_cell, 20);
         let hop = prop_oneof![Just(Hop::Plain), Just(Hop::Asof), Just(Hop::Range)];
-        (w_rows, u_rows, t_rows, hop, u_starts, t_ts).prop_map(
-            |(w_rows, u_rows, t_rows, hop, u_starts, t_ts)| Instance {
-                w_rows,
-                u_rows,
-                t_rows,
-                hop,
-                u_starts,
-                t_ts,
-            },
+        // The second path: `x` rows reference `w` (NULL, valid or dangling),
+        // and each `t` row references an `x` row the same way.
+        let x_fk_w = prop_oneof![
+            1 => Just(None),
+            4 => (0i64..n_w as i64).prop_map(Some),
+            1 => Just(Some(n_w as i64)),
+        ];
+        let x_rows = (1usize..=3).prop_flat_map(move |n_x| {
+            let t_fk_x_cell = prop_oneof![
+                1 => Just(None),
+                4 => (0i64..n_x as i64).prop_map(Some),
+                1 => Just(Some(n_x as i64)),
+            ];
+            (
+                prop::collection::vec(x_fk_w.clone(), n_x),
+                prop::collection::vec(t_fk_x_cell, 20),
+            )
+        });
+        (
+            w_rows,
+            u_rows,
+            t_rows,
+            hop,
+            u_starts,
+            t_ts,
+            any::<bool>(),
+            x_rows,
+            any::<bool>(),
         )
+            .prop_map(
+                |(
+                    w_rows,
+                    u_rows,
+                    t_rows,
+                    hop,
+                    u_starts,
+                    t_ts,
+                    diamond,
+                    (x_rows, t_fk_x),
+                    w_first,
+                )| {
+                    Instance {
+                        w_rows,
+                        u_rows,
+                        t_rows,
+                        hop,
+                        u_starts,
+                        t_ts,
+                        diamond,
+                        x_rows,
+                        t_fk_x,
+                        w_first: diamond && w_first,
+                    }
+                },
+            )
     })
 }
 
@@ -341,6 +431,13 @@ fn arb_case() -> impl Strategy<Value = Case> {
             3 => arb_pred().prop_map(Some),
         ];
         (Just(inst), dim_sel, met_sel, where_pred)
+            .prop_map(|(inst, sel_dims, sel_metrics, where_pred)| {
+                let sel_metrics: Vec<usize> = sel_metrics
+                    .into_iter()
+                    .filter(|&i| metric_exists(&inst, i))
+                    .collect();
+                (inst, sel_dims, sel_metrics, where_pred)
+            })
             .prop_filter(
                 "at least one of dimensions/metrics must be selected",
                 |(_, sel_dims, sel_metrics, _)| !sel_dims.is_empty() || !sel_metrics.is_empty(),
@@ -358,6 +455,13 @@ fn arb_case() -> impl Strategy<Value = Case> {
 /// dimension at each grain, root-grain safe metrics (`sum(t.v)`, `count(*)`),
 /// and ancestor metrics on `u` and `w`.
 fn build_def(hop: Hop) -> SemanticViewDefinition {
+    build_def_shaped(hop, false, false)
+}
+
+/// [`build_def`], plus (with `diamond`) the second path `t → x → w` and the
+/// two `USING` metrics, `svu` along `t_u` and `svx` along `t_x`. With
+/// `w_first`, `w` is declared first, so it is the base table.
+fn build_def_shaped(hop: Hop, diamond: bool, w_first: bool) -> SemanticViewDefinition {
     let asof = hop == Hop::Asof;
     let table = |alias: &str, pk: &[&str]| TableRef {
         alias: alias.to_string(),
@@ -374,12 +478,20 @@ fn build_def(hop: Hop) -> SemanticViewDefinition {
     // FROM is anchored there with LEFT JOINs outward along the chain.
     let u_pk: &[&str] = if asof { &["uk", "us"] } else { &["id"] };
     let mut tables = vec![table("t", &[]), table("u", u_pk), table("w", &["id"])];
+    if diamond {
+        tables.push(table("x", &["id"]));
+    }
     if hop == Hop::Range {
         tables[1].distinct_ranges = vec![DistinctRange {
             name: "u_period".to_string(),
             start: "rs".to_string(),
             end: "re".to_string(),
         }];
+    }
+    if w_first {
+        // `w, t, u, x`: the diamond's shared table is the base table.
+        tables.swap(0, 2);
+        tables.swap(1, 2);
     }
     let dim = |name: &str, expr: &str, source: &str| Dimension {
         cortex_search_service: None,
@@ -432,13 +544,20 @@ fn build_def(hop: Hop) -> SemanticViewDefinition {
         window_spec: None,
         tags: Vec::new(),
     };
-    let metrics = vec![
+    let mut metrics = vec![
         base_metric("sv", "sum(t.v)", Some("t")),
         base_metric("ct", "count(*)", None),
         base_metric("su", "sum(u.uw)", Some("u")),
         base_metric("sw", "sum(w.ww)", Some("w")),
     ];
-    let joins = vec![
+    if diamond {
+        for (name, rel) in [("svu", "t_u"), ("svx", "t_x")] {
+            let mut m = base_metric(name, "sum(t.v)", Some("t"));
+            m.using_relationships = vec![rel.to_string()];
+            metrics.push(m);
+        }
+    }
+    let mut joins = vec![
         if hop == Hop::Range {
             Join {
                 from_alias: "t".to_string(),
@@ -484,6 +603,22 @@ fn build_def(hop: Hop) -> SemanticViewDefinition {
             range_end: None,
         },
     ];
+    if diamond {
+        // Declared after the `u` path, so the first-declared path to `w` is
+        // the one through `u`, which the expansion used to follow silently.
+        for (name, from, to, fk) in [("t_x", "t", "x", "fk_x"), ("x_w", "x", "w", "fk_w")] {
+            joins.push(Join {
+                from_alias: from.to_string(),
+                table: to.to_string(),
+                fk_columns: vec![fk.to_string()],
+                ref_columns: vec!["id".to_string()],
+                name: Some(name.to_string()),
+                cardinality: Cardinality::ManyToOne,
+                asof: None,
+                range_end: None,
+            });
+        }
+    }
     SemanticViewDefinition {
         variables: Vec::new(),
         max_staleness: None,
@@ -512,7 +647,8 @@ fn make_db(inst: &Instance) -> duckdb::Connection {
     conn.execute_batch(
         "CREATE TABLE w (id INTEGER, wcat INTEGER, ww INTEGER); \
          CREATE TABLE u (id INTEGER, uk INTEGER, us INTEGER, rs INTEGER, re INTEGER, fk_w INTEGER, ucat INTEGER, uw INTEGER); \
-         CREATE TABLE t (fk_u INTEGER, ts INTEGER, d INTEGER, v INTEGER);",
+         CREATE TABLE x (id INTEGER, fk_w INTEGER); \
+         CREATE TABLE t (fk_u INTEGER, ts INTEGER, d INTEGER, v INTEGER, fk_x INTEGER);",
     )
     .expect("create tables");
 
@@ -549,6 +685,16 @@ fn make_db(inst: &Instance) -> duckdb::Connection {
         conn.execute_batch(&format!("INSERT INTO u VALUES {};", values.join(",")))
             .expect("insert u rows");
     }
+    if !inst.x_rows.is_empty() {
+        let values: Vec<String> = inst
+            .x_rows
+            .iter()
+            .enumerate()
+            .map(|(i, fk_w)| format!("({i},{})", cell(fk_w)))
+            .collect();
+        conn.execute_batch(&format!("INSERT INTO x VALUES {};", values.join(",")))
+            .expect("insert x rows");
+    }
     if !inst.t_rows.is_empty() {
         let values: Vec<String> = inst
             .t_rows
@@ -556,7 +702,15 @@ fn make_db(inst: &Instance) -> duckdb::Connection {
             .enumerate()
             .map(|(i, (fk_u, d, v))| {
                 let ts = inst.t_ts.get(i).copied().flatten();
-                format!("({},{},{},{})", cell(fk_u), cell(&ts), cell(d), cell(v))
+                let fk_x = inst.t_fk_x.get(i).copied().flatten();
+                format!(
+                    "({},{},{},{},{})",
+                    cell(fk_u),
+                    cell(&ts),
+                    cell(d),
+                    cell(v),
+                    cell(&fk_x)
+                )
             })
             .collect();
         conn.execute_batch(&format!("INSERT INTO t VALUES {};", values.join(",")))
@@ -600,10 +754,19 @@ fn dim_table(dim: &str) -> &'static str {
 /// declared source table, which sits at the base grain.
 fn metric_table(metric: &str) -> &'static str {
     match metric {
-        "sv" | "ct" => "t",
+        "sv" | "ct" | "svu" | "svx" => "t",
         "su" => "u",
         "sw" => "w",
         other => unreachable!("unexpected metric {other}"),
+    }
+}
+
+/// The oracle's grain for a metric: its table, except that `svx` reads `t`
+/// with `w` joined through `x`, a grain of its own (`tx`).
+fn grain_key(metric: &str) -> &'static str {
+    match metric {
+        "svx" => "tx",
+        other => metric_table(other),
     }
 }
 
@@ -628,9 +791,11 @@ fn grain_sql(case: &Case, anchor: &str) -> String {
     let met_items: Vec<String> = case
         .sel_metrics
         .iter()
-        .filter(|&&i| metric_table(METS[i]) == anchor)
+        .filter(|&&i| grain_key(METS[i]) == anchor)
         .map(|&i| match METS[i] {
             "sv" => "sum(t.v) AS sv".to_string(),
+            "svu" => "sum(t.v) AS svu".to_string(),
+            "svx" => "sum(t.v) AS svx".to_string(),
             "ct" => "count(*) AS ct".to_string(),
             "su" => "sum(u.uw) AS su".to_string(),
             "sw" => "sum(w.ww) AS sw".to_string(),
@@ -665,8 +830,18 @@ fn grain_sql(case: &Case, anchor: &str) -> String {
         }
         Hop::Plain => "FROM t LEFT JOIN u ON t.fk_u = u.id LEFT JOIN w ON u.fk_w = w.id",
     };
+    // Phase 7: the `tx` grain reaches `w` through `x` instead, so its `w`
+    // join is replaced; `u` is still joined for `ucat`.
+    let tx_from;
     let from = match anchor {
         "t" => t_from,
+        "tx" => {
+            tx_from = t_from.replace(
+                "LEFT JOIN w ON u.fk_w = w.id",
+                "LEFT JOIN x ON t.fk_x = x.id LEFT JOIN w ON x.fk_w = w.id",
+            );
+            tx_from.as_str()
+        }
         "u" => "FROM u LEFT JOIN w ON u.fk_w = w.id",
         "w" => "FROM w",
         other => unreachable!("unexpected anchor {other}"),
@@ -699,7 +874,7 @@ fn oracle_sql(case: &Case) -> String {
     // Grains in first-selected order.
     let mut anchors: Vec<&str> = Vec::new();
     for &i in &case.sel_metrics {
-        let table = metric_table(METS[i]);
+        let table = grain_key(METS[i]);
         if !anchors.contains(&table) {
             anchors.push(table);
         }
@@ -767,7 +942,7 @@ fn oracle_projection(case: &Case, anchors: &[&str]) -> String {
         let metric = METS[m];
         let group = anchors
             .iter()
-            .position(|a| *a == metric_table(metric))
+            .position(|a| *a == grain_key(metric))
             .expect("every selected metric's grain is an anchor");
         items.push(format!("g{group}.{metric}"));
     }
@@ -796,7 +971,17 @@ fn is_duckdb_group_by_bind_bug(msg: &str) -> bool {
 /// and matches the independent per-grain oracle. Shared by the proptest and the
 /// pinned cases below so a pinned case runs exactly the property's checks.
 fn check_case(case: &Case) -> Result<(), TestCaseError> {
-    let def = build_def(case.inst.hop);
+    let def = build_def_shaped(case.inst.hop, case.inst.diamond, case.inst.w_first);
+    // CREATE's graph rule accepts the diamond only with `w` (its shared table)
+    // declared first. The `t`-first diamond is generated too, for the
+    // expansion of any acyclic graph, but no user can create it today.
+    let creatable = semantic_views::graph::validate_graph(&def);
+    prop_assert_eq!(
+        creatable.is_ok(),
+        !case.inst.diamond || case.inst.w_first,
+        "CREATE's graph rule: {:?}",
+        creatable.err().map(|e| e.to_string())
+    );
     let req = QueryRequest {
         where_clause: case.where_pred.as_ref().map(Pred::to_member_sql),
         dimensions: case
@@ -822,6 +1007,26 @@ fn check_case(case: &Case) -> Result<(), TestCaseError> {
             .any(|&d| level(dim_table(DIMS[d])) < level(metric_table(METS[m])))
     });
     let result = expand("multihop", &def, &req);
+
+    // Phase 7: with the second path, a query that reads `t`'s rows and names
+    // `w` has two paths to it. It is refused, before anything else, unless
+    // every metric reading `t` names its path in a `USING`.
+    if reaches_w_two_ways(case) {
+        match result {
+            Err(e) => {
+                let msg = e.to_string();
+                prop_assert!(
+                    msg.contains("by more than one path"),
+                    "a query with two paths to w was rejected, but not as multi-path: {msg}"
+                );
+            }
+            Ok(sql) => prop_assert!(
+                false,
+                "a query with two paths to w must be refused, got SQL:\n{sql}"
+            ),
+        }
+        return Ok(());
+    }
 
     if dimension_below_a_metric_grain {
         match result {
@@ -938,6 +1143,110 @@ fn check_case(case: &Case) -> Result<(), TestCaseError> {
         diff, case.sel_dims, case.sel_metrics, expanded, oracle
     );
     Ok(())
+}
+
+/// Whether `case` reaches `w` from `t` along a path it does not choose: the
+/// view has the second path, a dimension or filter member is on `w`, and some
+/// selected metric reads `t` with no `USING` (`sv`, `ct`), or there is no
+/// metric and the lowest member is on `t`, so the query reads `t`'s rows.
+fn reaches_w_two_ways(case: &Case) -> bool {
+    if !case.inst.diamond {
+        return false;
+    }
+    let mut members: Vec<&str> = case.sel_dims.iter().map(|&d| dim_table(DIMS[d])).collect();
+    if let Some(p) = &case.where_pred {
+        p.tables(&mut members);
+    }
+    if !members.contains(&"w") {
+        return false;
+    }
+    if case.sel_metrics.is_empty() {
+        return members.contains(&"t");
+    }
+    case.sel_metrics
+        .iter()
+        .any(|&m| matches!(METS[m], "sv" | "ct"))
+}
+
+/// Phase 7 guard: the diamond cases reach both outcomes, a refusal and an
+/// answer along a chosen path (`svu` / `svx` beside a member on `w`), and the
+/// two paths give different numbers in some of them, so the oracle comparison
+/// is not vacuous.
+#[test]
+fn generator_reaches_both_diamond_branches() {
+    use proptest::strategy::ValueTree;
+    use proptest::test_runner::TestRunner;
+
+    let mut runner = TestRunner::deterministic();
+    let (mut refused, mut chosen, mut plain, mut differ) = (0usize, 0usize, 0usize, 0usize);
+    // The same two outcomes in the shape users can create (`w` declared first).
+    let (mut refused_w_first, mut chosen_w_first) = (0usize, 0usize);
+    for _ in 0..400 {
+        let case = arb_case()
+            .new_tree(&mut runner)
+            .expect("strategy must produce a value")
+            .current();
+        if !case.inst.diamond {
+            plain += 1;
+            continue;
+        }
+        if reaches_w_two_ways(&case) {
+            refused += 1;
+            refused_w_first += usize::from(case.inst.w_first);
+            continue;
+        }
+        let names_w = case.sel_dims.iter().any(|&d| DIMS[d] == "wcat")
+            || case.where_pred.as_ref().is_some_and(|p| {
+                let mut tables = Vec::new();
+                p.tables(&mut tables);
+                tables.contains(&"w")
+            });
+        if names_w
+            && case
+                .sel_metrics
+                .iter()
+                .any(|&m| matches!(METS[m], "svu" | "svx"))
+        {
+            chosen += 1;
+            chosen_w_first += usize::from(case.inst.w_first);
+            // Whether the two paths give different sums by `wcat` here (the
+            // `u` path read by plain key, a close enough stand-in for this).
+            let conn = make_db(&case.inst);
+            let diff: i64 = conn
+                .query_row(
+                    "SELECT count(*) FROM (\
+                       (SELECT w.wcat, sum(t.v) FROM t LEFT JOIN u ON t.fk_u = u.id \
+                        LEFT JOIN w ON u.fk_w = w.id GROUP BY 1) \
+                       EXCEPT ALL \
+                       (SELECT w.wcat, sum(t.v) FROM t LEFT JOIN x ON t.fk_x = x.id \
+                        LEFT JOIN w ON x.fk_w = w.id GROUP BY 1))",
+                    [],
+                    |r| r.get(0),
+                )
+                .expect("path comparison runs");
+            differ += usize::from(diff > 0);
+        }
+    }
+    assert!(plain > 0, "no case without the second path");
+    assert!(
+        differ > 0,
+        "the two paths to w never give different sums; following the wrong one \
+         would go unnoticed"
+    );
+    assert!(refused > 0, "no diamond case is refused as multi-path");
+    assert!(
+        chosen > 0,
+        "no diamond case follows a USING path to w; the path oracle is never compared"
+    );
+    assert!(
+        refused_w_first > 0 && chosen_w_first > 0,
+        "the diamond declared w-first (the shape CREATE accepts) misses an outcome: \
+         {refused_w_first} refused, {chosen_w_first} answered along a USING path"
+    );
+    assert!(
+        refused > refused_w_first && chosen > chosen_w_first,
+        "the diamond declared t-first never reaches both outcomes"
+    );
 }
 
 /// PBT-6 guard: prove the generated cases reach both `where_clause` branches
@@ -1080,6 +1389,10 @@ fn ci_or_of_ands_instance() -> Instance {
         hop: Hop::Plain,
         u_starts: vec![],
         t_ts: vec![],
+        diamond: false,
+        w_first: false,
+        x_rows: vec![],
+        t_fk_x: vec![],
     }
 }
 
@@ -1177,6 +1490,10 @@ fn pinned_asof_hop_takes_the_latest_period() {
         hop: Hop::Asof,
         u_starts: vec![2, 1],
         t_ts: vec![Some(1), Some(2), Some(3), Some(4), Some(9), None],
+        diamond: false,
+        w_first: false,
+        x_rows: vec![],
+        t_fk_x: vec![],
     };
     let case = Case {
         inst: inst.clone(),
@@ -1329,6 +1646,10 @@ fn pinned_range_hop_takes_the_period_holding_the_value() {
         hop: Hop::Range,
         u_starts: vec![0, 1, 3],
         t_ts: vec![Some(-1), Some(1), Some(3), Some(5), Some(6), Some(9), None],
+        diamond: false,
+        w_first: false,
+        x_rows: vec![],
+        t_fk_x: vec![],
     };
     assert_eq!(u_period(&inst, 0), (None, Some(1)));
     assert_eq!(u_period(&inst, 1), (Some(3), Some(5)));

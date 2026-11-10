@@ -153,10 +153,7 @@ San Francisco	2	400
 # `"x.y"` (one identifier containing a dot) and `x.y` (two parts) are
 # different names (PR #249 review): CREATE accepts both, to different tables,
 # and `USING ("x"."y")` names the two-part one (which edge it binds is pinned
-# by `using_a_two_part_relationship_name_does_not_bind_a_dotted_one_part_name`;
-# a dimension on `r` is not co-queried with `arrivals` here because `USING` on
-# a table reached by ONE relationship fails to bind such a dimension, a
-# separate pre-existing defect).
+# by `using_a_two_part_relationship_name_does_not_bind_a_dotted_one_part_name`).
 statement ok
 CREATE SEMANTIC VIEW rn_dotted AS
   TABLES (
@@ -188,6 +185,17 @@ SELECT * FROM SEMANTIC_VIEW(rn_dotted DIMENSIONS dep_city METRICS flights);
 ----
 Denver	1
 San Francisco	2
+
+# TECH-DEBT #81: a dimension on `r`, which ONE relationship reaches, beside a
+# metric whose `USING` names that relationship. It used to fail to bind
+# ("Referenced table r not found"), because `r` was joined only under the
+# scoped alias `r__x.y`.
+query TI rowsort
+SELECT * FROM SEMANTIC_VIEW(rn_dotted DIMENSIONS arr_city METRICS arrivals);
+----
+Denver	1
+New York	1
+San Francisco	1
 
 # The same two names as two roles of ONE table would share the role alias
 # `a__x.y`, so that pair is rejected.
