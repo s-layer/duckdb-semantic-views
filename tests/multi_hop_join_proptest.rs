@@ -62,9 +62,8 @@
 //! sum `t.v` along their own path, which the oracle states by joining `w`
 //! through `u` or through `x`. The diamond cases query only the metrics on
 //! `t` (see [`metric_exists`]). The diamond is declared with `w` first in
-//! about half of those cases, the shape CREATE accepts (its shared table is
-//! the base table), and with `t` first in the rest, the shape it refuses
-//! until it accepts any acyclic graph; each case checks which.
+//! about half of those cases and with `t` first in the rest; CREATE accepts
+//! both, and each case checks that it does.
 
 use proptest::prelude::*;
 use semantic_views::expand::{expand, DimensionName, FactName, MetricName, QueryRequest};
@@ -98,9 +97,8 @@ struct Instance {
     x_rows: Vec<Option<i64>>,
     /// Per `t` row, its foreign key `fk_x` into `x` (missing entries are NULL).
     t_fk_x: Vec<Option<i64>>,
-    /// With the second path, whether `w` is declared first. CREATE accepts a
-    /// diamond only then (its shared table is the base table), so this is the
-    /// shape users can create; `t` first is the shape CREATE refuses today.
+    /// With the second path, whether `w` (the shared table) is declared first.
+    /// CREATE accepts the diamond either way.
     w_first: bool,
 }
 
@@ -972,13 +970,11 @@ fn is_duckdb_group_by_bind_bug(msg: &str) -> bool {
 /// pinned cases below so a pinned case runs exactly the property's checks.
 fn check_case(case: &Case) -> Result<(), TestCaseError> {
     let def = build_def_shaped(case.inst.hop, case.inst.diamond, case.inst.w_first);
-    // CREATE's graph rule accepts the diamond only with `w` (its shared table)
-    // declared first. The `t`-first diamond is generated too, for the
-    // expansion of any acyclic graph, but no user can create it today.
+    // CREATE accepts the diamond in either TABLES order, as Snowflake does
+    // (it used to refuse it unless `w`, its shared table, came first).
     let creatable = semantic_views::graph::validate_graph(&def);
-    prop_assert_eq!(
+    prop_assert!(
         creatable.is_ok(),
-        !case.inst.diamond || case.inst.w_first,
         "CREATE's graph rule: {:?}",
         creatable.err().map(|e| e.to_string())
     );
@@ -1179,7 +1175,7 @@ fn generator_reaches_both_diamond_branches() {
 
     let mut runner = TestRunner::deterministic();
     let (mut refused, mut chosen, mut plain, mut differ) = (0usize, 0usize, 0usize, 0usize);
-    // The same two outcomes in the shape users can create (`w` declared first).
+    // The same two outcomes with `w` declared first.
     let (mut refused_w_first, mut chosen_w_first) = (0usize, 0usize);
     for _ in 0..400 {
         let case = arb_case()

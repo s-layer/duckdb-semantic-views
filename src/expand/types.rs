@@ -372,8 +372,12 @@ pub struct MultiPathError {
     pub from_table: String,
     /// What reads rows at `from_table`: `metric 'x'`, or the query itself.
     pub reader: String,
-    /// Each path, as `o -> c -> r`.
+    /// Each path, as `o -> c -> r`, or in either direction as `c <- o -> s`.
     pub paths: Vec<String>,
+    /// The member is reached by no chain of relationships, so each path
+    /// crosses a many-to-many relationship or steps back along one (Snowflake's
+    /// 000002). A `USING` cannot choose between them, so the advice differs.
+    pub many_to_many: bool,
 }
 
 /// Detail payload for [`ExpandError::MetricFanTrap`], boxed so the enum stays
@@ -544,6 +548,12 @@ pub enum ExpandError {
     /// (a diamond: orders reach regions through customers and through stores).
     /// Snowflake refuses it as a multi-path relationship (010246). We used to
     /// follow the first-declared path silently.
+    ///
+    /// With [`MultiPathError::many_to_many`] set, no chain reaches the member
+    /// and the paths cross a many-to-many relationship (two bridges between
+    /// books and authors; customers and stores through orders and through
+    /// regions), which Snowflake refuses as 000002 "Unsupported feature
+    /// 'Multi-path in many-to-many relationship'" whatever the `USING`.
     MultiPath { detail: Box<MultiPathError> },
     /// A metric's `USING` picks one of several paths to a table the query
     /// reaches (a diamond), and the query also holds something only the
@@ -1034,7 +1044,20 @@ impl fmt::Display for ExpandError {
                     from_table,
                     reader,
                     paths,
+                    many_to_many,
                 } = detail.as_ref();
+                if *many_to_many {
+                    return write!(
+                        f,
+                        "semantic view '{view_name}': {member} is on table '{member_table}', \
+                         which {reader} reaches from table '{from_table}' by no chain of \
+                         relationships and by more than one path across a many-to-many \
+                         relationship: {}. A USING cannot choose between them, and Snowflake \
+                         does not support this either (multi-path in a many-to-many \
+                         relationship). Query members one path reaches",
+                        paths.join(", ")
+                    );
+                }
                 let advice = if reader.starts_with("metric") {
                     "Give the metric a USING that names the first relationship of the path to \
                      follow, or query members one path reaches"

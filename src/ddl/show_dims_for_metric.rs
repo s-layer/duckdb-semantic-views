@@ -16,7 +16,7 @@ use crate::catalog::CatalogReader;
 use crate::ddl::describe::format_json_array;
 use crate::ddl::read_ffi::{read_str_arg, run_dispatcher, serialize_varchar_bool_rows};
 use crate::expand::collect_derived_metric_source_tables;
-use crate::graph::{JoinTree, RelationshipGraph};
+use crate::graph::RelationshipGraph;
 use crate::model::{Cardinality, Dimension, SemanticViewDefinition};
 use crate::util::suggest_closest;
 
@@ -169,10 +169,8 @@ unsafe fn show_dims_for_metric(
             })
             .collect()
     } else {
-        let graph =
-            RelationshipGraph::from_definition(&def).map_err(|e| format!("graph error: {e}"))?;
-        // The directed parent tree — same derivation the fan-trap check uses (E-7).
-        let tree = JoinTree::from_graph(&graph);
+        // Built only to surface a malformed graph as an error, as before.
+        RelationshipGraph::from_definition(&def).map_err(|e| format!("graph error: {e}"))?;
         let card_map: HashMap<(String, String), Cardinality> = def
             .joins
             .iter()
@@ -189,7 +187,7 @@ unsafe fn show_dims_for_metric(
             .collect();
         def.dimensions
             .iter()
-            .filter(|d| is_dimension_reachable_for_metric(d, &met_tables, &tree, &card_map))
+            .filter(|d| is_dimension_reachable_for_metric(d, &met_tables, &card_map))
             .map(|d| {
                 let table_name = d
                     .source_table
@@ -216,16 +214,23 @@ unsafe fn show_dims_for_metric(
 /// Check if a dimension is reachable from a given set of metric source tables
 /// without causing a fan trap.
 ///
-/// A dimension is reachable if, for at least one metric source table, the path
-/// from the metric table to the dimension table does not traverse any edge in
-/// the fan-out direction (i.e., from the "one" side to the "many" side).
+/// A dimension is reachable if, for at least one metric source table, some
+/// path from the metric table to the dimension table never steps in the
+/// fan-out direction (from the "one" side to the "many" side).
 ///
 /// Fan-out direction: for edge `(from_alias, to_alias)` with `ManyToOne`,
-/// from->to is safe (forward), to->from is fan-out (reverse).
+/// from->to is safe (forward), to->from is fan-out (reverse). A `OneToOne`
+/// edge is safe both ways.
+///
+/// Every path counts, not only the one through a spanning tree: in a diamond
+/// (orders reach regions through customers and through stores) the tree walked
+/// from the first table could route orders to stores through regions, which
+/// fans out, and hide a dimension the metric reaches directly. A table reached
+/// by several safe paths is still listed; a query that needs one path picks it
+/// with `USING`, and one that needs none is refused by the query's own checks.
 fn is_dimension_reachable_for_metric(
     dim: &Dimension,
     met_tables: &[String],
-    tree: &JoinTree,
     card_map: &HashMap<(String, String), Cardinality>,
 ) -> bool {
     // Base table dimension (no source_table): always reachable
@@ -234,94 +239,34 @@ fn is_dimension_reachable_for_metric(
     };
     let dim_table = dim_table_raw.to_ascii_lowercase();
 
-    for met_table in met_tables {
-        if *met_table == dim_table {
-            return true; // Same table, no fan-out possible
+    // Safe steps: forward along any FK, and backward along a one-to-one one.
+    let mut safe_steps: HashMap<&str, Vec<&str>> = HashMap::new();
+    for ((from, to), card) in card_map {
+        safe_steps
+            .entry(from.as_str())
+            .or_default()
+            .push(to.as_str());
+        if *card == Cardinality::OneToOne {
+            safe_steps
+                .entry(to.as_str())
+                .or_default()
+                .push(from.as_str());
         }
-
-        let met_ancestors = tree.ancestors_to_root(met_table);
-        let dim_ancestors = tree.ancestors_to_root(&dim_table);
-
-        // Find the lowest common ancestor (LCA)
-        let dim_ancestor_set: HashSet<&String> = dim_ancestors.iter().collect();
-        let lca = met_ancestors
-            .iter()
-            .find(|a| dim_ancestor_set.contains(a))
-            .cloned();
-
-        let Some(lca) = lca else {
-            continue; // No common ancestor (disconnected -- shouldn't happen in valid tree)
-        };
-
-        let mut fan_out = false;
-
-        // Check path UP from met_table to LCA.
-        // Walking current -> parent at each step.
-        let mut current = met_table.clone();
-        while current != lca {
-            let Some(parent) = tree.parent_of(&current) else {
-                break;
-            };
-
-            // The card_map stores edges as (from_alias, to_alias) where
-            // from_alias has the FK pointing to to_alias.
-            //
-            // Walking current -> parent:
-            // - If edge is (current, parent): forward direction. ManyToOne forward = safe.
-            // - If edge is (parent, current): reverse direction. ManyToOne reverse = fan-out.
-            if card_map.get(&(current.clone(), parent.clone())).is_some() {
-                // Edge is current->parent (current has FK to parent).
-                // Walking current->parent = forward direction = always safe.
-            } else if let Some(&card) = card_map.get(&(parent.clone(), current.clone())) {
-                // Edge is parent->current (parent has FK to current).
-                // Walking current->parent = reverse direction.
-                // ManyToOne reverse = fan-out (going from "one" side to "many" side).
-                if card == Cardinality::ManyToOne {
-                    fan_out = true;
-                    break;
-                }
-            }
-            current = parent.clone();
-        }
-
-        if fan_out {
-            // This metric source table path has fan-out for this dimension.
-            // Try next metric source table (for derived metrics with multiple sources).
-            continue;
-        }
-
-        // Check path DOWN from LCA to dim_table.
-        // Build path from LCA to dim_table using dim_ancestors.
-        // dim_ancestors is [dim_table, parent, ..., root].
-        // Find LCA position and reverse the sub-path.
-        if let Some(lca_pos) = dim_ancestors.iter().position(|a| *a == lca) {
-            let path_down: Vec<String> = dim_ancestors[..=lca_pos].iter().rev().cloned().collect();
-            for window in path_down.windows(2) {
-                let a = &window[0]; // closer to LCA
-                let b = &window[1]; // closer to dim_table
-                                    // Walking a -> b (downward in the tree, away from root)
-                if card_map.get(&(a.clone(), b.clone())).is_some() {
-                    // Edge is a->b (a has FK to b). Walking forward = safe.
-                } else if let Some(&card) = card_map.get(&(b.clone(), a.clone())) {
-                    // Edge is b->a (b has FK to a). Walking a->b = reverse direction.
-                    // ManyToOne reverse = fan-out.
-                    if card == Cardinality::ManyToOne {
-                        fan_out = true;
-                        break;
-                    }
-                }
-            }
-        }
-
-        if !fan_out {
-            // Found a valid (no fan-out) path from this metric source to the dimension.
-            return true;
-        }
-        // else: try next metric source table
     }
 
-    // No metric source table found a valid path -- dimension not reachable.
-    // Edge case: if met_tables is empty (derived metric with no source tables),
-    // the dimension is not reachable.
-    false
+    met_tables.iter().any(|met_table| {
+        let mut seen: HashSet<&str> = HashSet::from([met_table.as_str()]);
+        let mut stack = vec![met_table.as_str()];
+        while let Some(current) = stack.pop() {
+            if current == dim_table {
+                return true;
+            }
+            for next in safe_steps.get(current).into_iter().flatten() {
+                if seen.insert(next) {
+                    stack.push(next);
+                }
+            }
+        }
+        false
+    })
 }

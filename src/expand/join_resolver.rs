@@ -1,7 +1,7 @@
 use std::collections::{HashMap, HashSet, VecDeque};
 
 use crate::graph::RelationshipGraph;
-use crate::model::{Join, SemanticViewDefinition, TableRef};
+use crate::model::{Cardinality, Join, SemanticViewDefinition, TableRef};
 
 use super::facts::{
     collect_derived_metric_source_tables, collect_derived_metric_using,
@@ -388,7 +388,7 @@ pub(super) fn push_join_clauses(
     }
 }
 
-/// Undirected BFS from the graph root over PK/FK join edges.
+/// Breadth-first search from the graph root over PK/FK join edges.
 ///
 /// Returns, for each reachable non-root alias, its tree parent (the neighbor
 /// on the path toward the root) and the `Join` edge connecting the two. This
@@ -396,6 +396,16 @@ pub(super) fn push_join_clauses(
 /// mentioning the alias would reference a table that is not yet (or never)
 /// joined (SG-2). Traversing edges in both directions also covers tables on
 /// the FK side of the root (SG-10).
+///
+/// A table referenced by several tables can be reached by more than one path,
+/// so the tree prefers the paths `fan_trap::find_path` prefers, in three
+/// rounds: first steps that do not fan out (to a referenced table, or across a
+/// one-to-one relationship); then one step to a table that references the
+/// root, followed by such steps (across a bridge); then any step. With
+/// `t3 -> t2 -> t1` beside `t3 -> t0 <- t1`, a plain walk could reach `t1`
+/// through `t0`, fanning out, and read no `t1` row where the chain the query
+/// follows reads one. In a tree there is one path either way. Each round
+/// visits edges in declaration order, so the tree is deterministic.
 fn build_tree_parents<'a>(
     def: &'a SemanticViewDefinition,
     root: &str,
@@ -403,29 +413,68 @@ fn build_tree_parents<'a>(
     let mut tree_parent: HashMap<String, (String, &'a Join)> = HashMap::new();
     let mut visited: HashSet<String> = HashSet::new();
     visited.insert(root.to_string());
-    let mut queue: VecDeque<String> = VecDeque::new();
-    queue.push_back(root.to_string());
-    while let Some(current) = queue.pop_front() {
-        // Visit edges in declaration order for determinism.
-        for join in &def.joins {
-            if join.fk_columns.is_empty() {
-                continue; // Legacy join -- not part of the PK/FK graph
-            }
-            let from = join.from_alias.to_ascii_lowercase();
-            let to = join.table.to_ascii_lowercase();
-            let neighbor = if from == current {
-                to
-            } else if to == current {
-                from
-            } else {
-                continue;
-            };
-            if visited.insert(neighbor.clone()) {
-                tree_parent.insert(neighbor.clone(), (current.clone(), join));
-                queue.push_back(neighbor.clone());
+    let joins: Vec<(&'a Join, String, String)> = def
+        .joins
+        .iter()
+        // Legacy joins (no FK columns) are not part of the PK/FK graph.
+        .filter(|j| !j.fk_columns.is_empty())
+        .map(|j| {
+            (
+                j,
+                j.from_alias.to_ascii_lowercase(),
+                j.table.to_ascii_lowercase(),
+            )
+        })
+        .collect();
+    // `current -> neighbor` along `join`, when the step is taken in this round.
+    let step = |join: &Join, from: &str, to: &str, current: &str, any: bool| -> Option<String> {
+        if from == current {
+            Some(to.to_string())
+        } else if to == current && (any || join.cardinality == Cardinality::OneToOne) {
+            Some(from.to_string())
+        } else {
+            None
+        }
+    };
+    let walk = |start: Vec<String>,
+                any: bool,
+                tree_parent: &mut HashMap<String, (String, &'a Join)>,
+                visited: &mut HashSet<String>| {
+        let mut queue: VecDeque<String> = start.into();
+        while let Some(current) = queue.pop_front() {
+            for (join, from, to) in &joins {
+                let Some(neighbor) = step(join, from, to, &current, any) else {
+                    continue;
+                };
+                if visited.insert(neighbor.clone()) {
+                    tree_parent.insert(neighbor.clone(), (current.clone(), *join));
+                    queue.push_back(neighbor);
+                }
             }
         }
+    };
+    // Round 1: steps that do not fan out.
+    walk(
+        vec![root.to_string()],
+        false,
+        &mut tree_parent,
+        &mut visited,
+    );
+    // Round 2: across a bridge, one step to a table referencing the root.
+    let mut bridges: Vec<String> = Vec::new();
+    for (join, from, to) in &joins {
+        if to == root && visited.insert(from.clone()) {
+            tree_parent.insert(from.clone(), (root.to_string(), *join));
+            bridges.push(from.clone());
+        }
     }
+    walk(bridges, false, &mut tree_parent, &mut visited);
+    // Round 3: any step, from every table reached so far.
+    let mut reached: Vec<String> = vec![root.to_string()];
+    let mut rest: Vec<String> = tree_parent.keys().cloned().collect();
+    rest.sort();
+    reached.extend(rest);
+    walk(reached, true, &mut tree_parent, &mut visited);
     tree_parent
 }
 
@@ -529,11 +578,38 @@ pub(super) fn resolve_joins_pkfk<'a>(
     // Also track which bare aliases are role-playing (have multiple relationships).
     let mut role_playing_bare_aliases: HashSet<String> = HashSet::new();
 
+    // The tables the facts a metric is written over live on, its own and those
+    // of every metric it is computed from: only there is a reference rewritten
+    // to a scoped alias (`facts::rewrite_using_scoped_refs`).
+    let metric_fact_tables = |met: &crate::model::Metric| -> HashSet<String> {
+        let names = super::facts::collect_transitive_metric_names(met, &def.metrics);
+        std::iter::once(met)
+            .chain(
+                def.metrics
+                    .iter()
+                    .filter(|m| names.contains(&crate::ident::normalize_ident_part(&m.name))),
+            )
+            .flat_map(|m| super::facts::collect_referenced_fact_tables(&m.expr, &def.facts))
+            .map(|t| t.to_ascii_lowercase())
+            .collect()
+    };
+
     let add_scoped = |scoped_joins: &mut Vec<(String, &'a Join, String)>,
                       role_playing: &mut HashSet<String>,
+                      fact_tables: &HashSet<String>,
                       using_rel: &str| {
         if let Some(join) = crate::graph::find_relationship(&def.joins, using_rel) {
             let to_alias = join.table.to_ascii_lowercase();
+            // A table reached by one relationship is the same rows bare or
+            // scoped, so its scoped instance is joined only for the facts the
+            // metric's `USING` rewrites onto it. Joined for nothing, it made an
+            // unqualified dimension expression on that table (`a.country AS
+            // country`) ambiguous between the two instances.
+            if !super::role_playing::is_role_playing_target(def, &to_alias)
+                && !fact_tables.contains(&to_alias)
+            {
+                return;
+            }
             // `scoped_join_alias` normalizes the name, so every spelling of
             // one relationship yields the same alias.
             let scoped = scoped_join_alias(&to_alias, using_rel);
@@ -552,9 +628,15 @@ pub(super) fn resolve_joins_pkfk<'a>(
     };
 
     for met in resolved_mets {
+        let fact_tables = metric_fact_tables(met);
         if !met.using_relationships.is_empty() {
             for using_rel in &met.using_relationships {
-                add_scoped(&mut scoped_joins, &mut role_playing_bare_aliases, using_rel);
+                add_scoped(
+                    &mut scoped_joins,
+                    &mut role_playing_bare_aliases,
+                    &fact_tables,
+                    using_rel,
+                );
             }
         } else if met.source_table.is_none() {
             // Derived metric: walk transitive USING relationships
@@ -563,6 +645,7 @@ pub(super) fn resolve_joins_pkfk<'a>(
                 add_scoped(
                     &mut scoped_joins,
                     &mut role_playing_bare_aliases,
+                    &fact_tables,
                     &using_rel,
                 );
             }

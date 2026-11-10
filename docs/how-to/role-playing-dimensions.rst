@@ -382,26 +382,25 @@ The expanded SQL shows the airports table joined with a scoped alias (e.g., ``a_
 
 .. _howto-rp-diamond:
 
-Role-Playing vs an Ambiguous Diamond
-====================================
+Role-Playing vs a Diamond
+=========================
 
-.. versionchanged:: 0.11.0
+.. versionchanged:: 0.19.0
 
    A table reached from two *different* source tables -- a join "diamond" -- is
-   rejected at ``CREATE`` time. Earlier versions accepted it and joined the
-   shared table through whichever relationship was declared first, which gave
-   wrong numbers when the two paths lead to different rows.
+   accepted at ``CREATE`` in any ``TABLES`` order, as in Snowflake. From 0.11.0
+   it was rejected unless the shared table was declared first. A query that
+   would have to pick one of the two paths is refused instead.
 
-Role-playing and a diamond both reach one table by two routes, but only one of
-them tells the extension which route a query means:
+Role-playing and a diamond both reach one table by two routes:
 
-- **Role-playing (supported):** several named relationships from **one** source
-  table to one target, like ``dep_airport`` and ``arr_airport`` from
-  ``flights`` to ``airports`` above. ``USING`` on a metric picks the route.
-- **Diamond (rejected):** one target reached from two **different** source
-  tables. In the view below, ``regions`` is reached from both ``customers`` and
-  ``stores``, so a ``region`` dimension could mean the customer's region or the
-  store's:
+- **Role-playing:** several named relationships from **one** source table to
+  one target, like ``dep_airport`` and ``arr_airport`` from ``flights`` to
+  ``airports`` above. ``USING`` on a metric picks the route.
+- **Diamond:** one target reached from two **different** source tables. In the
+  view below, ``regions`` is reached from both ``customers`` and ``stores``, so
+  a ``region`` dimension beside ``revenue`` could mean the customer's region or
+  the store's:
 
 .. code-block:: sql
 
@@ -422,17 +421,26 @@ them tells the extension which route a query means:
        r.region AS r.name
    )
    METRICS (
-       o.revenue AS SUM(o.amount)
+       o.revenue AS SUM(o.amount),
+       o.revenue_by_store USING (order_store) AS SUM(o.amount)
    );
+
+The view is created. ``revenue`` by ``region`` is refused, because orders reach
+regions by two paths:
 
 .. code-block:: text
 
-   diamond: 'r' is reachable from multiple tables ('c', 's'); the join path is
-   ambiguous. Declare the target under a second table alias so it is joined once
-   per path.
+   dimension 'region' is on table 'r', which metric 'revenue' reaches from table
+   'o' by more than one path: o -> c -> r, o -> s -> r. Give the metric a USING
+   that names the first relationship of the path to follow, or query members one
+   path reaches
 
-Fix it as the message says: declare ``regions`` once per path, under two
-aliases, and give each alias its own dimension. Each route then has its own
+``revenue_by_store`` by ``region`` is answered through the stores, because its
+``USING`` names the first relationship of that path. A query that stays on one
+path, such as ``revenue`` by a customer dimension, needs nothing extra.
+
+To group by both regions in one query, declare ``regions`` once per path, under
+two aliases, and give each alias its own dimension. Each route then has its own
 table and there is nothing left to choose between:
 
 .. code-block:: sql

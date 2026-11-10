@@ -66,10 +66,8 @@ pub(super) fn is_role_playing_target(def: &SemanticViewDefinition, target_alias:
 /// table (EXP-4) and facts on/through one (EXP-5), one hop past the direct
 /// `AmbiguousPath` case.
 ///
-/// The relationship graph is a tree apart from the sanctioned role-playing
-/// multi-edge (cross-source diamonds are rejected at define time), so each
-/// non-root, non-role-playing node has exactly one inbound edge — the first
-/// reverse entry is its parent toward the root.
+/// A table referenced by several tables has several ancestors; all of them are
+/// walked, nearest first, so the answer does not depend on declaration order.
 ///
 /// A definition whose relationship graph cannot be rebuilt (missing FK metadata
 /// or otherwise malformed), or one that contains a cycle, is reported as
@@ -100,29 +98,41 @@ pub(super) fn role_playing_on_path(
             reason,
         }
     })?;
-    let mut current = table_lower;
+    // A cycle in the relationship graph is a definition-validity problem; fail
+    // loudly rather than skip the ambiguity check.
+    graph
+        .toposort()
+        .map_err(|reason| ExpandError::UncheckableDefinition {
+            view_name: view_name.to_string(),
+            reason,
+        })?;
+    // Walk every table that references `table`, transitively, nearest first,
+    // stopping at the root. A table referenced by two different tables (a
+    // diamond, two children of one parent) has several, so all of them are
+    // walked: the first-declared one alone would make the answer depend on
+    // declaration order. A table no relationship reaches is disconnected from
+    // the root (an orphan, rejected at define time), so there is nothing to find.
     let mut visited: HashSet<String> = HashSet::new();
-    visited.insert(current.clone());
-    while current != graph.root {
-        // A non-root, non-role-playing node has exactly one inbound edge; no
-        // reverse entry means it is disconnected from the root (an orphan,
-        // rejected at define time) — no role-playing ancestor to find.
-        let Some(parent) = graph.reverse.get(&current).and_then(|p| p.first()) else {
-            return Ok(None);
-        };
-        let parent = parent.to_ascii_lowercase();
-        if !visited.insert(parent.clone()) {
-            // A cycle in the relationship graph is a definition-validity
-            // problem; fail loudly rather than skip the ambiguity check.
-            return Err(ExpandError::UncheckableDefinition {
-                view_name: view_name.to_string(),
-                reason: "relationship graph contains a cycle".to_string(),
-            });
+    visited.insert(table_lower.clone());
+    let mut frontier = vec![table_lower];
+    while !frontier.is_empty() {
+        let mut next: Vec<String> = Vec::new();
+        for current in &frontier {
+            if *current == graph.root {
+                continue;
+            }
+            for parent in graph.reverse.get(current).into_iter().flatten() {
+                let parent = parent.to_ascii_lowercase();
+                if visited.insert(parent.clone()) {
+                    next.push(parent);
+                }
+            }
         }
-        if is_role_playing_target(def, &parent) {
-            return Ok(Some(parent));
+        next.sort_unstable();
+        if let Some(rp) = next.iter().find(|p| is_role_playing_target(def, p)) {
+            return Ok(Some(rp.clone()));
         }
-        current = parent;
+        frontier = next;
     }
     Ok(None)
 }

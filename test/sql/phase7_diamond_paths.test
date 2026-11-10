@@ -5,9 +5,10 @@
 # Snowflake (fixture 3, 2026-11-10, cases D2-D13) refuses a query that would
 # have to pick one of the two paths itself (010246 "Multi-path relationship
 # ... is not supported"), and answers a metric whose USING names the first
-# relationship of one path through that path. This view declares regions
-# first, which is the one table order our CREATE accepts for this shape; the
-# query used to follow the customer path silently.
+# relationship of one path through that path. dv_r declares regions first,
+# which used to be the one table order our CREATE accepted for this shape (the
+# query then followed the customer path silently); dv_o, at the end, declares
+# orders first, as fixture 3's D1o did.
 #
 #   o1: Ana (EU) at store S-US, 10;  o2: Bo (US) at S-US, 20;  o3: Ana at S-EU, 40.
 #   By customer region: EU 50, US 20.  By store region: EU 40, US 30.
@@ -141,3 +142,140 @@ SELECT * FROM SEMANTIC_VIEW(dv_r DIMENSIONS c.cust_name METRICS o.rev_by_cust);
 ----
 Ana	50
 Bo	20
+
+# SHOW ... FOR METRIC lists every dimension a metric reaches by some path that
+# does not fan out. Revenue reaches stores directly (o -> s), though the tree
+# walked from regions, the first table, went o -> c -> r -> s and hid it.
+query TTTTTT rowsort
+SHOW SEMANTIC DIMENSIONS IN dv_r FOR METRIC revenue
+----
+dp_customers	cust_name	VARCHAR	false	[]	(empty)
+dp_orders	order_id	INTEGER	false	[]	(empty)
+dp_regions	region_name	VARCHAR	false	[]	(empty)
+dp_stores	store_name	VARCHAR	false	[]	(empty)
+
+# A customer count reaches regions, not orders (c -> o fans out) or stores
+# (c -> r -> s fans out).
+query TTTTTT rowsort
+SHOW SEMANTIC DIMENSIONS IN dv_r FOR METRIC customer_count
+----
+dp_customers	cust_name	VARCHAR	false	[]	(empty)
+dp_regions	region_name	VARCHAR	false	[]	(empty)
+
+# D1o: Snowflake creates the diamond with orders first, and so do we now. It
+# used to be refused ("diamond: 'r' is reachable from multiple tables").
+statement ok
+CREATE SEMANTIC VIEW dv_o
+  TABLES (
+    o AS dp_orders    PRIMARY KEY (order_id),
+    c AS dp_customers PRIMARY KEY (cust_id),
+    s AS dp_stores    PRIMARY KEY (store_id),
+    r AS dp_regions   PRIMARY KEY (region_id)
+  )
+  RELATIONSHIPS (
+    o_cust   AS o (cust_id)   REFERENCES c,
+    o_store  AS o (store_id)  REFERENCES s,
+    c_region AS c (region_id) REFERENCES r,
+    s_region AS s (region_id) REFERENCES r
+  )
+  DIMENSIONS (
+    o.order_id    AS order_id,
+    c.cust_name   AS cust_name,
+    s.store_name  AS store_name,
+    r.region_name AS region_name
+  )
+  METRICS (
+    o.revenue          AS SUM(amount),
+    o.rev_by_cust      USING (o_cust)  AS SUM(amount),
+    o.rev_by_store     USING (o_store) AS SUM(amount),
+    c.customer_count   AS COUNT(cust_id),
+    r.region_count     AS COUNT(region_id)
+  );
+
+# D2, D10, D11 on dv_o: the same refusals.
+statement error
+SELECT * FROM SEMANTIC_VIEW(dv_o DIMENSIONS r.region_name METRICS o.revenue);
+----
+by more than one path: o -> c -> r, o -> s -> r
+
+statement error
+SELECT * FROM SEMANTIC_VIEW(dv_o DIMENSIONS o.order_id, r.region_name);
+----
+by more than one path: o -> c -> r, o -> s -> r
+
+statement error
+SELECT * FROM SEMANTIC_VIEW(dv_o METRICS o.revenue WHERE r.region_name = 'EU');
+----
+by more than one path: o -> c -> r, o -> s -> r
+
+# D3-D9 on dv_o: Snowflake's answers.
+query TII rowsort
+SELECT * FROM SEMANTIC_VIEW(dv_o DIMENSIONS r.region_name METRICS o.rev_by_cust, o.rev_by_store);
+----
+EU	50	40
+US	20	30
+
+query TI rowsort
+SELECT * FROM SEMANTIC_VIEW(dv_o DIMENSIONS c.cust_name METRICS o.revenue);
+----
+Ana	50
+Bo	20
+
+query TI rowsort
+SELECT * FROM SEMANTIC_VIEW(dv_o DIMENSIONS r.region_name METRICS c.customer_count);
+----
+EU	1
+US	1
+
+query T rowsort
+SELECT * FROM SEMANTIC_VIEW(dv_o DIMENSIONS r.region_name);
+----
+EU
+US
+
+query TT rowsort
+SELECT * FROM SEMANTIC_VIEW(dv_o DIMENSIONS c.cust_name, r.region_name);
+----
+Ana	EU
+Bo	US
+
+query TI rowsort
+SELECT * FROM SEMANTIC_VIEW(dv_o DIMENSIONS s.store_name METRICS o.revenue);
+----
+S-EU	40
+S-US	30
+
+# Fixture 5: customers reach stores by no chain of relationships, and two ways
+# (through the orders between them, through their regions), so Snowflake
+# refuses a customer count by store (X1) or filtered on one (X4), and a region
+# count by customer (X5): 000002 "Multi-path in many-to-many relationship".
+statement error
+SELECT * FROM SEMANTIC_VIEW(dv_o DIMENSIONS s.store_name METRICS c.customer_count);
+----
+by no chain of relationships and by more than one path across a many-to-many relationship: c -> r <- s, c <- o -> s
+
+statement error
+SELECT * FROM SEMANTIC_VIEW(dv_o METRICS c.customer_count WHERE s.store_name = 'S-US');
+----
+across a many-to-many relationship: c -> r <- s, c <- o -> s
+
+statement error
+SELECT * FROM SEMANTIC_VIEW(dv_o DIMENSIONS c.cust_name METRICS r.region_count);
+----
+across a many-to-many relationship: r <- c, r <- s <- o -> c
+
+# X3: customers and stores with no metric list the pairs orders hold.
+query TT rowsort
+SELECT * FROM SEMANTIC_VIEW(dv_o DIMENSIONS c.cust_name, s.store_name);
+----
+Ana	S-EU
+Ana	S-US
+Bo	S-US
+
+query TTTTTT rowsort
+SHOW SEMANTIC DIMENSIONS IN dv_o FOR METRIC revenue
+----
+dp_customers	cust_name	VARCHAR	false	[]	(empty)
+dp_orders	order_id	INTEGER	false	[]	(empty)
+dp_regions	region_name	VARCHAR	false	[]	(empty)
+dp_stores	store_name	VARCHAR	false	[]	(empty)

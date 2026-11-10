@@ -1904,7 +1904,9 @@ fn legacy_quoted_pair_fact_metric_naming_both_roles_stays_rejected() {
 
 /// `"x.y"` (to `d`) is declared before `x.y` (to `r`); `USING ("x"."y")` names
 /// the two-part `x.y`, so the scoped join must target `r`. Matching on the
-/// joined normalized string bound the first-declared `"x.y"` instead.
+/// joined normalized string bound the first-declared `"x.y"` instead. The
+/// metric counts a fact on `r`: a table reached by one relationship is joined
+/// under its scoped alias only for the facts the `USING` rewrites onto it.
 #[test]
 fn using_a_two_part_relationship_name_does_not_bind_a_dotted_one_part_name() {
     let mut def = flights_airports_def();
@@ -1925,9 +1927,15 @@ fn using_a_two_part_relationship_name_does_not_bind_a_dotted_one_part_name() {
         source_table: Some("r".to_string()),
         ..Default::default()
     }];
+    def.facts = vec![crate::model::Fact {
+        name: "arr_code".to_string(),
+        expr: "r.airport_code".to_string(),
+        source_table: Some("r".to_string()),
+        ..Default::default()
+    }];
     def.metrics = vec![Metric {
         name: "arrivals".to_string(),
-        expr: "COUNT(*)".to_string(),
+        expr: "COUNT(arr_code)".to_string(),
         source_table: Some("f".to_string()),
         using_relationships: vec!["\"x\".\"y\"".to_string()],
         ..Default::default()

@@ -574,9 +574,9 @@ Graph validation errors
 
    cycle detected in relationships: <alias1> -> <alias2> -> <alias1>
 
-   diamond: '<alias>' is reachable from multiple tables ('<from1>', '<from2>');
-   the join path is ambiguous. Declare the target under a second table alias
-   so it is joined once per path.
+   diamond: two paths to '<alias>' via '<from>' and '<from>'; name each
+   relationship from '<from>' to '<alias>' so each one is joined under its own
+   alias
 
    orphan table '<alias>' is not connected by any relationship; did you mean '<suggestion>'?
 
@@ -1639,6 +1639,23 @@ Table reached by more than one path
 .. versionchanged:: 0.19.0
 
    These queries used to follow the path declared first, without saying so.
+
+.. code-block:: text
+
+   semantic view '<view>': dimension '<dim>' is on table '<table>', which
+   metric '<metric>' reaches from table '<from>' by no chain of relationships
+   and by more than one path across a many-to-many relationship:
+   c -> r <- s, c <- o -> s. A USING cannot choose between them, and
+   Snowflake does not support this either (multi-path in a many-to-many
+   relationship). Query members one path reaches
+
+**Cause:** No chain of relationships leads from the metric's table to ``<table>``, so reaching it crosses a many-to-many relationship (``c <- o -> s``: the orders between customers and stores) or steps back along a relationship, and there is more than one way to do that. Customers reach stores through their orders and through their regions; books reach authors through either of two bridges (``b <- ba -> a``, ``b <- be -> a``); a book reaches ``book_authors`` directly and through its lead author (``b <- ba``, ``b -> a <- ba``). Each path gives a different number. The same error names a filter member, and a query with no metrics whose members two bridges pair. Snowflake refuses the same queries: ``000002: Unsupported feature 'Multi-path in many-to-many relationship'``.
+
+**Fix:** Query a metric on a table that reaches the member by a chain of relationships (``o.revenue`` by store, ``ba.credits`` by author country), or members one path reaches. To cross one way only, declare a view without the other path.
+
+.. versionchanged:: 0.19.0
+
+   Such views used to be refused at ``CREATE``.
 
 .. code-block:: text
 

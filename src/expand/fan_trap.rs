@@ -97,7 +97,7 @@ pub(super) fn check_fan_traps(
 
                 // The join path between the two tables, scanned for an edge
                 // traversed in the fan-out direction.
-                let Some(path) = find_path(met_table, &dim_table, &adjacency) else {
+                let Some(path) = find_path(met_table, &dim_table, &adjacency, &card_map) else {
                     continue; // Not connected (legacy joins carrying no FK metadata)
                 };
                 // Phase 7.3: a dimension across a many-to-many bridge is
@@ -167,7 +167,8 @@ pub(super) fn check_fan_traps(
             // Path and cardinality lookups are keyed on the folded spelling;
             // the error payload reports the declared one, matching the
             // queried-dimension branch above.
-            let Some(path) = find_path(met_table, &na.source_table_key, &adjacency) else {
+            let Some(path) = find_path(met_table, &na.source_table_key, &adjacency, &card_map)
+            else {
                 continue; // Not connected (legacy joins carrying no FK metadata).
             };
             if let Some(rel_name) = fanning_edge_on_path(&path, &card_map) {
@@ -213,7 +214,7 @@ pub(super) fn check_fan_traps(
             if *met_table == root {
                 continue; // At the root grain: nothing fans it.
             }
-            let Some(path) = find_path(met_table, &root, &adjacency) else {
+            let Some(path) = find_path(met_table, &root, &adjacency, &card_map) else {
                 continue; // Not connected (legacy joins carrying no FK metadata).
             };
             if let Some(rel_name) = fanning_edge_on_path(&path, &card_map) {
@@ -257,7 +258,7 @@ pub(super) fn check_fan_traps(
                 if table_a == table_b {
                     continue;
                 }
-                let Some(path) = find_path(table_a, table_b, &adjacency) else {
+                let Some(path) = find_path(table_a, table_b, &adjacency, &card_map) else {
                     continue;
                 };
                 if let Some(rel_name) = fanning_edge_on_path(&path, &card_map) {
@@ -293,7 +294,7 @@ pub(super) fn check_fan_traps(
                     // Tables not connected by PK/FK edges (e.g. legacy joins
                     // with no FK metadata) cannot be analyzed — mirror the
                     // met×dim behavior and skip rather than error.
-                    let Some(path) = find_path(table_a, table_b, &adjacency) else {
+                    let Some(path) = find_path(table_a, table_b, &adjacency, &card_map) else {
                         continue;
                     };
                     if let Some(rel_name) = fanning_edge_on_path(&path, &card_map) {
@@ -446,7 +447,7 @@ impl GrainGraph {
 
     /// The join path `[from, …, to]`, or `None` when the two are not connected.
     pub(super) fn path(&self, from: &str, to: &str) -> Option<Vec<String>> {
-        find_path(from, to, &self.adjacency)
+        find_path(from, to, &self.adjacency, &self.card_map)
     }
 
     /// The name of a relationship on the `from` → `to` path that is traversed in
@@ -616,47 +617,79 @@ fn build_adjacency(def: &SemanticViewDefinition) -> HashMap<String, Vec<String>>
     adjacency
 }
 
-/// Find a path between two table aliases treating relationship edges as
-/// undirected (BFS). In a validated relationship tree the path is unique;
-/// role-playing multi-edges between one pair are collapsed to a single
-/// adjacency entry (their cardinality is collapsed to the worst case in the
-/// card map). Returns `None` when the tables are not connected (e.g. legacy
-/// joins carrying no FK metadata).
+/// How many undirected simple paths [`find_path`] looks at between two tables.
+/// A tree has one; a view with diamonds and bridges has a handful. The cap
+/// only bounds a pathological graph, where the path chosen is then the best
+/// of the first `PATH_CAP` found (shortest first).
+const PATH_CAP: usize = 256;
+
+/// Find the join path between two table aliases, treating relationship edges
+/// as undirected. Returns `None` when the tables are not connected (e.g.
+/// legacy joins carrying no FK metadata).
+///
+/// In a relationship tree there is exactly one simple path. Since Phase 7 PR 3
+/// CREATE accepts any acyclic graph (two children of one parent referenced by
+/// a third table, a diamond, two bridges), so there can be several, and the
+/// one a check looks at must not depend on declaration order. The path chosen
+/// is, in order of preference:
+///
+/// 1. one with no edge traversed in the fan-out direction (it joins
+///    many-to-one only, the path the query is answered along);
+/// 2. one shaped like a many-to-many bridge ([`is_bridge_path`]);
+/// 3. any other, for the error that refuses it.
+///
+/// Within each, the shortest, then the first by alias order. Whether a member
+/// is reached by more than one admissible path (a diamond, two bridges) is
+/// refused before any of this by `multi_path`, so the tie-break never decides
+/// an answer, only which path an error names. Role-playing multi-edges between
+/// one pair are one adjacency entry (their cardinality is collapsed to the
+/// worst case in the card map).
 fn find_path(
     start: &str,
     goal: &str,
     adjacency: &HashMap<String, Vec<String>>,
+    card_map: &CardMap,
 ) -> Option<Vec<String>> {
     if start == goal {
         return Some(vec![start.to_string()]);
     }
-    let mut prev: HashMap<String, String> = HashMap::new();
-    let mut visited: HashSet<String> = HashSet::new();
-    let mut queue: VecDeque<String> = VecDeque::new();
-    visited.insert(start.to_string());
-    queue.push_back(start.to_string());
-    while let Some(node) = queue.pop_front() {
-        let Some(neighbors) = adjacency.get(&node) else {
-            continue;
-        };
-        for neighbor in neighbors {
-            if visited.insert(neighbor.clone()) {
-                prev.insert(neighbor.clone(), node.clone());
-                if neighbor == goal {
-                    let mut path = vec![goal.to_string()];
-                    let mut current = goal;
-                    while let Some(p) = prev.get(current) {
-                        path.push(p.clone());
-                        current = p;
-                    }
-                    path.reverse();
-                    return Some(path);
+    let mut paths = simple_paths(start, goal, adjacency);
+    paths.sort_by(|a, b| a.len().cmp(&b.len()).then_with(|| a.cmp(b)));
+    let pick = |pred: &dyn Fn(&[String]) -> bool| paths.iter().position(|p| pred(p));
+    let at = pick(&|p| fanning_edge_on_path(p, card_map).is_none())
+        .or_else(|| pick(&|p| is_bridge_path(p, card_map)))
+        .unwrap_or(0);
+    (!paths.is_empty()).then(|| paths.swap_remove(at))
+}
+
+/// Up to [`PATH_CAP`] undirected simple paths from `start` to `goal`, breadth
+/// first, so the shortest are found first.
+fn simple_paths(
+    start: &str,
+    goal: &str,
+    adjacency: &HashMap<String, Vec<String>>,
+) -> Vec<Vec<String>> {
+    let mut found: Vec<Vec<String>> = Vec::new();
+    let mut queue: VecDeque<Vec<String>> = VecDeque::from([vec![start.to_string()]]);
+    while let Some(path) = queue.pop_front() {
+        let last = path.last().expect("paths are never empty");
+        for neighbor in adjacency.get(last).into_iter().flatten() {
+            if path.contains(neighbor) {
+                continue;
+            }
+            let mut next = path.clone();
+            next.push(neighbor.clone());
+            if neighbor == goal {
+                found.push(next);
+                if found.len() == PATH_CAP {
+                    return found;
                 }
-                queue.push_back(neighbor.clone());
+            } else {
+                queue.push_back(next);
             }
         }
     }
-    None
+    found
 }
 
 /// Scan consecutive pairs along `path` for an edge traversed in the fan-out
@@ -763,7 +796,8 @@ pub(super) fn check_where_clause_fan_traps(
                     if met_table == member_table {
                         continue;
                     }
-                    let Some(path) = find_path(met_table, member_table, &adjacency) else {
+                    let Some(path) = find_path(met_table, member_table, &adjacency, &card_map)
+                    else {
                         continue; // Not connected (legacy joins carrying no FK metadata).
                     };
                     // Phase 7.3: as for a dimension, a member across a bridge
@@ -872,7 +906,7 @@ pub(super) fn check_referenced_fact_fan_traps(
                 if *member_table == fact_table {
                     continue;
                 }
-                let Some(path) = find_path(member_table, &fact_table, &adjacency) else {
+                let Some(path) = find_path(member_table, &fact_table, &adjacency, &card_map) else {
                     continue; // Not connected (legacy joins carrying no FK metadata).
                 };
                 if let Some(rel_name) = fanning_edge_on_path(&path, &card_map) {
@@ -952,7 +986,7 @@ pub(super) fn validate_fact_table_path(
     // reach by walking a many-to-one edge backwards. Checking the path's
     // direction answers both at once.
     let reaches = |from: &String, to: &String| {
-        find_path(from, to, &adjacency)
+        find_path(from, to, &adjacency, &card_map)
             .is_some_and(|path| fanning_edge_on_path(&path, &card_map).is_none())
     };
     let grain = all_tables
@@ -987,9 +1021,6 @@ mod tests {
     use super::*;
     use crate::expand::test_helpers::{minimal_def, orders_view, TestFixtureExt};
     use crate::model::{Cardinality, NullsOrder, SortOrder, WindowSpec};
-
-    // The directed ancestor-walk helpers now live on `crate::graph::JoinTree`,
-    // where their unit tests moved too (§6.2 move 5, E-7).
 
     #[test]
     fn test_check_fan_traps_no_joins_ok() {

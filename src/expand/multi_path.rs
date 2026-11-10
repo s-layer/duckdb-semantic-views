@@ -273,6 +273,144 @@ fn render(paths: &[Vec<String>]) -> Vec<String> {
     paths.iter().map(|p| p.join(" -> ")).collect()
 }
 
+/// The tables `table` shares a relationship with, in either direction, each
+/// once, sorted: so a walk over them does not depend on declaration order.
+fn neighbours(def: &SemanticViewDefinition, table: &str) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    for j in def.joins.iter().filter(|j| !j.fk_columns.is_empty()) {
+        let other = if j.from_alias.eq_ignore_ascii_case(table) {
+            &j.table
+        } else if j.table.eq_ignore_ascii_case(table) {
+            &j.from_alias
+        } else {
+            continue;
+        };
+        let other = other.to_ascii_lowercase();
+        if other != table && !out.contains(&other) {
+            out.push(other);
+        }
+    }
+    out.sort();
+    out
+}
+
+/// A shortest path from `from` to `to` over relationships in either direction,
+/// as `[from, …, to]`, never stepping between `skip`'s two tables (in either
+/// direction). `None` when there is none.
+fn undirected_path(
+    def: &SemanticViewDefinition,
+    from: &str,
+    to: &str,
+    skip: Option<(&str, &str)>,
+) -> Option<Vec<String>> {
+    let mut parent: HashMap<String, String> = HashMap::new();
+    let mut queue = std::collections::VecDeque::from([from.to_string()]);
+    let mut seen: HashSet<String> = HashSet::from([from.to_string()]);
+    while let Some(current) = queue.pop_front() {
+        if current == to {
+            let mut path = vec![current];
+            while let Some(p) = parent.get(path.last()?) {
+                path.push(p.clone());
+            }
+            path.reverse();
+            return Some(path);
+        }
+        for next in neighbours(def, &current) {
+            let skipped = skip
+                .is_some_and(|(a, b)| (current == a && next == b) || (current == b && next == a));
+            if !skipped && seen.insert(next.clone()) {
+                parent.insert(next.clone(), current.clone());
+                queue.push_back(next);
+            }
+        }
+    }
+    None
+}
+
+/// Two of the paths between `from` and `to` over relationships in either
+/// direction, each `[from, …, to]`, or `None` when there is one path or none.
+///
+/// There is a second path exactly when some step of one path lies on a cycle
+/// of the (undirected) graph: a path that avoids that step then exists, and a
+/// path made only of steps that disconnect the graph is the only one. So a
+/// shortest path is taken, and for its first step that can be avoided, a
+/// shortest path that avoids it.
+fn two_undirected_paths(
+    def: &SemanticViewDefinition,
+    from: &str,
+    to: &str,
+) -> Option<[Vec<String>; 2]> {
+    let first = undirected_path(def, from, to, None)?;
+    first.windows(2).find_map(|step| {
+        let second = undirected_path(def, from, to, Some((&step[0], &step[1])))?;
+        Some([first.clone(), second])
+    })
+}
+
+/// A path over relationships in either direction, as `c <- o -> s`: `->` where
+/// a table references the next, `<-` where the next references it.
+fn render_undirected(def: &SemanticViewDefinition, path: &[String]) -> String {
+    let mut s = path.first().cloned().unwrap_or_default();
+    for step in path.windows(2) {
+        let forward = referenced(def, &step[0]).contains(&step[1]);
+        s.push_str(if forward { " -> " } else { " <- " });
+        s.push_str(&step[1]);
+    }
+    s
+}
+
+/// When a query reaches `to` from `home` by no chain of foreign keys: two of
+/// the paths it could take instead, across a many-to-many relationship and in
+/// either direction (shorter first), or `None` when there is one path or none.
+///
+/// With no chain to follow, the only way from `home` to `to` crosses a
+/// many-to-many relationship (a bridge, or the orders between customers and
+/// stores) or steps back along a foreign key. Snowflake answers that when it
+/// is the only path, and refuses a second one ("Unsupported feature
+/// 'Multi-path in many-to-many relationship'", 000002): customers reach
+/// stores through orders and through regions (fixture 5, X1), books reach
+/// authors through either of two bridges (fixture 3, Q2), and a book reaches
+/// `book_authors` directly and through its lead author (fixture 5, P3). A
+/// `USING` cannot choose between them.
+pub(super) fn many_to_many_paths(
+    def: &SemanticViewDefinition,
+    home: &str,
+    to: &str,
+) -> Option<Vec<String>> {
+    let home = home.to_ascii_lowercase();
+    let to = to.to_ascii_lowercase();
+    let mut paths: Vec<String> = two_undirected_paths(def, &home, &to)?
+        .iter()
+        .map(|p| render_undirected(def, p))
+        .collect();
+    paths.sort_by(|a, b| a.len().cmp(&b.len()).then_with(|| a.cmp(b)));
+    Some(paths)
+}
+
+/// For a query with no metrics whose members several tables pair equally
+/// well (two bridges between books and authors, Q8): the routes between the
+/// first two members through each such table, as `a <- ba -> b`.
+pub(super) fn paired_routes(
+    def: &SemanticViewDefinition,
+    pairing: &[&String],
+    first: &str,
+    second: &str,
+) -> Vec<String> {
+    pairing
+        .iter()
+        .filter_map(|via| {
+            let up = paths_from(def, via, first, 1).into_iter().next()?;
+            let down = paths_from(def, via, second, 1).into_iter().next()?;
+            let mut s = up.iter().rev().cloned().collect::<Vec<_>>().join(" <- ");
+            for t in &down[1..] {
+                s.push_str(" -> ");
+                s.push_str(t);
+            }
+            Some(s)
+        })
+        .collect()
+}
+
 /// Refuse a query that reaches a member's table from a metric's table by more
 /// than one path the metric's `USING` does not choose between.
 ///
@@ -314,6 +452,23 @@ pub(super) fn check_metric_paths(
                             from_table: home,
                             reader: format!("metric '{}'", met.name),
                             paths: render(&paths),
+                            many_to_many: false,
+                        }),
+                    });
+                }
+                if !paths.is_empty() || member.table == home {
+                    continue;
+                }
+                if let Some(routes) = many_to_many_paths(def, &home, &member.table) {
+                    return Err(ExpandError::MultiPath {
+                        detail: Box::new(MultiPathError {
+                            view_name: view_name.to_string(),
+                            member: member.label.clone(),
+                            member_table: member.table.clone(),
+                            from_table: home,
+                            reader: format!("metric '{}'", met.name),
+                            paths: routes,
+                            many_to_many: true,
                         }),
                     });
                 }
@@ -508,5 +663,52 @@ mod tests {
         // A role-played table: `role_playing` decides which relationship.
         let d = def(&[("dep", "f", "a"), ("arr", "f", "a"), ("a_region", "a", "r")]);
         assert_eq!(admitted_paths(&d, "f", "r", &[]).len(), 1);
+    }
+
+    #[test]
+    fn a_member_reached_two_ways_by_no_chain_has_two_many_to_many_paths() {
+        let d = diamond();
+        assert_eq!(
+            many_to_many_paths(&d, "c", "s"),
+            Some(vec!["c -> r <- s".to_string(), "c <- o -> s".to_string()])
+        );
+        assert_eq!(
+            many_to_many_paths(&d, "r", "o"),
+            Some(vec!["r <- c <- o".to_string(), "r <- s <- o".to_string()])
+        );
+        // Past the diamond's top, `k` still reaches the customers two ways.
+        assert_eq!(many_to_many_paths(&d, "k", "c").map(|p| p.len()), Some(2));
+    }
+
+    #[test]
+    fn a_tree_has_one_path_between_any_two_tables() {
+        // One bridge: books reach authors only across `ba`, and orders' child
+        // is reached only one way.
+        let d = def(&[
+            ("ba_b", "ba", "b"),
+            ("ba_a", "ba", "a"),
+            ("a_k", "a", "k"),
+            ("rv_b", "rv", "b"),
+        ]);
+        for (from, to) in [("b", "a"), ("b", "k"), ("a", "rv"), ("k", "ba"), ("b", "b")] {
+            assert_eq!(many_to_many_paths(&d, from, to), None, "{from} -> {to}");
+        }
+        assert_eq!(many_to_many_paths(&d, "b", "nowhere"), None);
+    }
+
+    #[test]
+    fn two_relationships_between_two_tables_are_one_step_either_way() {
+        // Role-playing: two FKs from flights to airports are one step, so
+        // airports reach flights one way.
+        let d = def(&[("dep", "f", "a"), ("arr", "f", "a")]);
+        assert_eq!(many_to_many_paths(&d, "a", "f"), None);
+    }
+
+    #[test]
+    fn the_paths_do_not_depend_on_declaration_order() {
+        let mut d = diamond();
+        let forward = many_to_many_paths(&d, "c", "s");
+        d.joins.reverse();
+        assert_eq!(many_to_many_paths(&d, "c", "s"), forward);
     }
 }

@@ -3,7 +3,6 @@
 mod cardinality;
 mod derived_metrics;
 mod facts;
-mod join_tree;
 mod member_exprs;
 mod member_refs;
 mod names;
@@ -25,7 +24,6 @@ pub use member_refs::validate_member_references;
 // Sole production consumer is the `extension`-gated `SHOW ... DIMENSIONS FOR
 // METRIC` reachability filter, so the whole type is dead in the default build.
 #[cfg_attr(not(feature = "extension"), allow(unused_imports))]
-pub(crate) use join_tree::JoinTree;
 pub use names::validate_name_uniqueness;
 pub(crate) use relationship::{find_relationship, RelNameMatch};
 pub use relationship::{validate_graph, RelationshipGraph};
