@@ -593,6 +593,14 @@ Areas where test coverage is reduced compared to ideal, with justification.
 - **What would finish it:** a target that fuzzes DDL **text**, not a struct — feed arbitrary bytes to `parse_keyword_body`, skip on parse failure (arbitrary bytes legitimately are not DDL), and assert that anything that DOES parse re-renders and re-parses to a fixpoint. That needs no precondition, since everything it asserts on came from the parser, and it searches the direction this target structurally cannot: what the parser *accepts*. It would subsume this entry and **#59**.
 - **Resolution (2026-10-25, the Phase 3 deletion PR):** `fuzz/fuzz_targets/fuzz_create_text.rs` is that target. It feeds arbitrary text to `plan_create` (the entry the grammar's CREATE goes through, which calls `parse_keyword_body`), prefixing `CREATE SEMANTIC VIEW fuzz_view AS ` when the input is not already a CREATE, skips anything that does not plan, and asserts that anything that does renders, plans again, and renders to the same text. It replaces `fuzz_parser_override_ffi`, whose entry point the PR deletes, in `Fuzz.yml` and the Justfile.
 
+### 110. ❌ A window frame or an order-sensitive function with no `ORDER BY` depends on row order — OPEN (Phase 7 PR 5)
+
+- **Origin:** 2026-11-10, review of the Phase 7 fix that runs a window with no `PARTITION BY` over every result row (#341).
+- **Shape:** a window metric with a frame clause or an order-sensitive function (`LAG`, `LEAD`, `FIRST_VALUE`, `ROW_NUMBER`, ...) but no `ORDER BY`, such as `SUM(t) OVER (ROWS BETWEEN 1 PRECEDING AND CURRENT ROW)` or `LAG(base, 1) OVER ()`. `CREATE` and YAML accept both (`ddl_corpus_body_a2.test`, the YAML window tests in `model.rs`).
+- **Current state:** the value depends on the order DuckDB returns the grouped rows in, so it can change between runs. With no `PARTITION BY` this now covers the whole result. Before #341 every row was its own partition, so the value was fixed but meaningless (each row's own value, or `NULL` from `LAG`). With an explicit `PARTITION BY` it was already order-dependent within each partition. The documentation says to give such windows an `ORDER BY`.
+- **What would finish it:** check on Snowflake whether it refuses a frame, and `LAG`/`LEAD`/rank-type functions, with no `ORDER BY` (the Phase 7 PR 5 window fixture), and refuse them at `CREATE` the same way. Stored views would then need the same check when they are read, or a note that they keep running.
+- **Coverage of the current state:** none. The value is not deterministic, so no test can pin it. The proptest oracles and the fixed tests cover only frameless windows, where an empty `ORDER BY` makes every row a peer.
+
 ### 109. ❌ A `USING` that picks one path through a diamond is refused beside a window or semi-additive metric — OPEN (Phase 7 PR 5)
 
 - **Origin:** 2026-11-10, Phase 7 diamond multi-path fix (Snowflake fixture 3, cases D2-D13).

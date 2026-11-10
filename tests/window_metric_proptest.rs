@@ -620,10 +620,12 @@ fn generator_varies_the_predicate_and_reaches_non_partition_dims() {
     let mut with_filter = 0usize;
     let mut pred_off_partition = 0usize;
     let mut distinct: HashSet<String> = HashSet::new();
-    // Phase 7: a window with no PARTITION BY over several result rows, and an
-    // ordered window whose order key is shared by rows of one partition
-    // (peers), so neither the whole-result rule nor the peer frame is vacuous.
+    // Phase 7: a window with no PARTITION BY over several result rows (also
+    // with an ORDER BY), and an ordered window whose order key is shared by
+    // rows of one partition (peers), so neither the whole-result rule nor the
+    // peer frame is vacuous. Counted over the rows the predicate keeps.
     let (mut whole_multi_row, mut ordered, mut ordered_with_peers) = (0usize, 0usize, 0usize);
+    let mut whole_ordered = 0usize;
 
     for _ in 0..400 {
         let case = arb_case()
@@ -631,17 +633,38 @@ fn generator_varies_the_predicate_and_reaches_non_partition_dims() {
             .expect("strategy must produce a value")
             .current();
         let part = partition_dims(&case);
-        let groups: HashSet<Vec<Option<i64>>> = case
-            .inst
-            .rows
-            .iter()
-            .map(|r| {
-                let cells = [r.0, r.1, r.2];
-                case.sel_dims.iter().map(|&d| cells[d]).collect()
-            })
-            .collect();
+        // The result's groups: the queried dims' distinct values over the rows
+        // the predicate keeps, read from DuckDB so NULLs filter as in SQL.
+        let groups: HashSet<Vec<Option<i64>>> = {
+            let conn = make_db(&case.inst);
+            let cols = if case.sel_dims.is_empty() {
+                "1".to_string()
+            } else {
+                case.sel_dims
+                    .iter()
+                    .map(|&d| dim_col(d))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            };
+            let where_sql = case
+                .where_pred
+                .as_ref()
+                .map_or_else(String::new, |p| format!(" WHERE {}", p.to_raw_sql()));
+            let n = case.sel_dims.len();
+            let mut stmt = conn
+                .prepare(&format!("SELECT DISTINCT {cols} FROM s{where_sql}"))
+                .expect("group query binds");
+            stmt.query_map([], |r| (0..n).map(|i| r.get::<_, Option<i64>>(i)).collect())
+                .expect("group query runs")
+                .map(Result::unwrap)
+                .collect()
+        };
         if matches!(case.mode, PartMode::Whole) && groups.len() > 1 {
             whole_multi_row += 1;
+            if case.order.is_some() {
+                // W2/W5's cell: an ordered window over the whole result.
+                whole_ordered += 1;
+            }
         }
         if let Some(o) = case.order {
             ordered += 1;
@@ -698,8 +721,13 @@ fn generator_varies_the_predicate_and_reaches_non_partition_dims() {
          the partition key, so the extension would cover only the easy case"
     );
     assert!(
-        whole_multi_row > 0,
-        "no case queried a window with no PARTITION BY over more than one row"
+        whole_multi_row >= 20,
+        "too few cases queried a window with no PARTITION BY over more than one row \
+         ({whole_multi_row})"
+    );
+    assert!(
+        whole_ordered >= 20,
+        "only {whole_ordered}/400 cases ordered a window with no PARTITION BY over more than one row"
     );
     assert!(
         ordered > 0 && ordered_with_peers > 0,

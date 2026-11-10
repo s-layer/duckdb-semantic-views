@@ -98,6 +98,8 @@ With neither, the window runs over every row of the result, as in Snowflake. ``S
    OVER (ORDER BY date)  ->  OVER (ORDER BY date)   (no partition: one running total over every store)
    OVER ()               ->  OVER ()                (the grand total on every row)
 
+Give a window an ``ORDER BY`` when it has a frame (``ROWS BETWEEN ...``) or uses an order-sensitive function such as ``LAG`` or ``LEAD``. Without one, the rows have no defined order, so the value depends on the order the grouped rows happen to come in and can change between runs.
+
 .. versionchanged:: 0.19.0
 
    A window with no ``PARTITION BY`` used to be partitioned by every queried dimension, so each row was its own partition and ``SUM(total_qty) OVER (ORDER BY date)`` returned each row's own ``total_qty``.
