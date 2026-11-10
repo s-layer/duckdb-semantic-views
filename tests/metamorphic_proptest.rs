@@ -1748,11 +1748,12 @@ proptest! {
 //   first-declared role (PR #247 review);
 // - `o_any_alt`: a base-table metric over the role-played FACT with no `USING`
 //   (the TECH-DEBT #69 fence);
-// - `win`: `SUM(inner) OVER ()` partitioned by every queried dimension, over
+// - `win`: `SUM(inner) OVER (PARTITION BY <every queried dimension>)`, over
 //   any of the above — a qualified metric whose inner aggregate carries the
 //   `USING` (PR #247 review: no scoped join was emitted for it). Partitioned by
 //   every queried dimension, each partition is one group, so the window must
-//   also equal its inner metric queried directly.
+//   also equal its inner metric queried directly. (With no `PARTITION BY` it
+//   would run over all the result rows, as in Snowflake.)
 
 /// Extra metric shapes property (e) adds to [`build_def`]'s, after the base
 /// metrics: `(name, expr, source table)`.
@@ -1775,6 +1776,9 @@ struct OrderCase {
     metrics: Vec<usize>,
     /// Query only `win`, over this pool index.
     window: Option<usize>,
+    /// `win` has no `PARTITION BY`, so it runs over every result row (else it
+    /// partitions by every queried dimension and equals its inner metric).
+    win_whole: bool,
     dims: Vec<usize>,
     pred: Option<Pred>,
     /// Declare the role-played table `ap` FIRST, so it is the base table and
@@ -1800,6 +1804,15 @@ fn pool_reaches_role_played(i: usize) -> bool {
 }
 
 fn arb_order_case() -> impl Strategy<Value = OrderCase> {
+    // `win_whole` is drawn after the rest, so the other fields' sample is the
+    // one they had before it existed.
+    (arb_order_case_partitioned(), any::<bool>()).prop_map(|(mut c, whole)| {
+        c.win_whole = whole;
+        c
+    })
+}
+
+fn arb_order_case_partitioned() -> impl Strategy<Value = OrderCase> {
     // Biased toward the pool members that reach the role-played table: the
     // rest cannot depend on declaration order and are there as controls.
     let role_side: Vec<usize> = (0..ORDER_POOL)
@@ -1836,6 +1849,7 @@ fn arb_order_case() -> impl Strategy<Value = OrderCase> {
                     one_to_one,
                     metrics,
                     window,
+                    win_whole: false,
                     dims,
                     pred,
                     ap_root: false,
@@ -1913,13 +1927,24 @@ fn build_order_def(case: &OrderCase, swapped: bool) -> SemanticViewDefinition {
             && inner >= BASE_METRICS.len()
             && ORDER_EXTRAS[inner - BASE_METRICS.len()].2 == "ap";
         let inner = pool_name(names, inner);
+        let partition: Vec<String> = if case.win_whole {
+            Vec::new()
+        } else {
+            case.dims.iter().map(|&d| names.dims[d].clone()).collect()
+        };
+        let over = if partition.is_empty() {
+            String::new()
+        } else {
+            format!("PARTITION BY {}", partition.join(", "))
+        };
         def.metrics.push(Metric {
             name: WIN.to_string(),
-            expr: format!("SUM({inner}) OVER ()"),
+            expr: format!("SUM({inner}) OVER ({over})"),
             source_table: Some(if on_root_ap { "ap" } else { "o" }.to_string()),
             window_spec: Some(semantic_views::model::WindowSpec {
                 window_function: "SUM".to_string(),
                 inner_metric: inner,
+                partition_dims: partition,
                 ..Default::default()
             }),
             ..Default::default()
@@ -1995,9 +2020,14 @@ fn check_order(case: &OrderCase) -> Result<(), String> {
              SQL (swapped):\n{sql_b}"
         ));
     }
-    // The window partitions by every queried dimension, so each partition is
-    // one group: it must equal its inner metric queried directly.
-    if let Some(inner) = case.window {
+    // A window partitioned by every queried dimension has one group per
+    // partition, so it must equal its inner metric queried directly. A window
+    // with no `PARTITION BY` is the grand total, so only the swap above checks
+    // it, unless there is no dimension and so only one row.
+    if let Some(inner) = case
+        .window
+        .filter(|_| !case.win_whole || case.dims.is_empty())
+    {
         let inner_name = pool_name(names, inner);
         let req_inner = request(names, &case.dims, &[inner_name], &[], case.pred.as_ref());
         let sql_i = expand("mm", &build_order_def(case, false), &req_inner)
@@ -2019,7 +2049,9 @@ proptest! {
     /// (e) Declaration-order invariance. Swapping the declaration order of the
     /// two relationships to the role-played table must not change which
     /// requests are accepted, nor any accepted answer; and a window metric
-    /// partitioned by every queried dimension must equal its inner metric.
+    /// partitioned by every queried dimension must equal its inner metric. The
+    /// window has no `PARTITION BY` in about half the cases, and then runs
+    /// over every result row.
     #[test]
     fn relationship_declaration_order_is_invisible(case in arb_order_case()) {
         if let Err(msg) = check_order(&case) {
@@ -2502,6 +2534,33 @@ fn generator_reaches_the_declaration_order_cells() {
     assert!(
         plain_role >= 32,
         "only {plain_role}/512 accepted cases queried a role-scoped metric directly"
+    );
+    // A window with no `PARTITION BY` over several rows, and one partitioned by
+    // every queried dimension, each over a `USING` metric and accepted.
+    let win_whole = cases
+        .iter()
+        .filter(|c| {
+            c.window.is_some_and(is_role_metric) && c.win_whole && !c.dims.is_empty() && accepted(c)
+        })
+        .count();
+    let win_partitioned = cases
+        .iter()
+        .filter(|c| {
+            c.window.is_some_and(is_role_metric)
+                && !c.win_whole
+                && !c.dims.is_empty()
+                && accepted(c)
+        })
+        .count();
+    assert!(
+        win_whole >= 16,
+        "only {win_whole}/512 accepted cases put a window with no PARTITION BY over a \
+         USING metric, grouped by a dimension"
+    );
+    assert!(
+        win_partitioned >= 16,
+        "only {win_partitioned}/512 accepted cases put a partitioned window over a \
+         USING metric, grouped by a dimension"
     );
 }
 

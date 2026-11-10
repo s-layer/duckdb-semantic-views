@@ -548,6 +548,8 @@ Both systems support semi-additive metrics (``NON ADDITIVE BY``) and window func
 
 Like Snowflake, the default (ascending) direction selects the **latest** snapshot and ``DESC`` selects the earliest (see :ref:`howto-semi-additive`).
 
+Like Snowflake, a window with no ``PARTITION BY`` runs over every row of the result: ``SUM(total_qty) OVER (ORDER BY month)`` is one running total, whatever other dimensions the query requests (since 0.19.0; it used to be partitioned by every queried dimension).
+
 The behavioral differences are:
 
 - ``NON ADDITIVE BY`` dimensions must be declared in the view's ``DIMENSIONS`` clause. Snowflake validates against its own catalog.

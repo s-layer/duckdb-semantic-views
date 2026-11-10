@@ -58,12 +58,15 @@ mod tests_dims_only_anchoring;
 // Pins ROWS (executes the SQL in-memory), so gated the same way.
 #[cfg(all(test, not(feature = "extension")))]
 mod tests_diamond_paths;
+// Pins ROWS (executes the SQL in-memory), so gated the same way.
 #[cfg(all(test, not(feature = "extension")))]
 mod tests_home_anchoring;
 #[cfg(test)]
 mod tests_join_emission_regression;
 #[cfg(test)]
 mod tests_per_grain;
+#[cfg(all(test, not(feature = "extension")))]
+mod tests_window_partition;
 // These tests pin NUMBERS, not SQL text: every case executes the generated SQL
 // against an in-memory `DuckDB`. The `extension` feature swaps the bundled
 // DuckDB API for loadable-extension stubs, where `Connection::open_in_memory`

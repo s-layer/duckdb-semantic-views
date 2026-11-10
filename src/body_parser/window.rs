@@ -225,6 +225,33 @@ fn parse_order_by_entries(
     Ok(order_by)
 }
 
+/// Refuse a `PARTITION BY` / `PARTITION BY EXCLUDING` naming no dimension. An
+/// empty list would be stored as no partition clause, which means "every result
+/// row". SQL's window grammar needs at least one expression after
+/// `PARTITION BY`, so the empty list is refused rather than read that way.
+fn require_partition_dims(
+    dims: &[String],
+    excluding: bool,
+    base_offset: usize,
+) -> Result<(), ParseError> {
+    if !dims.is_empty() {
+        return Ok(());
+    }
+    let clause = if excluding {
+        "PARTITION BY EXCLUDING"
+    } else {
+        "PARTITION BY"
+    };
+    Err(ParseError {
+        message: format!(
+            "{clause} names no dimension in OVER clause. Name at least one \
+             dimension, or leave the clause out to run the window over every \
+             result row."
+        ),
+        position: Some(base_offset),
+    })
+}
+
 /// Parse the content inside the OVER (...) clause:
 /// `[PARTITION BY [EXCLUDING] dims] [ORDER BY entries] [frame]`.
 ///
@@ -279,6 +306,7 @@ fn parse_over_content(content: &str, base_offset: usize) -> Result<OverContent, 
             .or_else(|| cur.find_any_kw(&FRAME_KEYWORDS));
         let dims_end = boundary.map_or(content.len(), |t| t.start);
         let dims = split_dim_list(content[dims_start..dims_end].trim())?;
+        require_partition_dims(&dims, excluding, base_offset)?;
         if excluding {
             excluding_dims = dims;
         } else {
@@ -529,6 +557,35 @@ mod tests {
         );
         // Caret at the `+`, which is byte 29 of the expression.
         assert_eq!(pos, Some(BASE + 29));
+    }
+
+    // A `PARTITION BY` (or `PARTITION BY EXCLUDING`) naming no dimension used
+    // to be stored as no partition clause at all, which since Phase 7 means
+    // "every result row". SQL's window grammar needs at least one expression
+    // after `PARTITION BY`, so an empty list is refused rather than quietly
+    // meaning "every result row".
+    #[test]
+    fn an_empty_partition_by_list_is_rejected() {
+        let (msg, pos) = err("SUM(w) OVER (PARTITION BY ORDER BY d)");
+        assert!(msg.contains("PARTITION BY names no dimension"), "{msg}");
+        // Anchored at `OVER` (byte 7), like the other OVER-clause diagnostics.
+        assert_eq!(pos, Some(BASE + 7));
+    }
+
+    #[test]
+    fn an_empty_partition_by_excluding_list_is_rejected() {
+        let (msg, _) = err("SUM(w) OVER (PARTITION BY EXCLUDING ORDER BY d)");
+        assert!(
+            msg.contains("PARTITION BY EXCLUDING names no dimension"),
+            "{msg}"
+        );
+        let (msg, _) = err("SUM(w) OVER (PARTITION BY EXCLUDING)");
+        assert!(
+            msg.contains("PARTITION BY EXCLUDING names no dimension"),
+            "{msg}"
+        );
+        let (msg, _) = err("SUM(w) OVER (PARTITION BY)");
+        assert!(msg.contains("PARTITION BY names no dimension"), "{msg}");
     }
 
     // PARSE-10: `func_part` was everything before OVER and its text before the

@@ -5,17 +5,19 @@
 //! `expand_window_metrics` (src/expand/window.rs) turns a window metric into a
 //! two-level query: a CTE (`__sv_agg`) that aggregates the inner metric by ALL
 //! queried dimensions, then an outer SELECT that applies the window function
-//! over that CTE with a computed `PARTITION BY`. The partition is derived two
+//! over that CTE with a computed `PARTITION BY`. The partition is derived three
 //! ways — `PARTITION BY EXCLUDING <dims>` (all queried dims MINUS the excluded
-//! set) or an explicit `PARTITION BY <dims>` — and that derivation, together
-//! with the pre-aggregation grain, is the path's real correctness surface. The
+//! set), an explicit `PARTITION BY <dims>`, or no `PARTITION BY` at all (every
+//! result row, as in Snowflake) — and that derivation, together with the
+//! pre-aggregation grain, is the path's real correctness surface. The
 //! example tests pin a handful of fixed shapes (three dims, one EXCLUDING set);
 //! nothing exercised the partition math over random dim subsets with NULL keys.
 //!
 //! Shape: a single table `s(c0, c1, c2, v)`, three dimensions `d{i} = s.c{i}`,
-//! and one window metric `w = <FUNC>(SUM(s.v)) OVER (PARTITION BY …)`. The
-//! declared partition config (EXCLUDING vs explicit PARTITION, and which dims)
-//! and the queried dim subset (always a superset of the required dims) are
+//! and one window metric `w = <FUNC>(SUM(s.v)) OVER (…)`. The declared
+//! partition config (EXCLUDING, explicit PARTITION or none, and which dims),
+//! an optional `ORDER BY` on one dim (direction and NULLS placement drawn), and
+//! the queried dim subset (always a superset of the required dims) are
 //! randomized, as is `<FUNC>`.
 //!
 //! For every query, the extension's SQL is compared against an **independently
@@ -28,11 +30,10 @@
 //! grain surfaces as a non-zero diff.
 //!
 //! Scope: the window functions under test are the exact-over-integers set
-//! (`SUM`/`COUNT`/`MIN`/`MAX`) so the multiset diff needs no float tolerance,
-//! and the windows are partition-only. `ORDER BY`/frame passthrough is left to
-//! the example tests (and the semi-additive harness already stresses ordered,
-//! NULLS-placed RANK windows); the partition/grain derivation is the piece with
-//! no prior randomized coverage.
+//! (`SUM`/`COUNT`/`MIN`/`MAX`) so the multiset diff needs no float tolerance.
+//! With an `ORDER BY`, the oracle's correlated subquery also keeps only the
+//! rows sorting before the current one or equal to it (its peers), which is
+//! the default frame; an explicit frame clause is left to the example tests.
 //!
 //! # PBT-6 / TECH-DEBT #41 — the `where_clause` axis
 //!
@@ -52,7 +53,8 @@
 use proptest::prelude::*;
 use semantic_views::expand::{expand, DimensionName, MetricName, QueryRequest};
 use semantic_views::model::{
-    AccessModifier, Dimension, Metric, SemanticViewDefinition, TableRef, WindowSpec,
+    AccessModifier, Dimension, Metric, NullsOrder, SemanticViewDefinition, SortOrder, TableRef,
+    WindowOrderBy, WindowSpec,
 };
 
 /// Number of dimensions (physical `s.c{i}` ↔ logical `d{i}` by index).
@@ -192,12 +194,25 @@ impl WFunc {
 /// How the metric declares its partition. Dim indices are into `0..NDIMS`.
 #[derive(Debug, Clone)]
 enum PartMode {
-    /// `PARTITION BY EXCLUDING <dims>` — effective partition is queried dims
-    /// minus these (may be empty).
+    /// `PARTITION BY EXCLUDING <dims>` — non-empty; effective partition is
+    /// queried dims minus these (empty when it names every queried dim).
     Excluding(Vec<usize>),
     /// Explicit `PARTITION BY <dims>` — non-empty; effective partition is
     /// exactly these.
     Partition(Vec<usize>),
+    /// No `PARTITION BY` at all: the window runs over every result row, as in
+    /// Snowflake (2026-11-10 fixture 4, W2/W5). We used to partition this by
+    /// every queried dimension, one row per partition.
+    Whole,
+}
+
+/// A window `ORDER BY <dim> [ASC|DESC] NULLS {FIRST|LAST}`, with the default
+/// frame: the rows of the partition up to the current row and its peers.
+#[derive(Debug, Clone, Copy)]
+struct Order {
+    dim: usize,
+    desc: bool,
+    nulls_first: bool,
 }
 
 /// A full case: an instance, the window function, the declared partition config,
@@ -207,6 +222,8 @@ struct Case {
     inst: Instance,
     func: WFunc,
     mode: PartMode,
+    /// The window's `ORDER BY`, if any (its dim is always queried).
+    order: Option<Order>,
     sel_dims: Vec<usize>,
     /// The pre-aggregation predicate (PBT-6). `None` one case in four, keeping
     /// the original no-predicate coverage rather than replacing it.
@@ -237,18 +254,34 @@ fn arb_func() -> impl Strategy<Value = WFunc> {
     ]
 }
 
+fn arb_order() -> impl Strategy<Value = Option<Order>> {
+    prop_oneof![
+        1 => Just(None),
+        1 => (0..NDIMS, any::<bool>(), any::<bool>())
+            .prop_map(|(dim, desc, nulls_first)| Some(Order { dim, desc, nulls_first })),
+    ]
+}
+
 fn arb_case() -> impl Strategy<Value = Case> {
-    // Pick the metric's declared partition config first (the required dims),
-    // then a query dim-set that is a superset of it — so every generated query
-    // satisfies the required-dimension check and `expand` accepts it.
-    (arb_instance(), arb_func(), any::<bool>()).prop_flat_map(|(inst, func, explicit)| {
+    // Pick the metric's declared partition config and ORDER BY first (the
+    // required dims), then a query dim-set that is a superset of them — so
+    // every generated query satisfies the required-dimension check and
+    // `expand` accepts it. Mode 0 is EXCLUDING, 1 an explicit PARTITION BY,
+    // 2 no PARTITION BY.
+    (arb_instance(), arb_func(), 0u8..3, arb_order()).prop_flat_map(|(inst, func, mode, order)| {
         let all: Vec<usize> = (0..NDIMS).collect();
-        // Explicit PARTITION BY must be non-empty; EXCLUDING may be empty.
-        let req_size = if explicit { 1..=NDIMS } else { 0..=NDIMS };
+        // EXCLUDING and PARTITION BY each name at least one dim.
+        let req_size = if mode == 2 { 0..=0 } else { 1..=NDIMS };
         let req = prop::sample::subsequence(all, req_size);
-        (Just(inst), Just(func), Just(explicit), req).prop_flat_map(
-            |(inst, func, explicit, req)| {
-                let rest: Vec<usize> = (0..NDIMS).filter(|d| !req.contains(d)).collect();
+        (Just(inst), Just(func), Just(mode), Just(order), req).prop_flat_map(
+            |(inst, func, mode, order, req)| {
+                let mut required = req.clone();
+                if let Some(o) = order {
+                    if !required.contains(&o.dim) {
+                        required.push(o.dim);
+                    }
+                }
+                let rest: Vec<usize> = (0..NDIMS).filter(|d| !required.contains(d)).collect();
                 let rest_len = rest.len();
                 let extra = prop::sample::subsequence(rest, 0..=rest_len);
                 let where_pred = prop_oneof![
@@ -258,27 +291,33 @@ fn arb_case() -> impl Strategy<Value = Case> {
                 (
                     Just(inst),
                     Just(func),
-                    Just(explicit),
+                    Just(mode),
+                    Just(order),
                     Just(req),
+                    Just(required),
                     extra,
                     where_pred,
                 )
-                    .prop_map(|(inst, func, explicit, req, extra, where_pred)| {
-                        let mut sel_dims: Vec<usize> = req.iter().copied().chain(extra).collect();
-                        sel_dims.sort_unstable();
-                        let mode = if explicit {
-                            PartMode::Partition(req)
-                        } else {
-                            PartMode::Excluding(req)
-                        };
-                        Case {
-                            inst,
-                            func,
-                            mode,
-                            sel_dims,
-                            where_pred,
-                        }
-                    })
+                    .prop_map(
+                        |(inst, func, mode, order, req, required, extra, where_pred)| {
+                            let mut sel_dims: Vec<usize> =
+                                required.into_iter().chain(extra).collect();
+                            sel_dims.sort_unstable();
+                            let mode = match mode {
+                                0 => PartMode::Excluding(req),
+                                1 => PartMode::Partition(req),
+                                _ => PartMode::Whole,
+                            };
+                            Case {
+                                inst,
+                                func,
+                                mode,
+                                order,
+                                sel_dims,
+                                where_pred,
+                            }
+                        },
+                    )
             },
         )
     })
@@ -286,8 +325,8 @@ fn arb_case() -> impl Strategy<Value = Case> {
 
 /// Build the semantic-view definition: single table `s`, three dimensions, and
 /// one window metric `w` wrapping its own inner `SUM(s.v)` with the given
-/// function and partition config.
-fn build_def(func: WFunc, mode: &PartMode) -> SemanticViewDefinition {
+/// function, partition config and `ORDER BY`.
+fn build_def(func: WFunc, mode: &PartMode, order: Option<Order>) -> SemanticViewDefinition {
     let tables = vec![TableRef {
         alias: "s".to_string(),
         table: "s".to_string(),
@@ -334,7 +373,25 @@ fn build_def(func: WFunc, mode: &PartMode) -> SemanticViewDefinition {
     let (excluding_dims, partition_dims) = match mode {
         PartMode::Excluding(d) => (d.iter().map(|&i| dim_name(i)).collect(), vec![]),
         PartMode::Partition(d) => (vec![], d.iter().map(|&i| dim_name(i)).collect()),
+        PartMode::Whole => (vec![], vec![]),
     };
+    let order_by = order
+        .map(|o| {
+            vec![WindowOrderBy {
+                expr: dim_name(o.dim),
+                order: if o.desc {
+                    SortOrder::Desc
+                } else {
+                    SortOrder::Asc
+                },
+                nulls: if o.nulls_first {
+                    NullsOrder::First
+                } else {
+                    NullsOrder::Last
+                },
+            }]
+        })
+        .unwrap_or_default();
     let metrics = vec![Metric {
         name: "w".to_string(),
         expr: "SUM(s.v)".to_string(),
@@ -353,7 +410,7 @@ fn build_def(func: WFunc, mode: &PartMode) -> SemanticViewDefinition {
             extra_args: vec![],
             excluding_dims,
             partition_dims,
-            order_by: vec![],
+            order_by,
             frame_clause: None,
         }),
         tags: Vec::new(),
@@ -409,6 +466,7 @@ fn partition_dims(case: &Case) -> Vec<usize> {
             .filter(|d| !excl.contains(d))
             .collect(),
         PartMode::Partition(p) => p.clone(),
+        PartMode::Whole => Vec::new(),
     }
 }
 
@@ -450,18 +508,29 @@ fn oracle_sql(case: &Case) -> String {
 
     let part = partition_dims(case);
     let func = case.func.name();
-    let corr_where = if part.is_empty() {
+    let mut preds: Vec<String> = part
+        .iter()
+        .map(|&i| {
+            let n = dim_name(i);
+            format!("a2.{n} IS NOT DISTINCT FROM a1.{n}")
+        })
+        .collect();
+    // With an `ORDER BY`, the default frame holds the partition's rows up to
+    // the current one and its peers: those whose key sorts before it or equal
+    // to it, a NULL key sorting at the end its `NULLS` says.
+    if let Some(o) = case.order {
+        let n = dim_name(o.dim);
+        let cmp = if o.desc { ">=" } else { "<=" };
+        preds.push(if o.nulls_first {
+            format!("(a2.{n} IS NULL OR (a1.{n} IS NOT NULL AND a2.{n} {cmp} a1.{n}))")
+        } else {
+            format!("(a1.{n} IS NULL OR (a2.{n} IS NOT NULL AND a2.{n} {cmp} a1.{n}))")
+        });
+    }
+    let corr_where = if preds.is_empty() {
         String::new()
     } else {
-        let preds = part
-            .iter()
-            .map(|&i| {
-                let n = dim_name(i);
-                format!("a2.{n} IS NOT DISTINCT FROM a1.{n}")
-            })
-            .collect::<Vec<_>>()
-            .join(" AND ");
-        format!(" WHERE {preds}")
+        format!(" WHERE {}", preds.join(" AND "))
     };
     let window_col = format!("(SELECT {func}(a2.w) FROM agg a2{corr_where}) AS w");
     let outer_select = sel
@@ -479,7 +548,7 @@ proptest! {
 
     #[test]
     fn window_metric_matches_independent_oracle(case in arb_case()) {
-        let def = build_def(case.func, &case.mode);
+        let def = build_def(case.func, &case.mode, case.order);
         let req = QueryRequest {
             where_clause: case.where_pred.as_ref().map(Pred::to_member_sql),
             dimensions: case.sel_dims.iter().map(|&i| DimensionName::new(dim_name(i))).collect(),
@@ -525,8 +594,8 @@ proptest! {
         prop_assert_eq!(
             diff, 0,
             "window-metric expansion disagrees with the independent partition oracle \
-             (symmetric multiset diff = {}); func={:?} mode={:?} dims={:?}\n--- expanded:\n{}\n--- oracle:\n{}",
-            diff, case.func, case.mode, case.sel_dims, expanded, oracle
+             (symmetric multiset diff = {}); func={:?} mode={:?} order={:?} dims={:?}\n--- expanded:\n{}\n--- oracle:\n{}",
+            diff, case.func, case.mode, case.order, case.sel_dims, expanded, oracle
         );
     }
 }
@@ -551,6 +620,12 @@ fn generator_varies_the_predicate_and_reaches_non_partition_dims() {
     let mut with_filter = 0usize;
     let mut pred_off_partition = 0usize;
     let mut distinct: HashSet<String> = HashSet::new();
+    // Phase 7: a window with no PARTITION BY over several result rows (also
+    // with an ORDER BY), and an ordered window whose order key is shared by
+    // rows of one partition (peers), so neither the whole-result rule nor the
+    // peer frame is vacuous. Counted over the rows the predicate keeps.
+    let (mut whole_multi_row, mut ordered, mut ordered_with_peers) = (0usize, 0usize, 0usize);
+    let mut whole_ordered = 0usize;
 
     for _ in 0..400 {
         let case = arb_case()
@@ -558,6 +633,55 @@ fn generator_varies_the_predicate_and_reaches_non_partition_dims() {
             .expect("strategy must produce a value")
             .current();
         let part = partition_dims(&case);
+        // The result's groups: the queried dims' distinct values over the rows
+        // the predicate keeps, read from DuckDB so NULLs filter as in SQL.
+        let groups: HashSet<Vec<Option<i64>>> = {
+            let conn = make_db(&case.inst);
+            let cols = if case.sel_dims.is_empty() {
+                "1".to_string()
+            } else {
+                case.sel_dims
+                    .iter()
+                    .map(|&d| dim_col(d))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            };
+            let where_sql = case
+                .where_pred
+                .as_ref()
+                .map_or_else(String::new, |p| format!(" WHERE {}", p.to_raw_sql()));
+            let n = case.sel_dims.len();
+            let mut stmt = conn
+                .prepare(&format!("SELECT DISTINCT {cols} FROM s{where_sql}"))
+                .expect("group query binds");
+            stmt.query_map([], |r| (0..n).map(|i| r.get::<_, Option<i64>>(i)).collect())
+                .expect("group query runs")
+                .map(Result::unwrap)
+                .collect()
+        };
+        if matches!(case.mode, PartMode::Whole) && groups.len() > 1 {
+            whole_multi_row += 1;
+            if case.order.is_some() {
+                // W2/W5's cell: an ordered window over the whole result.
+                whole_ordered += 1;
+            }
+        }
+        if let Some(o) = case.order {
+            ordered += 1;
+            // Two groups in one partition with the same order key.
+            let key = |g: &Vec<Option<i64>>, dims: &[usize]| -> Vec<Option<i64>> {
+                dims.iter()
+                    .map(|d| g[case.sel_dims.iter().position(|s| s == d).expect("queried")])
+                    .collect()
+            };
+            let mut seen: HashSet<(Vec<Option<i64>>, Option<i64>)> = HashSet::new();
+            if groups
+                .iter()
+                .any(|g| !seen.insert((key(g, &part), key(g, &[o.dim])[0])))
+            {
+                ordered_with_peers += 1;
+            }
+        }
         match &case.where_pred {
             None => without_pred += 1,
             Some(p) => {
@@ -595,6 +719,19 @@ fn generator_varies_the_predicate_and_reaches_non_partition_dims() {
         "no case constrained a queried dimension outside the effective partition; \
          that is the shape where filtering moves the window value without moving \
          the partition key, so the extension would cover only the easy case"
+    );
+    assert!(
+        whole_multi_row >= 20,
+        "too few cases queried a window with no PARTITION BY over more than one row \
+         ({whole_multi_row})"
+    );
+    assert!(
+        whole_ordered >= 20,
+        "only {whole_ordered}/400 cases ordered a window with no PARTITION BY over more than one row"
+    );
+    assert!(
+        ordered > 0 && ordered_with_peers > 0,
+        "ordered windows: {ordered}, with peers in a partition: {ordered_with_peers}"
     );
     assert!(
         distinct.len() > 50,

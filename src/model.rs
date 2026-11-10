@@ -3071,9 +3071,10 @@ mod tests {
 
     #[test]
     fn yaml_window_partition_dim_named_like_a_frame_keyword_is_rejected() {
-        // Silent: `PARTITION BY rows` re-parses with an EMPTY dim list and
-        // `frame_clause: Some("rows")` — the partition key disappears and a
-        // frame appears, with no error anywhere.
+        // Silent: `PARTITION BY rows` re-parsed with an EMPTY dim list and
+        // `frame_clause: Some("rows")` — the partition key disappeared and a
+        // frame appeared, with no error anywhere. The re-parse now refuses the
+        // empty `PARTITION BY` list, so the YAML is refused on that.
         let yaml = format!(
             "{VALID_TABLES}dimensions:\n  - name: rows\n    expr: o.d\n    source_table: o\n\
              metrics:\n  - name: base\n    expr: sum(o.amount)\n    source_table: o\n  \
@@ -3083,8 +3084,10 @@ mod tests {
         );
         let e = yaml_err(&yaml);
         assert!(
-            e.contains("'w'") && e.contains("round-trip"),
-            "the error must name the metric and say the spec does not round-trip: {e}"
+            e.contains("'w'")
+                && e.contains("does not parse back")
+                && e.contains("PARTITION BY names no dimension"),
+            "the error must name the metric and the empty PARTITION BY it parses back to: {e}"
         );
     }
 

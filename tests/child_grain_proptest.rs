@@ -135,8 +135,8 @@ const D_LDAMT: usize = 2;
 /// ordinary column aggregates — the controls that must stay untouched.
 ///
 /// `w_parent` is a window metric over `s_parent` with no `PARTITION BY` clause,
-/// which partitions by every queried dimension, so each row's window holds its
-/// own group and the value equals that group's `s_parent`. Its `__sv_agg` CTE is re-anchored at `li`, the inner
+/// which runs over every result row (as in Snowflake), so each row holds the
+/// sum of every group's `s_parent`. Its `__sv_agg` CTE is re-anchored at `li`, the inner
 /// metric's home table, and has to join `o` for the inlined parent fact even
 /// when no queried dimension reaches `o` (reviewbot on #250: it did not, and
 /// the query failed with a Binder Error).
@@ -906,9 +906,9 @@ fn grain_oracle_sql(case: &Case, grain: Grain, sel_metrics: &[usize]) -> String 
             "s_parent" => "sum(x.p_rate)",
             "mn_one" => "min(1)",
             "mx_amt" => "max(x.amount)",
-            // A window partitioned by every queried dimension holds one group,
-            // so it reads back that group's own `s_parent`.
-            "w_parent" => "sum(x.p_rate)",
+            // A window with no `PARTITION BY` runs over every result row: the
+            // sum of every group's own `s_parent`.
+            "w_parent" => "sum(sum(x.p_rate)) OVER ()",
             // NON ADDITIVE BY (lamt) — ASC / NULLS LAST — keeps the LAST
             // value of that sort in each group: the rows at the group's
             // MAX(lamt), or every row when the group's `lamt` is all NULL

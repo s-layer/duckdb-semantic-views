@@ -1,0 +1,132 @@
+# Phase 7: a window metric with no PARTITION BY runs over every result row.
+#
+# Snowflake (fixture 4, 2026-11-10, cases W2, W3 and W5) computes
+# SUM(total_pages) OVER (ORDER BY title) as a running total across the whole
+# result, with rows of the same title as peers. We used to partition such a
+# window by every queried dimension, so each row got its own total_pages back.
+#
+# One table of (book, country) rows, so a book with authors in two countries
+# has two rows: W5's shape without the bridge.
+#   By title: Duo 100, Mixed 400 (200 FR + 200 UK), Orphan 50, Solo 300.
+
+require semantic_views
+
+statement ok
+CREATE TABLE wp_book_rows (title VARCHAR, country VARCHAR, pages INTEGER);
+
+statement ok
+INSERT INTO wp_book_rows VALUES
+  ('Duo', 'FR', 100), ('Mixed', 'FR', 200), ('Mixed', 'UK', 200),
+  ('Solo', 'UK', 300), ('Orphan', NULL, 50);
+
+statement ok
+CREATE SEMANTIC VIEW wp AS
+  TABLES (b AS wp_book_rows)
+  DIMENSIONS (b.title AS b.title, b.country AS b.country)
+  METRICS (
+    b.total_pages AS SUM(b.pages),
+    b.running_by_title AS SUM(total_pages) OVER (ORDER BY title),
+    b.grand_total AS SUM(total_pages) OVER (),
+    b.previous_title AS LAG(total_pages, 1) OVER (ORDER BY title),
+    b.avg_excl_title AS AVG(total_pages) OVER (PARTITION BY EXCLUDING title),
+    b.running_in_country AS SUM(total_pages) OVER (PARTITION BY country ORDER BY title)
+  );
+
+# W2 (the window alone): a running total over the titles.
+query TI rowsort
+SELECT * FROM SEMANTIC_VIEW(wp DIMENSIONS b.title METRICS b.running_by_title);
+----
+Duo	100
+Mixed	500
+Orphan	550
+Solo	850
+
+# W5's shape: one total across both countries; the two Mixed rows are peers.
+query TTI rowsort
+SELECT * FROM SEMANTIC_VIEW(wp DIMENSIONS b.country, b.title METRICS b.running_by_title);
+----
+FR	Duo	100
+FR	Mixed	500
+NULL	Orphan	550
+UK	Mixed	500
+UK	Solo	850
+
+# An empty OVER () is the grand total on every row.
+query TI rowsort
+SELECT * FROM SEMANTIC_VIEW(wp DIMENSIONS b.title METRICS b.grand_total);
+----
+Duo	850
+Mixed	850
+Orphan	850
+Solo	850
+
+# LAG reads the previous title's row.
+query TI rowsort
+SELECT * FROM SEMANTIC_VIEW(wp DIMENSIONS b.title METRICS b.previous_title);
+----
+Duo	NULL
+Mixed	100
+Orphan	400
+Solo	50
+
+# W3: excluding the only queried dimension leaves no partition (unchanged).
+query TR rowsort
+SELECT * FROM SEMANTIC_VIEW(wp DIMENSIONS b.title METRICS b.avg_excl_title);
+----
+Duo	212.5
+Mixed	212.5
+Orphan	212.5
+Solo	212.5
+
+# PARTITION BY EXCLUDING still partitions by the other queried dimensions.
+query TTR rowsort
+SELECT * FROM SEMANTIC_VIEW(wp DIMENSIONS b.country, b.title METRICS b.avg_excl_title);
+----
+FR	Duo	150.0
+FR	Mixed	150.0
+NULL	Orphan	50.0
+UK	Mixed	250.0
+UK	Solo	250.0
+
+# An explicit PARTITION BY runs within each partition (unchanged).
+query TTI rowsort
+SELECT * FROM SEMANTIC_VIEW(wp DIMENSIONS b.country, b.title METRICS b.running_in_country);
+----
+FR	Duo	100
+FR	Mixed	300
+NULL	Orphan	50
+UK	Mixed	200
+UK	Solo	500
+
+# The standard-SQL form reads the same running total.
+query TI rowsort
+SELECT title, AGG(running_by_title) FROM wp GROUP BY title;
+----
+Duo	100
+Mixed	500
+Orphan	550
+Solo	850
+
+# A PARTITION BY naming no dimension is refused (SQL needs at least one), rather than
+# being read as "every result row".
+statement error
+CREATE SEMANTIC VIEW wp_empty AS
+  TABLES (b AS wp_book_rows)
+  DIMENSIONS (b.title AS b.title)
+  METRICS (
+    b.total_pages AS SUM(b.pages),
+    b.w AS SUM(total_pages) OVER (PARTITION BY ORDER BY title)
+  );
+----
+PARTITION BY names no dimension
+
+statement error
+CREATE SEMANTIC VIEW wp_empty AS
+  TABLES (b AS wp_book_rows)
+  DIMENSIONS (b.title AS b.title)
+  METRICS (
+    b.total_pages AS SUM(b.pages),
+    b.w AS SUM(total_pages) OVER (PARTITION BY EXCLUDING ORDER BY title)
+  );
+----
+PARTITION BY EXCLUDING names no dimension
