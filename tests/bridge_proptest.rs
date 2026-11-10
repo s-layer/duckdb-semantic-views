@@ -883,10 +883,11 @@ fn generator_reaches_bridged_refused_and_filtered_cases() {
         };
         let after_hop_up =
             |m: usize, d: usize| METS[m].1 == "c" && matches!(DIMS[d].1, "x" | "bt" | "y");
-        if case
-            .mets
-            .iter()
-            .any(|m| case.dims.iter().any(|d| after_hop_up(*m, *d)))
+        if case.answerable()
+            && case
+                .mets
+                .iter()
+                .any(|m| case.dims.iter().any(|d| after_hop_up(*m, *d)))
         {
             hop_up += 1;
         }
@@ -907,10 +908,11 @@ fn generator_reaches_bridged_refused_and_filtered_cases() {
             if case.answerable() && case.mets.iter().any(|m| ds.iter().any(|d| crosses(*m, *d))) {
                 filtered = true;
             }
-            if case
-                .mets
-                .iter()
-                .any(|m| ds.iter().any(|d| after_hop_up(*m, *d)))
+            if case.answerable()
+                && case
+                    .mets
+                    .iter()
+                    .any(|m| ds.iter().any(|d| after_hop_up(*m, *d)))
             {
                 hop_up_filtered += 1;
             }
@@ -920,7 +922,8 @@ fn generator_reaches_bridged_refused_and_filtered_cases() {
         bridged && refused && filtered,
         "{bridged} {refused} {filtered}"
     );
-    // A metric on `c` grouped, and filtered, across the bridge after its hop up.
+    // A metric on `c` grouped, and filtered, across the bridge after its hop up,
+    // in queries that are answered and so compared with the oracle.
     assert!(
         hop_up >= 100 && hop_up_filtered >= 30,
         "{hop_up} {hop_up_filtered}"
