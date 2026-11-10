@@ -361,6 +361,21 @@ pub struct AmbiguousMetricPathError {
     pub available_relationships: Vec<String>,
 }
 
+/// Detail payload for [`ExpandError::MultiPath`], boxed for the same reason
+/// as [`AmbiguousMemberFactPathError`].
+#[derive(Debug)]
+pub struct MultiPathError {
+    pub view_name: String,
+    /// The member, as `dimension 'x'` or `filter member 'x'`.
+    pub member: String,
+    pub member_table: String,
+    pub from_table: String,
+    /// What reads rows at `from_table`: `metric 'x'`, or the query itself.
+    pub reader: String,
+    /// Each path, as `o -> c -> r`.
+    pub paths: Vec<String>,
+}
+
 /// Detail payload for [`ExpandError::MetricFanTrap`], boxed so the enum stays
 /// small (R-9, code-review 2026-07-11 — the other fat variant).
 #[derive(Debug)]
@@ -522,6 +537,25 @@ pub enum ExpandError {
         view_name: String,
         table_a: String,
         table_b: String,
+    },
+    /// A member's table is reached from the table a query reads rows at (a
+    /// metric's own table, or the table a query with no metrics lists) by more
+    /// than one path through different tables, and no `USING` chooses one
+    /// (a diamond: orders reach regions through customers and through stores).
+    /// Snowflake refuses it as a multi-path relationship (010246). We used to
+    /// follow the first-declared path silently.
+    MultiPath { detail: Box<MultiPathError> },
+    /// A metric's `USING` picks one of several paths to a table the query
+    /// reaches (a diamond), and the query also holds something only the
+    /// base-anchored, window or semi-additive emitter computes, which joins
+    /// along the first-declared path. Refused rather than answered through the
+    /// other path. Window metrics follow it once Phase 7 PR 5 lands
+    /// (TECH-DEBT #109).
+    UnfollowedUsingPath {
+        view_name: String,
+        metric_name: String,
+        member_table: String,
+        path: String,
     },
     /// The `where_clause` predicate references a metric. Snowflake's rule for
     /// the `WHERE` inside `SEMANTIC_VIEW(…)`: "you can only refer to dimensions,
@@ -990,6 +1024,44 @@ impl fmt::Display for ExpandError {
                     "semantic view '{view_name}': tables '{table_a}' and '{table_b}' are not \
                      related -- no table reaches both by following relationships many-to-one, so \
                      no rows hold their members together. Query them separately"
+                )
+            }
+            Self::MultiPath { detail } => {
+                let MultiPathError {
+                    view_name,
+                    member,
+                    member_table,
+                    from_table,
+                    reader,
+                    paths,
+                } = detail.as_ref();
+                let advice = if reader.starts_with("metric") {
+                    "Give the metric a USING that names the first relationship of the path to \
+                     follow, or query members one path reaches"
+                } else {
+                    "Query members one path reaches, or add a metric whose USING names the \
+                     first relationship of the path to follow"
+                };
+                write!(
+                    f,
+                    "semantic view '{view_name}': {member} is on table '{member_table}', which \
+                     {reader} reaches from table '{from_table}' by more than one path: {}. \
+                     {advice}",
+                    paths.join(", ")
+                )
+            }
+            Self::UnfollowedUsingPath {
+                view_name,
+                metric_name,
+                member_table,
+                path,
+            } => {
+                write!(
+                    f,
+                    "semantic view '{view_name}': metric '{metric_name}' reaches table \
+                     '{member_table}' along the path its USING names ({path}), which this query \
+                     cannot follow: it also holds a window or semi-additive metric, or a member \
+                     declared on no table. Query the metric without them"
                 )
             }
             Self::WhereClauseReferencesMetric {

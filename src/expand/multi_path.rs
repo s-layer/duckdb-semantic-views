@@ -1,0 +1,487 @@
+//! Tables a query reaches by more than one path (a diamond).
+//!
+//! A view can reach one table from another along two chains of relationships
+//! through different tables: orders reach regions through their customer and
+//! through their store. A query that groups or filters orders by region has to
+//! pick one, and the two give different numbers. Snowflake refuses such a query
+//! ("Multi-path relationship between the dimension entity 'R' and the base
+//! metric or dimension entity 'O' is not supported", 010246, fixture 3 of
+//! 2026-11-10) unless the metric's `USING` names the first relationship of one
+//! path, which it then follows. We used to follow the first-declared path
+//! without saying so.
+//!
+//! A path here is a chain of tables, each referencing the next (many-to-one,
+//! from the referencing table to the referenced one). Two relationships between
+//! the same two tables are one step: that is a role-played table, which
+//! `role_playing` handles, and its relationships are the roles.
+
+use std::collections::{HashMap, HashSet};
+
+use crate::model::{Dimension, Metric, SemanticViewDefinition};
+
+use super::types::{ExpandError, MultiPathError};
+use super::where_clause::WhereMember;
+
+/// How many paths are collected from each first step. Two settle every
+/// question asked here (one path, or more than one); the rest only lengthen
+/// the error message.
+const PATHS_PER_STEP: usize = 3;
+
+/// The tables `table` references, each once, in declaration order.
+fn referenced(def: &SemanticViewDefinition, table: &str) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    for j in &def.joins {
+        if j.fk_columns.is_empty() || !j.from_alias.eq_ignore_ascii_case(table) {
+            continue;
+        }
+        let to = j.table.to_ascii_lowercase();
+        if !out.contains(&to) {
+            out.push(to);
+        }
+    }
+    out
+}
+
+/// The tables `to` can be reached from by following references, `to`
+/// included: a walk toward `to` only enters these, so it never explores a
+/// branch with no path at its end.
+fn reaching(def: &SemanticViewDefinition, to: &str) -> HashSet<String> {
+    let mut seen: HashSet<String> = HashSet::from([to.to_string()]);
+    let mut queue: Vec<String> = vec![to.to_string()];
+    while let Some(current) = queue.pop() {
+        for j in &def.joins {
+            if j.fk_columns.is_empty() || !j.table.eq_ignore_ascii_case(&current) {
+                continue;
+            }
+            let from = j.from_alias.to_ascii_lowercase();
+            if seen.insert(from.clone()) {
+                queue.push(from);
+            }
+        }
+    }
+    seen
+}
+
+/// Up to `cap` paths from `from` to `to`, each `[from, …, to]`, depth first in
+/// declaration order. Only tables that reach `to` are entered, so every step
+/// leads to a path and the walk stops after `cap` of them; a table already on
+/// the path is not entered again, so a cycle (refused at CREATE) cannot loop.
+fn paths_from(def: &SemanticViewDefinition, from: &str, to: &str, cap: usize) -> Vec<Vec<String>> {
+    fn walk(
+        def: &SemanticViewDefinition,
+        path: &mut Vec<String>,
+        to: &str,
+        reach: &HashSet<String>,
+        cap: usize,
+        out: &mut Vec<Vec<String>>,
+    ) {
+        let current = path.last().cloned().unwrap_or_default();
+        if current == to {
+            out.push(path.clone());
+            return;
+        }
+        for next in referenced(def, &current) {
+            if out.len() >= cap {
+                return;
+            }
+            if path.contains(&next) || !reach.contains(&next) {
+                continue;
+            }
+            path.push(next);
+            walk(def, path, to, reach, cap, out);
+            path.pop();
+        }
+    }
+    let to = to.to_ascii_lowercase();
+    let reach = reaching(def, &to);
+    let mut out = Vec::new();
+    if reach.contains(&from.to_ascii_lowercase()) {
+        walk(
+            def,
+            &mut vec![from.to_ascii_lowercase()],
+            &to,
+            &reach,
+            cap,
+            &mut out,
+        );
+    }
+    out
+}
+
+/// The paths from `from` up to `to` a metric with `using` may follow.
+///
+/// Every path when the metric's `USING` names no relationship that starts one
+/// of them; otherwise only the paths whose first step is a relationship it
+/// names. A `USING` relationship starts at the metric's own table (checked at
+/// CREATE), so it chooses the first step.
+fn admitted_paths(
+    def: &SemanticViewDefinition,
+    from: &str,
+    to: &str,
+    using: &[String],
+) -> Vec<Vec<String>> {
+    let from = from.to_ascii_lowercase();
+    let to = to.to_ascii_lowercase();
+    if from == to {
+        return Vec::new();
+    }
+    let by_step: Vec<(String, Vec<Vec<String>>)> = referenced(def, &from)
+        .into_iter()
+        .map(|step| {
+            let rest = paths_from(def, &step, &to, PATHS_PER_STEP);
+            (step, rest)
+        })
+        .filter(|(_, rest)| !rest.is_empty())
+        .collect();
+    let named: HashSet<String> = using
+        .iter()
+        .filter_map(|rel| crate::graph::find_relationship(&def.joins, rel))
+        .filter(|j| j.from_alias.eq_ignore_ascii_case(&from))
+        .map(|j| j.table.to_ascii_lowercase())
+        .collect();
+    let narrowed = by_step.iter().any(|(step, _)| named.contains(step));
+    by_step
+        .into_iter()
+        .filter(|(step, _)| !narrowed || named.contains(step))
+        .flat_map(|(_, rest)| rest)
+        .map(|rest| {
+            let mut path = vec![from.clone()];
+            path.extend(rest);
+            path
+        })
+        .collect()
+}
+
+/// The path a metric on `home` with `using` follows to `to` when `to` is
+/// reached by several paths and the `USING` picks exactly one of them, as
+/// `[home, …, to]`. `None` when `to` is reached one way or none (the usual
+/// join walk finds it) or several ways the `USING` does not choose between
+/// (refused by [`check_metric_paths`]).
+pub(super) fn pinned_path(
+    def: &SemanticViewDefinition,
+    home: &str,
+    to: &str,
+    using: &[String],
+) -> Option<Vec<String>> {
+    if admitted_paths(def, home, to, &[]).len() < 2 {
+        return None;
+    }
+    match admitted_paths(def, home, to, using).as_slice() {
+        [one] => Some(one.clone()),
+        _ => None,
+    }
+}
+
+/// The metrics `met` is computed from, each with the table its rows are read
+/// at: `met` itself when it is declared on a table, a window metric's inner
+/// metric, and a derived metric's base metrics. A base metric declared on no
+/// table aggregates at `root`.
+pub(super) fn base_components<'a>(
+    def: &'a SemanticViewDefinition,
+    met: &'a Metric,
+    root: &str,
+) -> Vec<(&'a Metric, String)> {
+    let mut out: Vec<(&Metric, String)> = Vec::new();
+    let names = super::facts::collect_transitive_metric_names(met, &def.metrics);
+    let reached = std::iter::once(met).chain(
+        def.metrics
+            .iter()
+            .filter(|m| names.contains(&crate::ident::normalize_ident_part(&m.name))),
+    );
+    for m in reached {
+        if m.is_window() || out.iter().any(|(o, _)| std::ptr::eq(*o, m)) {
+            continue;
+        }
+        let home = match &m.source_table {
+            Some(t) => t.to_ascii_lowercase(),
+            None if crate::graph::contains_aggregate_function(&m.expr).is_some() => {
+                root.to_string()
+            }
+            None => continue,
+        };
+        out.push((m, home));
+    }
+    out
+}
+
+/// A member whose table a query has to reach: what to call it in an error, and
+/// its table.
+pub(super) struct Member {
+    pub(super) label: String,
+    pub(super) table: String,
+}
+
+/// The members a query with metrics reaches from each metric's table: every
+/// dimension's table and the tables of the facts it is written over, and every
+/// `where_clause` member's table and fact tables.
+pub(super) fn query_members(
+    def: &SemanticViewDefinition,
+    resolved_dims: &[&Dimension],
+    where_members: &[WhereMember],
+) -> Vec<Member> {
+    let mut out: Vec<Member> = Vec::new();
+    for dim in resolved_dims {
+        let label = format!("dimension '{}'", dim.name);
+        let tables =
+            dim.source_table
+                .iter()
+                .cloned()
+                .chain(super::facts::collect_referenced_fact_tables(
+                    &dim.expr, &def.facts,
+                ));
+        for table in tables {
+            out.push(Member {
+                label: label.clone(),
+                table: table.to_ascii_lowercase(),
+            });
+        }
+    }
+    for member in where_members {
+        let label = format!("filter member '{}'", member.name);
+        for table in member.table.iter().chain(member.fact_tables.iter()) {
+            out.push(Member {
+                label: label.clone(),
+                table: table.to_ascii_lowercase(),
+            });
+        }
+    }
+    out
+}
+
+/// The paths each multi-path member is reached by for one metric component:
+/// member table -> `[home, …, table]`, for every member a [`pinned_path`]
+/// exists for. Members the metric's inlined facts reach are included.
+pub(super) fn component_paths(
+    def: &SemanticViewDefinition,
+    component: &Metric,
+    home: &str,
+    member_tables: &[String],
+) -> HashMap<String, Vec<String>> {
+    let fact_tables = super::facts::collect_referenced_fact_tables(&component.expr, &def.facts);
+    member_tables
+        .iter()
+        .cloned()
+        .chain(fact_tables)
+        .filter_map(|t| {
+            let t = t.to_ascii_lowercase();
+            pinned_path(def, home, &t, &component.using_relationships).map(|p| (t, p))
+        })
+        .collect()
+}
+
+fn render(paths: &[Vec<String>]) -> Vec<String> {
+    paths.iter().map(|p| p.join(" -> ")).collect()
+}
+
+/// Refuse a query that reaches a member's table from a metric's table by more
+/// than one path the metric's `USING` does not choose between.
+///
+/// Asked of every metric each queried metric is computed from (a derived
+/// metric's base metrics, a window metric's inner metric), since each is
+/// computed through its own joins.
+pub(super) fn check_metric_paths(
+    view_name: &str,
+    def: &SemanticViewDefinition,
+    root: &str,
+    resolved_mets: &[&Metric],
+    members: &[Member],
+) -> Result<(), ExpandError> {
+    for met in resolved_mets {
+        for (component, home) in base_components(def, met, root) {
+            let fact_tables =
+                super::facts::collect_referenced_fact_tables(&component.expr, &def.facts);
+            let fact_members = fact_tables.into_iter().map(|t| Member {
+                label: format!("a fact metric '{}' is written over", component.name),
+                table: t.to_ascii_lowercase(),
+            });
+            let reached: Vec<Member> = members
+                .iter()
+                .map(|m| Member {
+                    label: m.label.clone(),
+                    table: m.table.clone(),
+                })
+                .chain(fact_members)
+                .collect();
+            for member in &reached {
+                let paths =
+                    admitted_paths(def, &home, &member.table, &component.using_relationships);
+                if paths.len() > 1 {
+                    return Err(ExpandError::MultiPath {
+                        detail: Box::new(MultiPathError {
+                            view_name: view_name.to_string(),
+                            member: member.label.clone(),
+                            member_table: member.table.clone(),
+                            from_table: home,
+                            reader: format!("metric '{}'", met.name),
+                            paths: render(&paths),
+                        }),
+                    });
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+/// The first metric component (in query order) that follows a pinned path to
+/// one of `members`' tables or its own fact tables, as (queried metric, table,
+/// path). Only the per-grain planner follows a pinned path, so a query it
+/// declines that has one is refused rather than joined along another path.
+pub(super) fn first_pinned(
+    def: &SemanticViewDefinition,
+    root: &str,
+    resolved_mets: &[&Metric],
+    members: &[Member],
+) -> Option<(String, String, String)> {
+    let tables: Vec<String> = members.iter().map(|m| m.table.clone()).collect();
+    for met in resolved_mets {
+        for (component, home) in base_components(def, met, root) {
+            let mut paths: Vec<(String, Vec<String>)> =
+                component_paths(def, component, &home, &tables)
+                    .into_iter()
+                    .collect();
+            paths.sort();
+            if let Some((table, path)) = paths.into_iter().next() {
+                return Some((met.name.clone(), table, path.join(" -> ")));
+            }
+        }
+    }
+    None
+}
+
+/// The paths by which `anchor`, the table a query with no metrics reads rows
+/// from, reaches `member` when there is more than one: such a query has no
+/// `USING` to choose with. `None` when there is one path or none.
+pub(super) fn anchor_paths(
+    def: &SemanticViewDefinition,
+    anchor: &str,
+    member: &str,
+) -> Option<Vec<String>> {
+    let paths = admitted_paths(def, anchor, member, &[]);
+    (paths.len() > 1).then(|| render(&paths))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::model::{Join, TableRef};
+
+    fn def(edges: &[(&str, &str, &str)]) -> SemanticViewDefinition {
+        let mut tables: Vec<String> = Vec::new();
+        for (_, from, to) in edges {
+            for t in [from, to] {
+                if !tables.iter().any(|x| x == t) {
+                    tables.push((*t).to_string());
+                }
+            }
+        }
+        SemanticViewDefinition {
+            tables: tables
+                .iter()
+                .map(|t| TableRef {
+                    alias: t.clone(),
+                    table: t.clone(),
+                    pk_columns: vec!["id".to_string()],
+                    ..Default::default()
+                })
+                .collect(),
+            joins: edges
+                .iter()
+                .map(|(name, from, to)| Join {
+                    table: (*to).to_string(),
+                    from_alias: (*from).to_string(),
+                    fk_columns: vec![format!("{to}_id")],
+                    ref_columns: vec!["id".to_string()],
+                    name: Some((*name).to_string()),
+                    ..Default::default()
+                })
+                .collect(),
+            ..Default::default()
+        }
+    }
+
+    fn diamond() -> SemanticViewDefinition {
+        def(&[
+            ("o_cust", "o", "c"),
+            ("o_store", "o", "s"),
+            ("c_region", "c", "r"),
+            ("s_region", "s", "r"),
+            ("r_country", "r", "k"),
+        ])
+    }
+
+    #[test]
+    fn a_diamond_has_two_paths_to_its_shared_table_and_past_it() {
+        let d = diamond();
+        assert_eq!(
+            render(&admitted_paths(&d, "o", "r", &[])),
+            ["o -> c -> r", "o -> s -> r"]
+        );
+        assert_eq!(admitted_paths(&d, "o", "k", &[]).len(), 2);
+        assert_eq!(admitted_paths(&d, "c", "r", &[]).len(), 1);
+        assert_eq!(admitted_paths(&d, "r", "o", &[]).len(), 0);
+    }
+
+    #[test]
+    fn using_picks_the_path_its_relationship_starts() {
+        let d = diamond();
+        let using = ["o_store".to_string()];
+        assert_eq!(
+            pinned_path(&d, "o", "k", &using),
+            Some(
+                vec!["o", "s", "r", "k"]
+                    .into_iter()
+                    .map(String::from)
+                    .collect()
+            )
+        );
+        // A table one path reaches needs no pin, `USING` or not.
+        assert_eq!(pinned_path(&d, "o", "c", &using), None);
+        assert_eq!(pinned_path(&d, "o", "s", &using), None);
+    }
+
+    #[test]
+    fn using_on_both_first_steps_chooses_neither() {
+        let d = diamond();
+        let using = ["o_cust".to_string(), "o_store".to_string()];
+        assert_eq!(admitted_paths(&d, "o", "r", &using).len(), 2);
+        assert_eq!(pinned_path(&d, "o", "r", &using), None);
+    }
+
+    /// Fifteen layers of three tables, each referencing all three in the next
+    /// layer, have 3^15 paths to the top. The walk stops after a few of them,
+    /// and never enters a table that cannot reach its target.
+    #[test]
+    fn a_dense_graph_is_walked_only_as_far_as_the_answer_needs() {
+        let names: Vec<(String, String, String)> = (0..15)
+            .flat_map(|layer| {
+                (0..3).flat_map(move |a| {
+                    (0..3).map(move |b| {
+                        let to = if layer == 14 {
+                            "top".to_string()
+                        } else {
+                            format!("t{}_{b}", layer + 1)
+                        };
+                        (format!("r{layer}_{a}_{b}"), format!("t{layer}_{a}"), to)
+                    })
+                })
+            })
+            .collect();
+        let edges: Vec<(&str, &str, &str)> = names
+            .iter()
+            .map(|(n, f, t)| (n.as_str(), f.as_str(), t.as_str()))
+            .chain([("dead", "t0_0", "nowhere")])
+            .collect();
+        let d = def(&edges);
+        assert!(admitted_paths(&d, "t0_0", "top", &[]).len() >= 2);
+        assert!(admitted_paths(&d, "t0_0", "nowhere", &[]).len() == 1);
+        assert!(admitted_paths(&d, "t5_0", "t0_0", &[]).is_empty());
+    }
+
+    #[test]
+    fn two_relationships_between_two_tables_are_one_step() {
+        // A role-played table: `role_playing` decides which relationship.
+        let d = def(&[("dep", "f", "a"), ("arr", "f", "a"), ("a_region", "a", "r")]);
+        assert_eq!(admitted_paths(&d, "f", "r", &[]).len(), 1);
+    }
+}

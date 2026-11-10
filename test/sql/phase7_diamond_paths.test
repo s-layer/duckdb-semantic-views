@@ -1,0 +1,143 @@
+# Phase 7: a view whose relationships reach one table by two paths through
+# different tables (a diamond). Orders reach regions through their customer
+# and through their store.
+#
+# Snowflake (fixture 3, 2026-11-10, cases D2-D13) refuses a query that would
+# have to pick one of the two paths itself (010246 "Multi-path relationship
+# ... is not supported"), and answers a metric whose USING names the first
+# relationship of one path through that path. This view declares regions
+# first, which is the one table order our CREATE accepts for this shape; the
+# query used to follow the customer path silently.
+#
+#   o1: Ana (EU) at store S-US, 10;  o2: Bo (US) at S-US, 20;  o3: Ana at S-EU, 40.
+#   By customer region: EU 50, US 20.  By store region: EU 40, US 30.
+
+require semantic_views
+
+statement ok
+CREATE TABLE dp_regions (region_id INTEGER, region_name VARCHAR);
+
+statement ok
+CREATE TABLE dp_customers (cust_id INTEGER, cust_name VARCHAR, region_id INTEGER);
+
+statement ok
+CREATE TABLE dp_stores (store_id INTEGER, store_name VARCHAR, region_id INTEGER);
+
+statement ok
+CREATE TABLE dp_orders (order_id INTEGER, cust_id INTEGER, store_id INTEGER, amount INTEGER);
+
+statement ok
+INSERT INTO dp_regions VALUES (1, 'EU'), (2, 'US');
+
+statement ok
+INSERT INTO dp_customers VALUES (1, 'Ana', 1), (2, 'Bo', 2);
+
+statement ok
+INSERT INTO dp_stores VALUES (1, 'S-US', 2), (2, 'S-EU', 1);
+
+statement ok
+INSERT INTO dp_orders VALUES (1, 1, 1, 10), (2, 2, 1, 20), (3, 1, 2, 40);
+
+statement ok
+CREATE SEMANTIC VIEW dv_r
+  TABLES (
+    r AS dp_regions   PRIMARY KEY (region_id),
+    c AS dp_customers PRIMARY KEY (cust_id),
+    s AS dp_stores    PRIMARY KEY (store_id),
+    o AS dp_orders    PRIMARY KEY (order_id)
+  )
+  RELATIONSHIPS (
+    o_cust   AS o (cust_id)   REFERENCES c,
+    o_store  AS o (store_id)  REFERENCES s,
+    c_region AS c (region_id) REFERENCES r,
+    s_region AS s (region_id) REFERENCES r
+  )
+  DIMENSIONS (
+    o.order_id    AS order_id,
+    c.cust_name   AS cust_name,
+    s.store_name  AS store_name,
+    r.region_name AS region_name
+  )
+  METRICS (
+    o.revenue          AS SUM(amount),
+    o.rev_by_cust      USING (o_cust)  AS SUM(amount),
+    o.rev_by_store     USING (o_store) AS SUM(amount),
+    c.customer_count   AS COUNT(cust_id)
+  );
+
+# D12: revenue by region with no USING has two paths.
+statement error
+SELECT * FROM SEMANTIC_VIEW(dv_r DIMENSIONS r.region_name METRICS o.revenue);
+----
+by more than one path: o -> c -> r, o -> s -> r
+
+# D10: orders and regions with no metric.
+statement error
+SELECT * FROM SEMANTIC_VIEW(dv_r DIMENSIONS o.order_id, r.region_name);
+----
+by more than one path: o -> c -> r, o -> s -> r
+
+# D11: a filter on regions needs a path to them too.
+statement error
+SELECT * FROM SEMANTIC_VIEW(dv_r METRICS o.revenue WHERE r.region_name = 'EU');
+----
+by more than one path: o -> c -> r, o -> s -> r
+
+# The same refusal through the standard-SQL query form.
+statement error
+SELECT region_name, AGG(revenue) FROM dv_r GROUP BY region_name;
+----
+by more than one path: o -> c -> r, o -> s -> r
+
+# D13: USING (o_cust) follows the customer path.
+query TI rowsort
+SELECT * FROM SEMANTIC_VIEW(dv_r DIMENSIONS r.region_name METRICS o.rev_by_cust);
+----
+EU	50
+US	20
+
+# D4: USING (o_store) follows the store path (it used to give EU 50, US 20).
+query TI rowsort
+SELECT * FROM SEMANTIC_VIEW(dv_r DIMENSIONS r.region_name METRICS o.rev_by_store);
+----
+EU	40
+US	30
+
+# D5: both paths in one query, each metric through its own.
+query TII rowsort
+SELECT * FROM SEMANTIC_VIEW(dv_r DIMENSIONS r.region_name METRICS o.rev_by_cust, o.rev_by_store);
+----
+EU	50	40
+US	20	30
+
+# A USING metric filtered on regions follows its path for the filter too.
+query I
+SELECT * FROM SEMANTIC_VIEW(dv_r METRICS o.rev_by_store WHERE r.region_name = 'EU');
+----
+40
+
+# D6, D7, D9: queries that stay on one path.
+query TI rowsort
+SELECT * FROM SEMANTIC_VIEW(dv_r DIMENSIONS c.cust_name METRICS o.revenue);
+----
+Ana	50
+Bo	20
+
+query TI rowsort
+SELECT * FROM SEMANTIC_VIEW(dv_r DIMENSIONS r.region_name METRICS c.customer_count);
+----
+EU	1
+US	1
+
+query TT rowsort
+SELECT * FROM SEMANTIC_VIEW(dv_r DIMENSIONS c.cust_name, r.region_name);
+----
+Ana	EU
+Bo	US
+
+# A USING metric by the table its relationship names (TECH-DEBT #81).
+query TI rowsort
+SELECT * FROM SEMANTIC_VIEW(dv_r DIMENSIONS c.cust_name METRICS o.rev_by_cust);
+----
+Ana	50
+Bo	20

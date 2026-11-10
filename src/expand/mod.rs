@@ -4,6 +4,7 @@ mod join_resolver;
 #[cfg(feature = "extension")]
 pub(crate) use join_resolver::range_condition;
 mod materialization;
+mod multi_path;
 mod per_grain;
 mod resolution;
 mod role_playing;
@@ -54,6 +55,9 @@ mod tests_bridge;
 // Pins ROWS (executes the SQL in-memory), so gated the same way.
 #[cfg(all(test, not(feature = "extension")))]
 mod tests_dims_only_anchoring;
+// Pins ROWS (executes the SQL in-memory), so gated the same way.
+#[cfg(all(test, not(feature = "extension")))]
+mod tests_diamond_paths;
 #[cfg(all(test, not(feature = "extension")))]
 mod tests_home_anchoring;
 #[cfg(test)]

@@ -255,6 +255,10 @@ pub(super) enum Anchor {
     At(String),
     /// No table reaches both of these members, so no rows hold them together.
     Unrelated(String, String),
+    /// The anchor reaches a member's table by more than one path (a diamond),
+    /// and a query with no metrics has no `USING` to choose one: Snowflake
+    /// refuses it (010246). Holds the anchor, the member's table, and the paths.
+    MultiPath(String, String, Vec<String>),
     /// Not decided here: the base-anchored emission answers, or refuses.
     Undecided,
 }
@@ -305,6 +309,9 @@ pub(super) fn dims_only_members(
 ///   base-anchored path refuses it as ambiguous, as Snowflake does. A
 ///   role-played table queried from itself or from above crosses no such hop,
 ///   and is answered.
+/// - When the anchor reaches a member's table by two paths through different
+///   tables (a diamond), the answer is [`Anchor::MultiPath`]: Snowflake refuses
+///   it, and nothing in a query with no metrics can choose a path.
 /// - So is it when two tables do equally well, or the graph cannot be built.
 pub(super) fn member_anchor(def: &SemanticViewDefinition, members: &[String]) -> Anchor {
     let mut members: Vec<String> = members.iter().map(|m| m.to_ascii_lowercase()).collect();
@@ -340,6 +347,11 @@ pub(super) fn member_anchor(def: &SemanticViewDefinition, members: &[String]) ->
     let [anchor] = closest.as_slice() else {
         return Anchor::Undecided;
     };
+    for member in &members {
+        if let Some(paths) = super::multi_path::anchor_paths(def, anchor, member) {
+            return Anchor::MultiPath((**anchor).clone(), member.clone(), paths);
+        }
+    }
     let Some(graph) = super::fan_trap::GrainGraph::build(def) else {
         return Anchor::Undecided;
     };
@@ -405,6 +417,39 @@ fn and_phantom_filter(predicate: Option<String>, guard: Option<String>) -> Optio
         (Some(p), Some(g)) => Some(format!("({p}) AND {g}")),
         (Some(p), None) => Some(p),
         (None, g) => g,
+    }
+}
+
+/// The refusal of a query with no metrics whose anchor reaches `member_table`
+/// by several paths, naming a queried dimension on that table when there is
+/// one (otherwise the member is a fact or a filter).
+fn multi_path_error(
+    view_name: &str,
+    resolved_dims: &[&Dimension],
+    anchor: String,
+    member_table: String,
+    paths: Vec<String>,
+) -> ExpandError {
+    let member = resolved_dims
+        .iter()
+        .find(|d| {
+            d.source_table
+                .as_deref()
+                .is_some_and(|t| t.eq_ignore_ascii_case(&member_table))
+        })
+        .map_or_else(
+            || "a queried member".to_string(),
+            |d| format!("dimension '{}'", d.name),
+        );
+    ExpandError::MultiPath {
+        detail: Box::new(super::types::MultiPathError {
+            view_name: view_name.to_string(),
+            member,
+            member_table,
+            from_table: anchor,
+            reader: "the query (with no metrics)".to_string(),
+            paths,
+        }),
     }
 }
 
@@ -572,6 +617,15 @@ fn expand_facts(
     }
     let anchored = match members.map(|m| member_anchor(def, &m)) {
         Some(Anchor::At(anchor)) => Some(anchor),
+        Some(Anchor::MultiPath(anchor, member_table, paths)) => {
+            return Err(multi_path_error(
+                view_name,
+                &resolved_dims,
+                anchor,
+                member_table,
+                paths,
+            ));
+        }
         _ => None,
     };
 
@@ -673,6 +727,7 @@ fn expand_facts(
             &anchor,
             &resolved_dims,
             &extra,
+            &std::collections::HashMap::new(),
             &std::collections::HashMap::new(),
             &[],
         );
@@ -867,6 +922,24 @@ fn expand_unhoisted(
         .map(|raw| super::where_clause::resolve_where_clause(view_name, def, raw))
         .transpose()?;
 
+    // A member's table reached from a metric's table by two paths through
+    // different tables (a diamond) is refused unless the metric's `USING`
+    // picks one, as Snowflake refuses it (010246). Asked before anything is
+    // routed or planned: every emitter below would follow one path silently.
+    let path_members = if resolved_mets.is_empty() || def.joins.is_empty() {
+        None
+    } else {
+        let root = crate::graph::RelationshipGraph::from_definition(def)
+            .map(|g| g.root)
+            .unwrap_or_default();
+        let where_members = resolved_where
+            .as_ref()
+            .map_or(&[][..], |w| w.members.as_slice());
+        let members = super::multi_path::query_members(def, &resolved_dims, where_members);
+        super::multi_path::check_metric_paths(view_name, def, &root, &resolved_mets, &members)?;
+        Some((root, members))
+    };
+
     // Phase 55: Materialization routing.
     // Attempt to route to a pre-aggregated table if an exact match exists.
     // Returns None if no match, or if any metric is semi-additive / window.
@@ -914,6 +987,7 @@ fn expand_unhoisted(
                     &resolved_dims,
                     &extra,
                     &std::collections::HashMap::new(),
+                    &std::collections::HashMap::new(),
                     &[],
                 );
                 let items = resolved_dims
@@ -941,6 +1015,15 @@ fn expand_unhoisted(
                     table_a,
                     table_b,
                 });
+            }
+            Anchor::MultiPath(anchor, member_table, paths) => {
+                return Err(multi_path_error(
+                    view_name,
+                    &resolved_dims,
+                    anchor,
+                    member_table,
+                    paths,
+                ));
             }
             Anchor::Undecided => {}
         }
@@ -992,6 +1075,24 @@ fn expand_unhoisted(
         &where_tables,
         where_has_unqualified_member,
     );
+
+    // A path a metric's `USING` picks through a diamond is followed only by
+    // the per-grain plan's joins. Any other emitter would join along the
+    // first-declared path, so a query the planner declined is refused.
+    if grain_plan.is_none() {
+        if let Some((root, members)) = &path_members {
+            if let Some((metric_name, member_table, path)) =
+                super::multi_path::first_pinned(def, root, &resolved_mets, members)
+            {
+                return Err(ExpandError::UnfollowedUsingPath {
+                    view_name: view_name.to_string(),
+                    metric_name,
+                    member_table,
+                    path,
+                });
+            }
+        }
+    }
 
     // An all-window query whose inner aggregate lives at a non-root grain is
     // answered by anchoring `__sv_agg` there instead of at the base table

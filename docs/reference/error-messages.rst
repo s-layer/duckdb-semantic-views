@@ -1601,6 +1601,40 @@ Unrelated tables
 **Fix:** Query each child's dimensions separately, each with the parent's if you need them.
 
 
+.. _err-multi-path:
+
+Table reached by more than one path
+-----------------------------------
+
+.. versionadded:: 0.19.0
+
+.. code-block:: text
+
+   semantic view '<view>': dimension '<dim>' is on table '<table>', which
+   metric '<metric>' reaches from table '<from>' by more than one path:
+   o -> c -> r, o -> s -> r. Give the metric a USING that names the first
+   relationship of the path to follow, or query members one path reaches
+
+**Cause:** The view reaches ``<table>`` from the metric's table along two chains of relationships through different tables (a diamond): orders reach regions through their customer and through their store. Grouping or filtering orders by region has to pick one, and the two give different numbers. The same error names a filter member (``filter member '<name>'``) or a fact the metric is written over, and a query with no metrics whose rows are read from ``<from>`` (``the query (with no metrics)``). Snowflake refuses the same queries: ``Multi-path relationship between the dimension entity ... and the base metric or dimension entity ... is not supported``.
+
+**Fix:** Give the metric a ``USING`` that names the first relationship of one path, ``o.rev_by_store USING (o_store) AS SUM(amount)``, and the metric follows it: each order counts in its store's region. Metrics with different paths can be queried together; each is grouped through its own path and the results are merged on the queried dimensions. A query with no metrics cannot name a path: query members one path reaches, such as customers and their regions.
+
+.. versionchanged:: 0.19.0
+
+   These queries used to follow the path declared first, without saying so.
+
+.. code-block:: text
+
+   semantic view '<view>': metric '<metric>' reaches table '<table>' along the
+   path its USING names (o -> s -> r), which this query cannot follow: it also
+   holds a window or semi-additive metric, or a member declared on no table.
+   Query the metric without them
+
+**Cause:** Only part of the query planner follows a path a ``USING`` picks through a diamond. A window metric, a semi-additive metric whose ``NON ADDITIVE BY`` dimension is not queried, or a dimension or filter member declared on no table sends the query elsewhere, where it would follow the path declared first.
+
+**Fix:** Query the ``USING`` metric without them.
+
+
 Window and aggregate metric mixing
 ------------------------------------
 

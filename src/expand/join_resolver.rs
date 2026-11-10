@@ -540,7 +540,14 @@ pub(super) fn resolve_joins_pkfk<'a>(
             if !scoped_joins.iter().any(|(s, _, _)| *s == scoped) {
                 scoped_joins.push((scoped, join, using_rel.to_string()));
             }
-            role_playing.insert(to_alias);
+            // Only a role-played table is joined under its scoped aliases
+            // alone. A table reached by one relationship keeps its bare join
+            // too, for the dimensions on it, which `find_using_context` leaves
+            // on the bare alias: the scoped instance is the same rows, joined
+            // for the facts the metric's `USING` scopes (TECH-DEBT #81).
+            if super::role_playing::is_role_playing_target(def, &to_alias) {
+                role_playing.insert(to_alias);
+            }
         }
     };
 

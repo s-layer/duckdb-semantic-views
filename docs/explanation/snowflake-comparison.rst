@@ -492,6 +492,19 @@ query names no path to it. Both also accept a dimension *beyond* the
 role-played table (``regions`` reached from ``airports``), taking the path
 from the metric's ``USING`` and following the single relationship onward.
 
+``USING`` also picks a path through a diamond, where a table is reached
+along two chains of relationships through different tables (orders reach
+regions through their customer and through their store): ``USING (o_store)``
+names the first relationship of the store path, and the metric follows it.
+Both systems refuse a query that would have to pick one of the paths itself,
+whether a metric with no ``USING``, a filter, or a query with no metrics
+(Snowflake's ``Multi-path relationship ... is not supported``). Our
+``CREATE`` accepts such a view only when the shared table is declared first.
+
+.. versionchanged:: 0.19.0
+
+   A query on such a view used to follow the path declared first.
+
 Facts Query Mode
 ----------------
 
