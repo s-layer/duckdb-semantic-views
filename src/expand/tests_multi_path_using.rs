@@ -394,6 +394,10 @@ fn metrics_naming_different_paths_beside_a_snapshot_are_refused_with_advice_that
 
 /// `flights_def` plus `wd`, a window over `departures` (`USING (dep_airport)`),
 /// and `wa`, the same over `arrivals` (`USING (arr_airport)`).
+/// Each window is `SUM(<inner>) OVER (PARTITION BY city)`: one row per city,
+/// so it carries its inner metric's value and the test reads which path the
+/// inner metric was grouped through. (With no `PARTITION BY` it would run over
+/// all the result rows, as in Snowflake, and every row would hold the total.)
 fn window_def() -> SemanticViewDefinition {
     let mut def = flights_def();
     for (name, inner) in [
@@ -410,7 +414,7 @@ fn window_def() -> SemanticViewDefinition {
                 inner_metric: inner.to_string(),
                 extra_args: vec![],
                 excluding_dims: vec![],
-                partition_dims: vec![],
+                partition_dims: vec!["city".to_string()],
                 order_by: vec![],
                 frame_clause: None,
             }),
@@ -461,6 +465,18 @@ fn regions_def() -> SemanticViewDefinition {
     def.dimensions.push(dim("region", "r.region_name", "r"));
     def.joins
         .push(rel("airport_region", "a", "r", "region_id", "region_id"));
+    // `wa` partitioned by region instead, for a query by region alone.
+    let mut wa_region = def
+        .metrics
+        .iter()
+        .find(|m| m.name == "wa")
+        .expect("wa")
+        .clone();
+    wa_region.name = "wa_region".to_string();
+    if let Some(ws) = wa_region.window_spec.as_mut() {
+        ws.partition_dims = vec!["region".to_string()];
+    }
+    def.metrics.push(wa_region);
     def
 }
 
@@ -505,7 +521,7 @@ fn a_region_and_a_city_group_through_the_same_path() {
 #[test]
 fn a_window_reaches_a_region_through_its_inner_metric() {
     assert_eq!(
-        run(&regions_def(), &["region"], &["wa"]),
+        run(&regions_def(), &["region"], &["wa_region"]),
         table_of(&[&["North", "3"], &["South", "1"]])
     );
 }

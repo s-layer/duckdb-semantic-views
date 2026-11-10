@@ -1748,11 +1748,12 @@ proptest! {
 //   first-declared role (PR #247 review);
 // - `o_any_alt`: a base-table metric over the role-played FACT with no `USING`
 //   (the TECH-DEBT #69 fence);
-// - `win`: `SUM(inner) OVER ()` partitioned by every queried dimension, over
+// - `win`: `SUM(inner) OVER (PARTITION BY <every queried dimension>)`, over
 //   any of the above — a qualified metric whose inner aggregate carries the
 //   `USING` (PR #247 review: no scoped join was emitted for it). Partitioned by
 //   every queried dimension, each partition is one group, so the window must
-//   also equal its inner metric queried directly.
+//   also equal its inner metric queried directly. (With no `PARTITION BY` it
+//   would run over all the result rows, as in Snowflake.)
 
 /// Extra metric shapes property (e) adds to [`build_def`]'s, after the base
 /// metrics: `(name, expr, source table)`.
@@ -1913,13 +1914,15 @@ fn build_order_def(case: &OrderCase, swapped: bool) -> SemanticViewDefinition {
             && inner >= BASE_METRICS.len()
             && ORDER_EXTRAS[inner - BASE_METRICS.len()].2 == "ap";
         let inner = pool_name(names, inner);
+        let partition: Vec<String> = case.dims.iter().map(|&d| names.dims[d].clone()).collect();
         def.metrics.push(Metric {
             name: WIN.to_string(),
-            expr: format!("SUM({inner}) OVER ()"),
+            expr: format!("SUM({inner}) OVER (PARTITION BY {})", partition.join(", ")),
             source_table: Some(if on_root_ap { "ap" } else { "o" }.to_string()),
             window_spec: Some(semantic_views::model::WindowSpec {
                 window_function: "SUM".to_string(),
                 inner_metric: inner,
+                partition_dims: partition,
                 ..Default::default()
             }),
             ..Default::default()

@@ -933,6 +933,8 @@ Window metrics wrap another metric in a SQL window function. The ``OVER`` clause
            AVG(total_qty) OVER (PARTITION BY store ORDER BY date NULLS LAST)
    )
 
+With neither, the window runs over every row of the result, as in Snowflake: ``SUM(total_qty) OVER (ORDER BY date)`` is a running total across the whole result.
+
 See :ref:`howto-window-metrics` for details on both modes.
 
 .. warning::

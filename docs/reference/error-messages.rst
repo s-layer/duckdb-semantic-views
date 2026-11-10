@@ -840,6 +840,23 @@ Window metric PARTITION BY dimension not found
 **Fix:** Check the dimension name. The error suggests close matches. All dimensions in ``PARTITION BY`` must be declared in the view's ``DIMENSIONS`` clause.
 
 
+Window metric PARTITION BY names no dimension
+----------------------------------------------
+
+.. versionadded:: 0.19.0
+
+.. code-block:: text
+
+   PARTITION BY names no dimension in OVER clause. Name at least one dimension,
+   or leave the clause out to run the window over every result row.
+
+The same error says ``PARTITION BY EXCLUDING`` when that is the clause.
+
+**Cause:** A window metric's ``PARTITION BY`` or ``PARTITION BY EXCLUDING`` is followed by no dimension, as in ``OVER (PARTITION BY ORDER BY date)``. Snowflake refuses this as a syntax error. A dimension named like a frame keyword (``rows``, ``range``, ``groups``) with no ``ORDER BY`` after it is read as the frame, so it gets this error too.
+
+**Fix:** Name the dimensions to partition by. To run the window over every result row, leave ``PARTITION BY`` out: ``OVER (ORDER BY date)``.
+
+
 Window metric ORDER BY dimension not found
 -------------------------------------------
 

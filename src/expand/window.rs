@@ -6,7 +6,8 @@
 //! 2. An outer SELECT that applies the window function over the CTE results
 //!
 //! PARTITION BY EXCLUDING is resolved at expansion time: the partition columns
-//! are all queried dimensions MINUS the excluded dimensions.
+//! are all queried dimensions MINUS the excluded dimensions. With no PARTITION
+//! BY at all, the window runs over every result row, as in Snowflake.
 
 use std::collections::{HashMap, HashSet};
 
@@ -86,7 +87,8 @@ pub(crate) fn window_required_dimensions(
 ///    operate on grouped results, not raw rows.
 ///
 /// 2. **Outer SELECT**: Applies each window function over the CTE results with
-///    computed PARTITION BY (all queried dims minus EXCLUDING dims) and ORDER BY.
+///    computed PARTITION BY (all queried dims minus EXCLUDING dims, the listed
+///    dims of an explicit PARTITION BY, or none: every result row) and ORDER BY.
 ///    No GROUP BY in the outer query -- window functions are row-level operations.
 ///
 /// # Grain
@@ -322,32 +324,38 @@ pub(super) fn expand_window_metrics(
         }
         let func_call = format!("{}({})", ws.window_function, func_args.join(", "));
 
-        // Compute PARTITION BY columns
-        let partition_cols: Vec<String> = if ws.partition_dims.is_empty() {
-            // PARTITION BY EXCLUDING: all queried dims minus excluding_dims.
-            // Key the excluded set through the shared resolver so a quoted/dotted
-            // EXCLUDING reference still matches its declared dimension.
-            let excluding_set: HashSet<String> = ws
-                .excluding_dims
-                .iter()
-                .map(|d| super::resolution::dim_ref_key(def, d))
-                .collect();
-            resolved_dims
-                .iter()
-                .filter(|rd| {
-                    !excluding_set.contains(&crate::ident::normalize_ident_part(&rd.dim.name))
-                })
-                .map(|rd| quote_stored_ident(&rd.dim.name))
-                .collect()
-        } else {
-            // Explicit PARTITION BY: emit each listed dim's resolved CTE alias so
-            // a quoted/dotted reference binds to the CTE column, not a
-            // doubled-quote/dotted non-column.
-            ws.partition_dims
-                .iter()
-                .map(|d| window_dim_column(def, d))
-                .collect()
-        };
+        // Compute PARTITION BY columns. With neither `PARTITION BY` nor
+        // `PARTITION BY EXCLUDING` the window runs over every result row, as in
+        // Snowflake (fixture 4, W2/W5): `SUM(m) OVER (ORDER BY d)` is a running
+        // total across the result, not one partition per row.
+        let partition_cols: Vec<String> =
+            if ws.partition_dims.is_empty() && ws.excluding_dims.is_empty() {
+                Vec::new()
+            } else if ws.partition_dims.is_empty() {
+                // PARTITION BY EXCLUDING: all queried dims minus excluding_dims.
+                // Key the excluded set through the shared resolver so a quoted/dotted
+                // EXCLUDING reference still matches its declared dimension.
+                let excluding_set: HashSet<String> = ws
+                    .excluding_dims
+                    .iter()
+                    .map(|d| super::resolution::dim_ref_key(def, d))
+                    .collect();
+                resolved_dims
+                    .iter()
+                    .filter(|rd| {
+                        !excluding_set.contains(&crate::ident::normalize_ident_part(&rd.dim.name))
+                    })
+                    .map(|rd| quote_stored_ident(&rd.dim.name))
+                    .collect()
+            } else {
+                // Explicit PARTITION BY: emit each listed dim's resolved CTE alias so
+                // a quoted/dotted reference binds to the CTE column, not a
+                // doubled-quote/dotted non-column.
+                ws.partition_dims
+                    .iter()
+                    .map(|d| window_dim_column(def, d))
+                    .collect()
+            };
 
         // Build OVER clause
         let mut over_parts: Vec<String> = Vec::new();
