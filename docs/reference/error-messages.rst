@@ -852,7 +852,7 @@ Window metric PARTITION BY names no dimension
 
 The same error says ``PARTITION BY EXCLUDING`` when that is the clause.
 
-**Cause:** A window metric's ``PARTITION BY`` or ``PARTITION BY EXCLUDING`` is followed by no dimension, as in ``OVER (PARTITION BY ORDER BY date)``. Snowflake refuses this as a syntax error. A dimension named like a frame keyword (``rows``, ``range``, ``groups``) with no ``ORDER BY`` after it is read as the frame, so it gets this error too.
+**Cause:** A window metric's ``PARTITION BY`` or ``PARTITION BY EXCLUDING`` is followed by no dimension, as in ``OVER (PARTITION BY ORDER BY date)``. SQL's window grammar needs at least one expression after ``PARTITION BY``. A dimension named like a frame keyword (``rows``, ``range``, ``groups``) with no ``ORDER BY`` after it is read as the frame, so it gets this error too.
 
 **Fix:** Name the dimensions to partition by. To run the window over every result row, leave ``PARTITION BY`` out: ``OVER (ORDER BY date)``.
 

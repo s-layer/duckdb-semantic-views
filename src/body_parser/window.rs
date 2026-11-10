@@ -227,7 +227,8 @@ fn parse_order_by_entries(
 
 /// Refuse a `PARTITION BY` / `PARTITION BY EXCLUDING` naming no dimension. An
 /// empty list would be stored as no partition clause, which means "every result
-/// row". Snowflake refuses it as a syntax error.
+/// row". SQL's window grammar needs at least one expression after
+/// `PARTITION BY`, so the empty list is refused rather than read that way.
 fn require_partition_dims(
     dims: &[String],
     excluding: bool,
@@ -560,8 +561,9 @@ mod tests {
 
     // A `PARTITION BY` (or `PARTITION BY EXCLUDING`) naming no dimension used
     // to be stored as no partition clause at all, which since Phase 7 means
-    // "every result row". Snowflake refuses it as a syntax error; so do we, so
-    // an empty list can't quietly mean "partition by nothing".
+    // "every result row". SQL's window grammar needs at least one expression
+    // after `PARTITION BY`, so an empty list is refused rather than quietly
+    // meaning "every result row".
     #[test]
     fn an_empty_partition_by_list_is_rejected() {
         let (msg, pos) = err("SUM(w) OVER (PARTITION BY ORDER BY d)");

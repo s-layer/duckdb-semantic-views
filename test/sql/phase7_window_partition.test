@@ -107,7 +107,7 @@ Mixed	500
 Orphan	550
 Solo	850
 
-# A PARTITION BY naming no dimension is refused, as in Snowflake, rather than
+# A PARTITION BY naming no dimension is refused (SQL needs at least one), rather than
 # being read as "every result row".
 statement error
 CREATE SEMANTIC VIEW wp_empty AS
