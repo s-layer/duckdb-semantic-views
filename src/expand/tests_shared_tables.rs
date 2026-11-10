@@ -109,7 +109,21 @@ fn db() -> duckdb::Connection {
          INSERT INTO g_regions VALUES (1, 'R1'), (2, 'R2');
          INSERT INTO g_cust VALUES (1, 1, 10);
          INSERT INTO g_stores VALUES (1, 2);
-         INSERT INTO g_orders VALUES (1, 1, 1);",
+         INSERT INTO g_orders VALUES (1, 1, 1);
+         CREATE TABLE k_country (id INT, name VARCHAR);
+         CREATE TABLE k_airports (id INT, k_id INT);
+         CREATE TABLE k_flights (id INT, dep INT, arr INT);
+         INSERT INTO k_country VALUES (1, 'FR'), (2, 'UK');
+         INSERT INTO k_airports VALUES (1, 1), (2, 2);
+         INSERT INTO k_flights VALUES (1, 1, 2), (2, 2, 2);
+         CREATE TABLE m_root (id INT, name VARCHAR);
+         CREATE TABLE m_x (id INT, r_id INT);
+         CREATE TABLE m_m (id INT, x_id INT);
+         CREATE TABLE m_a (id INT, r_id INT, m_id INT);
+         INSERT INTO m_root VALUES (1, 'R1'), (2, 'R2');
+         INSERT INTO m_x VALUES (1, 1);
+         INSERT INTO m_m VALUES (1, 1), (2, 1);
+         INSERT INTO m_a VALUES (1, 2, 1), (2, 2, 1);",
     )
     .expect("fixture data");
     con
@@ -566,6 +580,26 @@ fn h5_review_metric_by_book_dimension_is_answered() {
 }
 
 /// H2: review metrics with no dimension.
+/// H1, H3, H6: a fan-out after a hop up. Snowflake counts each review once
+/// per author country it reaches across the bridge; we still refuse, in every
+/// order, as a fan trap (TECH-DEBT #111, Phase 7 PR 4).
+#[test]
+fn h1_h3_h6_a_fan_out_after_a_hop_up_is_still_refused() {
+    let requests = [
+        req(&["country"], &["review_count", "total_stars"], None),
+        req(&[], &["review_count"], Some("a.country = 'FR'")),
+        req(&["stars", "country"], &[], None),
+    ];
+    for (order, def) in every_order(&hv()) {
+        for request in &requests {
+            assert!(
+                expand("v", &def, request).is_err(),
+                "TABLES ({order}): TECH-DEBT #111 until PR 4"
+            );
+        }
+    }
+}
+
 #[test]
 fn h2_review_metrics_alone_are_answered() {
     assert_answer(
@@ -905,15 +939,10 @@ fn a_chain_is_followed_before_a_step_back_along_a_one_to_one_relationship() {
     );
 }
 
-/// Carriers reference their region, and so do airports, which flights
-/// reference twice (so airports are role-played); flights also reference
-/// their carrier (review of #342). A carrier metric by region follows the one
-/// chain `c -> r`, which no role-played table is on: the airports are reached
-/// from carriers only by stepping back along `f -> c`. It was refused as an
-/// ambiguous role in every order.
-#[test]
-fn a_role_played_table_off_the_chain_does_not_refuse_it() {
-    let view = SemanticViewDefinition {
+/// `fv`: carriers and airports reference regions; flights reference their
+/// carrier, and airports twice (`dep`, `arr`), so airports are role-played.
+fn fv() -> SemanticViewDefinition {
+    SemanticViewDefinition {
         tables: vec![
             table("c", "f_carriers", &["id"]),
             table("r", "f_regions", &["id"]),
@@ -928,11 +957,107 @@ fn a_role_played_table_off_the_chain_does_not_refuse_it() {
             rel("arr", "f", "a", "arr", "id"),
         ],
         dimensions: vec![dim("region", "r.name", "r")],
-        metrics: vec![metric("fees", "SUM(c.fee)", "c")],
+        metrics: vec![
+            metric("fees", "SUM(c.fee)", "c"),
+            metric("regions", "COUNT(r.id)", "r"),
+        ],
         ..Default::default()
-    };
+    }
+}
+
+/// A region metric by region reads regions alone (review of #342): it was
+/// refused because airports, role-played, reference regions.
+#[test]
+fn a_metric_on_the_dimensions_own_table_is_not_refused_by_a_role_played_referencer() {
+    assert_answer(
+        &fv(),
+        &req(&["region"], &["regions"], None),
+        &[&["R1", "1"], &["R2", "1"]],
+    );
+}
+
+/// The same in a tree: flights reference airports twice, airports
+/// reference their country. A country metric by country reads countries
+/// alone; it was answered only with countries declared first.
+#[test]
+fn a_metric_on_a_table_past_a_role_played_one_by_its_own_dimension_is_answered() {
+    assert_answer(
+        &kv(),
+        &req(&["country"], &["countries"], None),
+        &[&["FR", "1"], &["UK", "1"]],
+    );
+}
+
+/// The same country metric by a flight dimension, with one-to-one
+/// relationships, reaches flights from countries through airports, which
+/// flights reference twice: which airport's country is a flight's? Refused in
+/// every order. With countries declared first it joined the departure
+/// airport, the first-declared relationship, silently.
+#[test]
+fn a_metric_on_a_table_past_a_role_played_one_by_a_dimension_beyond_it_is_refused() {
+    // One-to-one, so no fan trap stands in front of the role check.
+    let mut view = kv();
+    for j in &mut view.joins {
+        j.cardinality = Cardinality::OneToOne;
+    }
+    for (order, def) in every_order(&view) {
+        let e = expand("v", &def, &req(&["flight"], &["countries"], None))
+            .expect_err("flights reach countries through dep or arr");
+        assert!(
+            matches!(e, ExpandError::AmbiguousMetricPath { .. }),
+            "TABLES ({order}): {e}"
+        );
+    }
+}
+
+/// `kv`: flights reference airports twice (`dep`, `arr`), airports
+/// reference their country: a tree.
+fn kv() -> SemanticViewDefinition {
+    SemanticViewDefinition {
+        tables: vec![
+            table("f", "k_flights", &["id"]),
+            table("a", "k_airports", &["id"]),
+            table("k", "k_country", &["id"]),
+        ],
+        joins: vec![
+            rel("dep", "f", "a", "dep", "id"),
+            rel("arr", "f", "a", "arr", "id"),
+            rel("a_k", "a", "k", "k_id", "id"),
+        ],
+        dimensions: vec![dim("country", "k.name", "k"), dim("flight", "f.id", "f")],
+        metrics: vec![metric("countries", "COUNT(k.id)", "k")],
+        ..Default::default()
+    }
+}
+
+/// A metric on `pairs` naming a role (`USING (p_x1)`) by a customer
+/// dimension follows that role (review of #342): customers are referenced by
+/// orders and tickets too, so the walk from the role down to customers found
+/// three relationships into them and refused the query. Pair 1's first visit
+/// is customer B's.
+#[test]
+fn a_role_named_by_using_is_followed_past_to_a_shared_table() {
+    let mut view = cv(true);
+    let mut by_x1 = metric("pairs_by_first", "COUNT(p.id)", "p");
+    by_x1.using_relationships = vec!["p_x1".to_string()];
+    view.metrics.push(by_x1);
     assert_answer(
         &view,
+        &req(&["name"], &["pairs_by_first"], None),
+        &[&["B", "1"]],
+    );
+}
+
+/// Carriers reference their region, and so do airports, which flights
+/// reference twice (so airports are role-played); flights also reference
+/// their carrier (review of #342). A carrier metric by region follows the one
+/// chain `c -> r`, which no role-played table is on: the airports are reached
+/// from carriers only by stepping back along `f -> c`. It was refused as an
+/// ambiguous role in every order.
+#[test]
+fn a_role_played_table_off_the_chain_does_not_refuse_it() {
+    assert_answer(
+        &fv(),
         &req(&["region"], &["fees"], None),
         &[&["R1", "10"], &["R2", "20"]],
     );
@@ -998,4 +1123,31 @@ fn a_metric_follows_its_own_chain_when_the_root_reaches_the_table_twice() {
         &req(&["region"], &["cust_v"], None),
         &[&["R1", "10"]],
     );
+}
+
+/// `m` reaches `r` by the chain `m -> x -> r`; `a` references both (review of
+/// #342). An `m` metric by an `r` dimension follows the chain in every order.
+/// The review read the join tree's bridge round as reaching `m` through `a`
+/// first; the chain round places `m` before it, so this was green before any
+/// change and stays as a pin.
+#[test]
+fn a_chain_to_the_root_is_followed_before_a_bridge() {
+    let view = SemanticViewDefinition {
+        tables: vec![
+            table("r", "m_root", &["id"]),
+            table("x", "m_x", &["id"]),
+            table("a", "m_a", &["id"]),
+            table("m", "m_m", &["id"]),
+        ],
+        joins: vec![
+            rel("x_r", "x", "r", "r_id", "id"),
+            rel("m_x", "m", "x", "x_id", "id"),
+            rel("a_r", "a", "r", "r_id", "id"),
+            rel("a_m", "a", "m", "m_id", "id"),
+        ],
+        dimensions: vec![dim("root", "r.name", "r")],
+        metrics: vec![metric("ms", "COUNT(m.id)", "m")],
+        ..Default::default()
+    };
+    assert_answer(&view, &req(&["root"], &["ms"], None), &[&["R1", "2"]]);
 }

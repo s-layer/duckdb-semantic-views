@@ -574,9 +574,8 @@ Graph validation errors
 
    cycle detected in relationships: <alias1> -> <alias2> -> <alias1>
 
-   diamond: two paths to '<alias>' via '<from>' and '<from>'; name each
-   relationship from '<from>' to '<alias>' so each one is joined under its own
-   alias
+   '<from>' references '<alias>' more than once; name each relationship from
+   '<from>' to '<alias>' so each one is joined under its own alias
 
    orphan table '<alias>' is not connected by any relationship; did you mean '<suggestion>'?
 
@@ -606,7 +605,7 @@ Graph validation errors
 
 - **Self-reference:** A table cannot have a relationship pointing to itself.
 - **Cycle:** Follow the chain in the error message to find the circular dependency and remove it.
-- **Diamond:** One table references another twice and at least one of the relationships has no name. Name each one, so each is joined under its own alias; that is the role-playing pattern (see :ref:`howto-role-playing`). A table referenced by two *different* tables is accepted since 0.19.0, in any ``TABLES`` order; a query that would have to pick one of its paths is refused instead (see :ref:`err-multi-path`).
+- **Unnamed role-playing relationships:** One table references another twice and at least one of the relationships has no name. Name each one, so each is joined under its own alias; that is the role-playing pattern (see :ref:`howto-role-playing`). A table referenced by two *different* tables is accepted since 0.19.0, in any ``TABLES`` order; a query that would have to pick one of its paths is refused instead (see :ref:`err-multi-path`).
 - **Orphan:** Add a relationship that connects the table, or remove it from ``TABLES``.
 - **Not connected / not reachable:** Every table must be reachable from the first table in ``TABLES``. Add the missing relationship, or remove the table. A view that lists several tables but no ``RELATIONSHIPS`` at all gets the base-table form of this error.
 - **No foreign-key columns:** A YAML ``joins`` entry needs ``fk_columns`` (the DDL form always has them).
@@ -1444,7 +1443,7 @@ Ambiguous fact or metric on a role-playing table
    it on the referencing table with USING instead, e.g.
    <table>.<metric> USING (<relationship>) AS SUM(<fact>).
 
-**Cause:** The first form: a metric, dimension, or fact reaches a fact on a role-playing table (or on a table reached only through one), and nothing says which relationship to read it through. The second form: a metric is declared on the role-playing table itself, where ``USING`` cannot be attached. When the relationships fan out, the second case raises ``fan trap detected`` instead. If the role-playing table is the view's base table (declared first in ``TABLES``), a metric on it is answered when it is queried without dimensions, alongside only other base-table metrics, and with a filter (if any) that names only base-table members. A dimension, filter, co-queried metric or ``NON ADDITIVE BY`` dimension on another table brings this error back. Grouping by a dimension on the base table itself, or a ``NON ADDITIVE BY`` on one, is rejected too, with the ``dimension ... is ambiguous`` error (a known limitation).
+**Cause:** The first form: a metric, dimension, or fact reaches a fact on a role-playing table (or on a table reached only through one), and nothing says which relationship to read it through. The second form: a metric is declared on the role-playing table itself (or on a table reached only through it), where ``USING`` cannot be attached, and the query groups or filters it by a dimension on another table, or its ``NON ADDITIVE BY`` or window names one: those would be joined to the metric's rows through one of the relationships without saying which. A metric on the role-playing table queried with no dimension, alone or beside metrics on other tables, is computed over its own table's rows and needs no role. Grouping it by a dimension on its own table is rejected too, with the ``dimension ... is ambiguous`` error (a known limitation).
 
 **Fix:** Declare the metric on the referencing table and give it a ``USING`` that names one relationship, for example ``f.dep_elev USING (dep_airport) AS SUM(a.elev)``. See :ref:`howto-rp-facts`.
 

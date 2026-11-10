@@ -12,7 +12,8 @@ Demonstrates v0.14.0 features:
     no row, and a metric's value no longer changes with what it is queried with.
   - SHOW / DESCRIBE report each member's data_type again.
   - A USING metric can aggregate a fact on a role-played table, and each role
-    returns its own number; a metric that cannot name a role is rejected.
+    returns its own number; a metric that cannot name a role is rejected
+    wherever a role is needed.
   - Relationship names match the way DuckDB matches identifiers.
   - CREATE rejects duplicate relationship names and unconnected tables.
   - Semantic-view DDL in a multi-statement string runs (since v0.16.0; v0.14.0
@@ -149,11 +150,12 @@ show(
 )
 
 # A metric declared on the role-played table cannot say which relationship
-# reaches it, so it is rejected instead of silently using the first one. Here
-# the fan-trap check speaks first (each airport has many flights); with
-# one-to-one relationships the error names the ambiguity instead.
-expect_error(
-    "a metric on the role-played table",
+# reaches it. Queried alone it needs none: since v0.19.0 it is summed over the
+# airports' own rows (13 + 5434). Grouped or filtered by a flight's member it
+# would be joined through one of the two relationships, so that is rejected
+# instead of silently using the first one.
+show(
+    "a metric on the role-played table, alone",
     "SELECT * FROM semantic_view('trips', metrics := ['any_elev'])",
 )
 

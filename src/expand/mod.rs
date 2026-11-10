@@ -118,6 +118,8 @@ pub use types::{
 pub(crate) use facts::collect_derived_metric_source_tables;
 #[cfg(feature = "extension")]
 pub(crate) use materialization::find_routing_materialization_name;
+#[cfg_attr(not(feature = "extension"), allow(unused_imports))]
+pub(crate) use multi_path::refused_as_many_to_many;
 // The shim's isolated bind of `semantic_view()` (`query::table_function`).
 #[cfg(feature = "extension")]
 pub(crate) use where_clause::{check_params_supplied, show_params, where_fence};

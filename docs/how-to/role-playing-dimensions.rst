@@ -184,7 +184,7 @@ metric in the query names a path:
 
 .. code-block:: text
 
-   Binder Error: semantic_view: semantic view 'flight_analytics': dimension 'city' is ambiguous -- table 'a' is reached via multiple relationships: [dep_airport, arr_airport]. Give every metric in the query a USING that names one of them, or use a dimension from a non-ambiguous table. ...
+   Binder Error: semantic_view: semantic view 'flight_analytics': dimension 'city' is ambiguous -- table 'a' is reached via multiple relationships: [arr_airport, dep_airport]. Give every metric in the query a USING that names one of them, or use a dimension from a non-ambiguous table. ...
 
 .. versionchanged:: 0.18.0
 

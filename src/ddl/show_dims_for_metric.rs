@@ -187,7 +187,7 @@ unsafe fn show_dims_for_metric(
             .collect();
         def.dimensions
             .iter()
-            .filter(|d| is_dimension_reachable_for_metric(d, &met_tables, &card_map))
+            .filter(|d| is_dimension_reachable_for_metric(&def, d, &met_tables, &card_map))
             .map(|d| {
                 let table_name = d
                     .source_table
@@ -228,7 +228,12 @@ unsafe fn show_dims_for_metric(
 /// fans out, and hide a dimension the metric reaches directly. A table reached
 /// by several safe paths is still listed; a query that needs one path picks it
 /// with `USING`, and one that needs none is refused by the query's own checks.
+///
+/// A table reached by no chain and two ways is left out, as the query refuses
+/// it (`expand::refused_as_many_to_many`): a step back along a one-to-one
+/// relationship does not fan out, but it is not a chain either.
 fn is_dimension_reachable_for_metric(
+    def: &SemanticViewDefinition,
     dim: &Dimension,
     met_tables: &[String],
     card_map: &HashMap<(String, String), Cardinality>,
@@ -255,6 +260,9 @@ fn is_dimension_reachable_for_metric(
     }
 
     met_tables.iter().any(|met_table| {
+        if crate::expand::refused_as_many_to_many(def, met_table, &dim_table) {
+            return false;
+        }
         let mut seen: HashSet<&str> = HashSet::from([met_table.as_str()]);
         let mut stack = vec![met_table.as_str()];
         while let Some(current) = stack.pop() {

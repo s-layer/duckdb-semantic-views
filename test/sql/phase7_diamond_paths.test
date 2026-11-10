@@ -279,3 +279,52 @@ dp_customers	cust_name	VARCHAR	false	[]	(empty)
 dp_orders	order_id	INTEGER	false	[]	(empty)
 dp_regions	region_name	VARCHAR	false	[]	(empty)
 dp_stores	store_name	VARCHAR	false	[]	(empty)
+
+# A one-to-one step back is safe for SHOW, but not a chain: shipments
+# reference their order one-to-one and a region of their own, and orders reach
+# regions through their customer. Revenue by a shipment dimension reaches
+# shipments by no chain and two ways (o <- s, o -> c -> r <- s), so the query
+# is refused (review of #342), and SHOW leaves the dimension out. It listed it.
+statement ok
+CREATE TABLE dq_regions (region_id INTEGER, region_name VARCHAR);
+
+statement ok
+CREATE TABLE dq_customers (cust_id INTEGER, region_id INTEGER);
+
+statement ok
+CREATE TABLE dq_orders (order_id INTEGER, cust_id INTEGER, amount INTEGER);
+
+statement ok
+CREATE TABLE dq_shipments (ship_id INTEGER, order_id INTEGER, region_id INTEGER, carrier VARCHAR);
+
+statement ok
+CREATE SEMANTIC VIEW dq_v
+  TABLES (
+    o AS dq_orders    PRIMARY KEY (order_id),
+    c AS dq_customers PRIMARY KEY (cust_id),
+    r AS dq_regions   PRIMARY KEY (region_id),
+    s AS dq_shipments PRIMARY KEY (ship_id) UNIQUE (order_id)
+  )
+  RELATIONSHIPS (
+    s_order  AS s (order_id)  REFERENCES o,
+    o_cust   AS o (cust_id)   REFERENCES c,
+    c_region AS c (region_id) REFERENCES r,
+    s_region AS s (region_id) REFERENCES r
+  )
+  DIMENSIONS (
+    r.region_name AS region_name,
+    s.carrier     AS carrier
+  )
+  METRICS (
+    o.revenue AS SUM(o.amount)
+  );
+
+statement error
+SELECT * FROM SEMANTIC_VIEW(dq_v DIMENSIONS s.carrier METRICS o.revenue);
+----
+across a many-to-many relationship
+
+query TTTTTT rowsort
+SHOW SEMANTIC DIMENSIONS IN dq_v FOR METRIC revenue
+----
+dq_regions	region_name	VARCHAR	false	[]	(empty)

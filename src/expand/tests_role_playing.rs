@@ -786,7 +786,7 @@ fn exp31_where_member_fact_chain_to_a_role_playing_table_is_rejected() {
             assert_eq!(role_playing_table, "a");
             assert_eq!(
                 available_relationships,
-                vec!["dep_airport".to_string(), "arr_airport".to_string()],
+                vec!["arr_airport".to_string(), "dep_airport".to_string()],
                 "the message must list the roles the user has to choose between"
             );
         }
@@ -1379,12 +1379,20 @@ fn expect_metric_path_ambiguity(def: &SemanticViewDefinition, req: &QueryRequest
 /// Review finding (same-table metric): a metric declared ON the role-played
 /// table over its own fact skipped the fence (`own == fact_table`), and the
 /// base-anchored join bound bare `a` through the first-declared edge: 300 (the
-/// departure role) for no reason but declaration order.
+/// departure role) for no reason but declaration order. It was then refused.
+/// Read alone it is computed over the airports' own rows (each metric is
+/// aggregated at its own table, TECH-DEBT #71), which needs no role: 100 + 7.
 #[test]
-fn td69_fence_metric_on_the_role_played_table_over_its_own_fact_is_rejected() {
+fn td69_metric_on_the_role_played_table_over_its_own_fact_reads_its_own_rows() {
     let mut def = one_to_one_role_played_fact_def();
     def.metrics.push(metric_on("a", "any_elev", "SUM(elev)"));
-    expect_metric_path_ambiguity(&def, &metrics_req(&[], &["any_elev"]), "any_elev");
+    let sql = expand("v", &def, &metrics_req(&[], &["any_elev"])).unwrap();
+    assert!(!sql.contains("JOIN"), "reads the airports alone:\n{sql}");
+    assert_eq!(
+        run_rows(&role_numbers_db(), &sql),
+        vec![(None, 107.0)],
+        "{sql}"
+    );
 }
 
 /// The same hole without a fact: a raw column on the role-played table. Not a
@@ -1398,7 +1406,29 @@ fn td69_fence_metric_on_the_role_played_table_over_a_raw_column_is_rejected() {
     expect_metric_path_ambiguity(&def, &metrics_req(&["carrier"], &["raw_elev"]), "raw_elev");
 }
 
-/// A derived metric over such a metric is rejected through the base it inlines.
+/// A derived metric over such a metric, read alone, is computed over the
+/// airports' rows the same way.
+#[test]
+fn td69_derived_metric_over_a_role_played_table_metric_reads_its_own_rows() {
+    let mut def = one_to_one_role_played_fact_def();
+    def.metrics
+        .push(metric_on("a", "raw_elev", "SUM(a.elevation)"));
+    def.metrics.push(Metric {
+        name: "twice_raw".to_string(),
+        expr: "raw_elev * 2".to_string(),
+        ..Default::default()
+    });
+    let sql = expand("v", &def, &metrics_req(&[], &["twice_raw"])).unwrap();
+    assert!(!sql.contains("JOIN"), "reads the airports alone:\n{sql}");
+    assert_eq!(
+        run_rows(&role_numbers_db(), &sql),
+        vec![(None, 214.0)],
+        "{sql}"
+    );
+}
+
+/// Grouped by a dimension on the table that plays the roles, it is still
+/// rejected through the base it inlines.
 #[test]
 fn td69_fence_derived_metric_over_a_role_played_table_metric_is_rejected() {
     let mut def = one_to_one_role_played_fact_def();
@@ -1409,11 +1439,14 @@ fn td69_fence_derived_metric_over_a_role_played_table_metric_is_rejected() {
         expr: "raw_elev * 2".to_string(),
         ..Default::default()
     });
-    expect_metric_path_ambiguity(&def, &metrics_req(&[], &["twice_raw"]), "raw_elev");
+    expect_metric_path_ambiguity(&def, &metrics_req(&["carrier"], &["twice_raw"]), "raw_elev");
 }
 
-/// A metric on a DESCENDANT of the role-played table hangs off the bare,
-/// first-declared instance just the same.
+/// A metric on a DESCENDANT of the role-played table, by a dimension on the
+/// table that plays the roles, hangs off the bare, first-declared instance
+/// just the same. Since 0.19.0 the check walks from the query's other tables
+/// to the metric's own, so it holds in every TABLES order; it walked from the
+/// first table, so `TABLES (r, ...)` was answered through `dep_airport`.
 #[test]
 fn td69_fence_metric_below_the_role_played_table_is_rejected() {
     let mut def = flights_airports_regions_def();
@@ -1422,7 +1455,129 @@ fn td69_fence_metric_below_the_role_played_table_is_rejected() {
     }
     def.metrics
         .push(metric_on("r", "region_rows", "COUNT(r.region_id)"));
-    expect_metric_path_ambiguity(&def, &metrics_req(&[], &["region_rows"]), "region_rows");
+    let req = metrics_req(&["carrier"], &["region_rows"]);
+    expect_metric_path_ambiguity(&def, &req, "region_rows");
+    def.tables.reverse();
+    expect_metric_path_ambiguity(&def, &req, "region_rows");
+}
+
+/// The same metric read alone is computed over its own table's rows (the
+/// home-table answer, TECH-DEBT #71) and names no role: it reads `regions`
+/// and nothing else, in either TABLES order. It was refused with flights
+/// declared first, as if it were joined through an airport.
+#[test]
+fn td69_metric_below_the_role_played_table_alone_reads_its_own_rows() {
+    let mut def = flights_airports_regions_def();
+    for j in &mut def.joins {
+        j.cardinality = Cardinality::OneToOne;
+    }
+    def.metrics
+        .push(metric_on("r", "region_rows", "COUNT(r.region_id)"));
+    let req = metrics_req(&[], &["region_rows"]);
+    for _ in 0..2 {
+        let sql = expand("v", &def, &req).expect("a metric alone names no role");
+        assert!(
+            sql.contains("FROM \"regions\" AS \"r\"") && !sql.contains("JOIN"),
+            "reads regions alone:\n{sql}"
+        );
+        def.tables.reverse();
+    }
+}
+
+/// A metric on the role-played table itself, read alone, is computed over
+/// that table's rows too, with flights or airports declared first. With
+/// flights first it was refused as a fan trap: the per-grain plan declined any
+/// metric on a role-played table, and the base-anchored FROM joined the
+/// airports to the flights (found by `dag_proptest`'s doubled relationship).
+#[test]
+fn a_metric_on_the_role_played_table_alone_reads_its_own_rows() {
+    let mut def = flights_airports_regions_def();
+    def.metrics
+        .push(metric_on("a", "airport_rows", "COUNT(a.code)"));
+    let req = metrics_req(&[], &["airport_rows"]);
+    for _ in 0..2 {
+        let sql = expand("v", &def, &req).expect("a metric alone names no role");
+        assert!(
+            sql.contains("FROM \"airports\" AS \"a\"") && !sql.contains("JOIN"),
+            "reads airports alone:\n{sql}"
+        );
+        def.tables.reverse();
+    }
+}
+
+/// `flights_airports_def` with `airport_details` (`d`), one row per airport
+/// (`d(airport_code) REFERENCES a`, one-to-one), and a flight count with no
+/// `USING`.
+fn flights_airports_details_def() -> SemanticViewDefinition {
+    let mut def = flights_airports_def();
+    def.tables.push(TableRef {
+        alias: "d".to_string(),
+        table: "airport_details".to_string(),
+        pk_columns: vec!["airport_code".to_string()],
+        ..Default::default()
+    });
+    def.joins.push(Join {
+        table: "a".to_string(),
+        from_alias: "d".to_string(),
+        fk_columns: vec!["airport_code".to_string()],
+        ref_columns: vec!["airport_code".to_string()],
+        name: Some("detail_airport".to_string()),
+        cardinality: Cardinality::OneToOne,
+        ..Default::default()
+    });
+    def.dimensions.push(Dimension {
+        name: "terminal".to_string(),
+        expr: "d.terminal".to_string(),
+        source_table: Some("d".to_string()),
+        ..Default::default()
+    });
+    def.metrics.push(metric_on("f", "flights", "COUNT(*)"));
+    def
+}
+
+/// A flight metric by a dimension on `airport_details`, which references the
+/// airports: the way from flights crosses one of the two relationships to the
+/// airports and steps back to the details. Without a role that is ambiguous,
+/// and with one (`arrival_count USING (arr_airport)`) the details were still
+/// joined to the bare airports instance over the first-declared relationship,
+/// so the arrival count was grouped by the departure airport's terminal. Both
+/// are refused, in either TABLES order (found by `dag_proptest`'s doubled
+/// relationship); following the role `USING` names is TECH-DEBT #111.
+#[test]
+fn a_table_reached_back_across_a_role_played_table_is_refused() {
+    let mut def = flights_airports_details_def();
+    for metric in ["flights", "arrival_count", "departure_count"] {
+        for _ in 0..2 {
+            match expand("v", &def, &metrics_req(&["terminal"], &[metric])) {
+                Err(ExpandError::AmbiguousDescendantPath {
+                    role_playing_table, ..
+                }) => assert_eq!(role_playing_table, "a"),
+                other => panic!("{metric} by terminal must name no role silently: {other:?}"),
+            }
+            def.tables.reverse();
+        }
+    }
+}
+
+/// The same beside a dimension on the airports themselves, which `USING`
+/// scopes to `a__arr_airport`: the details were joined to a bare `a` that no
+/// longer appeared in the FROM, and the query failed to bind.
+#[test]
+fn a_table_reached_back_across_a_scoped_role_played_table_is_refused() {
+    let mut def = flights_airports_details_def();
+    for _ in 0..2 {
+        match expand(
+            "v",
+            &def,
+            &metrics_req(&["terminal", "city"], &["arrival_count"]),
+        ) {
+            Err(ExpandError::AmbiguousDescendantPath {
+                role_playing_table, ..
+            }) => assert_eq!(role_playing_table, "a"),
+            other => panic!("arrival_count by terminal and city: {other:?}"),
+        }
+        def.tables.reverse();
+    }
 }
 
 /// CONTROL: with only ONE relationship to `a` there is no role to pick, so the
@@ -1567,10 +1722,25 @@ fn base_table_metric_grouped_by_a_referencing_table_dimension_is_rejected() {
     expect_base_metric_rejected_both_orders(&metrics_req(&["carrier"], &["n_airports"]));
 }
 
-/// The same with a metric on the referencing table co-queried.
+/// With a metric on the referencing table co-queried and no dimension, each
+/// metric is computed over its own table's rows, so neither names a role. It
+/// was rejected while the base-anchored FROM joined the flights to the
+/// airports.
 #[test]
-fn base_table_metric_co_queried_with_a_referencing_table_metric_is_rejected() {
-    expect_base_metric_rejected_both_orders(&metrics_req(&[], &["n_airports", "n_flights"]));
+fn base_table_metric_co_queried_with_a_referencing_table_metric_reads_each_table() {
+    for swapped in [false, true] {
+        let mut def = one_to_one_role_played_base_def();
+        if swapped {
+            def.joins.swap(0, 1);
+        }
+        let sql = expand("v", &def, &metrics_req(&[], &["n_airports", "n_flights"])).unwrap();
+        assert!(
+            sql.contains("FROM \"airports\" AS \"a\"\n)")
+                && sql.contains("FROM \"flights\" AS \"f\"\n)")
+                && !sql.contains("LEFT JOIN"),
+            "each metric reads its own table:\n{sql}"
+        );
+    }
 }
 
 /// The same through a semi-additive metric on the base table whose

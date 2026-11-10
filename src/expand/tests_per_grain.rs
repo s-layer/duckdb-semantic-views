@@ -748,11 +748,13 @@ fn window_metrics_at_two_different_grains_still_error() {
     );
 }
 
-/// A metric carrying `USING` role-playing context is not per-grain eligible
-/// either: which role a grain CTE should join is exactly what `USING` answers on
-/// the base-anchored path, and the grain CTEs do not carry that context.
+/// A metric on a role-played table read alone is computed per-grain, at its
+/// own table: `orders` reaches `customers` through two named relationships,
+/// and the total balance is the customers' own, with no role to pick. It used
+/// to fall to the base-anchored FROM, which joined the customers to the
+/// orders and refused the metric as a fan trap.
 #[test]
-fn multi_grain_with_role_playing_still_errors() {
+fn a_role_played_metric_alone_is_computed_at_its_own_grain() {
     // `orders` reaches `customers` through TWO named relationships — the
     // role-playing shape.
     let def = orders_with_parent_customers().with_pkfk_join(
@@ -762,11 +764,10 @@ fn multi_grain_with_role_playing_still_errors() {
         &["billing_customer_id"],
         &["id"],
     );
-    let err = expand("sales", &def, &req(&[], &["total_balance"]))
-        .expect_err("role-playing is not per-grain eligible");
+    let sql = expand("sales", &def, &req(&[], &["total_balance"])).unwrap();
     assert!(
-        matches!(err, ExpandError::RootGrainFanTrap { .. }),
-        "expected the v0.11.0 fan-trap error, got: {err}"
+        sql.contains("FROM \"customers\" AS \"c\"") && !sql.contains("JOIN"),
+        "reads the customers alone:\n{sql}"
     );
 }
 

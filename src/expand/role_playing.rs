@@ -10,7 +10,8 @@ use super::types::{AmbiguousMemberFactPathError, AmbiguousMetricPathError, Expan
 
 /// Determine which relationships point to a given table alias in the definition.
 ///
-/// Returns a list of relationship names that have `to_alias` as their target.
+/// Returns the names of the relationships that have `to_alias` as their
+/// target, sorted.
 /// Used for ambiguity detection: if a table is reached by multiple named relationships,
 /// dimensions from that table require USING context to disambiguate.
 pub(super) fn relationships_to_table(
@@ -18,11 +19,16 @@ pub(super) fn relationships_to_table(
     target_alias: &str,
 ) -> Vec<String> {
     let target_lower = target_alias.to_ascii_lowercase();
-    def.joins
+    let mut names: Vec<String> = def
+        .joins
         .iter()
         .filter(|j| !j.fk_columns.is_empty() && j.table.to_ascii_lowercase() == target_lower)
         .filter_map(|j| j.name.clone())
-        .collect()
+        .collect();
+    // Sorted, so a message listing them reads the same whatever order the
+    // relationships were declared in.
+    names.sort_unstable();
+    names
 }
 
 /// Is `target_alias` a genuinely *role-playing* target — i.e. does any single
@@ -53,6 +59,93 @@ pub(super) fn is_role_playing_target(def: &SemanticViewDefinition, target_alias:
         // was already present — linear time, no O(n²) `Vec::contains` scan.
         if !seen_from.insert(j.from_alias.to_ascii_lowercase()) {
             return true;
+        }
+    }
+    false
+}
+
+/// A role-played table that a query reading rows from `from` (the metrics'
+/// home tables, [`query_starts`]) crosses the other way round to reach
+/// `table`: `f => a <- g`, a metric on `f` by a member on `g`, where `g` is
+/// joined to whichever instance of `a` is joined. Only a start with no chain
+/// to `table` is walked (a chain is [`role_playing_on_path`]'s), and only when
+/// every path from it crosses those relationships (where some path does not,
+/// there are two paths and no chain, which `multi_path` refuses). A start on
+/// the role-played table itself reads its rows and names no role here.
+///
+/// Following the role a metric's `USING` names down to `g` is TECH-DEBT #111;
+/// until then such a member is refused, with or without one.
+fn role_crossed_backwards(
+    def: &SemanticViewDefinition,
+    from: &[String],
+    table: &str,
+) -> Option<String> {
+    let table_lower = table.to_ascii_lowercase();
+    let graph = crate::graph::RelationshipGraph::from_definition(def).ok()?;
+    let mut crossed: Vec<String> = Vec::new();
+    for start in from {
+        let start = start.to_ascii_lowercase();
+        if start == table_lower || graph_chain_reaches(&graph, &start, &table_lower) {
+            continue;
+        }
+        if super::multi_path::undirected_path(def, &start, &table_lower, None).is_none() {
+            continue;
+        }
+        for (source, rp) in role_playing_pairs(def) {
+            // Not a role this walk picks: one on the start's own rows, or on
+            // `table`'s (`table` being role-played, or the table that plays
+            // the roles, whose own checks name them).
+            if rp == start || rp == table_lower || source == table_lower {
+                continue;
+            }
+            let avoided =
+                super::multi_path::undirected_path(def, &start, &table_lower, Some((&source, &rp)));
+            if avoided.is_none() && !crossed.contains(&rp) {
+                crossed.push(rp);
+            }
+        }
+    }
+    crossed.sort_unstable();
+    crossed.into_iter().next()
+}
+
+/// Each `(source, target)` pair of tables, lowercased, where `source` declares
+/// two or more named relationships to `target` (the role-played table), sorted.
+fn role_playing_pairs(def: &SemanticViewDefinition) -> Vec<(String, String)> {
+    let mut counts: std::collections::BTreeMap<(String, String), usize> =
+        std::collections::BTreeMap::new();
+    for j in def
+        .joins
+        .iter()
+        .filter(|j| !j.fk_columns.is_empty() && j.name.is_some())
+    {
+        *counts
+            .entry((
+                j.from_alias.to_ascii_lowercase(),
+                j.table.to_ascii_lowercase(),
+            ))
+            .or_default() += 1;
+    }
+    counts
+        .into_iter()
+        .filter(|(_, n)| *n > 1)
+        .map(|(pair, _)| pair)
+        .collect()
+}
+
+/// Whether `from` reaches `to` by a chain of relationships in `graph`.
+fn graph_chain_reaches(graph: &crate::graph::RelationshipGraph, from: &str, to: &str) -> bool {
+    let mut seen: HashSet<String> = HashSet::from([from.to_string()]);
+    let mut stack = vec![from.to_string()];
+    while let Some(current) = stack.pop() {
+        if current == to {
+            return true;
+        }
+        for next in graph.edges.get(&current).into_iter().flatten() {
+            let next = next.to_ascii_lowercase();
+            if seen.insert(next.clone()) {
+                stack.push(next);
+            }
         }
     }
     false
@@ -182,6 +275,10 @@ pub(super) fn role_playing_on_path(
         let mut reached: HashSet<String> = HashSet::new();
         for start in from {
             let start = start.to_ascii_lowercase();
+            if start == table_lower {
+                // `table`'s own rows are read: nothing is on the way to them.
+                continue;
+            }
             let chain = walk(&start, false);
             if chain.contains(&table_lower) {
                 reached.extend(chain);
@@ -292,7 +389,11 @@ pub(super) fn check_where_clause_role_playing_path(
         // walked either way.
         let joined_tables = member.table.iter().chain(member.fact_tables.iter());
         for member_table in joined_tables {
-            if let Some(rp) = role_playing_on_path(view_name, def, &from, member_table)? {
+            let rp = match role_playing_on_path(view_name, def, &from, member_table)? {
+                Some(rp) => Some(rp),
+                None => role_crossed_backwards(def, &from, member_table),
+            };
+            if let Some(rp) = rp {
                 let available_relationships = relationships_to_table(def, &rp);
                 return Err(ExpandError::AmbiguousWhereClausePath {
                     view_name: view_name.to_string(),
@@ -364,6 +465,92 @@ pub(super) fn base_table_if_query_stays_on_it(
     stays.then_some(root)
 }
 
+/// The role-played table a metric on `own_table` would be joined through to
+/// reach `members`, the tables of the query's other members (its dimensions'
+/// and `where_clause` members' tables, and the dimensions a snapshot or window
+/// names, [`named_dimension_tables`]), `own_table` among them or not:
+/// `own_table` itself when it is role-played and the query has any member (a
+/// dimension on `own_table` is scoped to the role a co-queried metric names,
+/// which this metric cannot name), or one on the way from another table to it
+/// (`r <- a <= f`, a metric on `r` by a dimension on `f`; `g -> a <= f`, a
+/// metric on `f` by a dimension on `g`). `None` for a metric read with no
+/// member, which is computed over its own table's rows and needs no role.
+///
+/// The own-table check ([`check_member_fact_role_playing_path`]) refuses a
+/// query on `Some`; the per-grain planner, which anchors each metric at its
+/// own table, declines it the same way and no other.
+pub(super) fn role_on_the_way_to_own_table(
+    view_name: &str,
+    def: &SemanticViewDefinition,
+    own_table: &str,
+    members: &[String],
+) -> Result<Option<String>, ExpandError> {
+    if members.is_empty() {
+        return Ok(None);
+    }
+    if is_role_playing_target(def, own_table) {
+        return Ok(Some(own_table.to_ascii_lowercase()));
+    }
+    let others: Vec<String> = members
+        .iter()
+        .filter(|t| !t.eq_ignore_ascii_case(own_table))
+        .cloned()
+        .collect();
+    for other in &others {
+        if let Some(rp) =
+            role_playing_on_path(view_name, def, std::slice::from_ref(other), own_table)?
+        {
+            return Ok(Some(rp));
+        }
+    }
+    Ok(role_crossed_backwards(def, &others, own_table))
+}
+
+/// The tables of a query's members as a metric on its own table sees them:
+/// the queried dimensions', the `where_clause` members', and the dimensions
+/// `met`'s snapshot or window names, lowercased, sorted and deduplicated.
+fn member_tables(
+    def: &SemanticViewDefinition,
+    resolved_dims: &[&crate::model::Dimension],
+    where_tables: &[String],
+    met: &crate::model::Metric,
+) -> Vec<String> {
+    let mut out: Vec<String> = resolved_dims
+        .iter()
+        .filter_map(|d| d.source_table.as_ref().map(|t| t.to_ascii_lowercase()))
+        .chain(where_tables.iter().map(|t| t.to_ascii_lowercase()))
+        .chain(named_dimension_tables(def, met))
+        .collect();
+    out.sort_unstable();
+    out.dedup();
+    out
+}
+
+/// The tables of the dimensions `met` names without their being queried: its
+/// `NON ADDITIVE BY` dimensions and its window's partitioning and ordering.
+/// A snapshot or a window joins them to the metric's rows, so they are tables
+/// the metric reads beside its own. A name that does not resolve to a
+/// dimension on a table adds nothing.
+pub(super) fn named_dimension_tables(
+    def: &SemanticViewDefinition,
+    met: &crate::model::Metric,
+) -> Vec<String> {
+    let window = met.window_spec.iter().flat_map(|ws| {
+        ws.partition_dims
+            .iter()
+            .chain(&ws.excluding_dims)
+            .map(String::as_str)
+            .chain(ws.order_by.iter().map(|o| o.expr.as_str()))
+    });
+    met.non_additive_by
+        .iter()
+        .map(|na| na.dimension.as_str())
+        .chain(window)
+        .filter_map(|name| super::resolution::find_dimension(def, name))
+        .filter_map(|d| d.source_table.as_ref().map(|t| t.to_ascii_lowercase()))
+        .collect()
+}
+
 /// Reject a dimension or metric whose expression reaches a FACT on a table that
 /// is (or is reached only through) a role-playing table, unless the member can
 /// name the role (TECH-DEBT #69 — the fence that change walks past).
@@ -402,9 +589,6 @@ pub(super) fn check_member_fact_role_playing_path(
         return Ok(());
     }
     let from = query_starts(def, resolved_mets);
-    // The base-anchored emission joins a metric's own table from the first
-    // table in TABLES, so that is where the walk to it starts.
-    let base_start = vec![first_table(def)];
     let ambiguous = |member_name: &str, fact_name: String, fact_table: String, rp: String| {
         let available_relationships = relationships_to_table(def, &rp);
         ExpandError::AmbiguousMemberFactPath {
@@ -469,7 +653,13 @@ pub(super) fn check_member_fact_role_playing_path(
             .as_deref()
             .filter(|t| Some(*t) != exempt_base.as_deref())
         {
-            if let Some(rp) = role_playing_on_path(view_name, def, &base_start, own_table)? {
+            // The tables the query's members are on, each walked to the
+            // metric's own table: a role-played table on that way (`r <- a <=
+            // f`, a metric on `r` by a dimension on `f`) is one the metric's
+            // rows would be joined through. A metric read with no member is
+            // computed over its own table's rows, and needs no role.
+            let members = member_tables(def, resolved_dims, where_tables, base);
+            if let Some(rp) = role_on_the_way_to_own_table(view_name, def, own_table, &members)? {
                 let available_relationships = relationships_to_table(def, &rp);
                 return Err(ExpandError::AmbiguousMetricPath {
                     detail: Box::new(AmbiguousMetricPathError {
@@ -567,6 +757,15 @@ pub(super) fn find_using_context(
         // that instance (`descendant_chain`). Without a single role it is
         // refused rather than silently bound to the first-declared relationship.
         let from = query_starts(def, resolved_mets);
+        if let Some(rp) = role_crossed_backwards(def, &from, &dim_table_lower) {
+            return Err(ExpandError::AmbiguousDescendantPath {
+                view_name: view_name.to_string(),
+                dimension_name: dim.name.clone(),
+                dimension_table: dim_table_lower,
+                available_relationships: relationships_to_table(def, &rp),
+                role_playing_table: rp,
+            });
+        }
         if let Some(rp) = role_playing_on_path(view_name, def, &from, &dim_table_lower)? {
             if descendant_chain(def, &rp, &dim_table_lower).is_some()
                 && resolved_mets
@@ -709,32 +908,44 @@ fn met_is_on(met: &crate::model::Metric, table: &str) -> bool {
 
 /// The relationships from the role-played table `rp` down to `table`, which is
 /// reachable only through it, in join order (`a -> r`, then `r -> country`):
-/// each table on the way has exactly one inbound relationship, so the chain is
-/// the single path a role's instance continues along. `None` when the walk
-/// does not end at `rp` along such edges.
+/// the one chain of relationships from `rp` to `table`, the path a role's
+/// instance continues along. Tables on the way may be referenced by other
+/// tables too (since 0.19.0 CREATE accepts that); only the chain from `rp`
+/// matters. `None` when there is no such chain, more than one, or a step on it
+/// is itself two relationships (another role to name).
 pub(super) fn descendant_chain<'a>(
     def: &'a SemanticViewDefinition,
     rp: &str,
     table: &str,
 ) -> Option<Vec<&'a crate::model::Join>> {
-    let mut chain: Vec<&crate::model::Join> = Vec::new();
-    let mut current = table.to_ascii_lowercase();
-    while !current.eq_ignore_ascii_case(rp) {
-        let inbound: Vec<&crate::model::Join> = def
-            .joins
-            .iter()
-            .filter(|j| !j.fk_columns.is_empty() && j.table.eq_ignore_ascii_case(&current))
-            .collect();
-        let [edge] = inbound.as_slice() else {
-            return None;
-        };
+    let rp = rp.to_ascii_lowercase();
+    let table = table.to_ascii_lowercase();
+    let mut found: Vec<Vec<&crate::model::Join>> = Vec::new();
+    let mut stack: Vec<(String, Vec<&crate::model::Join>)> = vec![(rp.clone(), Vec::new())];
+    while let Some((current, chain)) = stack.pop() {
+        if current == table {
+            found.push(chain);
+            if found.len() > 1 {
+                return None;
+            }
+            continue;
+        }
         if chain.len() > def.joins.len() {
             return None; // A cycle; validation refuses these at CREATE.
         }
-        chain.push(edge);
-        current = edge.from_alias.to_ascii_lowercase();
+        for edge in def
+            .joins
+            .iter()
+            .filter(|j| !j.fk_columns.is_empty() && j.from_alias.eq_ignore_ascii_case(&current))
+        {
+            let mut next = chain.clone();
+            next.push(edge);
+            stack.push((edge.table.to_ascii_lowercase(), next));
+        }
     }
-    chain.reverse();
+    let chain = found.pop()?;
+    // Two relationships between one pair on the way are two chains above;
+    // `found` holding one means every step is a single relationship.
     Some(chain)
 }
 

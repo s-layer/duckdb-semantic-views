@@ -123,6 +123,9 @@ CREATE SEMANTIC VIEW p0c_legs_view AS
   FACTS (
     p.elev AS p.elevation
   )
+  DIMENSIONS (
+    l.leg AS l.leg_id
+  )
   METRICS (
     p.any_leg_elev AS SUM(p.elev),
     p.raw_leg_elev AS SUM(p.elevation),
@@ -130,13 +133,22 @@ CREATE SEMANTIC VIEW p0c_legs_view AS
     l.arr_leg_elev USING (leg_arr) AS SUM(p.elev)
   );
 
-statement error
+# Since 0.19.0 such a metric read alone is computed over the ports' own rows,
+# which names no role (each metric is aggregated at its own table): SFO + DEN
+# + LAX. It was refused while the base-anchored FROM joined the ports to the
+# legs. Grouped by a legs dimension it is still refused.
+query I
 SELECT * FROM SEMANTIC_VIEW(p0c_legs_view METRICS any_leg_elev);
 ----
-metric 'any_leg_elev' is ambiguous -- it aggregates table 'p'
+5547
+
+query I
+SELECT * FROM SEMANTIC_VIEW(p0c_legs_view METRICS raw_leg_elev);
+----
+5547
 
 statement error
-SELECT * FROM SEMANTIC_VIEW(p0c_legs_view METRICS raw_leg_elev);
+SELECT * FROM SEMANTIC_VIEW(p0c_legs_view DIMENSIONS leg METRICS raw_leg_elev);
 ----
 metric 'raw_leg_elev' is ambiguous -- it aggregates table 'p'
 

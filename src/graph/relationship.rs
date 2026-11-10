@@ -126,8 +126,8 @@ impl RelationshipGraph {
                 }
                 if joins_from_source.iter().any(|j| j.name.is_none()) {
                     return Err(format!(
-                        "diamond: two paths to '{node}' via '{source}' and '{source}'; name \
-                         each relationship from '{source}' to '{node}' so each one is joined \
+                        "'{source}' references '{node}' more than once; name each \
+                         relationship from '{source}' to '{node}' so each one is joined \
                          under its own alias"
                     ));
                 }
@@ -677,7 +677,7 @@ pub fn validate_graph(def: &SemanticViewDefinition) -> Result<RelationshipGraph,
 
     // 0b. Relationship names are unique (TECH-DEBT #79). Before the diamond
     //     check, so a duplicated role-playing name gets this message rather
-    //     than "diamond: two paths".
+    //     than the unnamed-relationship one.
     check_relationship_names_unique(def).map_err(ParseError::positionless)?;
 
     let graph = RelationshipGraph::from_definition(def).map_err(ParseError::positionless)?;
@@ -1760,8 +1760,8 @@ mod tests {
         );
         let err = validate_graph(&def).unwrap_err().message;
         assert!(
-            err.contains("diamond"),
-            "Unnamed diamonds should be rejected: {err}"
+            err.contains("'f' references 'a' more than once; name each relationship"),
+            "Unnamed role-playing relationships should be rejected: {err}"
         );
     }
 
@@ -1778,8 +1778,8 @@ mod tests {
         );
         let err = validate_graph(&def).unwrap_err().message;
         assert!(
-            err.contains("diamond"),
-            "Mixed named/unnamed diamonds should be rejected: {err}"
+            err.contains("'f' references 'a' more than once; name each relationship"),
+            "Mixed named/unnamed role-playing relationships should be rejected: {err}"
         );
     }
 

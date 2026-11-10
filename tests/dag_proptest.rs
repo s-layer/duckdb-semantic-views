@@ -10,7 +10,10 @@
 //! two children of one parent, bridges and two bridges between the same tables
 //! all occur; a quarter of the graphs are seeded with two bridges between
 //! `t0` and `t1`, which random edges reach too rarely. Every table has a dimension `g{k}` and a metric `s{k}` =
-//! `SUM(t{k}.v)`; the data has NULL and dangling foreign keys.
+//! `SUM(t{k}.v)`; the data has NULL and dangling foreign keys. A quarter of
+//! the graphs double one relationship (`t{a}.f{b}b REFERENCES t{b}`, a second
+//! role for `t{b}`), and `t{a}` then has `s{a}_a` and `s{a}_b`, the same sum
+//! with a `USING` naming one role each.
 //!
 //! The oracle restates Snowflake's rules from the graph, counting the chains
 //! of foreign keys (directed paths) between tables:
@@ -30,7 +33,16 @@
 //!   one chain to each member the answer is the distinct member values over its
 //!   rows; with two chains to a member, two nearest tables (two bridges), or
 //!   none (unrelated tables), the query is refused.
-//! - **Any query** gives the same rows, or is refused, in two TABLES orders.
+//! - **A doubled relationship.** A chain across it counts once per role, so a
+//!   member reached across it is refused (no role picked) unless the metric is
+//!   on `t{a}` and its `USING` names a role, which then is the one chain
+//!   followed. A member on `t{b}` or past it that no chain crosses to, a metric
+//!   on `t{b}` or past it with other members, a `USING` beside a chain that
+//!   does not cross, a `USING` beside a filter on `t{b}` or past it (a filter
+//!   names no role), and a query with no metrics near the role-played table
+//!   are not restated (only the two TABLES orders are compared).
+//! - **Any query** gives the same rows, or is refused, in two TABLES orders
+//!   (with the same message, unless a relationship is doubled).
 //!
 //! Rows are compared as sorted multisets of text, every column cast to
 //! VARCHAR inside DuckDB.
@@ -62,6 +74,12 @@ struct Case {
     dims: Vec<usize>,
     /// `g{k} = c` as the query's filter.
     filter: Option<(usize, i64)>,
+    /// An index into `edges`: that relationship is declared twice, the second
+    /// time over column `f{to}b` (a second role for its table).
+    doubled: Option<usize>,
+    /// For a metric on the doubled relationship's referencing table, the role
+    /// its `USING` names: `false` the first relationship, `true` the second.
+    using: Option<bool>,
 }
 
 impl Case {
@@ -86,6 +104,53 @@ impl Case {
             }
         }
         out
+    }
+
+    /// The doubled relationship, `(from, to)`.
+    fn pair(&self) -> Option<(usize, usize)> {
+        self.doubled.map(|i| self.edges[i])
+    }
+
+    /// The role the queried metric's `USING` names, if it names one.
+    fn role(&self) -> Option<bool> {
+        match (self.pair(), self.metric) {
+            (Some((from, _)), Some(m)) if m == from => self.using,
+            _ => None,
+        }
+    }
+
+    /// Is `k` the role-played table, or reached from it by a chain?
+    fn past_roles(&self, k: usize) -> bool {
+        self.pair()
+            .is_some_and(|(_, to)| !self.chains(to, k).is_empty())
+    }
+
+    /// [`Self::chains`], each crossing the doubled relationship once per role:
+    /// `Some(role)` for a chain across it, `None` for one that does not cross.
+    fn role_chains(&self, from: usize, to: usize) -> Vec<(Vec<usize>, Option<bool>)> {
+        let mut out = Vec::new();
+        for chain in self.chains(from, to) {
+            let crosses = self
+                .pair()
+                .is_some_and(|(a, b)| chain.windows(2).any(|w| w == [a, b]));
+            if crosses {
+                out.push((chain.clone(), Some(false)));
+                out.push((chain, Some(true)));
+            } else {
+                out.push((chain, None));
+            }
+        }
+        out
+    }
+
+    /// The one chain the oracle follows from `from` to `to`: across the role
+    /// the metric's `USING` names, when it names one.
+    fn chosen_chain(&self, from: usize, to: usize) -> (Vec<usize>, Option<bool>) {
+        let role = self.role();
+        self.role_chains(from, to)
+            .into_iter()
+            .find(|(_, r)| r.is_none() || *r == role)
+            .expect("an answered member has a chain")
     }
 
     fn members(&self) -> Vec<usize> {
@@ -150,32 +215,51 @@ fn arb_case() -> impl Strategy<Value = Case> {
                 u32::from(seeded) * 3 => Just(vec![0, 1]),
             ];
             let filter = prop_oneof![2 => Just(None), 1 => (0..n, 0i64..3).prop_map(Some)];
+            let doubled = prop_oneof![3 => Just(None), 1 => (0..edges.len()).prop_map(Some)];
+            let using = prop_oneof![1 => Just(None), 2 => any::<bool>().prop_map(Some)];
             (
-                Just(n),
-                Just(edges),
-                one_to_one,
-                rows,
-                order(),
-                order(),
-                metric,
-                dims,
-                filter,
+                (Just(n), Just(edges), one_to_one, rows, order(), order()),
+                (
+                    metric,
+                    dims,
+                    filter,
+                    doubled,
+                    using,
+                    prop::bool::weighted(0.5),
+                ),
             )
         })
         .prop_filter(
             "a query with no metric names a dimension",
-            |(_, _, _, _, _, _, metric, dims, _)| metric.is_some() || !dims.is_empty(),
+            |(_, (metric, dims, ..))| metric.is_some() || !dims.is_empty(),
         )
         .prop_map(
-            |(n, edges, one_to_one, rows, o1, o2, metric, dims, filter)| Case {
-                n,
-                edges,
-                one_to_one,
-                rows,
-                orders: [o1, o2],
-                metric,
-                dims,
-                filter,
+            |(
+                (n, edges, one_to_one, rows, o1, o2),
+                (metric, dims, filter, doubled, using, aim),
+            )| {
+                let mut case = Case {
+                    n,
+                    edges,
+                    one_to_one,
+                    rows,
+                    orders: [o1, o2],
+                    metric,
+                    dims,
+                    filter,
+                    doubled,
+                    using,
+                };
+                // Half the doubled graphs query the referencing table's metric
+                // by the role-played table's dimension, which random draws
+                // reach too rarely.
+                if let (true, Some((from, to))) = (aim, case.pair()) {
+                    case.metric = Some(from);
+                    if !case.dims.contains(&to) {
+                        case.dims.push(to);
+                    }
+                }
+                case
             },
         )
 }
@@ -202,6 +286,40 @@ fn build_def(case: &Case, order: &[usize], reverse_relationships: bool) -> Seman
             ..Default::default()
         })
         .collect();
+    let mut metrics: Vec<Metric> = (0..case.n)
+        .map(|k| Metric {
+            name: format!("s{k}"),
+            expr: format!("SUM(t{k}.v)"),
+            source_table: Some(t(k)),
+            ..Default::default()
+        })
+        .collect();
+    if let (Some(i), Some((from, to))) = (case.doubled, case.pair()) {
+        joins.insert(
+            i + 1,
+            Join {
+                table: t(to),
+                from_alias: t(from),
+                fk_columns: vec![format!("f{to}b")],
+                ref_columns: vec!["id".to_string()],
+                name: Some(format!("r{from}_{to}b")),
+                cardinality: Cardinality::ManyToOne,
+                ..Default::default()
+            },
+        );
+        for (suffix, rel) in [
+            ("a", format!("r{from}_{to}")),
+            ("b", format!("r{from}_{to}b")),
+        ] {
+            metrics.push(Metric {
+                name: format!("s{from}_{suffix}"),
+                expr: format!("SUM(t{from}.v)"),
+                source_table: Some(t(from)),
+                using_relationships: vec![rel],
+                ..Default::default()
+            });
+        }
+    }
     if reverse_relationships {
         joins.reverse();
     }
@@ -224,14 +342,7 @@ fn build_def(case: &Case, order: &[usize], reverse_relationships: bool) -> Seman
                 ..Default::default()
             })
             .collect(),
-        metrics: (0..case.n)
-            .map(|k| Metric {
-                name: format!("s{k}"),
-                expr: format!("SUM(t{k}.v)"),
-                source_table: Some(t(k)),
-                ..Default::default()
-            })
-            .collect(),
+        metrics,
         ..Default::default()
     }
 }
@@ -247,7 +358,11 @@ fn request(case: &Case) -> QueryRequest {
         metrics: case
             .metric
             .iter()
-            .map(|k| MetricName::new(format!("s{k}")))
+            .map(|k| match case.role() {
+                Some(false) => MetricName::new(format!("s{k}_a")),
+                Some(true) => MetricName::new(format!("s{k}_b")),
+                None => MetricName::new(format!("s{k}")),
+            })
             .collect(),
         // PIN: a FACTS query reads one table's rows like a query with no metrics; this harness oracles the graph's paths, which the dims-only property already walks.
         facts: vec![],
@@ -259,7 +374,11 @@ fn make_db(case: &Case) -> duckdb::Connection {
     let cell = |c: &Option<i64>| c.map_or_else(|| "NULL".to_string(), |v| v.to_string());
     for k in 0..case.n {
         let outs = case.out_edges(k);
-        let fk_cols: String = outs.iter().map(|to| format!(", f{to} INTEGER")).collect();
+        let second = case.pair().filter(|(from, _)| *from == k).map(|(_, to)| to);
+        let mut fk_cols: String = outs.iter().map(|to| format!(", f{to} INTEGER")).collect();
+        if let Some(to) = second {
+            fk_cols.push_str(&format!(", f{to}b INTEGER"));
+        }
         conn.execute_batch(&format!(
             "CREATE TABLE t{k} (id INTEGER, g INTEGER, v INTEGER{fk_cols});"
         ))
@@ -268,7 +387,13 @@ fn make_db(case: &Case) -> duckdb::Connection {
             .iter()
             .enumerate()
             .map(|(i, (g, v, fks))| {
-                let fks: String = fks.iter().map(|f| format!(", {}", cell(f))).collect();
+                let mut fks: String = fks.iter().map(|f| format!(", {}", cell(f))).collect();
+                if second.is_some() {
+                    // The second role's key: other rows than the first's, one
+                    // NULL in four and some dangling (4 is past every table).
+                    let b = (i % 4 != 3).then_some((i as i64 * 2 + 1) % 5);
+                    fks.push_str(&format!(", {}", cell(&b)));
+                }
                 format!("({i}, {}, {}{fks})", cell(g), cell(v))
             })
             .collect();
@@ -280,16 +405,24 @@ fn make_db(case: &Case) -> duckdb::Connection {
 
 /// `FROM t{from}` LEFT JOINed along one chain per member, each table of a
 /// chain under its own alias, and the alias each member's columns are read at.
-fn joined_from(from: usize, chains: &[(usize, Vec<usize>)]) -> (String, Vec<(usize, String)>) {
+/// A chain across the doubled relationship in its second role joins over the
+/// second key, `f{to}b`.
+fn joined_from(
+    case: &Case,
+    from: usize,
+    chains: &[(usize, Vec<usize>, Option<bool>)],
+) -> (String, Vec<(usize, String)>) {
     let mut sql = format!("t{from} AS x");
     let mut at: Vec<(usize, String)> = vec![(from, "x".to_string())];
-    for (ci, (member, chain)) in chains.iter().enumerate() {
+    for (ci, (member, chain, role)) in chains.iter().enumerate() {
         let mut prev = "x".to_string();
         for (step, pair) in chain.windows(2).enumerate() {
             let alias = format!("c{ci}_{step}");
+            let second = *role == Some(true) && case.pair() == Some((pair[0], pair[1]));
             sql.push_str(&format!(
-                " LEFT JOIN t{to} AS {alias} ON {prev}.f{to} = {alias}.id",
-                to = pair[1]
+                " LEFT JOIN t{to} AS {alias} ON {prev}.f{to}{b} = {alias}.id",
+                to = pair[1],
+                b = if second { "b" } else { "" }
             ));
             prev = alias;
         }
@@ -301,12 +434,15 @@ fn joined_from(from: usize, chains: &[(usize, Vec<usize>)]) -> (String, Vec<(usi
 /// The oracle's SQL for a query whose every member is reached by one chain
 /// from `from`, the metric's table or the table a query with no metrics lists.
 fn oracle_sql(case: &Case, from: usize) -> String {
-    let chains: Vec<(usize, Vec<usize>)> = case
+    let chains: Vec<(usize, Vec<usize>, Option<bool>)> = case
         .members()
         .into_iter()
-        .map(|m| (m, case.chains(from, m).remove(0)))
+        .map(|m| {
+            let (chain, role) = case.chosen_chain(from, m);
+            (m, chain, role)
+        })
         .collect();
-    let (from_sql, at) = joined_from(from, &chains);
+    let (from_sql, at) = joined_from(case, from, &chains);
     let alias = |k: usize| {
         at.iter()
             .rev()
@@ -360,44 +496,99 @@ enum Expect {
 }
 
 /// The paths from `from` to `to` over relationships in either direction, each
-/// table at most once, counted by brute force (a graph has at most five
-/// tables).
-fn undirected_paths(case: &Case, from: usize, to: usize) -> usize {
-    fn walk(case: &Case, at: usize, to: usize, seen: &mut Vec<usize>) -> usize {
+/// table at most once, found by brute force (a graph has at most five
+/// tables). The doubled relationship is one step here.
+fn undirected_paths(case: &Case, from: usize, to: usize) -> Vec<Vec<usize>> {
+    fn walk(case: &Case, at: usize, to: usize, seen: &mut Vec<usize>, out: &mut Vec<Vec<usize>>) {
         if at == to {
-            return 1;
+            out.push(seen.clone());
+            return;
         }
-        let mut count = 0;
         for next in 0..case.n {
             let linked = case.edges.contains(&(at, next)) || case.edges.contains(&(next, at));
             if linked && !seen.contains(&next) {
                 seen.push(next);
-                count += walk(case, next, to, seen);
+                walk(case, next, to, seen, out);
                 seen.pop();
             }
         }
-        count
     }
-    walk(case, from, to, &mut vec![from])
+    let mut out = Vec::new();
+    walk(case, from, to, &mut vec![from], &mut out);
+    out
 }
 
 fn expect(case: &Case) -> Expect {
     let members = case.members();
     if let Some(m) = case.metric {
+        if case.past_roles(m) && members.iter().any(|&d| d != m) {
+            return Expect::Either;
+        }
+        // A filter carries no `USING`, so one past the role-played table is
+        // refused whatever role the metric names: a fence of its own.
+        if case.role().is_some() && case.filter.is_some_and(|(k, _)| case.past_roles(k)) {
+            return Expect::Either;
+        }
+        let crosses_roles = |path: &[usize]| {
+            case.pair()
+                .is_some_and(|(a, b)| path.windows(2).any(|w| w == [a, b] || w == [b, a]))
+        };
         let mut refusals: Vec<&'static str> = Vec::new();
+        let mut restated = true;
         for &d in &members {
-            match case.chains(m, d).len() {
-                0 if undirected_paths(case, m, d) > 1 => refusals.push("many-to-many"),
-                0 | 1 => {}
+            let chains = case.role_chains(m, d);
+            let across = chains.iter().filter(|(_, r)| r.is_some()).count();
+            let beside = chains.len() - across;
+            if across == 0 && case.past_roles(d) {
+                // A chain that does not cross to a role-played table: the
+                // role-playing check refuses its dimension without a USING.
+                restated = false;
+                continue;
+            }
+            let count = match case.role() {
+                Some(_) if across > 0 && beside > 0 => {
+                    restated = false;
+                    continue;
+                }
+                Some(_) => across / 2 + beside,
+                None => chains.len(),
+            };
+            match count {
+                0 => {
+                    let paths = undirected_paths(case, m, d);
+                    if paths.iter().any(|p| crosses_roles(p)) {
+                        restated = false;
+                    } else if paths.len() > 1 {
+                        refusals.push("many-to-many");
+                    }
+                }
+                1 => {}
+                _ if across > 0 => refusals.extend(["ambiguous", "more than one path"]),
                 _ => refusals.push("more than one path"),
             }
         }
         if !refusals.is_empty() {
             return Expect::Refused(refusals);
         }
-        if members.iter().all(|&d| case.chains(m, d).len() == 1) {
+        let one_each = members.iter().all(|&d| {
+            let chains = case.role_chains(m, d);
+            match case.role() {
+                Some(r) => {
+                    chains
+                        .iter()
+                        .filter(|(_, x)| x.is_none() || *x == Some(r))
+                        .count()
+                        == 1
+                }
+                None => chains.len() == 1,
+            }
+        });
+        if restated && one_each {
             return Expect::Rows(m);
         }
+        return Expect::Either;
+    }
+    if members.iter().any(|&d| case.past_roles(d)) {
         return Expect::Either;
     }
     let candidates: Vec<usize> = (0..case.n)
@@ -492,9 +683,17 @@ fn check_case(case: &Case) -> Result<(), TestCaseError> {
         }
         answers.push(answer);
     }
+    // With a doubled relationship more fences can refuse one query (a fan
+    // trap relative to the base table, a filter that names no role), and
+    // which speaks first may follow the TABLES order: the two orders must
+    // agree on the rows, and on refusing, but not on the message.
+    let (a, b) = (&answers[0], &answers[1]);
+    if case.doubled.is_some() && a.is_err() && b.is_err() {
+        return Ok(());
+    }
     prop_assert_eq!(
-        &answers[0],
-        &answers[1],
+        a,
+        b,
         "the two TABLES orders {:?} and {:?} disagree",
         case.orders[0],
         case.orders[1]
@@ -525,6 +724,20 @@ fn generator_reaches_every_outcome() {
             .new_tree(&mut runner)
             .expect("strategy must produce a value")
             .current();
+        let across = case.metric.is_some_and(|m| {
+            case.members()
+                .iter()
+                .any(|&d| case.role_chains(m, d).iter().any(|(_, r)| r.is_some()))
+        });
+        if across {
+            let key = match (case.role(), expect(&case)) {
+                (None, Expect::Refused(_)) => "role refused",
+                (Some(_), Expect::Rows(_)) => "role answered",
+                _ => "role other",
+            };
+            *seen.entry(key).or_default() += 1;
+            continue;
+        }
         let shared = (0..case.n).any(|k| case.edges.iter().filter(|(_, t)| *t == k).count() > 1);
         if !shared {
             *seen.entry("no shared table").or_default() += 1;
@@ -540,11 +753,13 @@ fn generator_reaches_every_outcome() {
             (None, Expect::Refused(t)) if t == ["more than one path"] => "dims multi-path",
             (None, Expect::Refused(t)) if t == ["many-to-many"] => "dims two bridges",
             (None, Expect::Refused(_)) => "dims unrelated",
-            (None, Expect::Either) => unreachable!("a query with no metrics is always restated"),
+            (None, Expect::Either) => "dims near a role-played table",
         };
         *seen.entry(key).or_default() += 1;
     }
     for key in [
+        "role refused",
+        "role answered",
         "no shared table",
         "metric alone",
         "metric answered",
@@ -585,6 +800,8 @@ fn a_chain_is_followed_beside_a_shorter_path_that_fans_out() {
         metric: Some(3),
         dims: vec![1],
         filter: None,
+        doubled: None,
+        using: None,
     };
     check_case(&case).unwrap();
 }

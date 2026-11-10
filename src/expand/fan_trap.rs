@@ -378,7 +378,9 @@ fn build_relationship_graph(
 /// recorded relationship name is that of a `ManyToOne` edge so error messages
 /// cite a relationship that actually fans. Previously the last-declared edge
 /// simply overwrote earlier ones, so a `OneToOne` declared after a
-/// `ManyToOne` masked the fan-out (declaration-order dependent).
+/// `ManyToOne` masked the fan-out (declaration-order dependent). Of two edges
+/// with the same cardinality, the one first by name is recorded, for the same
+/// reason.
 fn build_card_map(def: &SemanticViewDefinition) -> CardMap {
     let mut card_map: CardMap = HashMap::new();
     for join in def.joins.iter().filter(|j| !j.fk_columns.is_empty()) {
@@ -392,8 +394,12 @@ fn build_card_map(def: &SemanticViewDefinition) -> CardMap {
                 e.insert((join.cardinality, rel_name));
             }
             std::collections::hash_map::Entry::Occupied(mut e) => {
-                if e.get().0 == Cardinality::OneToOne && join.cardinality == Cardinality::ManyToOne
-                {
+                let worse = e.get().0 == Cardinality::OneToOne
+                    && join.cardinality == Cardinality::ManyToOne;
+                // Of two edges alike, the first by name, so the message is
+                // the same whatever order the relationships were declared in.
+                let alike_and_first = e.get().0 == join.cardinality && rel_name < e.get().1;
+                if worse || alike_and_first {
                     e.insert((join.cardinality, rel_name));
                 }
             }

@@ -303,7 +303,7 @@ fn neighbours(def: &SemanticViewDefinition, table: &str) -> Vec<String> {
 /// A shortest path from `from` to `to` over relationships in either direction,
 /// as `[from, …, to]`, never stepping between `skip`'s two tables (in either
 /// direction). `None` when there is none.
-fn undirected_path(
+pub(super) fn undirected_path(
     def: &SemanticViewDefinition,
     from: &str,
     to: &str,
@@ -363,6 +363,16 @@ fn render_undirected(def: &SemanticViewDefinition, path: &[String]) -> String {
         s.push_str(&step[1]);
     }
     s
+}
+
+/// Whether a metric on `home` by a member on `to` is refused as reaching it
+/// by no chain and two ways ([`many_to_many_paths`]), for `SHOW SEMANTIC
+/// DIMENSIONS ... FOR METRIC`, which leaves such a member out.
+#[cfg_attr(not(feature = "extension"), allow(dead_code))]
+pub(crate) fn refused_as_many_to_many(def: &SemanticViewDefinition, home: &str, to: &str) -> bool {
+    !home.eq_ignore_ascii_case(to)
+        && admitted_paths(def, home, to, &[]).is_empty()
+        && many_to_many_paths(def, home, to).is_some()
 }
 
 /// When a query reaches `to` from `home` by no chain of foreign keys: two of
