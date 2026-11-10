@@ -1626,13 +1626,15 @@ Table reached by more than one path
 .. code-block:: text
 
    semantic view '<view>': metric '<metric>' reaches table '<table>' along the
-   path its USING names (o -> s -> r), which this query cannot follow: it also
-   holds a window or semi-additive metric, or a member declared on no table.
-   Query the metric without them
+   path its USING names (o -> s -> r), which this query cannot follow: only the
+   plan that computes each metric at its own grain follows a USING path, and
+   this query does not fit that plan (for example, it also holds a window or an
+   active semi-additive metric, or a member declared on no table). Query the
+   metric with fewer members
 
-**Cause:** Only part of the query planner follows a path a ``USING`` picks through a diamond. A window metric, a semi-additive metric whose ``NON ADDITIVE BY`` dimension is not queried, or a dimension or filter member declared on no table sends the query elsewhere, where it would follow the path declared first.
+**Cause:** Only part of the query planner follows a path a ``USING`` picks through a diamond. A window metric, a semi-additive metric whose ``NON ADDITIVE BY`` dimension is not queried, or a dimension or filter member declared on no table sends the query elsewhere, where it would follow the path declared first. A dimension or filter below the metric's grain is reported as a fan trap instead, since no path answers it.
 
-**Fix:** Query the ``USING`` metric without them.
+**Fix:** Query the ``USING`` metric without the members the message names.
 
 
 Window and aggregate metric mixing

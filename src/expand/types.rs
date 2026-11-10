@@ -1060,8 +1060,10 @@ impl fmt::Display for ExpandError {
                     f,
                     "semantic view '{view_name}': metric '{metric_name}' reaches table \
                      '{member_table}' along the path its USING names ({path}), which this query \
-                     cannot follow: it also holds a window or semi-additive metric, or a member \
-                     declared on no table. Query the metric without them"
+                     cannot follow: only the plan that computes each metric at its own grain \
+                     follows a USING path, and this query does not fit that plan (for example, \
+                     it also holds a window or an active semi-additive metric, or a member \
+                     declared on no table). Query the metric with fewer members"
                 )
             }
             Self::WhereClauseReferencesMetric {

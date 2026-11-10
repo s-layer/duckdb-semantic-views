@@ -596,10 +596,10 @@ Areas where test coverage is reduced compared to ideal, with justification.
 ### 109. ❌ A `USING` that picks one path through a diamond is refused beside a window or semi-additive metric — OPEN (Phase 7 PR 5)
 
 - **Origin:** 2026-11-10, Phase 7 diamond multi-path fix (Snowflake fixture 3, cases D2-D13).
-- **Shape:** a table the metric's table reaches by two paths through different tables (orders reach regions through customers and through stores), and a metric whose `USING` names the first relationship of one path (`rev_by_store USING (o_store)`). Only the per-grain planner joins along that path (`per_grain::Group::paths`). When it declines the query (a window metric reached by the query, an active semi-additive metric alone in its group, a dimension or filter member declared on no table), every other emitter joins along the first-declared path.
+- **Shape:** a table the metric's table reaches by two paths through different tables (orders reach regions through customers and through stores), and a metric whose `USING` names the first relationship of one path (`rev_by_store USING (o_store)`). Only the per-grain planner joins along that path (`per_grain::Group::paths`). When it declines the query (a window metric reached by the query, an active semi-additive metric on a pinned path, a dimension or filter member declared on no table), every other emitter joins along the first-declared path.
 - **Current state:** refused with `UnfollowedUsingPath` rather than answered through the other path. No wrong number is possible.
-- **What would finish it:** thread `Group::paths` into the window `__sv_agg` CTE (Phase 7 PR 5, which reworks window emission anyway) and into the semi-additive snapshot CTE, then delete the fence in `sql_gen::expand_unhoisted`.
-- **Coverage of the current state:** `tests_diamond_paths::window_beside_a_pinned_path_is_refused`.
+- **What would finish it:** thread `Group::paths` into the window `__sv_agg` CTE (Phase 7 PR 5, which reworks window emission anyway) and into the semi-additive snapshot CTE, then delete the fence in `sql_gen::expand_unhoisted`. A member declared on no table stays refused: no grain holds it.
+- **Coverage of the current state:** in `tests_diamond_paths`, `window_beside_a_pinned_path_is_refused`, `semi_additive_alone_on_a_pinned_path_is_refused`, `semi_additive_beside_another_path_is_refused`, `member_on_no_table_beside_a_pinned_path_is_refused` and `filter_on_no_table_beside_a_pinned_path_is_refused`.
 
 ### 108. ❌ A connection open before another one's `LOAD` needs an ordinary statement before it parses semantic-view statements — OPEN (upstream)
 

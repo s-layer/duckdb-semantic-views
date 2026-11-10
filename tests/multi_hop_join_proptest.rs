@@ -61,7 +61,10 @@
 //! reads `t`'s rows and names `w`. `svu USING (t_u)` and `svx USING (t_x)`
 //! sum `t.v` along their own path, which the oracle states by joining `w`
 //! through `u` or through `x`. The diamond cases query only the metrics on
-//! `t` (see [`metric_exists`]).
+//! `t` (see [`metric_exists`]). The diamond is declared with `w` first in
+//! about half of those cases, the shape CREATE accepts (its shared table is
+//! the base table), and with `t` first in the rest, the shape it refuses
+//! until it accepts any acyclic graph; each case checks which.
 
 use proptest::prelude::*;
 use semantic_views::expand::{expand, DimensionName, FactName, MetricName, QueryRequest};
@@ -95,6 +98,10 @@ struct Instance {
     x_rows: Vec<Option<i64>>,
     /// Per `t` row, its foreign key `fk_x` into `x` (missing entries are NULL).
     t_fk_x: Vec<Option<i64>>,
+    /// With the second path, whether `w` is declared first. CREATE accepts a
+    /// diamond only then (its shared table is the base table), so this is the
+    /// shape users can create; `t` first is the shape CREATE refuses today.
+    w_first: bool,
 }
 
 /// The kind of the `t → u` relationship.
@@ -145,8 +152,14 @@ const METS: [&str; 6] = ["sv", "ct", "su", "sw", "svu", "svx"];
 /// `t` is answered once per group rather than refused; `bridge_proptest`
 /// oracles that. The diamond cases therefore query only the metrics on `t`,
 /// whose question is which path to `w` they follow.
+///
+/// With `w` declared first, the source-less `count(*)` (`ct`) counts the base
+/// table `w`, and grouped by `t` it would cross the same bridge, so those
+/// cases leave it out too.
 fn metric_exists(inst: &Instance, i: usize) -> bool {
-    if inst.diamond {
+    if inst.diamond && inst.w_first {
+        !matches!(METS[i], "su" | "sw" | "ct")
+    } else if inst.diamond {
         !matches!(METS[i], "su" | "sw")
     } else {
         !matches!(METS[i], "svu" | "svx")
@@ -376,9 +389,20 @@ fn arb_instance() -> impl Strategy<Value = Instance> {
             t_ts,
             any::<bool>(),
             x_rows,
+            any::<bool>(),
         )
             .prop_map(
-                |(w_rows, u_rows, t_rows, hop, u_starts, t_ts, diamond, (x_rows, t_fk_x))| {
+                |(
+                    w_rows,
+                    u_rows,
+                    t_rows,
+                    hop,
+                    u_starts,
+                    t_ts,
+                    diamond,
+                    (x_rows, t_fk_x),
+                    w_first,
+                )| {
                     Instance {
                         w_rows,
                         u_rows,
@@ -389,6 +413,7 @@ fn arb_instance() -> impl Strategy<Value = Instance> {
                         diamond,
                         x_rows,
                         t_fk_x,
+                        w_first: diamond && w_first,
                     }
                 },
             )
@@ -430,12 +455,13 @@ fn arb_case() -> impl Strategy<Value = Case> {
 /// dimension at each grain, root-grain safe metrics (`sum(t.v)`, `count(*)`),
 /// and ancestor metrics on `u` and `w`.
 fn build_def(hop: Hop) -> SemanticViewDefinition {
-    build_def_shaped(hop, false)
+    build_def_shaped(hop, false, false)
 }
 
 /// [`build_def`], plus (with `diamond`) the second path `t → x → w` and the
-/// two `USING` metrics, `svu` along `t_u` and `svx` along `t_x`.
-fn build_def_shaped(hop: Hop, diamond: bool) -> SemanticViewDefinition {
+/// two `USING` metrics, `svu` along `t_u` and `svx` along `t_x`. With
+/// `w_first`, `w` is declared first, so it is the base table.
+fn build_def_shaped(hop: Hop, diamond: bool, w_first: bool) -> SemanticViewDefinition {
     let asof = hop == Hop::Asof;
     let table = |alias: &str, pk: &[&str]| TableRef {
         alias: alias.to_string(),
@@ -461,6 +487,11 @@ fn build_def_shaped(hop: Hop, diamond: bool) -> SemanticViewDefinition {
             start: "rs".to_string(),
             end: "re".to_string(),
         }];
+    }
+    if w_first {
+        // `w, t, u, x`: the diamond's shared table is the base table.
+        tables.swap(0, 2);
+        tables.swap(1, 2);
     }
     let dim = |name: &str, expr: &str, source: &str| Dimension {
         cortex_search_service: None,
@@ -940,7 +971,17 @@ fn is_duckdb_group_by_bind_bug(msg: &str) -> bool {
 /// and matches the independent per-grain oracle. Shared by the proptest and the
 /// pinned cases below so a pinned case runs exactly the property's checks.
 fn check_case(case: &Case) -> Result<(), TestCaseError> {
-    let def = build_def_shaped(case.inst.hop, case.inst.diamond);
+    let def = build_def_shaped(case.inst.hop, case.inst.diamond, case.inst.w_first);
+    // CREATE's graph rule accepts the diamond only with `w` (its shared table)
+    // declared first. The `t`-first diamond is generated too, for the
+    // expansion of any acyclic graph, but no user can create it today.
+    let creatable = semantic_views::graph::validate_graph(&def);
+    prop_assert_eq!(
+        creatable.is_ok(),
+        !case.inst.diamond || case.inst.w_first,
+        "CREATE's graph rule: {:?}",
+        creatable.err().map(|e| e.to_string())
+    );
     let req = QueryRequest {
         where_clause: case.where_pred.as_ref().map(Pred::to_member_sql),
         dimensions: case
@@ -1138,6 +1179,8 @@ fn generator_reaches_both_diamond_branches() {
 
     let mut runner = TestRunner::deterministic();
     let (mut refused, mut chosen, mut plain, mut differ) = (0usize, 0usize, 0usize, 0usize);
+    // The same two outcomes in the shape users can create (`w` declared first).
+    let (mut refused_w_first, mut chosen_w_first) = (0usize, 0usize);
     for _ in 0..400 {
         let case = arb_case()
             .new_tree(&mut runner)
@@ -1149,6 +1192,7 @@ fn generator_reaches_both_diamond_branches() {
         }
         if reaches_w_two_ways(&case) {
             refused += 1;
+            refused_w_first += usize::from(case.inst.w_first);
             continue;
         }
         let names_w = case.sel_dims.iter().any(|&d| DIMS[d] == "wcat")
@@ -1164,6 +1208,7 @@ fn generator_reaches_both_diamond_branches() {
                 .any(|&m| matches!(METS[m], "svu" | "svx"))
         {
             chosen += 1;
+            chosen_w_first += usize::from(case.inst.w_first);
             // Whether the two paths give different sums by `wcat` here (the
             // `u` path read by plain key, a close enough stand-in for this).
             let conn = make_db(&case.inst);
@@ -1192,6 +1237,15 @@ fn generator_reaches_both_diamond_branches() {
     assert!(
         chosen > 0,
         "no diamond case follows a USING path to w; the path oracle is never compared"
+    );
+    assert!(
+        refused_w_first > 0 && chosen_w_first > 0,
+        "the diamond declared w-first (the shape CREATE accepts) misses an outcome: \
+         {refused_w_first} refused, {chosen_w_first} answered along a USING path"
+    );
+    assert!(
+        refused > refused_w_first && chosen > chosen_w_first,
+        "the diamond declared t-first never reaches both outcomes"
     );
 }
 
@@ -1336,6 +1390,7 @@ fn ci_or_of_ands_instance() -> Instance {
         u_starts: vec![],
         t_ts: vec![],
         diamond: false,
+        w_first: false,
         x_rows: vec![],
         t_fk_x: vec![],
     }
@@ -1436,6 +1491,7 @@ fn pinned_asof_hop_takes_the_latest_period() {
         u_starts: vec![2, 1],
         t_ts: vec![Some(1), Some(2), Some(3), Some(4), Some(9), None],
         diamond: false,
+        w_first: false,
         x_rows: vec![],
         t_fk_x: vec![],
     };
@@ -1591,6 +1647,7 @@ fn pinned_range_hop_takes_the_period_holding_the_value() {
         u_starts: vec![0, 1, 3],
         t_ts: vec![Some(-1), Some(1), Some(3), Some(5), Some(6), Some(9), None],
         diamond: false,
+        w_first: false,
         x_rows: vec![],
         t_fk_x: vec![],
     };

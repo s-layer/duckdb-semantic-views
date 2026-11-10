@@ -371,6 +371,166 @@ fn window_beside_a_pinned_path_is_refused() {
     }
 }
 
+/// `diamond(order)` plus `last_by_store`, a semi-additive `rev_by_store`
+/// (the latest order's amount, along the store path), and `label`, a
+/// dimension declared on no table.
+fn diamond_with_unfollowed_shapes(order: &str) -> SemanticViewDefinition {
+    let mut def = diamond(order);
+    let mut last = metric("last_by_store", "SUM(o.amount)", Some("o"), &["o_store"]);
+    last.non_additive_by = vec![crate::model::NonAdditiveDim {
+        dimension: "order_id".to_string(),
+        order: crate::model::SortOrder::Desc,
+        ..Default::default()
+    }];
+    def.metrics.push(last);
+    def.dimensions.push(Dimension {
+        name: "label".to_string(),
+        expr: "'all'".to_string(),
+        source_table: None,
+        ..Default::default()
+    });
+    def
+}
+
+/// Assert the query is refused on every table order because it cannot follow
+/// the path a metric's `USING` picks.
+fn assert_unfollowed(request: &QueryRequest) {
+    for order in ORDERS {
+        match expand("dv", &diamond_with_unfollowed_shapes(order), request) {
+            Ok(sql) => panic!(
+                "TABLES order {order}: expected the USING path to be refused as unfollowed, \
+                 got rows {:?}\nSQL:\n{sql}",
+                rows(&sql)
+            ),
+            Err(err) => assert!(
+                matches!(err, ExpandError::UnfollowedUsingPath { .. }),
+                "TABLES order {order}: got {err}"
+            ),
+        }
+    }
+}
+
+/// An active semi-additive metric alone on a pinned path: the planner leaves a
+/// lone snapshot group to the snapshot CTE, which joins along the usual walk
+/// (through customers), so the query is refused (TECH-DEBT #109).
+#[test]
+fn semi_additive_alone_on_a_pinned_path_is_refused() {
+    assert_unfollowed(&req(&["region_name"], &["last_by_store"], None));
+}
+
+/// The same metric beside one on the other path: two groups, and the snapshot
+/// group with a pinned path is declined, so the query is refused
+/// (TECH-DEBT #109).
+#[test]
+fn semi_additive_beside_another_path_is_refused() {
+    assert_unfollowed(&req(
+        &["region_name"],
+        &["rev_by_cust", "last_by_store"],
+        None,
+    ));
+}
+
+/// A dimension declared on no table cannot be placed under a grain, so the
+/// planner declines, and the query is refused rather than joined through
+/// customers (TECH-DEBT #109).
+#[test]
+fn member_on_no_table_beside_a_pinned_path_is_refused() {
+    assert_unfollowed(&req(&["region_name", "label"], &["rev_by_store"], None));
+}
+
+/// The same member in a filter.
+#[test]
+fn filter_on_no_table_beside_a_pinned_path_is_refused() {
+    assert_unfollowed(&req(
+        &["region_name"],
+        &["rev_by_store"],
+        Some("label = 'all'"),
+    ));
+}
+
+/// A dimension below the metric's grain is a fan trap whichever path the
+/// metric follows, and the refusal says so rather than blaming the path.
+#[test]
+fn fan_trap_beside_a_pinned_path_is_reported_as_one() {
+    for order in ORDERS {
+        let mut def = diamond(order);
+        def.tables.push(table("li", "line_items", "line_id"));
+        def.joins
+            .push(rel("li_order", "li", "o", "order_id", "order_id"));
+        def.dimensions.push(dim("sku", "li.sku", "li"));
+        for (dims, filter) in [
+            (&["region_name", "sku"][..], None),
+            (&["region_name"][..], Some("sku = 'a'")),
+        ] {
+            let err = expand("dv", &def, &req(dims, &["rev_by_store"], filter))
+                .expect_err("line items fan orders");
+            assert!(
+                err.to_string().contains("fan trap"),
+                "TABLES order {order}, filter {filter:?}: got {err}"
+            );
+        }
+    }
+}
+
+/// A query with no metrics whose rows cannot be placed, because a member is
+/// declared on no table, is still refused when two of its members are joined
+/// by two paths: the base-anchored emission would join one of them.
+#[test]
+fn dims_only_with_a_member_on_no_table_is_refused() {
+    for order in ORDERS {
+        let err = expand(
+            "dv",
+            &diamond_with_unfollowed_shapes(order),
+            &req(&["order_id", "region_name", "label"], &[], None),
+        )
+        .expect_err("two paths from orders to regions");
+        assert!(
+            matches!(err, ExpandError::MultiPath { .. }) && err.to_string().contains("o -> s -> r"),
+            "TABLES order {order}: got {err}"
+        );
+    }
+}
+
+/// The same with the member in a filter.
+#[test]
+fn dims_only_filtered_on_no_table_is_refused() {
+    for order in ORDERS {
+        let err = expand(
+            "dv",
+            &diamond_with_unfollowed_shapes(order),
+            &req(&["order_id", "region_name"], &[], Some("label = 'all'")),
+        )
+        .expect_err("two paths from orders to regions");
+        assert!(
+            matches!(err, ExpandError::MultiPath { .. }) && err.to_string().contains("o -> s -> r"),
+            "TABLES order {order}: got {err}"
+        );
+    }
+}
+
+/// And a FACTS query beside such a member.
+#[test]
+fn facts_with_a_member_on_no_table_is_refused() {
+    for order in ORDERS {
+        let request = QueryRequest {
+            where_clause: None,
+            facts: vec![
+                FactName::new("amount"),
+                FactName::new("region_name"),
+                FactName::new("label"),
+            ],
+            dimensions: vec![],
+            metrics: vec![],
+        };
+        let err = expand("dv", &diamond_with_unfollowed_shapes(order), &request)
+            .expect_err("two paths from orders to regions");
+        assert!(
+            matches!(err, ExpandError::MultiPath { .. }) && err.to_string().contains("o -> s -> r"),
+            "TABLES order {order}: got {err}"
+        );
+    }
+}
+
 /// A `USING` metric grouped by the table its relationship names: one path, so
 /// the `USING` chooses nothing, and the table is joined as usual
 /// (TECH-DEBT #81 used to leave it unbindable).

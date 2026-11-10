@@ -361,6 +361,31 @@ pub(super) fn anchor_paths(
     (paths.len() > 1).then(|| render(&paths))
 }
 
+/// For a query with no metrics whose rows cannot be placed (a member is
+/// declared on no table, so [`member_anchor`](super::sql_gen::member_anchor)
+/// decides nothing): a member table that the base table or another member's
+/// table reaches by more than one path, with that table and the paths. The
+/// base-anchored emission such a query falls to would join along one of them.
+pub(super) fn between_members(
+    def: &SemanticViewDefinition,
+    members: &[String],
+) -> Option<(String, String, Vec<String>)> {
+    let mut tables: Vec<String> = members.iter().map(|m| m.to_ascii_lowercase()).collect();
+    tables.sort();
+    tables.dedup();
+    let root = crate::graph::RelationshipGraph::from_definition(def)
+        .map(|g| g.root.to_ascii_lowercase())
+        .ok();
+    for from in root.iter().chain(&tables) {
+        for to in tables.iter().filter(|t| *t != from) {
+            if let Some(paths) = anchor_paths(def, from, to) {
+                return Some((from.clone(), to.clone(), paths));
+            }
+        }
+    }
+    None
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

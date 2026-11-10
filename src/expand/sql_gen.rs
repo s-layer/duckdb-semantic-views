@@ -626,7 +626,35 @@ fn expand_facts(
                 paths,
             ));
         }
-        _ => None,
+        _ => {
+            // Unplaced rows (a member declared on no table): two placed
+            // members joined by two paths are still refused, as for a
+            // dimensions-only query.
+            let mut placed = dim_tables.clone();
+            for fact in &resolved_facts {
+                placed.extend(fact.source_table.clone());
+                placed.extend(super::facts::collect_referenced_fact_tables(
+                    &fact.expr, &def.facts,
+                ));
+            }
+            for dim in &resolved_dims {
+                placed.extend(super::facts::collect_referenced_fact_tables(
+                    &dim.expr, &def.facts,
+                ));
+            }
+            if let Some((from, member_table, paths)) =
+                super::multi_path::between_members(def, &placed)
+            {
+                return Err(multi_path_error(
+                    view_name,
+                    &resolved_dims,
+                    from,
+                    member_table,
+                    paths,
+                ));
+            }
+            None
+        }
     };
 
     // 3b. Role-playing ambiguity detection (SG-17), mirroring the metrics
@@ -1025,7 +1053,28 @@ fn expand_unhoisted(
                     paths,
                 ));
             }
-            Anchor::Undecided => {}
+            Anchor::Undecided => {
+                // A member declared on no table leaves the rows unplaced, but
+                // two placed members joined by two paths are still refused.
+                let mut placed: Vec<String> = where_tables;
+                for dim in &resolved_dims {
+                    placed.extend(dim.source_table.clone());
+                    placed.extend(super::facts::collect_referenced_fact_tables(
+                        &dim.expr, &def.facts,
+                    ));
+                }
+                if let Some((from, member_table, paths)) =
+                    super::multi_path::between_members(def, &placed)
+                {
+                    return Err(multi_path_error(
+                        view_name,
+                        &resolved_dims,
+                        from,
+                        member_table,
+                        paths,
+                    ));
+                }
+            }
         }
     }
 
@@ -1084,6 +1133,20 @@ fn expand_unhoisted(
             if let Some((metric_name, member_table, path)) =
                 super::multi_path::first_pinned(def, root, &resolved_mets, members)
             {
+                // A member below a metric's grain is refused on every path,
+                // and that is the error to give. In per-grain mode the fence
+                // asks only that, which no choice of path changes: a pinned
+                // path is many-to-one at every step.
+                check_fan_traps(view_name, def, &resolved_dims, &resolved_mets, true, false)?;
+                if let Some(rw) = &resolved_where {
+                    super::fan_trap::check_where_clause_fan_traps(
+                        view_name,
+                        def,
+                        &rw.members,
+                        &resolved_mets,
+                        false,
+                    )?;
+                }
                 return Err(ExpandError::UnfollowedUsingPath {
                     view_name: view_name.to_string(),
                     metric_name,
