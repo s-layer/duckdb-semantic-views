@@ -473,38 +473,44 @@ impl GrainGraph {
     }
 }
 
-/// Whether `path` (`[anchor, bridge, …, target]`) reaches its target through a
-/// many-to-many **bridge** table (Phase 7.3).
+/// Whether `path` (`[anchor, …, bridge, …, target]`) reaches its target
+/// through a many-to-many **bridge** table (Phase 7.3, and after a hop up
+/// since Phase 7 PR 4).
 ///
 /// Snowflake treats a table holding many-to-one relationships to two tables as
 /// a bridge between them: a metric on one side can be grouped by a dimension
 /// on the other side, or on the bridge itself, and each of its rows counts once
 /// per group (the 7.0 fixture's B1-B10). A path qualifies when:
 ///
-/// - its FIRST hop fans the anchor: the bridge references the anchor, so one
-///   anchor row meets many bridge rows;
+/// - up to its first fanning hop, every hop follows a foreign key (or a
+///   one-to-one edge), so each anchor row reaches at most one row of each
+///   table before the bridge: `reviews -> books` (fixture 3's H1-H4) or none;
+/// - its first fanning hop enters the bridge: the bridge references the table
+///   before it, so one row there meets many bridge rows;
 /// - no later hop fans: from the bridge on, every hop follows a foreign key
 ///   (or a one-to-one edge), so each bridge row reaches at most one row of
 ///   every table after it;
-/// - the bridge references some table other than the anchor. A table whose
-///   only relationship is the one to the anchor is a plain child, and a
-///   dimension on it is below the metric's grain, refused as Snowflake refuses
-///   it (fixture A5).
+/// - the bridge references some table other than the one before it. A table
+///   whose only relationship is the one it was entered by is a plain child,
+///   and a dimension on it is below the metric's grain, refused as Snowflake
+///   refuses it (fixture A5).
 ///
-/// The first-hop rule also gives the emitter its dedup key: the bridge
-/// references the anchor, so the anchor declares a PRIMARY KEY or UNIQUE key.
-/// A fan-out reached after a hop up (`t -> u <- bridge`) would need `t`'s own
-/// key, which nothing guarantees, so it stays refused.
+/// The emitter deduplicates by the anchor's PRIMARY KEY (`per_grain`'s
+/// `anchor_key`). A bridge entered from the anchor itself guarantees the
+/// anchor a key, since the bridge references it; after a hop up the anchor
+/// may declare none, and then the plan declines and the fence refuses it.
 fn is_bridge_path(path: &[String], card_map: &CardMap) -> bool {
-    let [anchor, bridge, ..] = path else {
+    let Some(entry) = (0..path.len().saturating_sub(1))
+        .find(|&i| fanning_edge_on_path(&path[i..i + 2], card_map).is_some())
+    else {
         return false;
     };
-    let first_fans = fanning_edge_on_path(&path[..2], card_map).is_some();
-    let rest_safe = fanning_edge_on_path(&path[1..], card_map).is_none();
+    let (before, bridge) = (&path[entry], &path[entry + 1]);
+    let rest_safe = fanning_edge_on_path(&path[entry + 1..], card_map).is_none();
     let bridges_elsewhere = card_map
         .keys()
-        .any(|(from, to)| from == bridge && to != anchor);
-    first_fans && rest_safe && bridges_elsewhere
+        .any(|(from, to)| from == bridge && to != before);
+    rest_safe && bridges_elsewhere
 }
 
 /// Source tables (lowercased, sorted, deduped) whose rows feed `met`'s

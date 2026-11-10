@@ -270,11 +270,20 @@ SELECT * FROM SEMANTIC_VIEW(p7_bridge_reviews DIMENSIONS r.stars METRICS b.total
 ----
 fan trap
 
-# Refused: a fan-out after a hop up. Reviews would need their own key.
-statement error
+# A fan-out after a hop up (fixture 3, H1, H3): reviews hop up to books, then
+# cross the bridge, and each review counts once per country it reaches.
+# Reviews 1 and 2 are of Duo (two French authors), review 3 of Mixed (French
+# and British).
+query TI rowsort
 SELECT * FROM SEMANTIC_VIEW(p7_bridge_reviews DIMENSIONS a.country METRICS r.review_count);
 ----
-fan trap
+FR	3
+UK	1
+
+query I
+SELECT * FROM SEMANTIC_VIEW(p7_bridge_reviews METRICS r.review_count WHERE a.country = 'UK');
+----
+1
 
 # Refused: a semi-additive metric across the bridge, and the message says why.
 statement error
