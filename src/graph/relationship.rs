@@ -1,10 +1,13 @@
 //! Relationship graph validation and topological sort for semantic view definitions.
 //!
 //! Built from `TABLES` + `RELATIONSHIPS` declarations at CREATE time.
-//! Validates that the relationship graph forms a tree rooted at the base table
-//! (first table in TABLES clause). Rejects cycles, diamonds, self-references,
-//! orphan tables, tables unreachable from the root, unreachable `source_table`
-//! aliases, and FK/PK count mismatches.
+//! Validates the relationship graph: rejects cycles, self-references, one table
+//! referencing another twice without distinct relationship names, orphan
+//! tables, tables unreachable from the base table (first in TABLES),
+//! unreachable `source_table` aliases, and FK/PK count mismatches. A table
+//! referenced by several tables (a diamond, two bridges) is accepted; whether a
+//! query may use more than one path to it is decided per query
+//! (`expand::multi_path`).
 //!
 //! Used by `define.rs` at CREATE time and by `expand.rs` at query time.
 
@@ -82,82 +85,69 @@ impl RelationshipGraph {
         })
     }
 
-    /// Check that the relationship graph is a tree (each non-root node has
-    /// at most one parent), with an exception for role-playing dimensions.
+    /// Check that every table referenced more than once **by the same table**
+    /// is referenced through named relationships with distinct names.
     ///
-    /// Returns `Err` with a diamond description if any non-root node is
-    /// reachable via multiple paths. The sole exception (Phase 32:
-    /// role-playing) is a node reached by multiple relationships **all from the
-    /// same source table**, each named with a distinct name (e.g.
-    /// `flights -> airports` via `dep_airport` and `arr_airport`). Multiple
-    /// paths from *different* source tables are always a genuine diamond and
-    /// are rejected regardless of naming (E-4), because expansion would
-    /// otherwise resolve the ambiguous path to whichever edge was declared
-    /// first. (Fan-in onto the base table is not a diamond — the root is
-    /// exempt.)
+    /// A table referenced by several *different* tables is accepted: two
+    /// children of one parent, two bridges, a true diamond (orders reach
+    /// regions through customers and through stores), a child of a bridged
+    /// table. Snowflake creates all of these, whatever the TABLES order, and
+    /// decides per query whether the query's tables are reached by exactly one
+    /// path (`expand::multi_path`), so CREATE does not refuse them.
+    ///
+    /// One table referencing another twice (Phase 32: role-playing, e.g.
+    /// `flights -> airports` via `dep_airport` and `arr_airport`) needs every
+    /// such relationship named, with names that differ once normalized,
+    /// because each role is joined under its own alias
+    /// `<table>__<normalize_ident_part(name)>`. A table listed first in TABLES
+    /// is exempt from this, as it always was.
     pub fn check_no_diamonds(&self, def: &SemanticViewDefinition) -> Result<(), String> {
-        for (node, parents) in &self.reverse {
-            if node != &self.root && parents.len() > 1 {
-                // Parents from two or more DISTINCT source tables => a genuine
-                // multi-path diamond with an ambiguous join path. The
-                // role-playing allowance below is only for a single source
-                // declaring several named FKs (see the method doc).
-                let distinct_sources: HashSet<&String> = parents.iter().collect();
-                if distinct_sources.len() > 1 {
-                    let mut srcs: Vec<&str> = distinct_sources.iter().map(|s| s.as_str()).collect();
-                    srcs.sort_unstable();
-                    return Err(format!(
-                        "diamond: '{}' is reachable from multiple tables ({}); the join path \
-                         is ambiguous. Declare the target under a second table alias so it is \
-                         joined once per path.",
-                        node,
-                        srcs.into_iter()
-                            .map(|s| format!("'{s}'"))
-                            .collect::<Vec<_>>()
-                            .join(", ")
-                    ));
-                }
-
-                // Single source, multiple edges: allowed only as role-playing —
-                // every relationship to this node must be named with a distinct
-                // name (e.g. flights -> airports via dep_airport and
-                // arr_airport).
-                let joins_to_node: Vec<&crate::model::Join> = def
+        let mut nodes: Vec<(&String, &Vec<String>)> = self.reverse.iter().collect();
+        nodes.sort_unstable();
+        for (node, parents) in nodes {
+            if node == &self.root {
+                continue;
+            }
+            let mut sources: Vec<&String> = parents.iter().collect();
+            sources.sort_unstable();
+            sources.dedup();
+            for source in sources {
+                let joins_from_source: Vec<&crate::model::Join> = def
                     .joins
                     .iter()
-                    .filter(|j| !j.fk_columns.is_empty() && j.table.to_ascii_lowercase() == *node)
+                    .filter(|j| {
+                        !j.fk_columns.is_empty()
+                            && j.table.to_ascii_lowercase() == *node
+                            && j.from_alias.to_ascii_lowercase() == *source
+                    })
                     .collect();
-
-                let all_named =
-                    !joins_to_node.is_empty() && joins_to_node.iter().all(|j| j.name.is_some());
-
-                if all_named {
-                    // Each role is joined under the scoped alias
-                    // `<table>__<normalize_ident_part(name)>`, so the names must
-                    // differ after normalization: `dep`, `DEP` and `"dep"` are
-                    // one name, and so — for the alias, though they are two
-                    // relationship names — are `x.y` and `"x.y"`.
-                    let mut seen_names: HashMap<String, &str> = HashMap::new();
-                    for j in &joins_to_node {
-                        let name = j.name.as_deref().unwrap_or_default();
-                        let key = crate::ident::normalize_ident_part(name);
-                        if let Some(first) = seen_names.get(&key) {
-                            return Err(format!(
-                                "relationships '{first}' and '{name}' to '{node}' would both be \
-                                 joined as '{}__{key}'; role-playing relationships to one table \
-                                 need names that differ once quotes are removed and case is folded",
-                                crate::ident::normalize_ident_part(node)
-                            ));
-                        }
-                        seen_names.insert(key, name);
-                    }
-                    continue; // Role-playing: allow this diamond
+                if joins_from_source.len() < 2 {
+                    continue;
                 }
-
-                return Err(format!(
-                    "diamond: two paths to '{}' via '{}' and '{}'",
-                    node, parents[0], parents[1]
-                ));
+                if joins_from_source.iter().any(|j| j.name.is_none()) {
+                    return Err(format!(
+                        "'{source}' references '{node}' more than once; name each \
+                         relationship from '{source}' to '{node}' so each one is joined \
+                         under its own alias"
+                    ));
+                }
+                // The names must differ after normalization: `dep`, `DEP` and
+                // `"dep"` are one name, and so — for the alias, though they are
+                // two relationship names — are `x.y` and `"x.y"`.
+                let mut seen_names: HashMap<String, &str> = HashMap::new();
+                for j in &joins_from_source {
+                    let name = j.name.as_deref().unwrap_or_default();
+                    let key = crate::ident::normalize_ident_part(name);
+                    if let Some(first) = seen_names.get(&key) {
+                        return Err(format!(
+                            "relationships '{first}' and '{name}' to '{node}' would both be \
+                             joined as '{}__{key}'; role-playing relationships to one table \
+                             need names that differ once quotes are removed and case is folded",
+                            crate::ident::normalize_ident_part(node)
+                        ));
+                    }
+                    seen_names.insert(key, name);
+                }
             }
         }
         Ok(())
@@ -687,7 +677,7 @@ pub fn validate_graph(def: &SemanticViewDefinition) -> Result<RelationshipGraph,
 
     // 0b. Relationship names are unique (TECH-DEBT #79). Before the diamond
     //     check, so a duplicated role-playing name gets this message rather
-    //     than "diamond: two paths".
+    //     than the unnamed-relationship one.
     check_relationship_names_unique(def).map_err(ParseError::positionless)?;
 
     let graph = RelationshipGraph::from_definition(def).map_err(ParseError::positionless)?;
@@ -695,7 +685,7 @@ pub fn validate_graph(def: &SemanticViewDefinition) -> Result<RelationshipGraph,
     // 1. Cycle detection (Kahn's algorithm).
     let _topo_order = graph.toposort().map_err(ParseError::positionless)?;
 
-    // 2. Diamond detection (multiple parents, relaxed for named role-playing).
+    // 2. One table referencing another twice needs distinct relationship names.
     graph
         .check_no_diamonds(def)
         .map_err(ParseError::positionless)?;
@@ -773,30 +763,73 @@ mod tests {
     // Diamond detection
     // -----------------------------------------------------------------------
 
+    /// A true diamond (A -> B, A -> C, B -> D, C -> D) is created in every
+    /// TABLES order, as Snowflake does: whether a query may use it is decided
+    /// per query, by `expand::multi_path`. CREATE used to refuse it unless the
+    /// shared table D came first ("diamond: ... reachable from multiple
+    /// tables").
     #[test]
-    fn diamond_detected() {
-        // A -> B, A -> C, B -> D, C -> D (diamond at D)
-        let def = make_def(
-            vec![
-                ("a", "tbl_a", vec!["id"]),
-                ("b", "tbl_b", vec!["id"]),
-                ("c", "tbl_c", vec!["id"]),
-                ("d", "tbl_d", vec!["id"]),
-            ],
-            vec![
-                ("a", "b", vec!["b_id"]),
-                ("a", "c", vec!["c_id"]),
-                ("b", "d", vec!["d_id"]),
-                ("c", "d", vec!["d_id"]),
-            ],
-            vec![],
-            vec![],
-        );
-        let err = validate_graph(&def).unwrap_err().message;
-        assert!(
-            err.contains("diamond") && err.contains("reachable from multiple tables"),
-            "expected diamond error, got: {err}"
-        );
+    fn a_diamond_is_accepted_in_every_tables_order() {
+        let tables = [
+            ("a", "tbl_a", vec!["id"]),
+            ("b", "tbl_b", vec!["id"]),
+            ("c", "tbl_c", vec!["id"]),
+            ("d", "tbl_d", vec!["id"]),
+        ];
+        let joins = vec![
+            ("a", "b", vec!["b_id"]),
+            ("a", "c", vec!["c_id"]),
+            ("b", "d", vec!["d_id"]),
+            ("c", "d", vec!["d_id"]),
+        ];
+        for first in 0..tables.len() {
+            let mut order = tables.to_vec();
+            order.rotate_left(first);
+            let def = make_def(order, joins.clone(), vec![], vec![]);
+            assert!(
+                validate_graph(&def).is_ok(),
+                "diamond with '{}' first must be accepted: {:?}",
+                tables[first].0,
+                validate_graph(&def).err().map(|e| e.message)
+            );
+        }
+    }
+
+    /// Two children of one parent (B -> A, C -> A) and two bridges between
+    /// the same tables (X -> A, X -> B, Y -> A, Y -> B) are created with any
+    /// table first.
+    #[test]
+    fn shared_parents_are_accepted_in_every_tables_order() {
+        let shapes: [(&[&str], Vec<(&str, &str, Vec<&str>)>); 2] = [
+            (
+                &["a", "b", "c"],
+                vec![("b", "a", vec!["a_id"]), ("c", "a", vec!["a_id"])],
+            ),
+            (
+                &["a", "b", "x", "y"],
+                vec![
+                    ("x", "a", vec!["a_id"]),
+                    ("x", "b", vec!["b_id"]),
+                    ("y", "a", vec!["a_id"]),
+                    ("y", "b", vec!["b_id"]),
+                ],
+            ),
+        ];
+        for (names, joins) in shapes {
+            for first in 0..names.len() {
+                let mut order: Vec<&str> = names.to_vec();
+                order.rotate_left(first);
+                let tables: Vec<(&str, &str, Vec<&str>)> =
+                    order.iter().map(|n| (*n, *n, vec!["id"])).collect();
+                let def = make_def(tables, joins.clone(), vec![], vec![]);
+                assert!(
+                    validate_graph(&def).is_ok(),
+                    "{names:?} with '{}' first must be accepted: {:?}",
+                    order[0],
+                    validate_graph(&def).err().map(|e| e.message)
+                );
+            }
+        }
     }
 
     // -----------------------------------------------------------------------
@@ -1685,15 +1718,13 @@ mod tests {
     }
 
     #[test]
-    fn named_cross_source_diamond_rejected() {
-        // E-4 (code-review 2026-07-11): a node reached from two DIFFERENT
-        // source tables via distinctly-named relationships is a genuine
-        // multi-path diamond, NOT role-playing. It was previously accepted
-        // (the relaxation only checked name uniqueness), and expansion then
-        // silently joined the node through whichever edge was declared first.
-        // It must be rejected: role-playing requires a single source table.
-        //   a (base) -> b, a -> c, b -> d (via_b), c -> d (via_c)  =>  d is a
-        //   diamond reachable from both b and c.
+    fn named_cross_source_diamond_accepted() {
+        // A node reached from two DIFFERENT source tables via distinctly-named
+        // relationships is a diamond, not role-playing: d is joined once, bare,
+        // and a query that reaches it along both paths is refused per query by
+        // `expand::multi_path` (E-4's silent first-declared edge cannot recur).
+        // CREATE accepts it, as Snowflake does.
+        //   a (base) -> b, a -> c, b -> d (via_b), c -> d (via_c)
         let def = make_def_with_named_joins(
             vec![
                 ("a", "tbl_a", vec!["id"]),
@@ -1709,10 +1740,10 @@ mod tests {
             ],
             vec![("cnt", Some("a"), vec![])],
         );
-        let err = validate_graph(&def).unwrap_err().message;
         assert!(
-            err.contains("diamond") && err.contains("reachable from multiple tables"),
-            "cross-source named diamond must be rejected: {err}"
+            validate_graph(&def).is_ok(),
+            "{:?}",
+            validate_graph(&def).err().map(|e| e.message)
         );
     }
 
@@ -1729,8 +1760,8 @@ mod tests {
         );
         let err = validate_graph(&def).unwrap_err().message;
         assert!(
-            err.contains("diamond"),
-            "Unnamed diamonds should be rejected: {err}"
+            err.contains("'f' references 'a' more than once; name each relationship"),
+            "Unnamed role-playing relationships should be rejected: {err}"
         );
     }
 
@@ -1747,8 +1778,8 @@ mod tests {
         );
         let err = validate_graph(&def).unwrap_err().message;
         assert!(
-            err.contains("diamond"),
-            "Mixed named/unnamed diamonds should be rejected: {err}"
+            err.contains("'f' references 'a' more than once; name each relationship"),
+            "Mixed named/unnamed role-playing relationships should be rejected: {err}"
         );
     }
 

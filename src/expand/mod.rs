@@ -61,10 +61,13 @@ mod tests_diamond_paths;
 // Pins ROWS (executes the SQL in-memory), so gated the same way.
 #[cfg(all(test, not(feature = "extension")))]
 mod tests_home_anchoring;
+// Pins ROWS (executes the SQL in-memory), so gated the same way.
 #[cfg(test)]
 mod tests_join_emission_regression;
 #[cfg(test)]
 mod tests_per_grain;
+#[cfg(all(test, not(feature = "extension")))]
+mod tests_shared_tables;
 #[cfg(all(test, not(feature = "extension")))]
 mod tests_window_partition;
 // These tests pin NUMBERS, not SQL text: every case executes the generated SQL
@@ -115,6 +118,8 @@ pub use types::{
 pub(crate) use facts::collect_derived_metric_source_tables;
 #[cfg(feature = "extension")]
 pub(crate) use materialization::find_routing_materialization_name;
+#[cfg_attr(not(feature = "extension"), allow(unused_imports))]
+pub(crate) use multi_path::refused_as_many_to_many;
 // The shim's isolated bind of `semantic_view()` (`query::table_function`).
 #[cfg(feature = "extension")]
 pub(crate) use where_clause::{check_params_supplied, show_params, where_fence};

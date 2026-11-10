@@ -303,11 +303,12 @@ Troubleshooting
    you loaded the extension into and run the DDL again. Qualified table names
    such as ``pg.public.orders`` inside the view body are fine.
 
-**diamond: '...' is reachable from multiple tables**
-   The view reaches one table from two different source tables, which makes
-   the join path ambiguous. This often happens when two sources share a lookup
-   table, such as ``regions``. Declare the shared table under a second alias;
-   see :ref:`howto-rp-diamond`.
+**... reaches from table '...' by more than one path**
+   The view reaches one table from another along two chains of relationships,
+   which often happens when two sources share a lookup table, such as
+   ``regions``. Give the metric a ``USING`` that names the first relationship of
+   the path to follow, or declare the shared table under a second alias; see
+   :ref:`howto-rp-diamond`.
 
 
 .. _howto-ds-related:

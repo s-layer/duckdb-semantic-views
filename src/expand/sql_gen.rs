@@ -259,6 +259,12 @@ pub(super) enum Anchor {
     /// and a query with no metrics has no `USING` to choose one: Snowflake
     /// refuses it (010246). Holds the anchor, the member's table, and the paths.
     MultiPath(String, String, Vec<String>),
+    /// Several tables reach every member equally well, none above another
+    /// (two bridges between books and authors pair each book with its authors
+    /// twice over): Snowflake refuses it (000002, multi-path in a many-to-many
+    /// relationship). Holds the first member's table, the second's, and the
+    /// route through each such table.
+    Paired(String, String, Vec<String>),
     /// Not decided here: the base-anchored emission answers, or refuses.
     Undecided,
 }
@@ -312,7 +318,10 @@ pub(super) fn dims_only_members(
 /// - When the anchor reaches a member's table by two paths through different
 ///   tables (a diamond), the answer is [`Anchor::MultiPath`]: Snowflake refuses
 ///   it, and nothing in a query with no metrics can choose a path.
-/// - So is it when two tables do equally well, or the graph cannot be built.
+/// - When two tables do equally well (two bridges between the members' tables),
+///   the answer is [`Anchor::Paired`]: Snowflake refuses it, and which table
+///   pairs the rows would depend on declaration order.
+/// - When the graph cannot be built, the answer is [`Anchor::Undecided`].
 pub(super) fn member_anchor(def: &SemanticViewDefinition, members: &[String]) -> Anchor {
     let mut members: Vec<String> = members.iter().map(|m| m.to_ascii_lowercase()).collect();
     members.sort();
@@ -345,7 +354,15 @@ pub(super) fn member_anchor(def: &SemanticViewDefinition, members: &[String]) ->
         .filter(|t| !candidates.iter().any(|o| o != *t && reaches(t, o)))
         .collect();
     let [anchor] = closest.as_slice() else {
-        return Anchor::Undecided;
+        // Sorted, so the message does not depend on declaration order.
+        let mut pairing: Vec<&String> = closest.iter().map(|t| **t).collect();
+        pairing.sort();
+        let (first, second) = (&members[0], &members[members.len() - 1]);
+        if first == second {
+            return Anchor::Undecided;
+        }
+        let routes = super::multi_path::paired_routes(def, &pairing, first, second);
+        return Anchor::Paired(first.clone(), second.clone(), routes);
     };
     for member in &members {
         if let Some(paths) = super::multi_path::anchor_paths(def, anchor, member) {
@@ -429,6 +446,7 @@ fn multi_path_error(
     anchor: String,
     member_table: String,
     paths: Vec<String>,
+    many_to_many: bool,
 ) -> ExpandError {
     let member = resolved_dims
         .iter()
@@ -445,9 +463,10 @@ fn multi_path_error(
         detail: Box::new(super::types::MultiPathError {
             view_name: view_name.to_string(),
             member,
-            member_table,
             from_table: anchor,
             reader: "the query (with no metrics)".to_string(),
+            many_to_many,
+            member_table,
             paths,
         }),
     }
@@ -624,6 +643,17 @@ fn expand_facts(
                 anchor,
                 member_table,
                 paths,
+                false,
+            ));
+        }
+        Some(Anchor::Paired(first, second, routes)) => {
+            return Err(multi_path_error(
+                view_name,
+                &resolved_dims,
+                first,
+                second,
+                routes,
+                true,
             ));
         }
         _ => {
@@ -651,6 +681,7 @@ fn expand_facts(
                     from,
                     member_table,
                     paths,
+                    false,
                 ));
             }
             None
@@ -676,7 +707,12 @@ fn expand_facts(
     // check above.
     if anchored.is_none() {
         for fact in &resolved_facts {
-            check_fact_role_playing_path(view_name, def, fact)?;
+            check_fact_role_playing_path(
+                view_name,
+                def,
+                &super::role_playing::query_starts(def, &[]),
+                fact,
+            )?;
         }
         // TECH-DEBT #69: a queried dimension's expression may reach a fact on a
         // role-playing path too (#54 inlines it), and a fact query has no USING.
@@ -694,7 +730,7 @@ fn expand_facts(
     // spliced as the member's own expression, never rewritten to a scoped
     // alias. Same reasoning as 3b/3c.
     if let Some(rw) = resolved_where.as_ref().filter(|_| anchored.is_none()) {
-        check_where_clause_role_playing_path(view_name, def, &rw.members)?;
+        check_where_clause_role_playing_path(view_name, def, &rw.members, &[])?;
     }
 
     // 4. Resolve fact expressions via DAG inlining (fact-to-fact dependencies).
@@ -979,10 +1015,19 @@ fn expand_unhoisted(
     // compute from the base tables (correct, if slower). Routing a filtered
     // query when every referenced member is a materialized dimension is a
     // separate, later change.
-    if resolved_where.is_none() {
-        if let Some(routed_sql) =
+    //
+    // A query with no metrics is routed only once `member_anchor` has found
+    // one table to read it from: a materialization must not answer what the
+    // base tables refuse (two paths, unrelated tables).
+    let route = || {
+        if resolved_where.is_none() {
             super::materialization::try_route_materialization(def, &resolved_dims, &resolved_mets)
-        {
+        } else {
+            None
+        }
+    };
+    if !resolved_mets.is_empty() {
+        if let Some(routed_sql) = route() {
             return Ok(routed_sql);
         }
     }
@@ -1003,6 +1048,9 @@ fn expand_unhoisted(
             .map_or(Anchor::Undecided, |members| member_anchor(def, &members));
         match anchor {
             Anchor::At(anchor) => {
+                if let Some(routed_sql) = route() {
+                    return Ok(routed_sql);
+                }
                 let mut extra = where_tables;
                 for dim in &resolved_dims {
                     extra.extend(super::facts::collect_referenced_fact_tables(
@@ -1051,6 +1099,17 @@ fn expand_unhoisted(
                     anchor,
                     member_table,
                     paths,
+                    false,
+                ));
+            }
+            Anchor::Paired(first, second, routes) => {
+                return Err(multi_path_error(
+                    view_name,
+                    &resolved_dims,
+                    first,
+                    second,
+                    routes,
+                    true,
                 ));
             }
             Anchor::Undecided => {
@@ -1072,7 +1131,11 @@ fn expand_unhoisted(
                         from,
                         member_table,
                         paths,
+                        false,
                     ));
+                }
+                if let Some(routed_sql) = route() {
+                    return Ok(routed_sql);
                 }
             }
         }
@@ -1355,7 +1418,7 @@ fn expand_unhoisted(
         // reaching the member's table is unambiguous only if no role-playing
         // table sits on the path. Runs on every emission path because it is
         // decided here, above the per-grain / anchored / base-anchored split.
-        check_where_clause_role_playing_path(view_name, def, &rw.members)?;
+        check_where_clause_role_playing_path(view_name, def, &rw.members, &resolved_mets)?;
     }
 
     if let Some(plan) = grain_plan {

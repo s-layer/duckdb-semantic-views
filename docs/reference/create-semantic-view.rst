@@ -595,7 +595,7 @@ A metric on books can then be grouped or filtered by an author dimension, and th
 - A table whose only relationship is the one to the metric's table is a plain child, not a bridge, and grouping by it is still refused as a :ref:`fan trap <howto-fan-traps>`. So is a path with two one-to-many hops, or one that goes up to a parent and then down into a bridge.
 - A window metric, or a semi-additive metric whose ``NON ADDITIVE BY`` dimension is left out of the query, can't be grouped across a bridge, and the fan trap error says so.
 - The metric's table needs a ``PRIMARY KEY``, which each of its rows is counted once by. A ``UNIQUE`` key is not enough, because it can hold more than one ``NULL``, and without a ``PRIMARY KEY`` the query is refused as a fan trap.
-- Two bridges between the same two tables make the second table reachable from two tables, which is refused as a diamond (see below). Snowflake cannot pick one of them with ``USING`` either, since a metric's ``USING`` must name a relationship from the metric's own table.
+- Two bridges between the same two tables are accepted, but a query that crosses from one side to the other is refused, as in Snowflake: each row is paired with the other side through either bridge, and ``USING`` cannot pick one, since a metric's ``USING`` must name a relationship from the metric's own table. So is a query by a dimension on one bridge when the other side is reached through both. A query on one side, or a metric on a bridge by the other side, is answered. See :ref:`the error <err-multi-path>`.
 - A query with only dimensions on the two sides lists the pairs the bridge holds, as in Snowflake: ``DIMENSIONS b.title, a.country`` reads ``book_authors`` and joins up to both, so an author with no book and a book with no author are not listed. A dimension on one table alone, such as ``b.title``, lists all of that table's values (see :ref:`Dimensions only <ref-sv-modes>`).
 
 **Cardinality inference:**
@@ -609,13 +609,19 @@ Cardinality is used for :ref:`fan trap detection <howto-fan-traps>`.
 
 **Validation rules:**
 
-- The relationship graph must form a tree rooted at the base table: each table is reached from exactly one other table.
+- The relationship graph must be acyclic and connected. A table may be referenced by several tables, in any ``TABLES`` order.
 - Cycles are rejected: ``cycle detected in relationships: a -> b -> a``.
 - Several named relationships from the **same** source table to the same target are allowed. This is the role-playing pattern (``dep_airport`` and ``arr_airport`` from ``flights`` to ``airports``); pick the path per metric with ``USING``.
-- One target reached from two **different** source tables is a diamond, and is rejected whatever the relationships are named: ``diamond: 's' is reachable from multiple tables ('a', 'b'); the join path is ambiguous.`` To model it, declare the shared table twice under two aliases, one per path, so each is joined once. The base table is the exception: two tables may reference the table declared first. A query that reaches it from a metric's table by two paths (orders reach regions through customers and through stores) is refused unless the metric's ``USING`` names the first relationship of one path, ``o.rev_by_store USING (o_store) AS SUM(amount)``, which the metric then follows, as in Snowflake. See :ref:`the error <err-multi-path>`.
+- One target reached from two **different** source tables (a diamond: orders reach regions through customers and through stores) is accepted, as are two bridges between the same tables. A query that reaches a member's table from a metric's table by two paths is refused unless the metric's ``USING`` names the first relationship of one path, ``o.rev_by_store USING (o_store) AS SUM(amount)``, which the metric then follows, as in Snowflake. A query that reaches a member by no chain of relationships, and two ways, is refused whatever the ``USING``: a customer count by store (customers reach stores through orders and through regions), or pages by author country across two bridges (``book_authors`` and ``book_editors``). See :ref:`the error <err-multi-path>`.
 - Relationship names must be unique within the view, whichever tables the relationships connect. Names are compared the way DuckDB compares identifiers (case-insensitively, quoted or not), so ``route`` and ``"ROUTE"`` are the same name: ``duplicate relationship name 'route'``. A role-playing pair that repeats a name gets this error too.
 - Self-references (``from_alias`` equals ``to_alias``) are rejected.
 - Every table must be reachable from the base table (the first table in ``TABLES``) through some chain of relationships, in either direction. An orphan table (declared in ``TABLES`` but not connected by any relationship), a base table with no relationship, two separate groups of related tables, and several tables with no ``RELATIONSHIPS`` clause at all are all rejected, naming the table that cannot be reached. A single-table view needs no relationships.
+
+.. versionchanged:: 0.19.0
+
+   A table referenced by several tables is accepted in any ``TABLES`` order.
+   It used to be rejected ("diamond: ... is reachable from multiple tables")
+   unless it was declared first.
 
 .. versionchanged:: 0.14.0
 

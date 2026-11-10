@@ -333,11 +333,9 @@ fn cyclic_relationships_are_rejected_by_expand() {
     // EXP-15 specifies the outcome: `build_relationship_graph` re-runs the
     // CREATE-time cycle check, so this is now `UncheckableDefinition`.
     //
-    // Note what this test no longer proves: the fence short-circuits BEFORE the
-    // JoinTree parent-walk, so it is not the #141 termination guard any more.
-    // That guard's direct coverage is
-    // `graph::join_tree::tests::walks_terminate_on_cyclic_parent_map`, which
-    // exercises the walk on a cyclic parent map without going through the fence.
+    // The JoinTree parent-walk that #141 hung in is gone (0.19.0: its last
+    // consumer, `SHOW ... FOR METRIC`, now walks the relationships with a
+    // visited set), so there is no walk left for a termination guard to cover.
     let def = SemanticViewDefinition {
         tables: vec![
             TableRef {

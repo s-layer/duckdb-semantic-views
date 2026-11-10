@@ -76,8 +76,7 @@ fn rel(name: &str, from: &str, to: &str, fk: &str, pk: &str) -> Join {
 }
 
 /// The fixture's diamond view, with its tables in the order `order` names
-/// them: `"rcso"` is dv_r (regions first, the order our CREATE accepts) and
-/// `"ocsr"` dv_o.
+/// them: `"rcso"` is dv_r (regions first) and `"ocsr"` dv_o.
 fn diamond(order: &str) -> SemanticViewDefinition {
     let tables = order
         .chars()
@@ -120,7 +119,12 @@ fn diamond(order: &str) -> SemanticViewDefinition {
     }
 }
 
-const ORDERS: [&str; 2] = ["rcso", "ocsr"];
+/// Every TABLES order of the four tables. CREATE accepts each (Snowflake does),
+/// and each must give the same answer.
+const ORDERS: [&str; 24] = [
+    "ocsr", "ocrs", "oscr", "osrc", "orcs", "orsc", "cosr", "cors", "csor", "csro", "cros", "crso",
+    "socr", "sorc", "scor", "scro", "sroc", "srco", "rocs", "rosc", "rcos", "rcso", "rsoc", "rsco",
+];
 
 fn req(dims: &[&str], mets: &[&str], where_clause: Option<&str>) -> QueryRequest {
     QueryRequest {

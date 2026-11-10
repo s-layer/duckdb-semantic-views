@@ -781,7 +781,8 @@ fn dimension_role(
     // between them, so `anchor_joins` joins the whole chain off that instance.
     // `role_playing_on_path` finds no role-played table above the view's root,
     // which can itself be role-played (reached back from two child tables).
-    let rp = super::role_playing::role_playing_on_path("", def, &table)
+    let starts = super::role_playing::query_starts(def, mets);
+    let rp = super::role_playing::role_playing_on_path("", def, &starts, &table)
         .map_err(|_| ())?
         .unwrap_or_else(|| table.clone());
     let rel = def.joins.iter().find_map(|j| {
@@ -881,10 +882,10 @@ fn every_metric_has_roles(
 ///
 /// A table is ambiguous here if it *is* a role-playing target or is reachable
 /// only *through* one, which is what [`role_playing_on_path`] walks. Checking
-/// the tables the query touches also covers the joins between them: the
-/// relationship graph is a tree apart from the sanctioned role-playing
-/// multi-edge, so any node on the path between two touched tables is an ancestor
-/// of one of them, and the walk from that endpoint to the root passes through it.
+/// the tables the query touches also covers the joins between them: the walk
+/// from the query's starts to a touched table visits every table on the path
+/// to it, so a role-played table on the way between two touched tables is
+/// found from the farther one.
 ///
 /// [`role_playing_on_path`]: super::role_playing::role_playing_on_path
 fn role_playing_affects_query(
@@ -898,11 +899,12 @@ fn role_playing_affects_query(
     // error discarded here: a definition too malformed to walk declines
     // per-grain, and the base-anchored path it falls back to reports the real
     // diagnostic.
-    let ambiguity = |table: &String| match super::role_playing::role_playing_on_path("", def, table)
-    {
-        Ok(v) => v,
-        Err(_) => Some(table.clone()), // Unwalkable: treat as ambiguous, decline.
-    };
+    let starts = super::role_playing::query_starts(def, resolved_mets);
+    let ambiguity =
+        |table: &String| match super::role_playing::role_playing_on_path("", def, &starts, table) {
+            Ok(v) => v,
+            Err(_) => Some(table.clone()), // Unwalkable: treat as ambiguous, decline.
+        };
 
     // Tables that CANNOT be rescued by `USING`, so any role-playing on their
     // path declines outright. Deduplicated: several metrics commonly share a
@@ -915,18 +917,42 @@ fn role_playing_affects_query(
     // means and stays ineligible. A metric's grain table is likewise strict:
     // `USING` scopes the dimension a metric is grouped BY, not the table a
     // metric is aggregated AT.
-    let mut strict: HashSet<String> = where_tables
+    let strict: HashSet<String> = where_tables
         .iter()
         .map(|t| t.to_ascii_lowercase())
         .collect();
-    for met in resolved_mets {
-        // Named tables only: this asks which tables the query touches, so a
-        // root-grain component contributes nothing — the root is the anchor and
-        // is never the role-played table whose path is ambiguous.
-        strict.extend(metric_grain(met, def).named_tables().iter().cloned());
-    }
     if strict.iter().any(|t| ambiguity(t).is_some()) {
         return true;
+    }
+    // A metric's grain table is its group's anchor, so its own rows are read:
+    // it is ambiguous only where the own-table check finds a role on the way
+    // to it from another table the query reads (or it is role-played and the
+    // query reads another table). A metric on a role-played table read alone
+    // is answered over that table's rows, and must not fall to the
+    // base-anchored FROM, which joins it to the base table and refuses it as a
+    // fan trap. Named tables only: a root-grain component is the base table's,
+    // which the own-table check exempts while the query stays on it.
+    let read: Vec<String> = resolved_dims
+        .iter()
+        .filter_map(|d| d.source_table.as_ref().map(|t| t.to_ascii_lowercase()))
+        .chain(strict.iter().cloned())
+        .collect();
+    for met in resolved_mets {
+        // The dimensions a snapshot or a window joins to the metric's rows
+        // are read beside them too.
+        let named: Vec<String> = metrics_reached(def, met)
+            .into_iter()
+            .flat_map(|m| super::role_playing::named_dimension_tables(def, m))
+            .collect();
+        for grain in metric_grain(met, def).named_tables() {
+            let mut others: Vec<String> = read.iter().chain(&named).cloned().collect();
+            others.sort_unstable();
+            others.dedup();
+            match super::role_playing::role_on_the_way_to_own_table("", def, grain, &others) {
+                Ok(None) => {}
+                Ok(Some(_)) | Err(_) => return true,
+            }
+        }
     }
 
     // A queried dimension's table may be rescued when the ambiguous table is

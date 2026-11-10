@@ -574,9 +574,8 @@ Graph validation errors
 
    cycle detected in relationships: <alias1> -> <alias2> -> <alias1>
 
-   diamond: '<alias>' is reachable from multiple tables ('<from1>', '<from2>');
-   the join path is ambiguous. Declare the target under a second table alias
-   so it is joined once per path.
+   '<from>' references '<alias>' more than once; name each relationship from
+   '<from>' to '<alias>' so each one is joined under its own alias
 
    orphan table '<alias>' is not connected by any relationship; did you mean '<suggestion>'?
 
@@ -600,13 +599,13 @@ Graph validation errors
 
    unknown source table '<alias>'; did you mean '<suggestion>'?
 
-**Cause:** The relationship graph violates tree structure requirements.
+**Cause:** The relationship graph is invalid: a self-reference, a cycle, an unnamed or unconnected relationship, or a naming clash.
 
 **Fix:**
 
 - **Self-reference:** A table cannot have a relationship pointing to itself.
 - **Cycle:** Follow the chain in the error message to find the circular dependency and remove it.
-- **Diamond:** One target table is reached from two different source tables. Naming the relationships does not help; declare the shared table a second time under another alias (for example ``s_a AS stores`` and ``s_b AS stores``) so each path has its own copy. Several relationships from the *same* source table to one target are allowed; that is the role-playing pattern (see :ref:`howto-role-playing`).
+- **Unnamed role-playing relationships:** One table references another twice and at least one of the relationships has no name. Name each one, so each is joined under its own alias; that is the role-playing pattern (see :ref:`howto-role-playing`). A table referenced by two *different* tables is accepted since 0.19.0, in any ``TABLES`` order; a query that would have to pick one of its paths is refused instead (see :ref:`err-multi-path`).
 - **Orphan:** Add a relationship that connects the table, or remove it from ``TABLES``.
 - **Not connected / not reachable:** Every table must be reachable from the first table in ``TABLES``. Add the missing relationship, or remove the table. A view that lists several tables but no ``RELATIONSHIPS`` at all gets the base-table form of this error.
 - **No foreign-key columns:** A YAML ``joins`` entry needs ``fk_columns`` (the DDL form always has them).
@@ -1444,7 +1443,7 @@ Ambiguous fact or metric on a role-playing table
    it on the referencing table with USING instead, e.g.
    <table>.<metric> USING (<relationship>) AS SUM(<fact>).
 
-**Cause:** The first form: a metric, dimension, or fact reaches a fact on a role-playing table (or on a table reached only through one), and nothing says which relationship to read it through. The second form: a metric is declared on the role-playing table itself, where ``USING`` cannot be attached. When the relationships fan out, the second case raises ``fan trap detected`` instead. If the role-playing table is the view's base table (declared first in ``TABLES``), a metric on it is answered when it is queried without dimensions, alongside only other base-table metrics, and with a filter (if any) that names only base-table members. A dimension, filter, co-queried metric or ``NON ADDITIVE BY`` dimension on another table brings this error back. Grouping by a dimension on the base table itself, or a ``NON ADDITIVE BY`` on one, is rejected too, with the ``dimension ... is ambiguous`` error (a known limitation).
+**Cause:** The first form: a metric, dimension, or fact reaches a fact on a role-playing table (or on a table reached only through one), and nothing says which relationship to read it through. The second form: a metric is declared on the role-playing table itself (or on a table reached only through it), where ``USING`` cannot be attached, and the query groups or filters it by a dimension on another table, or its ``NON ADDITIVE BY`` or window names one: those would be joined to the metric's rows through one of the relationships without saying which. A metric on the role-playing table queried with no dimension, alone or beside metrics on other tables, is computed over its own table's rows and needs no role. Grouping it by a dimension on its own table is rejected too, with the ``dimension ... is ambiguous`` error (a known limitation).
 
 **Fix:** Declare the metric on the referencing table and give it a ``USING`` that names one relationship, for example ``f.dep_elev USING (dep_airport) AS SUM(a.elev)``. See :ref:`howto-rp-facts`.
 
@@ -1639,6 +1638,23 @@ Table reached by more than one path
 .. versionchanged:: 0.19.0
 
    These queries used to follow the path declared first, without saying so.
+
+.. code-block:: text
+
+   semantic view '<view>': dimension '<dim>' is on table '<table>', which
+   metric '<metric>' reaches from table '<from>' by no chain of relationships
+   and by more than one path across a many-to-many relationship:
+   c -> r <- s, c <- o -> s. A USING cannot choose between them, and
+   Snowflake does not support this either (multi-path in a many-to-many
+   relationship). Query members one path reaches
+
+**Cause:** No chain of relationships leads from the metric's table to ``<table>``, so reaching it crosses a many-to-many relationship (``c <- o -> s``: the orders between customers and stores) or steps back along a relationship, and there is more than one way to do that. Customers reach stores through their orders and through their regions; books reach authors through either of two bridges (``b <- ba -> a``, ``b <- be -> a``); a book reaches ``book_authors`` directly and through its lead author (``b <- ba``, ``b -> a <- ba``). Each path gives a different number. The same error names a filter member, and a query with no metrics whose members two bridges pair. Snowflake refuses the same queries: ``000002: Unsupported feature 'Multi-path in many-to-many relationship'``.
+
+**Fix:** Query a metric on a table that reaches the member by a chain of relationships (``o.revenue`` by store, ``ba.credits`` by author country), or members one path reaches. To cross one way only, declare a view without the other path.
+
+.. versionchanged:: 0.19.0
+
+   Such views used to be refused at ``CREATE``.
 
 .. code-block:: text
 

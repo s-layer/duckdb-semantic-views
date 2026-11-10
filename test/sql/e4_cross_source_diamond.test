@@ -1,8 +1,9 @@
 # E-4 (code-review 2026-07-11): a table reachable from two DIFFERENT source
 # tables is a genuine multi-path join diamond, not role-playing. Before the
-# fix the definition was accepted (as long as the relationships were named)
+# E-4 fix the definition was accepted (as long as the relationships were named)
 # and a query silently joined the shared table through whichever relationship
-# was declared first. CREATE must reject it at define time.
+# was declared first. E-4 refused it at CREATE. Since 0.19.0 CREATE accepts it,
+# as Snowflake does, and the query that would have to pick a path is refused.
 #
 # End-to-end coverage: exercises the full extension-load -> DDL -> graph
 # validation pipeline that the Rust unit tests in graph/relationship.rs miss.
@@ -22,8 +23,8 @@ statement ok
 CREATE TABLE e4_d (id INTEGER, name VARCHAR);
 
 # `d` is reachable via o->a->d AND o->b->d: two distinct source tables (a, b)
-# converge on it. Rejected regardless of relationship naming.
-statement error
+# converge on it.
+statement ok
 CREATE SEMANTIC VIEW e4_diamond AS
   TABLES (
     o AS e4_o,
@@ -43,8 +44,11 @@ CREATE SEMANTIC VIEW e4_diamond AS
   METRICS (
     o.total AS SUM(o.val)
   );
+
+statement error
+SELECT * FROM SEMANTIC_VIEW(e4_diamond DIMENSIONS d.name METRICS o.total);
 ----
-reachable from multiple tables
+by more than one path: o -> a -> d, o -> b -> d
 
 # Role-playing (a SINGLE source table with two distinctly-named FKs to one
 # target) is NOT a diamond and remains accepted — the no-regression guard.

@@ -13,7 +13,7 @@ Goal-oriented guides for specific tasks with DuckDB Semantic Views.
 
 - :ref:`howto-facts` -- Define reusable row-level expressions that can be referenced inside metric aggregations.
 - :ref:`howto-derived-metrics` -- Compose metrics from other metrics using arithmetic without repeating aggregate logic.
-- :ref:`howto-role-playing` -- Join the same table through several named relationships, pick the route with ``USING``, and fix an ambiguous diamond.
+- :ref:`howto-role-playing` -- Join the same table through several named relationships, pick the route with ``USING``, and query a diamond.
 - :ref:`howto-fan-traps` -- Diagnose and fix the fan trap error in multi-table views, and see which queries across several grains are answered.
 - :ref:`howto-query-tables` -- Make a ``TABLES`` entry a query that joins, filters or pre-aggregates source tables inside the view.
 

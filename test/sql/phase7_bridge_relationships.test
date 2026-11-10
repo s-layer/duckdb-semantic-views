@@ -282,18 +282,25 @@ SELECT * FROM SEMANTIC_VIEW(p7_bridge_reviews DIMENSIONS a.country METRICS b.las
 ----
 many-to-many bridge
 
-# Two bridges between the same two tables are a diamond, refused at CREATE.
-# Snowflake accepts the view but cannot pick a bridge with USING either.
+# Two bridges between the same two tables (fixture 3, Q). Snowflake creates
+# the view in any TABLES order and refuses a query that crosses from books to
+# authors (000002 "Multi-path in many-to-many relationship"), since each book
+# reaches its authors through either bridge and USING cannot pick one. A query
+# that stays on one bridge is answered. CREATE used to refuse the view as a
+# "diamond". `be` (editors) holds one row: Ben edits Solo.
 statement ok
 CREATE TABLE book_editors (book_id INTEGER, author_id INTEGER);
 
-statement error
+statement ok
+INSERT INTO book_editors VALUES (12, 2);
+
+statement ok
 CREATE SEMANTIC VIEW p7_two_bridges
   TABLES (
-    a  AS authors      PRIMARY KEY (author_id),
-    b  AS books        PRIMARY KEY (book_id),
     ba AS book_authors PRIMARY KEY (book_id, author_id),
-    be AS book_editors PRIMARY KEY (book_id, author_id)
+    be AS book_editors PRIMARY KEY (book_id, author_id),
+    b  AS books        PRIMARY KEY (book_id),
+    a  AS authors      PRIMARY KEY (author_id)
   )
   RELATIONSHIPS (
     ba_author AS ba (author_id) REFERENCES a,
@@ -301,7 +308,129 @@ CREATE SEMANTIC VIEW p7_two_bridges
     be_author AS be (author_id) REFERENCES a,
     be_book   AS be (book_id)   REFERENCES b
   )
-  DIMENSIONS (a.country AS country)
-  METRICS (b.total_pages AS SUM(pages));
+  DIMENSIONS (a.country AS country, b.title AS title, ba.role AS role)
+  METRICS (
+    b.total_pages  AS SUM(pages),
+    a.author_count AS COUNT(author_id),
+    ba.credits     AS COUNT(*),
+    be.edits       AS COUNT(*)
+  );
+
+# Q2: pages by author country.
+statement error
+SELECT * FROM SEMANTIC_VIEW(p7_two_bridges DIMENSIONS a.country METRICS b.total_pages);
 ----
-diamond
+by more than one path across a many-to-many relationship: b <- ba -> a, b <- be -> a
+
+# Q3: author count by title.
+statement error
+SELECT * FROM SEMANTIC_VIEW(p7_two_bridges DIMENSIONS b.title METRICS a.author_count);
+----
+by more than one path across a many-to-many relationship: a <- ba -> b, a <- be -> b
+
+# Q7: pages by a dimension on one bridge, which books reach directly and
+# through the other bridge and authors.
+statement error
+SELECT * FROM SEMANTIC_VIEW(p7_two_bridges DIMENSIONS ba.role METRICS b.total_pages);
+----
+across a many-to-many relationship: b <- ba, b <- be -> a <- ba
+
+# Q8: titles and countries with no metric.
+statement error
+SELECT * FROM SEMANTIC_VIEW(p7_two_bridges DIMENSIONS b.title, a.country);
+----
+by more than one path across a many-to-many relationship: a <- ba -> b, a <- be -> b
+
+# Q4, Q5, Q6, Q9: one side, or one bridge.
+query I
+SELECT * FROM SEMANTIC_VIEW(p7_two_bridges METRICS b.total_pages);
+----
+650
+
+query TI rowsort
+SELECT * FROM SEMANTIC_VIEW(p7_two_bridges DIMENSIONS a.country METRICS ba.credits);
+----
+FR	3
+UK	2
+
+query TI rowsort
+SELECT * FROM SEMANTIC_VIEW(p7_two_bridges DIMENSIONS a.country METRICS be.edits);
+----
+FR	1
+
+query T rowsort
+SELECT * FROM SEMANTIC_VIEW(p7_two_bridges DIMENSIONS a.country);
+----
+DE
+FR
+UK
+
+# Standard SQL over the view refuses Q2 too.
+statement error
+SELECT country, AGG(total_pages) FROM p7_two_bridges GROUP BY country;
+----
+many-to-many relationship
+
+# A direct foreign key beside a bridge (fixture 5, P). Each book references its
+# lead author, and lists all its authors in book_authors. Snowflake follows the
+# one chain, the lead author, for pages by country (P1, P7), and refuses a
+# member it reaches by no chain and a second way: pages by a bridge dimension
+# (books reach book_authors directly and through the lead author, P3) and
+# author count by title (P4). Credits by country reach authors by two chains
+# (P6, 010246).
+statement ok
+CREATE TABLE lead_books (book_id INTEGER, title VARCHAR, pages INTEGER, lead_id INTEGER);
+
+statement ok
+INSERT INTO lead_books VALUES (10, 'Duo', 100, 1), (11, 'Mixed', 200, 3), (12, 'Solo', 300, 3), (13, 'Orphan', 50, NULL);
+
+statement ok
+CREATE SEMANTIC VIEW p7_lead
+  TABLES (
+    b  AS lead_books   PRIMARY KEY (book_id),
+    a  AS authors      PRIMARY KEY (author_id),
+    ba AS book_authors PRIMARY KEY (book_id, author_id)
+  )
+  RELATIONSHIPS (
+    b_lead    AS b (lead_id)    REFERENCES a,
+    ba_author AS ba (author_id) REFERENCES a,
+    ba_book   AS ba (book_id)   REFERENCES b
+  )
+  DIMENSIONS (a.country AS country, b.title AS title, ba.role AS role)
+  METRICS (
+    b.total_pages  AS SUM(pages),
+    a.author_count AS COUNT(author_id),
+    ba.credits     AS COUNT(*)
+  );
+
+# P1: the lead author's country.
+query TI rowsort
+SELECT * FROM SEMANTIC_VIEW(p7_lead DIMENSIONS a.country METRICS b.total_pages);
+----
+FR	100
+NULL	50
+UK	500
+
+# P7: filtered on the lead author's country.
+query I
+SELECT * FROM SEMANTIC_VIEW(p7_lead METRICS b.total_pages WHERE a.country = 'FR');
+----
+100
+
+# P3
+statement error
+SELECT * FROM SEMANTIC_VIEW(p7_lead DIMENSIONS ba.role METRICS b.total_pages);
+----
+across a many-to-many relationship: b <- ba, b -> a <- ba
+
+# P4
+statement error
+SELECT * FROM SEMANTIC_VIEW(p7_lead DIMENSIONS b.title METRICS a.author_count);
+----
+across a many-to-many relationship: a <- b, a <- ba -> b
+
+# P6
+statement error
+SELECT * FROM SEMANTIC_VIEW(p7_lead DIMENSIONS a.country METRICS ba.credits);
+----
+by more than one path: ba -> a, ba -> b -> a

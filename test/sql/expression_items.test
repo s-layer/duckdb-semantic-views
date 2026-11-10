@@ -433,7 +433,7 @@ SAN FRANCISCO	26
 statement error
 SELECT * FROM SEMANTIC_VIEW(exi_air DIMENSIONS upper(city) METRICS flights);
 ----
-dimension 'upper(city)' is ambiguous -- table 'a' is reached via multiple relationships: [dep_airport, arr_airport]
+dimension 'upper(city)' is ambiguous -- table 'a' is reached via multiple relationships: [arr_airport, dep_airport]
 
 query I
 SELECT * FROM SEMANTIC_VIEW(exi_air METRICS dep_elev + flights AS x);
