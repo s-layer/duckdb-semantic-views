@@ -204,6 +204,9 @@ The same applies to these shapes:
   dimension left out of the query).
 - A role-played table, when every metric's ``USING`` names a relationship to
   it (metrics naming different ones are grouped separately and merged).
+- A dimension or filter across a many-to-many bridge table, such as a book
+  metric grouped by author country through ``book_authors``. Each book counts
+  once per group (see :ref:`Many-to-many relationships through a bridge <ref-create-bridge-relationships>`).
 
 A dimension group that exists at one grain but not another is kept, with
 ``NULL`` for the metrics that have no rows there. For example, a region with
@@ -216,6 +219,8 @@ single grain instead:
 - A role-played dimension together with an active semi-additive metric.
 - A role-played table reached by a metric with no ``USING`` to say which
   relationship is meant.
+- A window metric, or an active semi-additive metric, grouped or filtered
+  across a many-to-many bridge.
 
 :ref:`explanation-grain-multi` explains how the per-grain results are joined,
 and :ref:`explanation-grain-refused` explains why these three shapes are

@@ -1,0 +1,307 @@
+# Phase 7.3: many-to-many relationships through a bridge table.
+#
+# `book_authors` references both `authors` and `books`, and no relationship
+# runs between those two. The data and the expected answers are the Phase 7.0
+# fixture's (section B), as Snowflake gave them (2026-11-07): a metric is
+# counted once per group, never once per bridge row, so Duo (two French
+# authors) counts once for FR and Mixed (a French and a UK author) under both.
+# A book with no author lands in the NULL group, and the total with no
+# dimension is the books' own.
+
+require semantic_views
+
+statement ok
+CREATE TABLE authors (author_id INTEGER, name VARCHAR, country VARCHAR);
+
+statement ok
+CREATE TABLE books (book_id INTEGER, title VARCHAR, pages INTEGER);
+
+statement ok
+CREATE TABLE book_authors (book_id INTEGER, author_id INTEGER, role VARCHAR);
+
+statement ok
+CREATE TABLE countries (country VARCHAR, continent VARCHAR);
+
+statement ok
+INSERT INTO authors VALUES (1, 'Ana', 'FR'), (2, 'Ben', 'FR'), (3, 'Cleo', 'UK'), (4, 'Dan', 'DE');
+
+statement ok
+INSERT INTO books VALUES (10, 'Duo', 100), (11, 'Mixed', 200), (12, 'Solo', 300), (13, 'Orphan', 50);
+
+statement ok
+INSERT INTO book_authors VALUES
+  (10, 1, 'lead'), (10, 2, 'co'),
+  (11, 1, 'lead'), (11, 3, 'co'),
+  (12, 3, 'lead');
+
+statement ok
+INSERT INTO countries VALUES ('FR', 'Europe'), ('UK', 'Europe'), ('DE', 'Europe');
+
+statement ok
+CREATE SEMANTIC VIEW p7_bridge
+  TABLES (
+    a  AS authors      PRIMARY KEY (author_id),
+    b  AS books        PRIMARY KEY (book_id),
+    ba AS book_authors PRIMARY KEY (book_id, author_id),
+    c  AS countries    PRIMARY KEY (country)
+  )
+  RELATIONSHIPS (
+    ba_author AS ba (author_id) REFERENCES a,
+    ba_book   AS ba (book_id)   REFERENCES b,
+    a_country AS a (country)    REFERENCES c
+  )
+  DIMENSIONS (
+    a.country   AS country,
+    a.author    AS name,
+    b.title     AS title,
+    ba.role     AS role,
+    c.continent AS continent
+  )
+  METRICS (
+    b.total_pages    AS SUM(pages),
+    b.book_count     AS COUNT(*),
+    b.distinct_books AS COUNT(DISTINCT book_id),
+    a.author_count   AS COUNT(author_id)
+  );
+
+# B1: once per group. Joining the bridge into the aggregate would give FR 400 / 3.
+query TIII
+SELECT * FROM SEMANTIC_VIEW(p7_bridge
+  DIMENSIONS a.country METRICS b.total_pages, b.book_count, b.distinct_books)
+ORDER BY 1 NULLS LAST;
+----
+FR	300	2	2
+UK	500	2	2
+NULL	50	1	1
+
+# B2: no dimension, no inflation, and the authorless book is included.
+query III
+SELECT * FROM SEMANTIC_VIEW(p7_bridge METRICS b.total_pages, b.book_count, b.distinct_books);
+----
+650	4	4
+
+# B3: by author.
+query TI
+SELECT * FROM SEMANTIC_VIEW(p7_bridge DIMENSIONS a.author METRICS b.total_pages)
+ORDER BY 1 NULLS LAST;
+----
+Ana	300
+Ben	100
+Cleo	500
+NULL	50
+
+# B5: a filter across the bridge keeps a book when any author matches, once.
+query II
+SELECT * FROM SEMANTIC_VIEW(p7_bridge
+  METRICS b.total_pages, b.book_count
+  WHERE a.country = 'FR');
+----
+300	2
+
+# Mixed matches both values and still counts once.
+query II
+SELECT * FROM SEMANTIC_VIEW(p7_bridge
+  METRICS b.total_pages, b.book_count
+  WHERE a.country IN ('FR', 'UK'));
+----
+600	3
+
+# B6: the other direction. `a`, the base table, is the metric's home here.
+query TI
+SELECT * FROM SEMANTIC_VIEW(p7_bridge DIMENSIONS b.title METRICS a.author_count)
+ORDER BY 1 NULLS LAST;
+----
+Duo	2
+Mixed	2
+Solo	1
+NULL	1
+
+# B7: a dimension on the bridge itself.
+query TI
+SELECT * FROM SEMANTIC_VIEW(p7_bridge DIMENSIONS ba.role METRICS b.total_pages)
+ORDER BY 1 NULLS LAST;
+----
+co	300
+lead	600
+NULL	50
+
+query TTI
+SELECT * FROM SEMANTIC_VIEW(p7_bridge DIMENSIONS ba.role, a.country METRICS b.total_pages)
+ORDER BY 1 NULLS LAST, 2 NULLS LAST;
+----
+co	FR	100
+co	UK	200
+lead	FR	300
+lead	UK	300
+NULL	NULL	50
+
+# B9: a hop past the bridge, still once per group.
+query TII
+SELECT * FROM SEMANTIC_VIEW(p7_bridge DIMENSIONS c.continent METRICS b.total_pages, b.book_count)
+ORDER BY 1 NULLS LAST;
+----
+Europe	600	3
+NULL	50	1
+
+# Metrics on both sides of the bridge, each at its own grain: DE has an author
+# and no pages, the NULL group pages and no author.
+query TII
+SELECT * FROM SEMANTIC_VIEW(p7_bridge DIMENSIONS a.country METRICS b.total_pages, a.author_count)
+ORDER BY 1 NULLS LAST;
+----
+DE	NULL	1
+FR	300	2
+UK	500	1
+NULL	50	NULL
+
+# The standard SQL form takes the same path.
+query TI
+SELECT country, AGG(total_pages) FROM p7_bridge WHERE country <> 'DE' GROUP BY country ORDER BY country;
+----
+FR	300
+UK	500
+
+# B4: a dimension-only query across the bridge lists the pairs the bridge
+# holds, as Snowflake does: it reads from the bridge, the one table both
+# dimensions are reached from by foreign key. Dan, who has no book, and
+# Orphan, which has no author, are not listed.
+query TT
+SELECT * FROM SEMANTIC_VIEW(p7_bridge DIMENSIONS b.title, a.country)
+ORDER BY 1 NULLS LAST, 2 NULLS LAST;
+----
+Duo	FR
+Mixed	FR
+Mixed	UK
+Solo	UK
+
+# One table lists its own values: Orphan too, though no bridge row reaches it.
+query T
+SELECT * FROM SEMANTIC_VIEW(p7_bridge DIMENSIONS b.title) ORDER BY 1;
+----
+Duo
+Mixed
+Orphan
+Solo
+
+# B10: the fact table as the bridge. Cleo bought nothing, so the NULL group
+# has a customer and no revenue.
+statement ok
+CREATE TABLE customers (cust_id INTEGER, cust_name VARCHAR);
+
+statement ok
+CREATE TABLE products (product_id INTEGER, category VARCHAR);
+
+statement ok
+CREATE TABLE sales (sale_id INTEGER, cust_id INTEGER, product_id INTEGER, amount INTEGER);
+
+statement ok
+INSERT INTO customers VALUES (1, 'Ana'), (2, 'Ben'), (3, 'Cleo');
+
+statement ok
+INSERT INTO products VALUES (1, 'book'), (2, 'book'), (3, 'toy');
+
+statement ok
+INSERT INTO sales VALUES (1, 1, 1, 10), (2, 1, 2, 20), (3, 2, 3, 30), (4, 2, 1, 40);
+
+statement ok
+CREATE SEMANTIC VIEW p7_fact_bridge
+  TABLES (
+    c AS customers PRIMARY KEY (cust_id),
+    p AS products  PRIMARY KEY (product_id),
+    s AS sales     PRIMARY KEY (sale_id)
+  )
+  RELATIONSHIPS (
+    sale_customer AS s (cust_id)    REFERENCES c,
+    sale_product  AS s (product_id) REFERENCES p
+  )
+  DIMENSIONS (p.category AS category)
+  METRICS (
+    c.customer_count AS COUNT(cust_id),
+    s.revenue        AS SUM(amount)
+  );
+
+query TI
+SELECT * FROM SEMANTIC_VIEW(p7_fact_bridge DIMENSIONS p.category METRICS c.customer_count)
+ORDER BY 1 NULLS LAST;
+----
+book	2
+toy	1
+NULL	1
+
+query TII
+SELECT * FROM SEMANTIC_VIEW(p7_fact_bridge
+  DIMENSIONS p.category METRICS c.customer_count, s.revenue)
+ORDER BY 1 NULLS LAST;
+----
+book	2	70
+toy	1	30
+NULL	1	NULL
+
+# Refused: a dimension on a plain child (a table whose only relationship is to
+# the metric's) is below the metric's grain, as Snowflake refuses it.
+statement ok
+CREATE TABLE reviews (review_id INTEGER, book_id INTEGER, stars INTEGER);
+
+statement ok
+INSERT INTO reviews VALUES (1, 10, 5), (2, 10, 3), (3, 11, 4);
+
+statement ok
+CREATE SEMANTIC VIEW p7_bridge_reviews
+  TABLES (
+    b  AS books        PRIMARY KEY (book_id),
+    a  AS authors      PRIMARY KEY (author_id),
+    ba AS book_authors PRIMARY KEY (book_id, author_id),
+    r  AS reviews      PRIMARY KEY (review_id)
+  )
+  RELATIONSHIPS (
+    ba_author AS ba (author_id) REFERENCES a,
+    ba_book   AS ba (book_id)   REFERENCES b,
+    r_book    AS r (book_id)    REFERENCES b
+  )
+  DIMENSIONS (a.country AS country, r.stars AS stars, b.title AS title)
+  METRICS (
+    b.total_pages    AS SUM(pages),
+    r.review_count   AS COUNT(*),
+    b.last_pages NON ADDITIVE BY (title) AS SUM(pages)
+  );
+
+statement error
+SELECT * FROM SEMANTIC_VIEW(p7_bridge_reviews DIMENSIONS r.stars METRICS b.total_pages);
+----
+fan trap
+
+# Refused: a fan-out after a hop up. Reviews would need their own key.
+statement error
+SELECT * FROM SEMANTIC_VIEW(p7_bridge_reviews DIMENSIONS a.country METRICS r.review_count);
+----
+fan trap
+
+# Refused: a semi-additive metric across the bridge, and the message says why.
+statement error
+SELECT * FROM SEMANTIC_VIEW(p7_bridge_reviews DIMENSIONS a.country METRICS b.last_pages);
+----
+many-to-many bridge
+
+# Two bridges between the same two tables are a diamond, refused at CREATE.
+# Snowflake accepts the view but cannot pick a bridge with USING either.
+statement ok
+CREATE TABLE book_editors (book_id INTEGER, author_id INTEGER);
+
+statement error
+CREATE SEMANTIC VIEW p7_two_bridges
+  TABLES (
+    a  AS authors      PRIMARY KEY (author_id),
+    b  AS books        PRIMARY KEY (book_id),
+    ba AS book_authors PRIMARY KEY (book_id, author_id),
+    be AS book_editors PRIMARY KEY (book_id, author_id)
+  )
+  RELATIONSHIPS (
+    ba_author AS ba (author_id) REFERENCES a,
+    ba_book   AS ba (book_id)   REFERENCES b,
+    be_author AS be (author_id) REFERENCES a,
+    be_book   AS be (book_id)   REFERENCES b
+  )
+  DIMENSIONS (a.country AS country)
+  METRICS (b.total_pages AS SUM(pages));
+----
+diamond

@@ -213,11 +213,13 @@ read differently on its own than beside a metric from another table.
 
 .. note::
 
-   Only metrics are anchored this way. A dimensions-only query and a ``FACTS``
-   query are row-level, and keep their earlier behavior: they start at the base
-   table and drop the row a parent with no children would otherwise contribute.
-   A row-level query on a child fact therefore still omits a child row whose
-   foreign key is ``NULL``.
+   A dimensions-only query is anchored the same way since 0.19.0: it reads the
+   table under all its dimensions and joins up, so a parent and a child
+   dimension list the child's rows (see :ref:`Dimensions only <ref-sv-modes>`).
+   A ``FACTS`` query is row-level and keeps its earlier behavior: it starts at
+   the base table and drops the row a parent with no children would otherwise
+   contribute, so a ``FACTS`` query on a child fact still omits a child row
+   whose foreign key is ``NULL``.
 
 
 .. _explanation-grain-multi:

@@ -43,6 +43,7 @@ pub(super) fn check_fan_traps(
     resolved_dims: &[&crate::model::Dimension],
     resolved_mets: &[&Metric],
     per_grain: bool,
+    bridges: bool,
 ) -> Result<(), ExpandError> {
     if def.joins.is_empty() {
         return Ok(());
@@ -71,6 +72,10 @@ pub(super) fn check_fan_traps(
     // dedupe them (silent double-count). Window metrics were never skipped
     // (their inner aggregate is computed over the fanned join before the window
     // function runs); semi-additive metrics are now treated the same way.
+    // Phase 7.3: a refused path across a bridge is reported only when no plain
+    // fan-out is refused too, since a plain fan-out is what blocks the query
+    // then, and the bridge note would name the wrong reason.
+    let mut bridge_trap: Option<ExpandError> = None;
     for met in resolved_mets {
         // EXP-8: a base metric with no source table and no base-metric
         // references has an empty grain set but sits at the root grain — the
@@ -95,8 +100,16 @@ pub(super) fn check_fan_traps(
                 let Some(path) = find_path(met_table, &dim_table, &adjacency) else {
                     continue; // Not connected (legacy joins carrying no FK metadata)
                 };
+                // Phase 7.3: a dimension across a many-to-many bridge is
+                // answered once per group by the per-grain plan, which passes
+                // `bridges` only when every group it emits deduplicates its
+                // anchor rows that way. Every other fanning path is refused.
+                if bridges && is_bridge_path(&path, &card_map) {
+                    continue;
+                }
                 if let Some(rel_name) = fanning_edge_on_path(&path, &card_map) {
-                    return Err(ExpandError::FanTrap {
+                    let across_bridge = is_bridge_path(&path, &card_map);
+                    let trap = ExpandError::FanTrap {
                         detail: Box::new(FanTrapError {
                             view_name: view_name.to_string(),
                             metric_name: met.name.clone(),
@@ -107,11 +120,19 @@ pub(super) fn check_fan_traps(
                             dimension_name: dim.name.clone(),
                             dimension_table: dim_table_raw.clone(),
                             relationship_name: rel_name,
+                            across_bridge,
                         }),
-                    });
+                    };
+                    if !across_bridge {
+                        return Err(trap);
+                    }
+                    bridge_trap.get_or_insert(trap);
                 }
             }
         }
+    }
+    if let Some(trap) = bridge_trap {
+        return Err(trap);
     }
 
     // EXP-9 (code-review 2026-08-03): the loop above pairs each metric with the
@@ -161,6 +182,7 @@ pub(super) fn check_fan_traps(
                         dimension_name: na.dim_name,
                         dimension_table: na.source_table_raw,
                         relationship_name: rel_name,
+                        across_bridge: is_bridge_path(&path, &card_map),
                     }),
                 });
             }
@@ -434,6 +456,48 @@ impl GrainGraph {
         let path = self.path(from, to)?;
         fanning_edge_on_path(&path, &self.card_map)
     }
+
+    /// Whether the `from` → `to` path crosses a many-to-many bridge (Phase
+    /// 7.3), the one fanning shape a grain CTE can still answer: see
+    /// [`is_bridge_path`].
+    pub(super) fn is_bridge(&self, from: &str, to: &str) -> bool {
+        self.path(from, to)
+            .is_some_and(|path| is_bridge_path(&path, &self.card_map))
+    }
+}
+
+/// Whether `path` (`[anchor, bridge, …, target]`) reaches its target through a
+/// many-to-many **bridge** table (Phase 7.3).
+///
+/// Snowflake treats a table holding many-to-one relationships to two tables as
+/// a bridge between them: a metric on one side can be grouped by a dimension
+/// on the other side, or on the bridge itself, and each of its rows counts once
+/// per group (the 7.0 fixture's B1-B10). A path qualifies when:
+///
+/// - its FIRST hop fans the anchor: the bridge references the anchor, so one
+///   anchor row meets many bridge rows;
+/// - no later hop fans: from the bridge on, every hop follows a foreign key
+///   (or a one-to-one edge), so each bridge row reaches at most one row of
+///   every table after it;
+/// - the bridge references some table other than the anchor. A table whose
+///   only relationship is the one to the anchor is a plain child, and a
+///   dimension on it is below the metric's grain, refused as Snowflake refuses
+///   it (fixture A5).
+///
+/// The first-hop rule also gives the emitter its dedup key: the bridge
+/// references the anchor, so the anchor declares a PRIMARY KEY or UNIQUE key.
+/// A fan-out reached after a hop up (`t -> u <- bridge`) would need `t`'s own
+/// key, which nothing guarantees, so it stays refused.
+fn is_bridge_path(path: &[String], card_map: &CardMap) -> bool {
+    let [anchor, bridge, ..] = path else {
+        return false;
+    };
+    let first_fans = fanning_edge_on_path(&path[..2], card_map).is_some();
+    let rest_safe = fanning_edge_on_path(&path[1..], card_map).is_none();
+    let bridges_elsewhere = card_map
+        .keys()
+        .any(|(from, to)| from == bridge && to != anchor);
+    first_fans && rest_safe && bridges_elsewhere
 }
 
 /// Source tables (lowercased, sorted, deduped) whose rows feed `met`'s
@@ -674,6 +738,7 @@ pub(super) fn check_where_clause_fan_traps(
     def: &SemanticViewDefinition,
     where_members: &[WhereMember],
     resolved_mets: &[&Metric],
+    bridges: bool,
 ) -> Result<(), ExpandError> {
     if def.joins.is_empty() || where_members.is_empty() {
         return Ok(());
@@ -701,6 +766,12 @@ pub(super) fn check_where_clause_fan_traps(
                     let Some(path) = find_path(met_table, member_table, &adjacency) else {
                         continue; // Not connected (legacy joins carrying no FK metadata).
                     };
+                    // Phase 7.3: as for a dimension, a member across a bridge
+                    // filters the deduplicated anchor rows (the plan's inner
+                    // `SELECT DISTINCT` carries the predicate).
+                    if bridges && is_bridge_path(&path, &card_map) {
+                        continue;
+                    }
                     if let Some(rel_name) = fanning_edge_on_path(&path, &card_map) {
                         return Err(ExpandError::WhereClauseFanTrap {
                             view_name: view_name.to_string(),
@@ -925,7 +996,7 @@ mod tests {
         let def = orders_view();
         let resolved_dims: Vec<&_> = def.dimensions.iter().collect();
         let resolved_mets: Vec<&_> = def.metrics.iter().collect();
-        let result = check_fan_traps("test", &def, &resolved_dims, &resolved_mets, false);
+        let result = check_fan_traps("test", &def, &resolved_dims, &resolved_mets, false, false);
         assert!(result.is_ok(), "No joins should be OK");
     }
 
@@ -954,7 +1025,7 @@ mod tests {
             .retain(|m| m.source_table.is_some() || m.name == "total");
         let resolved_dims: Vec<&_> = def.dimensions.iter().collect();
         let resolved_mets: Vec<&_> = def.metrics.iter().collect();
-        let result = check_fan_traps("test", &def, &resolved_dims, &resolved_mets, false);
+        let result = check_fan_traps("test", &def, &resolved_dims, &resolved_mets, false, false);
         assert!(
             result.is_ok(),
             "ManyToOne forward direction should be safe, got: {result:?}"
@@ -983,7 +1054,7 @@ mod tests {
         def.metrics.retain(|m| m.source_table.is_some());
         let resolved_dims: Vec<&_> = def.dimensions.iter().collect();
         let resolved_mets: Vec<&_> = def.metrics.iter().collect();
-        let result = check_fan_traps("test", &def, &resolved_dims, &resolved_mets, false);
+        let result = check_fan_traps("test", &def, &resolved_dims, &resolved_mets, false, false);
         assert!(result.is_err(), "Should detect fan-out");
         if let Err(ExpandError::FanTrap { detail }) = &result {
             assert_eq!(detail.metric_name, "total");
@@ -1014,7 +1085,7 @@ mod tests {
         def.joins.last_mut().unwrap().cardinality = Cardinality::OneToOne;
         let resolved_dims: Vec<&_> = def.dimensions.iter().collect();
         let resolved_mets: Vec<&_> = def.metrics.iter().collect();
-        let result = check_fan_traps("test", &def, &resolved_dims, &resolved_mets, false);
+        let result = check_fan_traps("test", &def, &resolved_dims, &resolved_mets, false, false);
         assert!(
             result.is_ok(),
             "OneToOne should be safe regardless of direction, got: {result:?}"
@@ -1052,7 +1123,7 @@ mod tests {
         def.metrics.retain(|m| m.source_table.is_some());
         let resolved_dims: Vec<&_> = def.dimensions.iter().collect();
         let resolved_mets: Vec<&_> = def.metrics.iter().collect();
-        let result = check_fan_traps("test", &def, &resolved_dims, &resolved_mets, false);
+        let result = check_fan_traps("test", &def, &resolved_dims, &resolved_mets, false, false);
         assert!(
             matches!(result, Err(ExpandError::FanTrap { .. })),
             "Effectively-regular semi-additive metric must get the standard \
@@ -1101,7 +1172,7 @@ mod tests {
             .filter(|d| d.name == "item_name")
             .collect();
         let resolved_mets: Vec<&_> = def.metrics.iter().collect();
-        let result = check_fan_traps("test", &def, &resolved_dims, &resolved_mets, false);
+        let result = check_fan_traps("test", &def, &resolved_dims, &resolved_mets, false, false);
         match result {
             Err(ExpandError::FanTrap { detail }) => {
                 assert_eq!(detail.metric_name, "total_sourced");
@@ -1149,7 +1220,7 @@ mod tests {
             .filter(|d| d.name == "cust_name")
             .collect();
         let resolved_mets: Vec<&_> = def.metrics.iter().collect();
-        let result = check_fan_traps("test", &def, &resolved_dims, &resolved_mets, false);
+        let result = check_fan_traps("test", &def, &resolved_dims, &resolved_mets, false, false);
         assert!(
             result.is_ok(),
             "Active semi-additive metric with a safe-direction dimension must be allowed, \
@@ -1189,7 +1260,7 @@ mod tests {
         def.metrics.retain(|m| m.source_table.is_some());
         let resolved_dims: Vec<&_> = def.dimensions.iter().collect();
         let resolved_mets: Vec<&_> = def.metrics.iter().collect();
-        let result = check_fan_traps("test", &def, &resolved_dims, &resolved_mets, false);
+        let result = check_fan_traps("test", &def, &resolved_dims, &resolved_mets, false, false);
         assert!(
             matches!(result, Err(ExpandError::FanTrap { .. })),
             "Window metrics must get the standard fan-trap check, got: {result:?}"
@@ -1226,7 +1297,7 @@ mod tests {
         def.metrics.retain(|m| m.source_table.is_some());
         let resolved_dims: Vec<&_> = def.dimensions.iter().collect();
         let resolved_mets: Vec<&_> = def.metrics.iter().collect();
-        let result = check_fan_traps("test", &def, &resolved_dims, &resolved_mets, false);
+        let result = check_fan_traps("test", &def, &resolved_dims, &resolved_mets, false, false);
         assert!(
             result.is_ok(),
             "Window metric over a forward ManyToOne edge is safe, got: {result:?}"
@@ -1247,7 +1318,7 @@ mod tests {
             .with_metric("item_count", "COUNT(*)", Some("li"))
             .with_pkfk_join("items_to_orders", "li", "o", &["order_id"], &["id"]);
         let resolved_mets: Vec<&_> = def.metrics.iter().collect();
-        let result = check_fan_traps("test", &def, &[], &resolved_mets, false);
+        let result = check_fan_traps("test", &def, &[], &resolved_mets, false, false);
         match result {
             Err(ExpandError::MetricFanTrap { detail }) => {
                 assert_eq!(detail.metric_name, "order_total", "inflated metric");
@@ -1275,7 +1346,7 @@ mod tests {
             .with_pkfk_join("items_to_orders", "li", "o", &["order_id"], &["id"])
             .with_pkfk_join("payments_to_orders", "pay", "o", &["order_id"], &["id"]);
         let resolved_mets: Vec<&_> = def.metrics.iter().collect();
-        let result = check_fan_traps("test", &def, &[], &resolved_mets, false);
+        let result = check_fan_traps("test", &def, &[], &resolved_mets, false, false);
         match result {
             Err(ExpandError::MetricFanTrap { detail }) => {
                 assert_eq!(detail.metric_name, "item_total");
@@ -1307,7 +1378,7 @@ mod tests {
             );
         let resolved_dims: Vec<&_> = def.dimensions.iter().collect();
         let resolved_mets: Vec<&_> = def.metrics.iter().collect();
-        let result = check_fan_traps("test", &def, &resolved_dims, &resolved_mets, false);
+        let result = check_fan_traps("test", &def, &resolved_dims, &resolved_mets, false, false);
         assert!(
             result.is_ok(),
             "Same-grain metrics with a root-ward dim join must be allowed, got: {result:?}"
@@ -1327,7 +1398,7 @@ mod tests {
             .with_metric("item_count", "COUNT(*)", Some("li"))
             .with_pkfk_join("items_to_orders", "li", "o", &["order_id"], &["id"]);
         let resolved_mets: Vec<&_> = def.metrics.iter().collect();
-        let result = check_fan_traps("test", &def, &[], &resolved_mets, false);
+        let result = check_fan_traps("test", &def, &[], &resolved_mets, false, false);
         match result {
             Err(ExpandError::MetricFanTrap { detail }) => {
                 assert_eq!(detail.metric_name, "order_total");
@@ -1359,7 +1430,7 @@ mod tests {
             .with_pkfk_join("o_to_c", "o", "c", &["customer_id"], &["id"]);
         let resolved_dims: Vec<&_> = def.dimensions.iter().collect();
         let resolved_mets: Vec<&_> = def.metrics.iter().collect();
-        match check_fan_traps("test", &def, &resolved_dims, &resolved_mets, false) {
+        match check_fan_traps("test", &def, &resolved_dims, &resolved_mets, false, false) {
             Err(ExpandError::RootGrainFanTrap {
                 view_name,
                 metric_name,
@@ -1389,7 +1460,7 @@ mod tests {
         let resolved_mets: Vec<&_> = def.metrics.iter().collect();
         assert!(
             matches!(
-                check_fan_traps("test", &def, &[], &resolved_mets, false),
+                check_fan_traps("test", &def, &[], &resolved_mets, false, false),
                 Err(ExpandError::RootGrainFanTrap { .. })
             ),
             "A parent-table metric queried alone must error (EXP-1)"
@@ -1419,7 +1490,7 @@ mod tests {
         // (a child metric's rows appear once; the root metric is the anchor).
         for name in ["order_total", "item_total"] {
             let mets: Vec<&_> = def.metrics.iter().filter(|m| m.name == name).collect();
-            let result = check_fan_traps("test", &def, &[], &mets, false);
+            let result = check_fan_traps("test", &def, &[], &mets, false, false);
             assert!(
                 result.is_ok(),
                 "Metric '{name}' at/below root grain must be allowed, got: {result:?}"
@@ -1444,7 +1515,7 @@ mod tests {
             .with_pkfk_join("li_o", "li", "o", &["order_id"], &["id"]);
         let resolved_dims: Vec<&_> = def.dimensions.iter().collect();
         let resolved_mets: Vec<&_> = def.metrics.iter().collect();
-        match check_fan_traps("test", &def, &resolved_dims, &resolved_mets, false) {
+        match check_fan_traps("test", &def, &resolved_dims, &resolved_mets, false, false) {
             Err(ExpandError::FanTrap { detail }) => {
                 assert_eq!(detail.metric_name, "total");
                 assert_eq!(detail.dimension_name, "item_name");
@@ -1474,7 +1545,7 @@ mod tests {
             .with_metric("ratio", "order_total / item_count", None) // derived, grain {o, li}
             .with_pkfk_join("li_o", "li", "o", &["order_id"], &["id"]);
         let ratio: Vec<&_> = def.metrics.iter().filter(|m| m.name == "ratio").collect();
-        match check_fan_traps("test", &def, &[], &ratio, false) {
+        match check_fan_traps("test", &def, &[], &ratio, false, false) {
             Err(ExpandError::MetricFanTrap { detail }) => {
                 assert_eq!(detail.metric_name, "ratio");
                 assert_eq!(detail.relationship_name, "li_o");
@@ -1500,7 +1571,7 @@ mod tests {
             .with_pkfk_join("li_o", "li", "o", &["order_id"], &["id"]);
         let ratio: Vec<&_> = def.metrics.iter().filter(|m| m.name == "ratio").collect();
         assert!(
-            check_fan_traps("test", &def, &[], &ratio, false).is_ok(),
+            check_fan_traps("test", &def, &[], &ratio, false, false).is_ok(),
             "A single-grain derived metric must be allowed"
         );
     }
@@ -1518,7 +1589,7 @@ mod tests {
         );
         let resolved_dims: Vec<&_> = def.dimensions.iter().collect();
         let resolved_mets: Vec<&_> = def.metrics.iter().collect();
-        let result = check_fan_traps("test", &def, &resolved_dims, &resolved_mets, false);
+        let result = check_fan_traps("test", &def, &resolved_dims, &resolved_mets, false, false);
         match result {
             Err(ExpandError::UncheckableDefinition { view_name, reason }) => {
                 assert_eq!(view_name, "test");
@@ -1551,7 +1622,7 @@ mod tests {
         });
         let resolved_dims: Vec<&_> = def.dimensions.iter().collect();
         let resolved_mets: Vec<&_> = def.metrics.iter().collect();
-        match check_fan_traps("test", &def, &resolved_dims, &resolved_mets, false) {
+        match check_fan_traps("test", &def, &resolved_dims, &resolved_mets, false, false) {
             Err(ExpandError::UncheckableDefinition { view_name, reason }) => {
                 assert_eq!(view_name, "test");
                 assert!(
@@ -1585,7 +1656,7 @@ mod tests {
             .with_pkfk_join("c_o", "c", "o", &["primary_order_id"], &["id"]);
         let resolved_dims: Vec<&_> = def.dimensions.iter().collect();
         let resolved_mets: Vec<&_> = def.metrics.iter().collect();
-        match check_fan_traps("test", &def, &resolved_dims, &resolved_mets, false) {
+        match check_fan_traps("test", &def, &resolved_dims, &resolved_mets, false, false) {
             Err(ExpandError::UncheckableDefinition { view_name, reason }) => {
                 assert_eq!(view_name, "test");
                 assert!(
@@ -1631,7 +1702,7 @@ mod tests {
         let resolved_dims: Vec<&_> = def.dimensions.iter().collect();
         let resolved_mets: Vec<&_> = def.metrics.iter().collect();
         assert!(
-            check_fan_traps("test", &def, &resolved_dims, &resolved_mets, false).is_ok(),
+            check_fan_traps("test", &def, &resolved_dims, &resolved_mets, false, false).is_ok(),
             "an acyclic o -> c definition must remain checkable"
         );
     }
@@ -1659,7 +1730,8 @@ mod tests {
             }
             let resolved_dims: Vec<&_> = def.dimensions.iter().collect();
             let resolved_mets: Vec<&_> = def.metrics.iter().collect();
-            let result = check_fan_traps("test", &def, &resolved_dims, &resolved_mets, false);
+            let result =
+                check_fan_traps("test", &def, &resolved_dims, &resolved_mets, false, false);
             match result {
                 Err(ExpandError::FanTrap { detail }) => {
                     assert_eq!(

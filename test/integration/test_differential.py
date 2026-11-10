@@ -190,8 +190,21 @@ def reference_sql(dims: list[str], mets: list[str], where: str = "", having: str
     `where` and `having` are reference-SQL predicates (over `o`, and over the
     aggregates), added to the query as written."""
     select_items = [DIMS[d][1] for d in dims] + [METRICS[m] for m in mets]
-    joins = []
     needed = {DIMS[d][2] for d in dims} - {None}
+    region_needed = any(DIMS[d][2] is None for d in dims)
+    if not mets and not where and not region_needed and needed and needed <= {"p", "cat"}:
+        # A dimensions-only request reads the table under all its dimensions
+        # and joins up from it, as Snowflake does: products (joining
+        # categories) or categories alone, never the orders.
+        if "p" in needed:
+            sql = f"SELECT DISTINCT {', '.join(select_items)}\nFROM products p"
+            if "cat" in needed:
+                sql += "\nLEFT JOIN categories cat ON p.category_id = cat.id"
+            return sql
+        return f"SELECT DISTINCT {', '.join(select_items)}\nFROM categories cat"
+    if not mets and not where and needed == {"c"} and not region_needed:
+        return f"SELECT DISTINCT {', '.join(select_items)}\nFROM customers c"
+    joins = []
     if "cat" in needed:
         needed.add("p")  # categories hangs off products
     if "c" in needed:

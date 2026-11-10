@@ -215,6 +215,37 @@ Generates ``SELECT <dims>, <metrics> FROM ... GROUP BY <dims>``.
 
 Generates ``SELECT DISTINCT <dims> FROM ...``.
 
+.. versionchanged:: 0.19.0
+
+   The rows come from the one table that every queried dimension, and every
+   member the ``WHERE`` names, can be reached from by following relationships
+   toward the referenced table. The query reads that table and joins up from
+   it, as Snowflake does, so the answer doesn't depend on the order of
+   ``TABLES``:
+
+   - Dimensions on one table list that table's own values, including values
+     no other table refers to.
+   - A parent and a child dimension list the child's rows. A child row with a
+     ``NULL`` or dangling foreign key gives a ``NULL`` parent value, and a
+     parent with no child is not listed.
+   - Dimensions on the two sides of a :ref:`bridge <ref-create-bridge-relationships>`
+     list the pairs the bridge holds.
+
+   - A dimension on a role-played table (one another table references
+     through several relationships), or on a table above it, lists that
+     table's own rows. Beside a member on the referencing table it is refused
+     as ambiguous, since no metric names a relationship to follow.
+   - When no single table reaches every member, such as dimensions on two
+     children of one parent, the query is refused: the two tables are not
+     related, as Snowflake says.
+
+   A ``FACTS`` query reads the same table and joins up from it the same way,
+   but lists every row of it rather than each distinct one.
+
+   Before 0.19.0 the query read the table declared first in ``TABLES``, so the
+   same dimensions or facts could list other rows when the tables were
+   declared in another order.
+
 **Metrics only** (grand total, global aggregate):
 
 .. code-block:: sql

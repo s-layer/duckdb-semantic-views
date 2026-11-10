@@ -181,13 +181,13 @@ SELECT item_qty FROM SEMANTIC_VIEW(cr0808_sales FACTS item_qty) ORDER BY 1;
 2
 3
 
-# A base and a child dimension span two tables, so the childless order stays.
+# A base and a child dimension: Phase 7.3 reads the child's table, the one
+# that reaches both (as Snowflake does), so the childless order has no row.
 query TI rowsort
 SELECT region, item_qty FROM SEMANTIC_VIEW(cr0808_sales FACTS region, item_qty);
 ----
 East	2
 East	3
-North	NULL
 
 # ============================================================
 # EXP-29: dimensions-only DISTINCT on a child dimension.
@@ -201,14 +201,15 @@ SELECT item_qty FROM SEMANTIC_VIEW(cr0808_sales DIMENSIONS item_qty) ORDER BY 1;
 2
 3
 
-# Mixing a base dimension with a child one is NOT filtered: the base row is a
-# legitimate member of the result even with no child, so all three rows stand.
+# A base dimension beside a child one lists the child's rows: the query reads
+# the child's table and joins up to the order, as Snowflake does (2026-11-09
+# dims-only fixture, S3), so the childless order is not listed. A FACTS list of
+# the same two (above) still keeps it.
 query TI rowsort
 SELECT region, item_qty FROM SEMANTIC_VIEW(cr0808_sales DIMENSIONS region, item_qty);
 ----
 East	2
 East	3
-North	NULL
 
 # ============================================================
 # A child table with no PRIMARY KEY. On the base-anchored path there is no

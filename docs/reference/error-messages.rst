@@ -1372,7 +1372,7 @@ Ambiguous dimension path
    split by path (two window metrics, or metrics beside a semi-additive one):
    query the metrics separately.
 
-**Cause:** A dimension comes from a table reachable via multiple named relationships (role-playing pattern), and a metric in the query has no ``USING`` clause that selects one path to it (or the query has no metrics). A metric on a table further from the dimension, such as a child of the table that holds the relationships, cannot name a path at all, because a ``USING`` relationship must start at the metric's own table. The same message appears when every metric names a path but they name different ones in a query that is not grouped per path: two window metrics, or metrics beside a semi-additive metric whose ``NON ADDITIVE BY`` dimension is not queried. A window metric names its path through its inner metric.
+**Cause:** A dimension comes from a table reachable via multiple named relationships (role-playing pattern), and a metric in the query has no ``USING`` clause that selects one path to it (or the query has no metrics and also names a member on the table that holds the relationships, so it has to cross one of them). With no metrics and every member on the role-playing table or above it, the query reads that table's own rows and needs no path. A metric on a table further from the dimension, such as a child of the table that holds the relationships, cannot name a path at all, because a ``USING`` relationship must start at the metric's own table. The same message appears when every metric names a path but they name different ones in a query that is not grouped per path: two window metrics, or metrics beside a semi-additive metric whose ``NON ADDITIVE BY`` dimension is not queried. A window metric names its path through its inner metric.
 
 **Fix:** See :ref:`howto-role-playing`. Give each metric ``USING (<rel_name>)``, for example by writing ``f.departures USING (<rel_name>) AS f.flight_count`` over a plain metric, or use a dimension from a table that is not a role-playing target.
 
@@ -1582,6 +1582,23 @@ Incompatible table paths for facts
 **Cause:** A fact query does not aggregate, so it returns rows as they are. Reaching one of these two tables from the other means traversing a one-to-many relationship *against* its direction -- every row on one side matching many on the other -- and that holds whichever of the two you start from. The rows returned would silently be duplicates. The usual shape is two tables that both reference a third (``line_items`` and ``shipments`` both referencing ``orders``): joining both multiplies each one's rows by the other's.
 
 **Fix:** Query the two tables separately. Facts and dimensions can be combined freely as long as one table of the query reaches every other without fanning out -- a chain of many-to-one relationships is fine, however long, and so are two tables that one the query reads both references.
+
+
+
+Unrelated tables
+----------------
+
+.. versionadded:: 0.19.0
+
+.. code-block:: text
+
+   semantic view '<view>': tables '<table_a>' and '<table_b>' are not related
+   -- no table reaches both by following relationships many-to-one, so no rows
+   hold their members together. Query them separately
+
+**Cause:** A query with dimensions and no metrics reads the one table that every queried dimension, and every member its ``WHERE`` names, can be reached from by following relationships toward the referenced table. When no table reaches two of them, there is none: the usual shape is dimensions on two children of one parent, such as ``orders`` and ``tickets`` that both reference ``customers``. Adding a dimension on the parent does not relate them. Snowflake refuses the same query: ``The entities ... are not related``.
+
+**Fix:** Query each child's dimensions separately, each with the parent's if you need them.
 
 
 Window and aggregate metric mixing

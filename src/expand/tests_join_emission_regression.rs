@@ -91,9 +91,8 @@ GROUP BY
         "ON clause must not reference the never-joined p: {sql}"
     );
 
-    // The base-anchored resolver the test was written for still emits the
-    // dimensions-only path, which is where SG-2's edge choice now lives for a
-    // query reaching `li` from the base.
+    // A dimensions-only query reads from the table under its members, `li`
+    // here, and joins up to `o` through the li -> o edge as well.
     let def = def.with_dimension("item_qty", "li.qty", Some("li"));
     let dims_only = QueryRequest {
         where_clause: None,
@@ -104,10 +103,10 @@ GROUP BY
     let sql = expand("test", &def, &dims_only).unwrap();
     assert!(
         sql.contains(
-            "FROM \"orders\" AS \"o\"\nLEFT JOIN \"line_items\" AS \"li\" \
+            "FROM \"line_items\" AS \"li\"\nLEFT JOIN \"orders\" AS \"o\" \
              ON \"li\".\"order_id\" = \"o\".\"id\""
         ),
-        "the resolver must join li via li->o: {sql}"
+        "the dims-only query must join o via li->o: {sql}"
     );
     assert!(
         !sql.contains("\"p\"."),
@@ -167,23 +166,36 @@ GROUP BY
 /// `li` join was missing entirely.
 #[test]
 fn sg10_fact_source_chain_includes_intermediate_join() {
-    let req = QueryRequest {
+    // A fact on `ld` alone reads `ld`'s rows and joins nothing (Snowflake's
+    // FACTS anchoring, 2026-11-09 second dims-only fixture).
+    let alone = QueryRequest {
         where_clause: None,
         facts: vec![FactName::new("detail_amount")],
         dimensions: vec![],
         metrics: vec![],
     };
-    let sql = expand("test", &ld_li_o_def(), &req).unwrap();
-    // EXP-28: the queried fact lives on `ld` alone, so `ld` is the query's
-    // grain and the two LEFT JOINs above it would otherwise manufacture one
-    // all-NULL row per orderless/detail-less ancestor.
+    let sql = expand("test", &ld_li_o_def(), &alone).unwrap();
+    assert_eq!(
+        sql,
+        "\
+SELECT
+    ld.amount AS \"detail_amount\"
+FROM \"line_item_details\" AS \"ld\""
+    );
+    // Filtered on `o`, two hops up, it walks up through the intermediate `li`,
+    // each ON clause naming only tables already joined.
+    let filtered = QueryRequest {
+        where_clause: Some("o.region = 'E'".to_string()),
+        ..alone
+    };
+    let sql = expand("test", &ld_li_o_def(), &filtered).unwrap();
     let expected = "\
 SELECT
     ld.amount AS \"detail_amount\"
-FROM \"orders\" AS \"o\"
-LEFT JOIN \"line_items\" AS \"li\" ON \"li\".\"order_id\" = \"o\".\"id\"
-LEFT JOIN \"line_item_details\" AS \"ld\" ON \"ld\".\"line_item_id\" = \"li\".\"id\"
-WHERE \"ld\".\"id\" IS NOT NULL";
+FROM \"line_item_details\" AS \"ld\"
+LEFT JOIN \"line_items\" AS \"li\" ON \"ld\".\"line_item_id\" = \"li\".\"id\"
+LEFT JOIN \"orders\" AS \"o\" ON \"li\".\"order_id\" = \"o\".\"id\"
+WHERE (o.region) = 'E'";
     assert_eq!(sql, expected);
 }
 

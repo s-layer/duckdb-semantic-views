@@ -317,6 +317,11 @@ pub struct FanTrapError {
     pub dimension_name: String,
     pub dimension_table: String,
     pub relationship_name: String,
+    /// Phase 7.3: the path is a many-to-many bridge, which the per-grain plan
+    /// answers once per group but could not for this query (a semi-additive
+    /// or window metric, or a member that names no table). The message then
+    /// says so, instead of only suggesting the dimension be removed.
+    pub across_bridge: bool,
 }
 
 /// Detail payload for [`ExpandError::ReferencedFactFanTrap`], boxed for the
@@ -505,6 +510,15 @@ pub enum ExpandError {
     /// multiplying rows — the path between them fans out whichever way it is
     /// walked.
     FactPathViolation {
+        view_name: String,
+        table_a: String,
+        table_b: String,
+    },
+    /// A query with no metrics names members on two tables that no table
+    /// reaches both of by following relationships many-to-one (two children of
+    /// one parent), so there are no rows that hold them together. Snowflake
+    /// refuses it: "The entities ... are not related".
+    UnrelatedTables {
         view_name: String,
         table_a: String,
         table_b: String,
@@ -725,6 +739,7 @@ impl fmt::Display for ExpandError {
                     dimension_name,
                     dimension_table,
                     relationship_name,
+                    across_bridge,
                 } = &**detail;
                 write!(
                     f,
@@ -735,7 +750,18 @@ impl fmt::Display for ExpandError {
                      This would inflate aggregation results. \
                      Remove the dimension, use a metric from the same table, or restructure the \
                      relationship."
-                )
+                )?;
+                if *across_bridge {
+                    write!(
+                        f,
+                        " The path crosses a many-to-many bridge, which is grouped once per row \
+                         only for ordinary metrics on a table with a PRIMARY KEY: not for a \
+                         window metric, a semi-additive metric whose NON ADDITIVE BY dimension \
+                         is not queried, a role-played table, a query with a dimension or filter \
+                         that names no table, or a metric table with no PRIMARY KEY."
+                    )?;
+                }
+                Ok(())
             }
             Self::MetricFanTrap { detail } => {
                 let MetricFanTrapError {
@@ -952,6 +978,18 @@ impl fmt::Display for ExpandError {
                      table paths -- neither table '{table_a}' nor '{table_b}' can be reached from \
                      the other without crossing a one-to-many relationship, so joining them would \
                      duplicate the rows returned"
+                )
+            }
+            Self::UnrelatedTables {
+                view_name,
+                table_a,
+                table_b,
+            } => {
+                write!(
+                    f,
+                    "semantic view '{view_name}': tables '{table_a}' and '{table_b}' are not \
+                     related -- no table reaches both by following relationships many-to-one, so \
+                     no rows hold their members together. Query them separately"
                 )
             }
             Self::WhereClauseReferencesMetric {

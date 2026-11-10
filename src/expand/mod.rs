@@ -48,6 +48,12 @@ mod tests_fan_trap;
 // `tests_phantom_row_guard` below.
 #[cfg(all(test, not(feature = "extension")))]
 mod tests_bare_column_scoping;
+// Pins NUMBERS (executes the SQL in-memory), so gated the same way.
+#[cfg(all(test, not(feature = "extension")))]
+mod tests_bridge;
+// Pins ROWS (executes the SQL in-memory), so gated the same way.
+#[cfg(all(test, not(feature = "extension")))]
+mod tests_dims_only_anchoring;
 #[cfg(all(test, not(feature = "extension")))]
 mod tests_home_anchoring;
 #[cfg(test)]

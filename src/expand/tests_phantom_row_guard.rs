@@ -418,10 +418,12 @@ fn facts_list_of_a_child_dimension_has_no_phantom_row() {
     assert_eq!(rows, vec![Some(2), Some(3)], "SQL:\n{sql}");
 }
 
-/// A FACTS list of a base and a child dimension keeps the childless base row,
-/// as the same dimensions do in DIMENSIONS: the members span two tables.
+/// A FACTS list of a base and a child dimension lists the child's rows, as the
+/// same two members in DIMENSIONS do: a fact query reads the table under its
+/// members too, so the childless base row is not listed. Snowflake answers
+/// this way (2026-11-09 second dims-only fixture, F6: the orders' rows).
 #[test]
-fn facts_list_mixing_base_and_child_dimensions_keeps_the_base_row() {
+fn facts_list_mixing_base_and_child_dimensions_lists_the_childs_rows() {
     let def = child_def().with_dimension("qty", "li.qty", Some("li"));
     let req = QueryRequest {
         where_clause: None,
@@ -434,7 +436,7 @@ fn facts_list_mixing_base_and_child_dimensions_keeps_the_base_row() {
     let n: i64 = conn
         .query_row(&format!("SELECT count(*) FROM ({sql}) q"), [], |r| r.get(0))
         .unwrap_or_else(|e| panic!("query failed: {e}\nSQL:\n{sql}"));
-    assert_eq!(n, 3, "SQL:\n{sql}");
+    assert_eq!(n, 2, "SQL:\n{sql}");
 }
 
 // ---------------------------------------------------------------------------
@@ -498,8 +500,13 @@ fn orphan_db() -> duckdb::Connection {
     conn
 }
 
+/// A dimensions-only query on the parent alone lists the PARENT's own values:
+/// it reads from the parent's table, so the orphan child row contributes no
+/// NULL. Snowflake answers this way (2026-11-09 dims-only fixture, S1/T1: the
+/// orders with no or a missing customer add no NULL name), whichever table is
+/// declared first. The facts query below reads the parent's rows too.
 #[test]
-fn dims_only_distinct_on_a_parent_dimension_keeps_the_unmatched_base_row() {
+fn dims_only_distinct_on_a_parent_dimension_lists_the_parents_own_values() {
     let def = parent_def();
     let req = QueryRequest {
         where_clause: None,
@@ -519,11 +526,15 @@ fn dims_only_distinct_on_a_parent_dimension_keeps_the_unmatched_base_row() {
         .unwrap()
         .map(Result::unwrap)
         .collect();
-    assert_eq!(rows, vec![Some("E".to_string()), None], "SQL:\n{sql}");
+    assert_eq!(rows, vec![Some("E".to_string())], "SQL:\n{sql}");
 }
 
+/// A FACTS query on a parent fact alone lists the parent's own rows, so the
+/// orphan child row contributes no NULL. Snowflake answers this way (2026-11-09
+/// second dims-only fixture, F2: every customer's credit, once each, whichever
+/// table is declared first).
 #[test]
-fn facts_query_on_a_parent_fact_keeps_the_unmatched_base_row() {
+fn facts_query_on_a_parent_fact_lists_the_parents_rows() {
     let def = parent_def();
     let req = QueryRequest {
         where_clause: None,
@@ -543,14 +554,15 @@ fn facts_query_on_a_parent_fact_keeps_the_unmatched_base_row() {
         .unwrap()
         .map(Result::unwrap)
         .collect();
-    assert_eq!(rows, vec![Some(10), None], "SQL:\n{sql}");
+    assert_eq!(rows, vec![Some(10)], "SQL:\n{sql}");
 }
 
-/// A dimensions-only DISTINCT that mixes a base dimension with a child one is
-/// NOT filtered: the base row is a legitimate member of the result even without
-/// a child, and the queried members no longer live on one non-base table.
+/// A dimensions-only DISTINCT that mixes a base dimension with a child one
+/// lists the CHILD's rows: it reads from the child's table and joins up, so the
+/// childless parent `N` is not listed. Snowflake answers this way (2026-11-09
+/// dims-only fixture, S3: Cleo, who has no orders, is not listed).
 #[test]
-fn dims_only_distinct_mixing_base_and_child_keeps_the_base_row() {
+fn dims_only_distinct_mixing_base_and_child_lists_the_childs_rows() {
     let def = child_def().with_dimension("qty", "li.qty", Some("li"));
     let req = QueryRequest {
         where_clause: None,
@@ -563,7 +575,7 @@ fn dims_only_distinct_mixing_base_and_child_keeps_the_base_row() {
     let n: i64 = conn
         .query_row(&format!("SELECT count(*) FROM ({sql}) q"), [], |r| r.get(0))
         .unwrap_or_else(|e| panic!("query failed: {e}\nSQL:\n{sql}"));
-    assert_eq!(n, 3, "SQL:\n{sql}");
+    assert_eq!(n, 2, "SQL:\n{sql}");
 }
 
 /// Dimensions-only DISTINCT on a BASE dimension keeps every base row.

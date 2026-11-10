@@ -15,12 +15,16 @@
 //!
 //! Two invariants are checked per case:
 //!
-//! 1. **Parent-table metric + child dimension ⇒ rejected.** `SUM(u.w)` grouped
-//!    by `t.d` asks for a parent-grain aggregate at a grain below it: each
-//!    parent row genuinely fans across the child values. Neither the root-
-//!    anchored path (which silently inflated it — EXP-1) nor per-grain
-//!    aggregation can define it, so `expand` MUST reject it with a
-//!    fan-trap-family error.
+//! 1. **Parent-table metric + child dimension ⇒ counted once per group.**
+//!    `SUM(u.w)` grouped by `t.d` asks for a parent-grain aggregate at a grain
+//!    below it. Until Phase 7.3 that was refused as a fan trap (the root-anchored
+//!    path had silently inflated it: EXP-1). But `t` references a second table,
+//!    the role-played `p`, so it is a many-to-many BRIDGE between `u` and `p`,
+//!    and Snowflake answers a dimension on the bridge itself (fixture B7, B10):
+//!    each parent row is counted once for every distinct group its child rows
+//!    reach, and a parent with no child row lands in the NULL group. The
+//!    oracle states that directly ([`parent_grain_sql`]), so the old inflation
+//!    (each parent row once per child row) is still a numeric failure here.
 //! 2. **Accepted query ⇒ numerically correct.** For every query `expand`
 //!    accepts, the result must equal an independently hand-written oracle,
 //!    compared as a multiset inside DuckDB via a symmetric `EXCEPT ALL`
@@ -234,8 +238,9 @@ impl WMember {
 
     /// Whether resolving the member forces the CHILD table into the query. A
     /// predicate touching the child cannot be evaluated inside the parent-grain
-    /// CTE without joining `t` into it — which fans `u` — so such a query must
-    /// be rejected when the parent metric is selected.
+    /// CTE without joining `t` into it, which fans `u`. Since Phase 7.3 `t` is
+    /// a bridge, so the parent grain is deduplicated across it rather than
+    /// refused ([`parent_grain_sql`]).
     ///
     /// EXP-27: `Fchain` counts here even though it is *declared* on the parent.
     /// What matters is which tables the resolved predicate names, not where the
@@ -635,9 +640,9 @@ fn build_def() -> SemanticViewDefinition {
             sample_values: Vec::new(),
         },
         // EXP-27: declared on the PARENT, but its expression names a fact on
-        // the CHILD. Resolving it joins `t`, which fans `u` — so a predicate
-        // naming it must be rejected alongside the parent-grain metric even
-        // though nothing about the member's own table says so.
+        // the CHILD. Resolving it joins `t`, which fans `u`, so alongside the
+        // parent-grain metric it has to be taken across the bridge (Phase 7.3)
+        // even though nothing about the member's own table says so.
         Dimension {
             name: "fchain".to_string(),
             expr: "tv1 > 0".to_string(),
@@ -1005,30 +1010,58 @@ fn child_grain_sql(case: &Case) -> String {
 /// the root-anchored `FROM t LEFT JOIN u` got wrong (each parent row counted
 /// once per child row, childless parents dropped entirely).
 ///
-/// Only PARENT-side dimensions can be selected alongside it (`ucat`, and since
-/// TECH-DEBT #54 the fact-valued `uwd`): `td` lives below `u`'s grain and the
-/// query is rejected before it gets here.
 /// PBT-6: the predicate is applied inside THIS grain too, before its
-/// aggregate. Only parent-side members can appear — a predicate touching the
-/// child is rejected before it reaches the oracle (see the fence branch in the
-/// property), because evaluating it here would require joining `t` into the
-/// parent CTE and fanning `u`.
+/// aggregate.
+///
+/// Phase 7.3: a child dimension or a predicate touching the child reaches `t`
+/// across the bridge (see the module docs). Then the parent row is paired with
+/// each distinct group its child rows reach, the predicate deciding row by row
+/// which child rows count, and each (parent row, group) pair is aggregated
+/// once: `SELECT DISTINCT u.id, ...` over `u LEFT JOIN t`, then grouped. A
+/// parent with no child row keeps one pair with NULL child columns, which the
+/// predicate then judges like any other.
 fn parent_grain_sql(case: &Case) -> String {
     let where_sql = case
         .where_pred
         .as_ref()
         .map_or_else(String::new, |p| format!(" WHERE {}", p.to_raw_sql()));
+    let metric = |w: &str| {
+        parent_metric_names(case)
+            .iter()
+            .map(|m| match *m {
+                "sw" => format!("sum({w}) AS sw"),
+                // TECH-DEBT #76: `max(uw1)`, the fact written out.
+                "esw" => format!("max({w} + 1) AS esw"),
+                other => unreachable!("unexpected parent-grain metric {other}"),
+            })
+            .collect::<Vec<_>>()
+            .join(", ")
+    };
+    if crosses_bridge(case) {
+        let dims: Vec<&str> = case.sel_dims.iter().map(|&i| DIMS[i]).collect();
+        let pairs = std::iter::once("u.id AS __id".to_string())
+            .chain(std::iter::once("u.w AS __w".to_string()))
+            .chain(dims.iter().map(|d| child_dim_item(d)))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let inner = format!("SELECT DISTINCT {pairs} FROM u LEFT JOIN t ON t.fk = u.id{where_sql}");
+        let metrics = metric("b.__w");
+        if dims.is_empty() {
+            return format!("SELECT {metrics} FROM ({inner}) b");
+        }
+        let group_by = (1..=dims.len())
+            .map(|n| n.to_string())
+            .collect::<Vec<_>>()
+            .join(", ");
+        let keys = dims
+            .iter()
+            .map(|d| format!("b.{d} AS {d}"))
+            .collect::<Vec<_>>()
+            .join(", ");
+        return format!("SELECT {keys}, {metrics} FROM ({inner}) b GROUP BY {group_by}");
+    }
     let keys = parent_dim_items(case);
-    let metrics = parent_metric_names(case)
-        .iter()
-        .map(|m| match *m {
-            "sw" => "sum(u.w) AS sw",
-            // TECH-DEBT #76: `max(uw1)`, the fact written out.
-            "esw" => "max(u.w + 1) AS esw",
-            other => unreachable!("unexpected parent-grain metric {other}"),
-        })
-        .collect::<Vec<_>>()
-        .join(", ");
+    let metrics = metric("u.w");
     if keys.is_empty() {
         format!("SELECT {metrics} FROM u{where_sql}")
     } else {
@@ -1059,14 +1092,11 @@ fn parent_dim_items(case: &Case) -> Vec<String> {
         .collect()
 }
 
-/// The names of those dimensions, in the same order — the keys the two grains
-/// are combined on.
-fn parent_dim_names(case: &Case) -> Vec<&'static str> {
-    case.sel_dims
-        .iter()
-        .map(|&i| DIMS[i])
-        .filter(|d| matches!(*d, "ucat" | "uwd" | "eucat" | "uw1"))
-        .collect()
+/// Phase 7.3: whether the parent-grain half reaches `t` across the bridge, a
+/// child dimension or a predicate naming the child.
+fn crosses_bridge(case: &Case) -> bool {
+    case.sel_dims.iter().any(|&i| is_child_dim(DIMS[i]))
+        || case.where_pred.as_ref().is_some_and(Pred::touches_child)
 }
 
 /// The selected parent-grain metrics, in request order.
@@ -1112,10 +1142,11 @@ fn oracle_sql(case: &Case) -> String {
             items.join(", ")
         );
     }
-    // Every parent-side dimension is a combine key, not just `ucat` (#54 added
-    // a second). A group present at only one grain must survive, so the keys
-    // are COALESCEd and matched NULL-safely.
-    let keys = parent_dim_names(case);
+    // Every queried dimension is a combine key: the parent-side ones, and since
+    // Phase 7.3 the child-side ones the parent grain reaches across the bridge.
+    // A group present at only one grain must survive, so the keys are
+    // COALESCEd and matched NULL-safely.
+    let keys: Vec<&str> = case.sel_dims.iter().map(|&i| DIMS[i]).collect();
     for k in &keys {
         items.push(format!("COALESCE(a.{k}, b.{k}) AS {k}"));
     }
@@ -1212,6 +1243,76 @@ fn role_oracle_sql(case: &Case) -> String {
     format!("SELECT {items} FROM {from}")
 }
 
+/// A query of dimensions on `p`, `q` and `s` alone: no metric, no filter.
+fn is_role_only(case: &Case) -> bool {
+    case.sel_metrics.is_empty()
+        && case.where_pred.is_none()
+        && !case.sel_dims.is_empty()
+        && case.sel_dims.iter().all(|&i| is_role_dim(DIMS[i]))
+}
+
+/// The rows of the lowest of `p`, `q` and `s` a role-only query names, joined
+/// up to the others: a query with no metrics reads the table under its
+/// members (Snowflake, 2026-11-09 second dims-only fixture, R1-R3).
+fn role_only_oracle_sql(case: &Case) -> String {
+    let dims: Vec<&str> = case.sel_dims.iter().map(|&i| DIMS[i]).collect();
+    let from = if dims.contains(&"pcat") {
+        "p LEFT JOIN q ON p.qid = q.id LEFT JOIN s ON q.sid = s.id"
+    } else if dims.contains(&"qcat") {
+        "q LEFT JOIN s ON q.sid = s.id"
+    } else {
+        "s"
+    };
+    let items: Vec<String> = dims
+        .iter()
+        .map(|d| format!("{}.{d} AS {d}", &d[..1]))
+        .collect();
+    format!("SELECT DISTINCT {} FROM {from}", items.join(", "))
+}
+
+proptest! {
+    #![proptest_config(ProptestConfig { cases: 128, ..ProptestConfig::default() })]
+
+    /// Dimensions on the role-played `p`, or past it on `q` and `s`, queried
+    /// alone list the rows of the lowest of them, a `p` row no `t` row
+    /// references included. No relationship from `t` is crossed, so no path is
+    /// needed.
+    #[test]
+    fn role_played_tables_alone_list_their_own_rows(
+        inst in arb_instance(),
+        sel_dims in prop::sample::subsequence(vec![7usize, 8, 9], 1..=3),
+        inline in prop::collection::vec(prop::bool::weighted(0.35), TABLES.len()),
+    ) {
+        let case = Case { inst, sel_dims, sel_metrics: vec![], where_pred: None, inline };
+        prop_assert!(is_role_only(&case));
+        let def = with_inline_tables(build_def(), &case.inline);
+        let req = QueryRequest {
+            // PIN: every filterable member is on `t` or `u`, below `p`, so a filter would make the query cross one of `t`'s two relationships to `p` (refused as ambiguous, Snowflake's R7); `star_join_fence_and_aggregation` varies the filter.
+            where_clause: None,
+            dimensions: case.sel_dims.iter().map(|&i| DimensionName::new(DIMS[i])).collect(),
+            metrics: vec![],
+            // PIN: FACTS is oracled by child_grain_proptest; this property checks which rows a dimensions-only query reads.
+            facts: vec![],
+        };
+        let expanded = expand("star", &def, &req)
+            .map_err(|e| TestCaseError::fail(format!("refused: {e}")))?;
+        let oracle = oracle_over(role_only_oracle_sql(&case), &case.inline);
+        let proj = case.sel_dims.iter().map(|&i| DIMS[i]).collect::<Vec<_>>().join(", ");
+        let cmp = format!(
+            "SELECT \
+               (SELECT count(*) FROM (SELECT {proj} FROM ({expanded}) qa EXCEPT ALL \
+                                      SELECT {proj} FROM ({oracle}) qb) e1) \
+             + (SELECT count(*) FROM (SELECT {proj} FROM ({oracle}) qc EXCEPT ALL \
+                                      SELECT {proj} FROM ({expanded}) qd) e2)"
+        );
+        let conn = make_db(&case.inst, &case.inline);
+        let diff: i64 = conn.query_row(&cmp, [], |r| r.get(0)).unwrap_or_else(|e| {
+            panic!("comparison failed: {e}\n--- expanded:\n{expanded}\n--- oracle:\n{oracle}")
+        });
+        prop_assert_eq!(diff, 0, "--- expanded:\n{}\n--- oracle:\n{}", expanded, oracle);
+    }
+}
+
 proptest! {
     #![proptest_config(ProptestConfig { cases: 128, ..ProptestConfig::default() })]
 
@@ -1252,12 +1353,15 @@ proptest! {
             facts: vec![],
         };
 
-        let selects_parent_metric = case.sel_metrics.iter().any(|&i| is_parent_metric(METS[i]));
-        let selects_child_dim = case.sel_dims.iter().any(|&i| is_child_dim(DIMS[i]));
         let selects_pcat = case.sel_dims.iter().any(|&i| is_role_dim(DIMS[i]));
         let every_metric_names_p = !case.sel_metrics.is_empty()
             && case.sel_metrics.iter().all(|&i| names_p_path(METS[i]));
         let result = expand("star", &def, &req);
+        // Dimensions on `p` and above alone are answered from `p`'s rows and
+        // need no path: `role_played_tables_alone_list_their_own_rows`.
+        if is_role_only(&case) {
+            return Ok(());
+        }
 
         if selects_pcat && !every_metric_names_p {
             // Phase 6.3 (Snowflake parity): `p` is reached two ways, so a
@@ -1276,55 +1380,6 @@ proptest! {
                 Ok(sql) => prop_assert!(
                     false,
                     "pcat with a metric that names no path to p must be refused, got SQL:\n{sql}"
-                ),
-            }
-            return Ok(());
-        }
-
-        if selects_parent_metric && selects_child_dim {
-            // The parent metric grouped by a CHILD dimension stays rejected:
-            // `t.d` is below `u`'s grain, so each parent row genuinely fans
-            // across the child values. Per-grain aggregation cannot define this
-            // query — only the fan-trap error is correct.
-            match result {
-                Err(e) => {
-                    let msg = e.to_string();
-                    prop_assert!(
-                        msg.contains("fan trap"),
-                        "parent metric + child dimension rejected, but not as a fan trap: {msg}"
-                    );
-                }
-                Ok(sql) => prop_assert!(
-                    false,
-                    "a parent-grain metric grouped by a child dimension must be rejected, \
-                     got SQL:\n{sql}"
-                ),
-            }
-            return Ok(());
-        }
-
-        // PBT-6: a predicate naming a CHILD-side member alongside the PARENT
-        // metric is the where_clause analogue of the case above. Filtering on
-        // `t` requires joining it into the parent-grain aggregate, and that
-        // join fans `u` — each parent row once per matching child row — so
-        // `sum(u.w)` would be inflated. `check_where_clause_fan_traps` must
-        // reject it; there is no correct number to return.
-        if selects_parent_metric
-            && case.where_pred.as_ref().is_some_and(Pred::touches_child)
-        {
-            match result {
-                Err(e) => {
-                    let msg = e.to_string();
-                    prop_assert!(
-                        msg.contains("fan trap"),
-                        "parent metric + child-side where_clause member rejected, \
-                         but not as a fan trap: {msg}"
-                    );
-                }
-                Ok(sql) => prop_assert!(
-                    false,
-                    "a where_clause on the child table must not be applied to the \
-                     parent-grain metric sum(u.w) -- the join fans it. Got SQL:\n{sql}"
                 ),
             }
             return Ok(());
@@ -1416,12 +1471,14 @@ fn generator_reaches_both_where_clause_branches() {
     let mut without_pred = 0usize;
     let mut with_filter = 0usize;
     let mut with_fact_chain = 0usize;
-    // The two branches the property treats differently under a predicate.
+    // The two shapes the parent grain takes under a predicate: across the
+    // bridge when it names the child (Phase 7.3), on `u` alone otherwise.
     let mut parent_metric_child_pred = 0usize;
     let mut parent_metric_parent_only_pred = 0usize;
-    // EXP-27 specifically: the fact-chain member alongside the parent metric,
-    // which is the pair the new fence rejects. Without this the `Fchain` arm
-    // could be generated only in accepted queries and the fence stay untested.
+    // EXP-27 specifically: the fact-chain member alongside the parent metric.
+    // It was refused as a fan trap until Phase 7.3; now it reaches `t` across
+    // the bridge, and resolving the member to the child's columns is what puts
+    // `t` in the deduplicated pairs, so it has to be oracled.
     let mut parent_metric_fact_chain_pred = 0usize;
     let mut accepted_fact_chain_pred = 0usize;
     // PBT-15 (code-review 2026-08-08): the two metrics this harness added for
@@ -1448,7 +1505,7 @@ fn generator_reaches_both_where_clause_branches() {
     const EXPRESSION_ITEMS: [&str; 8] =
         ["etd", "eucat", "esv", "esw", "edsv", "esvf", "uw1", "tv1"];
     let mut expression_oracled = [0usize; 8];
-    let mut expression_fenced = 0usize;
+    let mut expression_bridged = 0usize;
     // Phase 6.3: `pcat` both refused and oracled, the oracled cases including
     // both paths at once and the metric-over-metric `sv_p2`.
     let mut pcat_refused = 0usize;
@@ -1475,15 +1532,13 @@ fn generator_reaches_both_where_clause_branches() {
         let selects_parent_metric = case.sel_metrics.iter().any(|&i| is_parent_metric(METS[i]));
         let selects_child_dim = case.sel_dims.iter().any(|&i| is_child_dim(DIMS[i]));
 
-        // The two rejection branches of the property, mirrored: everything else
+        // The rejection branch of the property, mirrored: everything else
         // falls through to the differential comparison.
-        let pred_touches_child = case.where_pred.as_ref().is_some_and(Pred::touches_child);
         let selects_pcat = case.sel_dims.iter().any(|&i| is_role_dim(DIMS[i]));
         let every_metric_names_p =
             !case.sel_metrics.is_empty() && case.sel_metrics.iter().all(|&i| names_p_path(METS[i]));
-        let pcat_refused_here = selects_pcat && !every_metric_names_p;
-        let oracled = !pcat_refused_here
-            && !(selects_parent_metric && (selects_child_dim || pred_touches_child));
+        let pcat_refused_here = selects_pcat && !every_metric_names_p && !is_role_only(&case);
+        let oracled = !pcat_refused_here;
         let has = |name: &str| case.sel_metrics.iter().any(|&i| METS[i] == name);
         let selects_qcat = case.sel_dims.iter().any(|&i| DIMS[i] == "qcat");
         let selects_scat = case.sel_dims.iter().any(|&i| DIMS[i] == "scat");
@@ -1543,15 +1598,15 @@ fn generator_reaches_both_where_clause_branches() {
             svf_and_dsv_oracled += 1;
         }
         // TECH-DEBT #76: each expression item must reach the oracle, and the
-        // parent-grain one must also meet the fan-trap fence.
+        // parent-grain one must also be taken across the bridge.
         for (k, name) in EXPRESSION_ITEMS.iter().enumerate() {
             let picked = case.sel_dims.iter().any(|&i| DIMS[i] == *name) || has(name);
             if picked && oracled {
                 expression_oracled[k] += 1;
             }
         }
-        if has("esw") && selects_child_dim {
-            expression_fenced += 1;
+        if oracled && has("esw") && selects_child_dim {
+            expression_bridged += 1;
         }
         match &case.where_pred {
             None => without_pred += 1,
@@ -1562,14 +1617,16 @@ fn generator_reaches_both_where_clause_branches() {
                 }
                 if p.references_fact_chain() {
                     with_fact_chain += 1;
-                    if !(selects_parent_metric && selects_child_dim) && !selects_parent_metric {
+                    if oracled && !selects_parent_metric {
                         accepted_fact_chain_pred += 1;
                     }
                 }
                 distinct.insert(p.to_member_sql());
-                // The dim-based fence branch takes precedence in the property,
-                // so only count cases that actually reach the where-clause one.
-                if selects_parent_metric && !selects_child_dim {
+                // Phase 7.3: the parent metric under a predicate, oracled
+                // across the bridge when it names the child. Only cases the
+                // property compares count, and a child dimension is left out so
+                // the predicate alone takes the parent grain across.
+                if oracled && selects_parent_metric && !selects_child_dim {
                     if p.touches_child() {
                         parent_metric_child_pred += 1;
                     } else {
@@ -1602,8 +1659,8 @@ fn generator_reaches_both_where_clause_branches() {
     );
     assert!(
         parent_metric_child_pred > 0,
-        "no case reached the parent-metric + child-side-predicate branch; the \
-         where_clause fan-trap assertion is unreachable and therefore vacuous"
+        "no oracled case paired the parent metric with a child-side predicate; \
+         the where_clause across the bridge has no randomized coverage"
     );
     assert!(
         parent_metric_parent_only_pred > 0,
@@ -1618,15 +1675,15 @@ fn generator_reaches_both_where_clause_branches() {
     );
     assert!(
         parent_metric_fact_chain_pred > 0,
-        "no case paired the fact-chain member with the parent metric; the \
-         EXP-27 fence is never exercised and its assertion is vacuous \
-         (present={with_fact_chain})"
+        "no oracled case paired the fact-chain member with the parent metric; \
+         EXP-27's member reaching the child through a fact is never taken \
+         across the bridge (present={with_fact_chain})"
     );
     assert!(
         accepted_fact_chain_pred > 0,
-        "the fact-chain member only ever appeared in REJECTED cases, so the \
-         non-fanning half -- that resolving it still produces the right number \
-         -- is never oracled"
+        "the fact-chain member was never oracled without the parent metric, so \
+         the child-grain half -- that resolving it still produces the right \
+         number -- is never compared"
     );
     // PBT-15: the metric-selection half of the same guard.
     assert!(
@@ -1655,9 +1712,9 @@ fn generator_reaches_both_where_clause_branches() {
         );
     }
     assert!(
-        expression_fenced > 0,
-        "the parent-grain expression metric `esw` never met a child dimension, \
-         so the fan-trap fence is never exercised on an expression item"
+        expression_bridged > 0,
+        "the parent-grain expression metric `esw` was never oracled with a child \
+         dimension, so an expression item is never taken across the bridge"
     );
     assert!(
         pcat_refused > 0 && pcat_oracled > 0,

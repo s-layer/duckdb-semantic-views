@@ -169,7 +169,8 @@ fn dimension_with_a_colliding_bare_column_is_ambiguous_in_a_multi_grain_plan() {
     assert_ambiguous(outcome(&["order_id"], &["sum_o_oid", "total_qty"], &[]));
 }
 
-/// Fact (row-level path, base-anchored by design: TECH-DEBT #82).
+/// Fact beside a dimension on `c`: the FACTS query reads `li` and joins `o`
+/// and `c` up to the dimension, so `o_id` is on two joined tables.
 #[test]
 fn fact_with_a_colliding_bare_column_is_ambiguous() {
     assert_ambiguous(outcome(&[], &[], &["region", "li_order"]));

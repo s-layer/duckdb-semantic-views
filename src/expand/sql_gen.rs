@@ -248,6 +248,125 @@ fn phantom_row_filter(
     ))
 }
 
+/// Which table a query with no metrics reads from (see [`member_anchor`]).
+#[derive(Debug, PartialEq, Eq)]
+pub(super) enum Anchor {
+    /// Read the rows of this table and join up from it.
+    At(String),
+    /// No table reaches both of these members, so no rows hold them together.
+    Unrelated(String, String),
+    /// Not decided here: the base-anchored emission answers, or refuses.
+    Undecided,
+}
+
+/// The tables a dimensions-only query's members live on: each dimension's
+/// table, the tables of the facts it is written over, and every filtered
+/// table. `None` when a dimension or a filter member names no table, so its
+/// rows cannot be placed.
+pub(super) fn dims_only_members(
+    def: &SemanticViewDefinition,
+    resolved_dims: &[&Dimension],
+    where_tables: &[String],
+    where_has_unqualified_member: bool,
+) -> Option<Vec<String>> {
+    if where_has_unqualified_member {
+        return None;
+    }
+    let mut members: Vec<String> = Vec::new();
+    for dim in resolved_dims {
+        members.push(dim.source_table.clone()?);
+        members.extend(super::facts::collect_referenced_fact_tables(
+            &dim.expr, &def.facts,
+        ));
+    }
+    members.extend(where_tables.iter().cloned());
+    Some(members)
+}
+
+/// The table a query with no metrics reads from.
+///
+/// Snowflake lists the rows of the one table that every member's table (each
+/// queried dimension or fact, each fact one is written over, each filtered
+/// table) can be reached from by following foreign keys (many-to-one), and
+/// joins up from it (the 2026-11-09 dims-only fixtures). So one table lists its
+/// own values, a parent and a child list the child's rows, and the two sides of
+/// a bridge list the bridge's rows, whichever table is declared first. Reading
+/// from the base table instead made the answer depend on declaration order.
+///
+/// Of the tables that reach every member, the one closest to them is chosen:
+/// the candidate no other candidate sits above.
+///
+/// - When no table reaches every member (two children of one parent), the
+///   answer is [`Anchor::Unrelated`]: Snowflake refuses such a query ("the
+///   entities are not related").
+/// - When a hop on the way from the anchor to a member has more than one
+///   relationship (a role-played table, queried from below), the answer is
+///   [`Anchor::Undecided`]: no relationship picks the role, and the
+///   base-anchored path refuses it as ambiguous, as Snowflake does. A
+///   role-played table queried from itself or from above crosses no such hop,
+///   and is answered.
+/// - So is it when two tables do equally well, or the graph cannot be built.
+pub(super) fn member_anchor(def: &SemanticViewDefinition, members: &[String]) -> Anchor {
+    let mut members: Vec<String> = members.iter().map(|m| m.to_ascii_lowercase()).collect();
+    members.sort();
+    members.dedup();
+    if members.is_empty() {
+        return Anchor::Undecided;
+    }
+    let reaches = |from: &str, to: &str| from == to || reaches_base_by_foreign_key(def, from, to);
+    let tables: Vec<String> = def
+        .tables
+        .iter()
+        .map(|t| t.alias.to_ascii_lowercase())
+        .collect();
+    let candidates: Vec<&String> = tables
+        .iter()
+        .filter(|t| members.iter().all(|m| reaches(t, m)))
+        .collect();
+    if candidates.is_empty() {
+        for (i, a) in members.iter().enumerate() {
+            for b in &members[i + 1..] {
+                if !tables.iter().any(|t| reaches(t, a) && reaches(t, b)) {
+                    return Anchor::Unrelated(a.clone(), b.clone());
+                }
+            }
+        }
+        return Anchor::Undecided;
+    }
+    let closest: Vec<&&String> = candidates
+        .iter()
+        .filter(|t| !candidates.iter().any(|o| o != *t && reaches(t, o)))
+        .collect();
+    let [anchor] = closest.as_slice() else {
+        return Anchor::Undecided;
+    };
+    let Some(graph) = super::fan_trap::GrainGraph::build(def) else {
+        return Anchor::Undecided;
+    };
+    for member in &members {
+        let Some(path) = graph.path(anchor, member) else {
+            return Anchor::Undecided;
+        };
+        for pair in path.windows(2) {
+            let edges = def
+                .joins
+                .iter()
+                .filter(|j| {
+                    let (f, t) = (
+                        j.from_alias.to_ascii_lowercase(),
+                        j.table.to_ascii_lowercase(),
+                    );
+                    (f == pair[0] && t == pair[1]) || (f == pair[1] && t == pair[0])
+                })
+                .count();
+            if edges != 1 {
+                return Anchor::Undecided;
+            }
+        }
+    }
+    Anchor::At((**anchor).clone())
+}
+
 /// Whether `alias` sits BELOW `base` in the relationship graph — i.e. following
 /// its declared foreign keys upwards (`from_alias` -> `table`, the referencing
 /// side to the referenced side) reaches the base table.
@@ -417,6 +536,45 @@ fn expand_facts(
     }
     validate_fact_table_path(view_name, def, &fact_tables, &dim_tables)?;
 
+    // A fact query reads the rows of the table under all its members, as a
+    // dimensions-only query does (`member_anchor`), but every row, not each
+    // distinct one. The path check above has made sure one of the members is
+    // that table. Anchored there, every hop is many-to-one with a single
+    // relationship, so the role-playing checks below have nothing to catch.
+    let where_has_unqualified_member = resolved_where
+        .as_ref()
+        .is_some_and(|w| w.members.iter().any(|m| m.table.is_none()));
+    let mut members: Option<Vec<String>> =
+        (!where_has_unqualified_member).then(|| dim_tables.clone());
+    for fact in &resolved_facts {
+        if let Some(m) = members.as_mut() {
+            match &fact.source_table {
+                Some(t) => {
+                    m.push(t.clone());
+                    m.extend(super::facts::collect_referenced_fact_tables(
+                        &fact.expr, &def.facts,
+                    ));
+                }
+                None => members = None,
+            }
+        }
+    }
+    for dim in &resolved_dims {
+        if let Some(m) = members.as_mut() {
+            if dim.source_table.is_none() {
+                members = None;
+            } else {
+                m.extend(super::facts::collect_referenced_fact_tables(
+                    &dim.expr, &def.facts,
+                ));
+            }
+        }
+    }
+    let anchored = match members.map(|m| member_anchor(def, &m)) {
+        Some(Anchor::At(anchor)) => Some(anchor),
+        _ => None,
+    };
+
     // 3b. Role-playing ambiguity detection (SG-17), mirroring the metrics
     // path in expand(). Fact queries carry no metrics, so there is never a
     // USING context to disambiguate: a dimension on a table reached by
@@ -424,32 +582,36 @@ fn expand_facts(
     // same error the metrics path raises when no co-queried metric supplies
     // USING. Previously the facts path skipped this check and silently bound
     // the dimension to an arbitrary relationship edge.
-    for dim in &resolved_dims {
-        let _ = find_using_context(view_name, def, dim, &[])?;
+    if anchored.is_none() {
+        for dim in &resolved_dims {
+            let _ = find_using_context(view_name, def, dim, &[])?;
+        }
     }
 
     // 3c. EXP-5: a fact sourced on (or reached only through) a role-playing
     // table has no USING context to pick a role — reject rather than silently
     // binding to the first-declared relationship, mirroring the dimension
     // check above.
-    for fact in &resolved_facts {
-        check_fact_role_playing_path(view_name, def, fact)?;
+    if anchored.is_none() {
+        for fact in &resolved_facts {
+            check_fact_role_playing_path(view_name, def, fact)?;
+        }
+        // TECH-DEBT #69: a queried dimension's expression may reach a fact on a
+        // role-playing path too (#54 inlines it), and a fact query has no USING.
+        super::role_playing::check_member_fact_role_playing_path(
+            view_name,
+            def,
+            &resolved_dims,
+            &[],
+            &[],
+        )?;
     }
-    // TECH-DEBT #69: a queried dimension's expression may reach a fact on a
-    // role-playing path too (#54 inlines it), and a fact query has no USING.
-    super::role_playing::check_member_fact_role_playing_path(
-        view_name,
-        def,
-        &resolved_dims,
-        &[],
-        &[],
-    )?;
 
     // 3d. EXP-10: a `where_clause` member on (or reached only through) a
     // role-playing table has no way to name its role either — the predicate is
     // spliced as the member's own expression, never rewritten to a scoped
     // alias. Same reasoning as 3b/3c.
-    if let Some(rw) = &resolved_where {
+    if let Some(rw) = resolved_where.as_ref().filter(|_| anchored.is_none()) {
         check_where_clause_role_playing_path(view_name, def, &rw.members)?;
     }
 
@@ -498,6 +660,30 @@ fn expand_facts(
     }
     if let Some(rw) = &resolved_where {
         fact_sources.extend(rw.source_tables.iter().cloned());
+    }
+    if let Some(anchor) = anchored {
+        let mut extra = fact_sources;
+        for dim in &resolved_dims {
+            extra.extend(super::facts::collect_referenced_fact_tables(
+                &dim.expr, &def.facts,
+            ));
+        }
+        let joins = super::per_grain::anchor_joins(
+            def,
+            &anchor,
+            &resolved_dims,
+            &extra,
+            &std::collections::HashMap::new(),
+            &[],
+        );
+        return Ok(SelectSpec {
+            where_clause: resolved_where.map(|rw| rw.sql),
+            distinct: false,
+            items,
+            from: FromSource::AnchorTable { def, anchor, joins },
+            group_by: GroupBy::None,
+        }
+        .render());
     }
     let joins = resolve_joins_pkfk(def, &resolved_dims, &[], &fact_sources);
 
@@ -700,6 +886,66 @@ fn expand_unhoisted(
         }
     }
 
+    // A dimensions-only query reads from the table under all its members, not
+    // from whichever table is declared first (see `member_anchor`). Every hop
+    // from there is many-to-one with one relationship, so no fan-trap,
+    // role-playing or phantom-row guard below has anything to catch on it.
+    if resolved_mets.is_empty() {
+        let where_tables: Vec<String> = resolved_where
+            .as_ref()
+            .map(|w| w.source_tables.clone())
+            .unwrap_or_default();
+        let unqualified = resolved_where
+            .as_ref()
+            .is_some_and(|w| w.members.iter().any(|m| m.table.is_none()));
+        let anchor = dims_only_members(def, &resolved_dims, &where_tables, unqualified)
+            .map_or(Anchor::Undecided, |members| member_anchor(def, &members));
+        match anchor {
+            Anchor::At(anchor) => {
+                let mut extra = where_tables;
+                for dim in &resolved_dims {
+                    extra.extend(super::facts::collect_referenced_fact_tables(
+                        &dim.expr, &def.facts,
+                    ));
+                }
+                let joins = super::per_grain::anchor_joins(
+                    def,
+                    &anchor,
+                    &resolved_dims,
+                    &extra,
+                    &std::collections::HashMap::new(),
+                    &[],
+                );
+                let items = resolved_dims
+                    .iter()
+                    .map(|dim| {
+                        SelectItem::new(
+                            super::facts::inline_dimension_facts(&dim.expr, &def.facts),
+                            dim.output_type.clone(),
+                            quote_stored_ident(&dim.name),
+                        )
+                    })
+                    .collect();
+                return Ok(SelectSpec {
+                    where_clause: resolved_where.map(|rw| rw.sql),
+                    distinct: true,
+                    items,
+                    from: FromSource::AnchorTable { def, anchor, joins },
+                    group_by: GroupBy::None,
+                }
+                .render());
+            }
+            Anchor::Unrelated(table_a, table_b) => {
+                return Err(ExpandError::UnrelatedTables {
+                    view_name: view_name.to_string(),
+                    table_a,
+                    table_b,
+                });
+            }
+            Anchor::Undecided => {}
+        }
+    }
+
     // 4. Pre-compute all metric expressions: inline facts into base metrics,
     //    then inline metric references into derived metrics.
     let topo_order = toposort_facts(&def.facts).map_err(|e| ExpandError::CycleDetected {
@@ -899,12 +1145,18 @@ fn expand_unhoisted(
     // replaces that topology in exactly the same way, so it uses the same mode;
     // the retained metric × dimension check is what still reports a dimension
     // below the metric's own grain.
+    // Phase 7.3: only a per-grain plan that deduplicates its bridged groups
+    // may let a dimension or filter across a many-to-many bridge through.
+    let bridges = grain_plan
+        .as_ref()
+        .is_some_and(super::per_grain::Plan::crosses_bridge);
     check_fan_traps(
         view_name,
         def,
         &resolved_dims,
         &resolved_mets,
         grain_plan.is_some() || window_anchor.is_some() || snapshot_anchor.is_some(),
+        bridges,
     )?;
     // PAR-6 (TECH-DEBT #53): a member reaching a fact on another table now
     // pulls that table's join, so the fence has to rule out a fanning one.
@@ -928,7 +1180,13 @@ fn expand_unhoisted(
         &where_tables,
     )?;
     if let Some(rw) = &resolved_where {
-        super::fan_trap::check_where_clause_fan_traps(view_name, def, &rw.members, &resolved_mets)?;
+        super::fan_trap::check_where_clause_fan_traps(
+            view_name,
+            def,
+            &rw.members,
+            &resolved_mets,
+            bridges,
+        )?;
         // EXP-10: and the role-playing seam the fan-trap check does not cover —
         // reaching the member's table is unambiguous only if no role-playing
         // table sits on the path. Runs on every emission path because it is
