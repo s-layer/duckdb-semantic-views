@@ -603,18 +603,33 @@ pub(super) fn resolve_joins_pkfk<'a>(
     // Also track which bare aliases are role-playing (have multiple relationships).
     let mut role_playing_bare_aliases: HashSet<String> = HashSet::new();
 
-    // The tables the facts a metric is written over live on, its own and those
-    // of every metric it is computed from: only there is a reference rewritten
-    // to a scoped alias (`facts::rewrite_using_scoped_refs`).
+    // The tables a metric reads through a scoped alias, its own and those of
+    // every metric it is computed from: the tables its facts live on (only
+    // there is a reference rewritten to a scoped alias,
+    // `facts::rewrite_using_scoped_refs`), and those of its `NON ADDITIVE BY`
+    // dimensions, whose snapshot orders by the scoped alias of a table other
+    // tables reference too (`role_playing::convergent_using_alias`).
     let metric_fact_tables = |met: &crate::model::Metric| -> HashSet<String> {
         let names = super::facts::collect_transitive_metric_names(met, &def.metrics);
-        std::iter::once(met)
+        let metrics: Vec<&crate::model::Metric> = std::iter::once(met)
             .chain(
                 def.metrics
                     .iter()
                     .filter(|m| names.contains(&crate::ident::normalize_ident_part(&m.name))),
             )
-            .flat_map(|m| super::facts::collect_referenced_fact_tables(&m.expr, &def.facts))
+            .collect();
+        let fact_tables = metrics
+            .iter()
+            .flat_map(|m| super::facts::collect_referenced_fact_tables(&m.expr, &def.facts));
+        let na_tables = metrics.iter().flat_map(|m| {
+            m.non_additive_by.iter().filter_map(|na| {
+                super::resolution::find_dimension(def, &na.dimension)
+                    .and_then(|d| d.source_table.clone())
+                    .filter(|t| super::role_playing::relationships_to_table(def, t).len() > 1)
+            })
+        });
+        fact_tables
+            .chain(na_tables)
             .map(|t| t.to_ascii_lowercase())
             .collect()
     };

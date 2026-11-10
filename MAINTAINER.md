@@ -99,7 +99,7 @@ src/
 │   │                          #   alternative), lowered to a semantic_view() call
 │   ├── ffi.rs                 #   FFI entry points: sv_grammar_changes_rust / sv_grammar_transform_rust
 │   └── mod.rs                 #   the rule list registered with DuckDB, and transform dispatch
-├── graph/                     # Relationship graph: cardinality, join tree, toposort, derived-metric DAG
+├── graph/                     # Relationship graph: cardinality, toposort, derived-metric DAG
 │   ├── relationship.rs cardinality.rs toposort.rs
 │   ├── derived_metrics.rs facts.rs using.rs names.rs
 │   ├── member_exprs.rs        #   CREATE-time content checks: no aggregate in a dimension or fact, no

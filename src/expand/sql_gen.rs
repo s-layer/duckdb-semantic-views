@@ -1015,10 +1015,19 @@ fn expand_unhoisted(
     // compute from the base tables (correct, if slower). Routing a filtered
     // query when every referenced member is a materialized dimension is a
     // separate, later change.
-    if resolved_where.is_none() {
-        if let Some(routed_sql) =
+    //
+    // A query with no metrics is routed only once `member_anchor` has found
+    // one table to read it from: a materialization must not answer what the
+    // base tables refuse (two paths, unrelated tables).
+    let route = || {
+        if resolved_where.is_none() {
             super::materialization::try_route_materialization(def, &resolved_dims, &resolved_mets)
-        {
+        } else {
+            None
+        }
+    };
+    if !resolved_mets.is_empty() {
+        if let Some(routed_sql) = route() {
             return Ok(routed_sql);
         }
     }
@@ -1039,6 +1048,9 @@ fn expand_unhoisted(
             .map_or(Anchor::Undecided, |members| member_anchor(def, &members));
         match anchor {
             Anchor::At(anchor) => {
+                if let Some(routed_sql) = route() {
+                    return Ok(routed_sql);
+                }
                 let mut extra = where_tables;
                 for dim in &resolved_dims {
                     extra.extend(super::facts::collect_referenced_fact_tables(
@@ -1121,6 +1133,9 @@ fn expand_unhoisted(
                         paths,
                         false,
                     ));
+                }
+                if let Some(routed_sql) = route() {
+                    return Ok(routed_sql);
                 }
             }
         }

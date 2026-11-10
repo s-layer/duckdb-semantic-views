@@ -9,9 +9,10 @@
 #     | li(order_id)   | s(order_id)
 #     li (line_items)  s (shipments)
 #
-# Two children (`li`, `s`) reference the base table `o`. This is the only legal
-# fan-in -- `check_no_diamonds` exempts the root and rejects every other
-# multi-parent node as an ambiguous join diamond.
+# Two children (`li`, `s`) reference the base table `o`. Since 0.19.0 CREATE
+# accepts a table referenced by several tables wherever it is declared, and a
+# query that would have to pick one of two paths is refused instead
+# (`phase7_diamond_paths.test`).
 #
 # The parent map used to take the first-declared child as the base table's
 # "parent", so `o` hung off `li` and chains ran through the root and out the far

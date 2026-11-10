@@ -630,8 +630,9 @@ const PATH_CAP: usize = 256;
 const PARTIAL_PATH_CAP: usize = 4096;
 
 /// Find the join path between two table aliases, treating relationship edges
-/// as undirected. Returns `None` when the tables are not connected (e.g.
-/// legacy joins carrying no FK metadata).
+/// as undirected. Returns `None` only when the tables are not connected (e.g.
+/// legacy joins carrying no FK metadata): when [`simple_paths`] runs out of
+/// budget first, the shortest undirected path is returned.
 ///
 /// In a relationship tree there is exactly one simple path. Since Phase 7 PR 3
 /// CREATE accepts any acyclic graph (two children of one parent referenced by
@@ -640,7 +641,8 @@ const PARTIAL_PATH_CAP: usize = 4096;
 /// is, in order of preference:
 ///
 /// 1. a chain of foreign keys, every step to a referenced table, the path
-///    `multi_path` counts and the join walk follows first;
+///    `multi_path` counts and the join walk follows first, found by a walk
+///    over forward steps alone, however many other paths there are;
 /// 2. one with no edge traversed in the fan-out direction (a step back along a
 ///    one-to-one relationship is allowed);
 /// 3. one shaped like a many-to-many bridge ([`is_bridge_path`]);
@@ -661,18 +663,62 @@ fn find_path(
     if start == goal {
         return Some(vec![start.to_string()]);
     }
+    let forward = |from: &str, to: &str| card_map.contains_key(&(from.to_string(), to.to_string()));
+    if let Some(chain) = shortest_path(start, goal, adjacency, &forward) {
+        return Some(chain);
+    }
     let mut paths = simple_paths(start, goal, adjacency);
+    if paths.is_empty() {
+        // Out of budget before the goal, in a dense cluster of tables: the
+        // tables are still connected, and a check must not skip them as if
+        // they were not.
+        return shortest_path(start, goal, adjacency, &|_, _| true);
+    }
     paths.sort_by(|a, b| a.len().cmp(&b.len()).then_with(|| a.cmp(b)));
     let pick = |pred: &dyn Fn(&[String]) -> bool| paths.iter().position(|p| pred(p));
-    let chain = |p: &[String]| {
-        p.windows(2)
-            .all(|w| card_map.contains_key(&(w[0].clone(), w[1].clone())))
-    };
-    let at = pick(&chain)
-        .or_else(|| pick(&|p| fanning_edge_on_path(p, card_map).is_none()))
+    let at = pick(&|p| fanning_edge_on_path(p, card_map).is_none())
         .or_else(|| pick(&|p| is_bridge_path(p, card_map)))
         .unwrap_or(0);
-    (!paths.is_empty()).then(|| paths.swap_remove(at))
+    Some(paths.swap_remove(at))
+}
+
+/// The shortest path from `start` to `goal` taking only the steps `step`
+/// allows, breadth first over sorted neighbours, so the first by alias order
+/// among the shortest. Linear in the graph, so it finds a chain of foreign keys
+/// however many other paths there are.
+fn shortest_path(
+    start: &str,
+    goal: &str,
+    adjacency: &HashMap<String, Vec<String>>,
+    step: &dyn Fn(&str, &str) -> bool,
+) -> Option<Vec<String>> {
+    let mut parent: HashMap<String, String> = HashMap::new();
+    let mut seen: HashSet<String> = HashSet::from([start.to_string()]);
+    let mut queue: VecDeque<String> = VecDeque::from([start.to_string()]);
+    while let Some(current) = queue.pop_front() {
+        if current == goal {
+            let mut path = vec![current];
+            while let Some(p) = parent.get(path.last().expect("never empty")) {
+                path.push(p.clone());
+            }
+            path.reverse();
+            return Some(path);
+        }
+        let mut next: Vec<&String> = adjacency
+            .get(&current)
+            .into_iter()
+            .flatten()
+            .filter(|n| step(&current, n))
+            .collect();
+        next.sort_unstable();
+        for n in next {
+            if seen.insert(n.clone()) {
+                parent.insert(n.clone(), current.clone());
+                queue.push_back(n.clone());
+            }
+        }
+    }
+    None
 }
 
 /// Up to [`PATH_CAP`] undirected simple paths from `start` to `goal`, breadth
@@ -1942,6 +1988,72 @@ mod tests {
     /// does not come back through its start), so the one path to it never
     /// fills `PATH_CAP`. The walk stops after `PARTIAL_PATH_CAP` partial paths
     /// and still has the shortest one.
+    /// The dense cluster of `simple_paths_stops_in_a_dense_cluster`, with
+    /// the goal five steps past `t0` along `g1`..`g4`, so `simple_paths`
+    /// runs out of budget before reaching it. Each relationship is declared
+    /// `forward` (`a -> b` from the cluster outward), or the other way.
+    fn far_goal(forward: bool) -> (HashMap<String, Vec<String>>, CardMap) {
+        let mut names: Vec<String> = (0..12).map(|i| format!("t{i}")).collect();
+        let mut adjacency: HashMap<String, Vec<String>> = HashMap::new();
+        let mut card_map: CardMap = HashMap::new();
+        let mut link = |a: &str, b: &str, card_map: &mut CardMap| {
+            adjacency
+                .entry(a.to_string())
+                .or_default()
+                .push(b.to_string());
+            adjacency
+                .entry(b.to_string())
+                .or_default()
+                .push(a.to_string());
+            let edge = if forward { (a, b) } else { (b, a) };
+            card_map.insert(
+                (edge.0.to_string(), edge.1.to_string()),
+                (Cardinality::ManyToOne, format!("{}_{}", edge.0, edge.1)),
+            );
+        };
+        for (i, a) in names.iter().enumerate() {
+            for b in &names[i + 1..] {
+                link(a, b, &mut card_map);
+            }
+        }
+        names = vec!["t0", "g1", "g2", "g3", "g4", "goal"]
+            .into_iter()
+            .map(str::to_string)
+            .collect();
+        for w in names.windows(2) {
+            link(&w[0], &w[1], &mut card_map);
+        }
+        (adjacency, card_map)
+    }
+
+    /// Out of budget, the tables are still connected (review of #342): `None`
+    /// read as "not connected", and every fan-trap check skipped the pair.
+    #[test]
+    fn find_path_survives_an_exhausted_budget() {
+        let (adjacency, card_map) = far_goal(false);
+        assert!(simple_paths("t1", "goal", &adjacency).is_empty());
+        let path = find_path("t1", "goal", &adjacency, &card_map).expect("connected");
+        assert_eq!(path, ["t1", "t0", "g1", "g2", "g3", "g4", "goal"]);
+    }
+
+    /// A chain of foreign keys is found however many other paths there are
+    /// (review of #342): only the paths `simple_paths` found were considered.
+    #[test]
+    fn find_path_finds_a_chain_past_the_budget() {
+        let (adjacency, mut card_map) = far_goal(true);
+        // Not a chain from `t1`: the cluster's relationships all point back.
+        for i in 1..12 {
+            let key = ("t0".to_string(), format!("t{i}"));
+            let v = card_map.remove(&key).expect("declared t0 -> ti");
+            card_map.insert((format!("t{i}"), "t0".to_string()), v);
+        }
+        let path = find_path("t1", "goal", &adjacency, &card_map).expect("connected");
+        assert_eq!(path, ["t1", "t0", "g1", "g2", "g3", "g4", "goal"]);
+        assert!(path
+            .windows(2)
+            .all(|w| card_map.contains_key(&(w[0].clone(), w[1].clone()))));
+    }
+
     #[test]
     fn simple_paths_stops_in_a_dense_cluster() {
         let names: Vec<String> = (0..12).map(|i| format!("t{i}")).collect();

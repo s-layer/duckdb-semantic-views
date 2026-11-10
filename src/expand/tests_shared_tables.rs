@@ -87,7 +87,29 @@ fn db() -> duckdb::Connection {
          INSERT INTO b_orders VALUES (1, 1, 10);
          INSERT INTO b_cust VALUES (1, 1);
          INSERT INTO b_regions VALUES (1, 'R1'), (2, 'R2');
-         INSERT INTO b_shipments VALUES (1, 1, 2);",
+         INSERT INTO b_shipments VALUES (1, 1, 2);
+         CREATE TABLE f_regions (id INT, name VARCHAR);
+         CREATE TABLE f_carriers (id INT, r_id INT, fee INT);
+         CREATE TABLE f_airports (id INT, r_id INT);
+         CREATE TABLE f_flights (id INT, c_id INT, dep INT, arr INT);
+         INSERT INTO f_regions VALUES (1, 'R1'), (2, 'R2');
+         INSERT INTO f_carriers VALUES (1, 1, 10), (2, 2, 20);
+         INSERT INTO f_airports VALUES (1, 2);
+         INSERT INTO f_flights VALUES (1, 1, 1, 1);
+         CREATE TABLE n_cust (id INT, signup DATE);
+         CREATE TABLE n_orders (id INT, c_id INT, amount INT);
+         CREATE TABLE n_stores (id INT, c_id INT);
+         INSERT INTO n_cust VALUES (1, '2026-01-01'), (2, '2026-02-01');
+         INSERT INTO n_orders VALUES (1, 1, 10), (2, 2, 20), (3, 2, 5);
+         INSERT INTO n_stores VALUES (1, 1);
+         CREATE TABLE g_regions (id INT, name VARCHAR);
+         CREATE TABLE g_cust (id INT, r_id INT, v INT);
+         CREATE TABLE g_stores (id INT, r_id INT);
+         CREATE TABLE g_orders (id INT, c_id INT, s_id INT);
+         INSERT INTO g_regions VALUES (1, 'R1'), (2, 'R2');
+         INSERT INTO g_cust VALUES (1, 1, 10);
+         INSERT INTO g_stores VALUES (1, 2);
+         INSERT INTO g_orders VALUES (1, 1, 1);",
     )
     .expect("fixture data");
     con
@@ -458,6 +480,24 @@ fn q7_book_metric_by_bridge_dimension_is_refused() {
 fn q8_dims_only_across_two_bridges_is_refused() {
     assert_many_to_many(
         &qv(),
+        &req(&["title", "country"], &[], None),
+        &["a <- ba -> b", "a <- be -> b"],
+    );
+}
+
+/// Q8 with a materialization of exactly those dimensions (review of #342): it
+/// was routed to the materialization before the refusal was asked.
+#[test]
+fn q8_is_refused_beside_a_materialization_of_its_dimensions() {
+    let mut view = qv();
+    view.materializations = vec![crate::model::Materialization {
+        name: "titles_by_country".to_string(),
+        table: "titles_by_country".to_string(),
+        dimensions: vec!["title".to_string(), "country".to_string()],
+        metrics: vec![],
+    }];
+    assert_many_to_many(
+        &view,
         &req(&["title", "country"], &[], None),
         &["a <- ba -> b", "a <- be -> b"],
     );
@@ -861,6 +901,101 @@ fn a_chain_is_followed_before_a_step_back_along_a_one_to_one_relationship() {
     assert_answer(
         &view,
         &req(&["region"], &["revenue"], None),
+        &[&["R1", "10"]],
+    );
+}
+
+/// Carriers reference their region, and so do airports, which flights
+/// reference twice (so airports are role-played); flights also reference
+/// their carrier (review of #342). A carrier metric by region follows the one
+/// chain `c -> r`, which no role-played table is on: the airports are reached
+/// from carriers only by stepping back along `f -> c`. It was refused as an
+/// ambiguous role in every order.
+#[test]
+fn a_role_played_table_off_the_chain_does_not_refuse_it() {
+    let view = SemanticViewDefinition {
+        tables: vec![
+            table("c", "f_carriers", &["id"]),
+            table("r", "f_regions", &["id"]),
+            table("f", "f_flights", &["id"]),
+            table("a", "f_airports", &["id"]),
+        ],
+        joins: vec![
+            rel("c_region", "c", "r", "r_id", "id"),
+            rel("a_region", "a", "r", "r_id", "id"),
+            rel("f_carrier", "f", "c", "c_id", "id"),
+            rel("dep", "f", "a", "dep", "id"),
+            rel("arr", "f", "a", "arr", "id"),
+        ],
+        dimensions: vec![dim("region", "r.name", "r")],
+        metrics: vec![metric("fees", "SUM(c.fee)", "c")],
+        ..Default::default()
+    };
+    assert_answer(
+        &view,
+        &req(&["region"], &["fees"], None),
+        &[&["R1", "10"], &["R2", "20"]],
+    );
+}
+
+/// Orders and stores both reference customers. A semi-additive order metric
+/// whose `USING` names the orders' relationship takes its snapshot at the
+/// latest signup of the orders' customers (review of #342): the snapshot
+/// ordered by `c__o_cust.signup`, an alias no join brought in, when orders
+/// were declared first.
+#[test]
+fn semi_additive_using_into_a_shared_table_is_answered() {
+    let mut last = metric("last_amt", "SUM(o.amount)", "o");
+    last.non_additive_by = vec![NonAdditiveDim {
+        dimension: "signup".to_string(),
+        ..Default::default()
+    }];
+    last.using_relationships = vec!["o_cust".to_string()];
+    let view = SemanticViewDefinition {
+        tables: vec![
+            table("o", "n_orders", &["id"]),
+            table("s", "n_stores", &["id"]),
+            table("c", "n_cust", &["id"]),
+        ],
+        joins: vec![
+            rel("o_cust", "o", "c", "c_id", "id"),
+            rel("s_cust", "s", "c", "c_id", "id"),
+        ],
+        dimensions: vec![dim("signup", "c.signup", "c")],
+        metrics: vec![last],
+        ..Default::default()
+    };
+    assert_answer(&view, &req(&[], &["last_amt"], None), &[&["25"]]);
+}
+
+/// Orders reference their customer one-to-one and their store; both
+/// reference a region (review of #342). A customer metric by region follows
+/// `c -> r`, whichever relationship is declared first: the join tree from
+/// orders reached the region through the store.
+#[test]
+fn a_metric_follows_its_own_chain_when_the_root_reaches_the_table_twice() {
+    let mut o_cust = rel("o_cust", "o", "c", "c_id", "id");
+    o_cust.cardinality = Cardinality::OneToOne;
+    let view = SemanticViewDefinition {
+        tables: vec![
+            table("o", "g_orders", &["id"]),
+            table("c", "g_cust", &["id"]),
+            table("s", "g_stores", &["id"]),
+            table("r", "g_regions", &["id"]),
+        ],
+        joins: vec![
+            rel("o_store", "o", "s", "s_id", "id"),
+            o_cust,
+            rel("c_region", "c", "r", "r_id", "id"),
+            rel("s_region", "s", "r", "r_id", "id"),
+        ],
+        dimensions: vec![dim("region", "r.name", "r")],
+        metrics: vec![metric("cust_v", "SUM(c.v)", "c")],
+        ..Default::default()
+    };
+    assert_answer(
+        &view,
+        &req(&["region"], &["cust_v"], None),
         &[&["R1", "10"]],
     );
 }

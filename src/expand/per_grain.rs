@@ -882,10 +882,10 @@ fn every_metric_has_roles(
 ///
 /// A table is ambiguous here if it *is* a role-playing target or is reachable
 /// only *through* one, which is what [`role_playing_on_path`] walks. Checking
-/// the tables the query touches also covers the joins between them: the
-/// relationship graph is a tree apart from the sanctioned role-playing
-/// multi-edge, so any node on the path between two touched tables is an ancestor
-/// of one of them, and the walk from that endpoint to the root passes through it.
+/// the tables the query touches also covers the joins between them: the walk
+/// from the query's starts to a touched table visits every table on the path
+/// to it, so a role-played table on the way between two touched tables is
+/// found from the farther one.
 ///
 /// [`role_playing_on_path`]: super::role_playing::role_playing_on_path
 fn role_playing_affects_query(

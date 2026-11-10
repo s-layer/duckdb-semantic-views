@@ -3,8 +3,9 @@
 //! Shape: a bridge table `bt` references both `h` (`bt.hid -> h.id`) and `x`
 //! (`bt.xid -> x.id`). Each side has its own many-to-one parent: `h.fk_z ->
 //! z.id` and `x.fk_y -> y.id`. When the base table is `h`, a plain child
-//! `c.hid -> h.id` hangs under `h` too (anywhere else it would make `h` a
-//! diamond, which CREATE refuses). The base table is drawn from `h`, `x`,
+//! `c.hid -> h.id` hangs under `h` too. CREATE has accepted that child with
+//! any base table since 0.19.0; the harness declares it only where its oracle
+//! models it. The base table is drawn from `h`, `x`,
 //! `bt` and `z`, because a bridge must not depend on which table comes first.
 //!
 //! Every relationship is many-to-one, and the data holds NULL and dangling

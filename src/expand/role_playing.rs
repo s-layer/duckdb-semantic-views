@@ -100,9 +100,11 @@ pub(super) fn query_starts(
 /// to reject dimensions on descendants of a role-playing table (EXP-4) and
 /// facts on/through one (EXP-5), one hop past the direct `AmbiguousPath` case.
 ///
-/// A table is on the path when a start reaches it by a chain of relationships
-/// and it reaches `table` by one; a start itself is not (its rows are read
-/// once, whatever references it). A role-played table beside the path, which
+/// A table is on the path when it reaches `table` by a chain of relationships
+/// and a start reaches it: by a chain, when the start has a chain to `table`
+/// (that chain is the path), or in either direction without passing through
+/// `table` otherwise. A start itself is not on it (its rows are read once,
+/// whatever references it). A role-played table beside the path, which
 /// also references `table`, is not on it: with any `TABLES` order accepted,
 /// walking up to the first-declared table instead made the answer depend on
 /// that order. An empty `from` counts every table as a start.
@@ -145,24 +147,46 @@ pub(super) fn role_playing_on_path(
             view_name: view_name.to_string(),
             reason,
         })?;
-    // The tables some start reaches without passing through `table`, over
-    // relationships in either direction (a path may step back along one, as
-    // `u <- t -> p` does), the starts themselves left out.
+    // The tables on some start's path to `table`, the starts themselves left
+    // out. A start with a chain of relationships to `table` follows a chain
+    // (one chain wins over any other path, as in Snowflake), so only what it
+    // reaches forward counts. A start with none reaches `table` some other
+    // way, stepping back along a relationship (`u <- t -> p`), so anything it
+    // reaches in either direction without passing through `table` counts.
     let reached: Option<HashSet<String>> = (!from.is_empty()).then(|| {
-        let starts: HashSet<String> = from.iter().map(|s| s.to_ascii_lowercase()).collect();
-        let mut seen: HashSet<String> = starts.clone();
-        seen.insert(table_lower.clone());
-        let mut stack: Vec<String> = starts.iter().cloned().collect();
-        let mut reached: HashSet<String> = HashSet::new();
-        while let Some(current) = stack.pop() {
-            let forward = graph.edges.get(&current).into_iter().flatten();
-            let backward = graph.reverse.get(&current).into_iter().flatten();
-            for next in forward.chain(backward) {
-                let next = next.to_ascii_lowercase();
-                if seen.insert(next.clone()) {
-                    reached.insert(next.clone());
-                    stack.push(next);
+        let walk = |start: &str, undirected: bool| -> HashSet<String> {
+            let mut seen: HashSet<String> = HashSet::from([start.to_string()]);
+            if undirected {
+                seen.insert(table_lower.clone());
+            }
+            let mut stack = vec![start.to_string()];
+            let mut out: HashSet<String> = HashSet::new();
+            while let Some(current) = stack.pop() {
+                let forward = graph.edges.get(&current).into_iter().flatten();
+                let backward = graph
+                    .reverse
+                    .get(&current)
+                    .into_iter()
+                    .flatten()
+                    .filter(|_| undirected);
+                for next in forward.chain(backward) {
+                    let next = next.to_ascii_lowercase();
+                    if seen.insert(next.clone()) {
+                        out.insert(next.clone());
+                        stack.push(next);
+                    }
                 }
+            }
+            out
+        };
+        let mut reached: HashSet<String> = HashSet::new();
+        for start in from {
+            let start = start.to_ascii_lowercase();
+            let chain = walk(&start, false);
+            if chain.contains(&table_lower) {
+                reached.extend(chain);
+            } else {
+                reached.extend(walk(&start, true));
             }
         }
         reached
