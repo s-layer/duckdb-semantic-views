@@ -1383,6 +1383,7 @@ fn expect_metric_path_ambiguity(def: &SemanticViewDefinition, req: &QueryRequest
 /// Read alone it is computed over the airports' own rows (each metric is
 /// aggregated at its own table, TECH-DEBT #71), which needs no role: 100 + 7.
 #[test]
+#[cfg(not(feature = "extension"))]
 fn td69_metric_on_the_role_played_table_over_its_own_fact_reads_its_own_rows() {
     let mut def = one_to_one_role_played_fact_def();
     def.metrics.push(metric_on("a", "any_elev", "SUM(elev)"));
@@ -1409,6 +1410,7 @@ fn td69_fence_metric_on_the_role_played_table_over_a_raw_column_is_rejected() {
 /// A derived metric over such a metric, read alone, is computed over the
 /// airports' rows the same way.
 #[test]
+#[cfg(not(feature = "extension"))]
 fn td69_derived_metric_over_a_role_played_table_metric_reads_its_own_rows() {
     let mut def = one_to_one_role_played_fact_def();
     def.metrics

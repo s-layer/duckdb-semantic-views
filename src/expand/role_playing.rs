@@ -918,34 +918,57 @@ pub(super) fn descendant_chain<'a>(
     rp: &str,
     table: &str,
 ) -> Option<Vec<&'a crate::model::Join>> {
+    // The number of chains from each table to `table`, capped at 2 and
+    // memoized, so each table is walked once however many paths a dense graph
+    // below `rp` has. Two relationships between one pair are two chains.
+    // `None` marks a table being walked: reaching it again is a cycle, which
+    // validation refuses at CREATE.
+    fn count<'a>(
+        node: &str,
+        table: &str,
+        out_of: &dyn Fn(&str) -> Vec<&'a crate::model::Join>,
+        memo: &mut std::collections::HashMap<String, Option<usize>>,
+    ) -> Option<usize> {
+        if node == table {
+            return Some(1);
+        }
+        match memo.get(node) {
+            Some(Some(n)) => return Some(*n),
+            Some(None) => return None,
+            None => {}
+        }
+        memo.insert(node.to_string(), None);
+        let mut n = 0;
+        for edge in out_of(node) {
+            n = (n + count(&edge.table.to_ascii_lowercase(), table, out_of, memo)?).min(2);
+        }
+        memo.insert(node.to_string(), Some(n));
+        Some(n)
+    }
     let rp = rp.to_ascii_lowercase();
     let table = table.to_ascii_lowercase();
-    let mut found: Vec<Vec<&crate::model::Join>> = Vec::new();
-    let mut stack: Vec<(String, Vec<&crate::model::Join>)> = vec![(rp.clone(), Vec::new())];
-    while let Some((current, chain)) = stack.pop() {
-        if current == table {
-            found.push(chain);
-            if found.len() > 1 {
-                return None;
-            }
-            continue;
-        }
-        if chain.len() > def.joins.len() {
-            return None; // A cycle; validation refuses these at CREATE.
-        }
-        for edge in def
-            .joins
+    let out_of = |node: &str| {
+        def.joins
             .iter()
-            .filter(|j| !j.fk_columns.is_empty() && j.from_alias.eq_ignore_ascii_case(&current))
-        {
-            let mut next = chain.clone();
-            next.push(edge);
-            stack.push((edge.table.to_ascii_lowercase(), next));
-        }
+            .filter(move |j| !j.fk_columns.is_empty() && j.from_alias.eq_ignore_ascii_case(node))
+            .collect::<Vec<_>>()
+    };
+    let mut memo = std::collections::HashMap::new();
+    if count(&rp, &table, &out_of, &mut memo)? != 1 {
+        return None;
     }
-    let chain = found.pop()?;
-    // Two relationships between one pair on the way are two chains above;
-    // `found` holding one means every step is a single relationship.
+    // Exactly one chain: follow the one relationship at each step whose far
+    // table still reaches `table`.
+    let mut chain: Vec<&crate::model::Join> = Vec::new();
+    let mut current = rp;
+    while current != table {
+        let edge = out_of(&current).into_iter().find(|j| {
+            let to = j.table.to_ascii_lowercase();
+            to == table || memo.get(&to).copied().flatten().unwrap_or(0) > 0
+        })?;
+        chain.push(edge);
+        current = edge.table.to_ascii_lowercase();
+    }
     Some(chain)
 }
 
@@ -1023,6 +1046,51 @@ mod tests {
             }],
             ..Default::default()
         }
+    }
+
+    /// `descendant_chain` below a dense layered graph: `rp` references three
+    /// tables, each of those references all three of the next layer, and so
+    /// on for 14 layers (3^14 forward paths), while `side` hangs off `rp` by
+    /// one relationship. The one chain to `side` is found without walking
+    /// every path (review of #342: the walk built and cloned each of them).
+    #[test]
+    fn descendant_chain_is_bounded_below_a_dense_graph() {
+        let join = |from: &str, to: &str, col: &str| Join {
+            from_alias: from.to_string(),
+            table: to.to_string(),
+            fk_columns: vec![col.to_string()],
+            ref_columns: vec!["id".to_string()],
+            name: Some(format!("{from}_{to}")),
+            ..Default::default()
+        };
+        let mut joins = vec![join("rp", "side", "side_id")];
+        let layer = |l: usize| (0..3).map(move |k| format!("l{l}_{k}"));
+        for to in layer(0) {
+            joins.push(join("rp", &to, &format!("{to}_id")));
+        }
+        for l in 0..14 {
+            for from in layer(l) {
+                for to in layer(l + 1) {
+                    joins.push(join(&from, &to, &format!("{to}_id")));
+                }
+            }
+        }
+        let def = SemanticViewDefinition {
+            joins,
+            ..Default::default()
+        };
+        let start = std::time::Instant::now();
+        let chain = descendant_chain(&def, "rp", "side").expect("one chain to side");
+        assert_eq!(chain.len(), 1);
+        assert!(
+            descendant_chain(&def, "rp", "l14_0").is_none(),
+            "many chains"
+        );
+        assert!(
+            start.elapsed() < std::time::Duration::from_secs(1),
+            "took {:?}",
+            start.elapsed()
+        );
     }
 
     #[test]
