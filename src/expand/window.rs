@@ -185,8 +185,9 @@ fn over_clause(
 
 /// The query a window is computed over, built by [`inner_request`].
 struct InnerRequest {
-    /// The definition it reads: the inner metrics public, and a copy of an
-    /// inner metric carrying a window's own `USING`.
+    /// The definition it reads: no materializations, the inner metrics
+    /// public, and in place of a window with its own `USING`, a copy of its
+    /// inner metric carrying it, under the window's name.
     def: SemanticViewDefinition,
     /// Its metrics: the queried non-window ones, then each window's inner one.
     metrics: Vec<MetricName>,
@@ -199,14 +200,20 @@ struct InnerRequest {
 ///
 /// # Errors
 ///
-/// [`ExpandError::UnknownMetric`] for an inner metric no metric is named, and
-/// [`ExpandError::WindowOverWindow`] for one that is a window metric.
+/// [`ExpandError::UnknownMetric`] for an inner metric no metric is named,
+/// [`ExpandError::WindowOverWindow`] for one that is a window metric, and
+/// [`ExpandError::WindowUsingOffItsTable`] for a window's own `USING` over an
+/// inner metric on another table or a derived one.
 fn inner_request(
     view_name: &str,
     def: &SemanticViewDefinition,
     resolved_mets: &[&Metric],
 ) -> Result<InnerRequest, ExpandError> {
     let mut inner_def = def.clone();
+    // A query holding a window metric is not routed to a materialization,
+    // and neither is the query it is computed over: EXPLAIN asks about the
+    // request as written, so the two must agree (reviewbot on #348).
+    inner_def.materializations.clear();
     let mut inner_metrics: Vec<MetricName> = Vec::new();
     let mut seen: HashSet<String> = HashSet::new();
     let mut add = |name: &str, inner_metrics: &mut Vec<MetricName>| {
@@ -242,15 +249,38 @@ fn inner_request(
                 inner_metric: inner.name.clone(),
             });
         }
+        // A window's own `USING` reaches an inner metric that names none
+        // through a copy of the inner metric carrying it, which takes the
+        // window's own name: no other member reads a window metric (a derived
+        // metric over one does not bind at CREATE, a window over one is
+        // refused), so the copy collides with nothing, and an error the inner
+        // query raises about it names the metric the user queried.
         let column = if !met.using_relationships.is_empty() && inner.using_relationships.is_empty()
         {
-            let name = format!("__sv_window_{i}");
-            inner_def.metrics.push(Metric {
-                name: name.clone(),
+            let same_table = matches!(
+                (&met.source_table, &inner.source_table),
+                (Some(w), Some(t)) if crate::ident::ident_matches(w, t)
+            );
+            if !same_table {
+                return Err(ExpandError::WindowUsingOffItsTable {
+                    view_name: view_name.to_string(),
+                    metric_name: met.name.clone(),
+                    inner_metric: inner.name.clone(),
+                });
+            }
+            let copy = Metric {
+                name: met.name.clone(),
                 using_relationships: met.using_relationships.clone(),
                 ..inner.clone()
-            });
-            name
+            };
+            if let Some(slot) = inner_def
+                .metrics
+                .iter_mut()
+                .find(|m| crate::ident::ident_matches(&m.name, &met.name))
+            {
+                *slot = copy;
+            }
+            met.name.clone()
         } else {
             inner.name.clone()
         };

@@ -109,8 +109,9 @@ src/
 │   │                          #   another table (TECH-DEBT #52 / PAR-3)
 │   ├── same_table_metrics.rs  #   a metric written over metrics on its own table (Phase 6.3): CREATE
 │   │                          #   checks, and the inlining `expand()` applies before anything else
-│   ├── window_dims.rs         #   CREATE-time check: a window clause names only dimensions of tables
-│   │                          #   related to the metric's (Snowflake 010211, Phase 7 PR 5)
+│   ├── window_dims.rs         #   CREATE-time checks: a window clause names only dimensions of tables
+│   │                          #   related to its inner metric's (Snowflake 010211, Phase 7 PR 5), and a
+│   │                          #   window's own USING needs its inner metric on its table
 │   └── mod.rs
 ├── expand/                    # Query expansion: definition + QueryRequest → SQL (pure, always compiled)
 │   ├── mod.rs resolution.rs join_resolver.rs sql_gen.rs select_spec.rs types.rs

@@ -836,14 +836,31 @@ Window metric names an unrelated dimension
 .. code-block:: text
 
    Window metric '<name>': its window clause names dimension '<dim>' of table
-   '<table>', which is unrelated to the metric's table '<metric_table>': neither
-   reaches the other along relationships (for example, they are joined through
-   a many-to-many bridge). A window clause may name dimensions of
-   '<metric_table>', of a table it references, or of a table referencing it.
+   '<table>', which is unrelated to the metric's table '<metric_table>', whose
+   rows its inner metric '<inner>' aggregates: neither reaches the other along
+   relationships (for example, they are joined through a many-to-many bridge).
+   A window clause may name dimensions of '<metric_table>', of a table it
+   references, or of a table referencing it.
 
-**Cause:** A window metric's ``PARTITION BY``, ``PARTITION BY EXCLUDING`` or ``ORDER BY`` names a dimension whose table is not related to the metric's own: books ordered by their authors' country, through a ``book_authors`` bridge, or orders ordered by a dimension of a table that only shares a parent with orders. A book has no single country to order it by. Snowflake refuses these at ``CREATE`` too (010211).
+**Cause:** A window metric's ``PARTITION BY``, ``PARTITION BY EXCLUDING`` or ``ORDER BY`` names a dimension whose table is not related to the table its inner metric aggregates, whose rows the window runs over: books ordered by their authors' country, through a ``book_authors`` bridge, or orders ordered by a dimension of a table that only shares a parent with orders. A book has no single country to order it by. For a derived inner metric, each of its base metrics' tables is checked. Snowflake refuses these at ``CREATE`` too (010211).
 
-**Fix:** Order or partition the window by dimensions of the metric's table or of tables related to it. To see a window's rows split by the other dimension, keep it out of the window clause and query it as a dimension beside the window metric: the window then runs over those rows.
+**Fix:** Order or partition the window by dimensions of the inner metric's table or of tables related to it. To see a window's rows split by the other dimension, keep it out of the window clause and query it as a dimension beside the window metric: the window then runs over those rows.
+
+
+Window metric USING over an inner metric on another table
+-----------------------------------------------------------
+
+.. versionadded:: 0.19.0
+
+.. code-block:: text
+
+   Window metric '<name>' has a USING clause, but its inner metric '<inner>' is
+   not on its table. A window metric's USING applies to its inner metric, so
+   the inner metric must be declared on the window metric's table.
+
+**Cause:** ``CREATE SEMANTIC VIEW`` refuses a window metric with ``USING`` whose inner metric has none and is declared on another table, or is a derived metric. The window's ``USING`` names relationships from the window metric's table, and the window reads its inner metric along them, which a metric on another table, or with no table, cannot follow. A view stored before 0.19.0 with such a metric is refused when it is queried, with ``semantic view '<view>': window function metric '<name>' has a USING clause, but its inner metric '<inner>' is not on its table.``
+
+**Fix:** Declare the inner metric on the window metric's table, or give the inner metric its own ``USING`` and drop it from the window.
 
 
 Window metric PARTITION BY dimension not found

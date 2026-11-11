@@ -1009,6 +1009,11 @@ struct DependentCase {
     na_dim_queried: bool,
     /// `true` selects the WINDOW dependent `wbal`, `false` the DERIVED `dbal`.
     pick_window: bool,
+    /// Whether `tsk` (the month of `ts`) is queried beside `ent` when `ts` is
+    /// not: the snapshot stays active, taken per (`ent`, month), and `wbal`'s
+    /// `PARTITION BY ent` then spans several snapshot groups (reviewbot on
+    /// #348: with `ent` alone each partition is one row).
+    with_month: bool,
     /// PBT-14: previously pinned at `None` here, the shape CLAUDE.md names as
     /// how EXP-9/EXP-10 reached `main`. A predicate is the most direct way to
     /// break a dependent metric's grain: it changes which rows reach the inner
@@ -1023,14 +1028,16 @@ fn arb_dependent_case() -> impl Strategy<Value = DependentCase> {
         prop_oneof![Just(SortOrder::Asc), Just(SortOrder::Desc)],
         any::<bool>(),
         any::<bool>(),
+        any::<bool>(),
         prop_oneof![1 => Just(None), 3 => arb_pred().prop_map(Some)],
     )
         .prop_map(
-            |(inst, order, na_dim_queried, pick_window, where_pred)| DependentCase {
+            |(inst, order, na_dim_queried, pick_window, with_month, where_pred)| DependentCase {
                 inst,
                 order,
                 na_dim_queried,
                 pick_window,
+                with_month: with_month && !na_dim_queried,
                 where_pred,
             },
         )
@@ -1056,18 +1063,35 @@ fn dependent_oracle_sql(case: &DependentCase) -> String {
         .as_ref()
         .map_or_else(String::new, |p| format!(" WHERE {}", p.to_raw_sql()));
     if case.pick_window && !case.na_dim_queried {
-        // The snapshot of `bal` per `ent`: with only `ent` queried, `PARTITION
-        // BY ent` puts each row in its own partition, so `wbal` is `bal`.
+        // The snapshot of `bal` per queried group, then summed over the groups
+        // sharing an `ent`. With only `ent` queried each partition is one row,
+        // so `wbal` is `bal`; with the month too a partition holds one row per
+        // month, each that month's own snapshot.
+        let sel_dims = if case.with_month {
+            vec![0, TSK_DIM]
+        } else {
+            vec![0]
+        };
         let snapshot = oracle_sql(&Case {
             inst: case.inst.clone(),
             order: case.order,
             na: NaKey::Ts,
             unit: "month",
-            sel_dims: vec![0],
+            sel_dims,
             sel_metrics: vec![0],
             where_pred: case.where_pred.clone(),
         });
-        format!("SELECT q.ent AS ent, q.bal AS wbal FROM ({snapshot}) q")
+        let tsk = if case.with_month {
+            "q1.tsk AS tsk, "
+        } else {
+            ""
+        };
+        format!(
+            "WITH q AS ({snapshot}) \
+             SELECT q1.ent AS ent, {tsk}\
+             (SELECT SUM(q2.bal) FROM q q2 WHERE q2.ent IS NOT DISTINCT FROM q1.ent) AS wbal \
+             FROM q q1"
+        )
     } else if case.pick_window {
         format!(
             "WITH agg AS (SELECT s.entity AS ent, s.ts AS ts, sum(s.balance) AS bal \
@@ -1092,7 +1116,13 @@ proptest! {
     fn a_dependent_metric_never_silently_drops_the_snapshot(case in arb_dependent_case()) {
         let def = build_def_with_dependents(case.order);
         let metric = if case.pick_window { "wbal" } else { "dbal" };
-        let dims: Vec<&str> = if case.na_dim_queried { vec!["ent", "ts"] } else { vec!["ent"] };
+        let dims: Vec<&str> = if case.na_dim_queried {
+            vec!["ent", "ts"]
+        } else if case.with_month {
+            vec!["ent", "tsk"]
+        } else {
+            vec!["ent"]
+        };
         let req = QueryRequest {
             where_clause: case.where_pred.as_ref().map(Pred::to_member_sql),
             dimensions: dims.iter().map(|d| DimensionName::new(*d)).collect(),
@@ -1130,7 +1160,13 @@ proptest! {
                 // dependent too — it used to return here, leaving a window over
                 // a non-self-referential inner metric unoracled anywhere.
                 let oracle = dependent_oracle_sql(&case);
-                let cols = if case.na_dim_queried { "ent, ts" } else { "ent" };
+                let cols = if case.na_dim_queried {
+                    "ent, ts"
+                } else if case.with_month {
+                    "ent, tsk"
+                } else {
+                    "ent"
+                };
                 let cmp = format!(
                     "SELECT \
                        (SELECT count(*) FROM (SELECT {metric}, {cols} FROM ({sql}) qa \
@@ -1175,6 +1211,7 @@ fn dependent_generator_reaches_every_branch() {
     let mut derived = 0usize;
     let mut window_effectively_regular = 0usize;
     let mut window_snapshot = 0usize;
+    let mut window_snapshot_by_month = 0usize;
     let mut derived_effectively_regular = 0usize;
     let mut derived_rejected = 0usize;
     let mut with_pred = 0usize;
@@ -1197,6 +1234,7 @@ fn dependent_generator_reaches_every_branch() {
             (true, false) => {
                 window += 1;
                 window_snapshot += 1;
+                window_snapshot_by_month += usize::from(case.with_month);
             }
             (false, true) => {
                 derived += 1;
@@ -1238,6 +1276,11 @@ fn dependent_generator_reaches_every_branch() {
         window_snapshot > 0,
         "no case reached the window + NA-dim-absent cell — the window over the \
          snapshot (Phase 7 PR 5) is never compared with its oracle"
+    );
+    assert!(
+        window_snapshot_by_month >= 20,
+        "only {window_snapshot_by_month}/400 window-over-snapshot cases queried the month, \
+         so a partition rarely spans several snapshot groups"
     );
     assert!(
         derived_effectively_regular > 0 && derived_rejected > 0,

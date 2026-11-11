@@ -626,6 +626,15 @@ pub enum ExpandError {
         metric_name: String,
         inner_metric: String,
     },
+    /// A window metric with its own `USING` over an inner metric on another
+    /// table, or a derived one. The window's `USING` names relationships from
+    /// the window's table, and it applies to the inner metric, so the two must
+    /// be on one table. `CREATE` refuses it too.
+    WindowUsingOffItsTable {
+        view_name: String,
+        metric_name: String,
+        inner_metric: String,
+    },
     /// A dimension required by a window metric (EXCLUDING or ORDER BY) is not in the query.
     WindowMetricRequiredDimension {
         view_name: String,
@@ -1181,6 +1190,19 @@ impl fmt::Display for ExpandError {
                     "semantic view '{view_name}': window function metric '{metric_name}' is \
                      computed over '{inner_metric}', which is itself a window function metric. \
                      A window metric must be computed over an aggregate metric."
+                )
+            }
+            Self::WindowUsingOffItsTable {
+                view_name,
+                metric_name,
+                inner_metric,
+            } => {
+                write!(
+                    f,
+                    "semantic view '{view_name}': window function metric '{metric_name}' has a \
+                     USING clause, but its inner metric '{inner_metric}' is not on its table. A \
+                     window metric's USING applies to its inner metric, so the inner metric must \
+                     be declared on the window metric's table."
                 )
             }
             Self::WindowMetricRequiredDimension {

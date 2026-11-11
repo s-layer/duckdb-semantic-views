@@ -216,10 +216,10 @@ Windows Across Relationships
 Because a window runs over its inner metric's result, it follows the same rules as that metric:
 
 - **Dimensions of other tables.** A window can be queried with dimensions of any table its inner metric can be queried with, including tables reached through a many-to-many bridge. Each group's value is counted once, as the inner metric counts it.
-- **USING paths and roles.** A window over a metric with ``USING`` reads its inner metric along that relationship. A ``USING`` written on the window metric itself applies to its inner metric when the inner metric has none of its own.
+- **USING paths and roles.** A window over a metric with ``USING`` reads its inner metric along that relationship. A ``USING`` written on the window metric itself applies to its inner metric when the inner metric has none of its own; the inner metric must then be on the window metric's table.
 - **Fan-outs.** A window queried with a dimension of a table that references the metric's table (orders by an item's quantity) counts each order once per group, as the inner metric does.
 
-The dimensions a window clause names (in ``PARTITION BY``, ``PARTITION BY EXCLUDING`` and ``ORDER BY``) can be written bare or as ``alias.name``. Each must be a dimension of the metric's own table, of a table it references, or of a table that references it. ``CREATE SEMANTIC VIEW`` refuses one on an unrelated table, such as a table on the other side of a many-to-many bridge or a sibling table under the same parent, as Snowflake does:
+The dimensions a window clause names (in ``PARTITION BY``, ``PARTITION BY EXCLUDING`` and ``ORDER BY``) can be written bare or as ``alias.name``. Each must be a dimension of the table the inner metric aggregates (the rows the window runs over), of a table that table references, or of a table that references it. ``CREATE SEMANTIC VIEW`` refuses one on an unrelated table, such as a table on the other side of a many-to-many bridge or a sibling table under the same parent, as Snowflake does:
 
 .. code-block:: text
 

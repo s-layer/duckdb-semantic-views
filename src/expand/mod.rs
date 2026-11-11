@@ -131,4 +131,5 @@ pub(crate) use where_clause::{check_params_supplied, show_params, where_fence};
 // What a query's variable values are written as (`crate::variables`).
 pub(crate) use where_clause::PARAM_FUNCTION;
 // Read-side member-type probe (TECH-DEBT #51, `query::member_types`).
+pub(crate) use facts::collect_derived_metric_source_tables;
 pub(crate) use window::window_required_dimensions;

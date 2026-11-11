@@ -1,16 +1,16 @@
 //! Window clause dimension validation (Phase 7 PR 5).
 //!
 //! A window metric's `PARTITION BY`, `PARTITION BY EXCLUDING` and `ORDER BY`
-//! may only name a dimension of a table related to the metric's own: the
-//! table itself, a table it reaches along foreign keys, or a table that
-//! reaches it. Snowflake refuses one across a many-to-many bridge at CREATE
+//! may only name a dimension of a table related to the table its inner metric
+//! aggregates, whose rows the window runs over: the table itself, a table it
+//! reaches along foreign keys, or a table that reaches it. Snowflake refuses one across a many-to-many bridge at CREATE
 //! with `010211: A metric cannot refer to another dimension from an unrelated
 //! entity` (Phase 7 fixture 3, N0): ordering books by their authors' country
 //! names a value a book does not have one of.
 
 use crate::errors::ParseError;
 use crate::ident::{first_unquoted_dot, ident_matches};
-use crate::model::{Cardinality, Dimension, SemanticViewDefinition};
+use crate::model::{Cardinality, Dimension, Metric, SemanticViewDefinition};
 
 /// The declared dimension a window clause reference names, bare or in the
 /// dotted `alias.name` form.
@@ -63,20 +63,61 @@ fn reaches(def: &SemanticViewDefinition, from: &str, to: &str) -> bool {
     false
 }
 
+/// The tables whose rows a window metric's inner metric aggregates: its own,
+/// or a derived one's base metrics' tables. Empty for an unknown inner metric,
+/// which `cross_refs` reports.
+fn inner_tables<'a>(
+    def: &'a SemanticViewDefinition,
+    inner: &str,
+) -> (Option<&'a Metric>, Vec<String>) {
+    let Some(m) = def.metrics.iter().find(|m| ident_matches(&m.name, inner)) else {
+        return (None, Vec::new());
+    };
+    let tables = match &m.source_table {
+        Some(t) => vec![t.clone()],
+        None => crate::expand::collect_derived_metric_source_tables(m, &def.metrics),
+    };
+    (Some(m), tables)
+}
+
 /// Refuse a window metric whose window clause names a dimension on a table
-/// that neither reaches the metric's table nor is reached from it.
+/// that neither reaches its inner metric's table nor is reached from it, and
+/// one whose own `USING` cannot apply to its inner metric.
 ///
-/// A table referencing the metric's own (a fan-out, orders ordered by an
-/// item's quantity) is accepted: the query answers it once per group (Phase 7
-/// PR 4c), and fixture 10 (F*) asks Snowflake whether it accepts it too.
+/// A table referencing the inner metric's own (a fan-out, orders ordered by
+/// an item's quantity) is accepted: the query answers it once per group
+/// (Phase 7 PR 4c). Whether Snowflake accepts it too is fixture 10's F*
+/// question (TECH-DEBT #110).
+///
+/// A window's `USING` names relationships from the window metric's table and
+/// applies to its inner metric, so that metric must be declared on the same
+/// table (`ExpandError::WindowUsingOffItsTable` refuses it at query time).
 pub fn validate_window_dimensions(def: &SemanticViewDefinition) -> Result<(), ParseError> {
-    if def.joins.is_empty() {
-        return Ok(());
-    }
     for metric in &def.metrics {
-        let (Some(ws), Some(table)) = (&metric.window_spec, metric.source_table.as_deref()) else {
+        let Some(ws) = &metric.window_spec else {
             continue;
         };
+        let (inner, tables) = inner_tables(def, &ws.inner_metric);
+        if let Some(inner) = inner {
+            let same_table = matches!(
+                (&metric.source_table, &inner.source_table),
+                (Some(w), Some(t)) if ident_matches(w, t)
+            );
+            if !metric.using_relationships.is_empty()
+                && inner.using_relationships.is_empty()
+                && !same_table
+            {
+                return Err(ParseError::positionless(format!(
+                    "Window metric '{}' has a USING clause, but its inner metric '{}' is not on \
+                     its table. A window metric's USING applies to its inner metric, so the \
+                     inner metric must be declared on the window metric's table.",
+                    metric.name, inner.name
+                )));
+            }
+        }
+        if def.joins.is_empty() {
+            continue;
+        }
         let refs = ws
             .excluding_dims
             .iter()
@@ -89,15 +130,18 @@ pub fn validate_window_dimensions(def: &SemanticViewDefinition) -> Result<(), Pa
             let Some(dim_table) = dim.source_table.as_deref() else {
                 continue;
             };
-            if !reaches(def, table, dim_table) && !reaches(def, dim_table, table) {
-                return Err(ParseError::positionless(format!(
-                    "Window metric '{}': its window clause names dimension '{}' of table \
-                     '{dim_table}', which is unrelated to the metric's table '{table}': neither \
-                     reaches the other along relationships (for example, they are joined \
-                     through a many-to-many bridge). A window clause may name dimensions of \
-                     '{table}', of a table it references, or of a table referencing it.",
-                    metric.name, reference
-                )));
+            for table in &tables {
+                if !reaches(def, table, dim_table) && !reaches(def, dim_table, table) {
+                    return Err(ParseError::positionless(format!(
+                        "Window metric '{}': its window clause names dimension '{}' of table \
+                         '{dim_table}', which is unrelated to the metric's table '{table}', \
+                         whose rows its inner metric '{}' aggregates: neither reaches the other \
+                         along relationships (for example, they are joined through a \
+                         many-to-many bridge). A window clause may name dimensions of \
+                         '{table}', of a table it references, or of a table referencing it.",
+                        metric.name, reference, ws.inner_metric
+                    )));
+                }
             }
         }
     }
@@ -223,6 +267,8 @@ mod tests {
     }
 
     /// Controls: the metric's own table, a table above it and one below it.
+    /// The one below (reviews, a fan-out) is accepted pending Snowflake
+    /// fixture 10's F* cases, TECH-DEBT #110.
     #[test]
     fn a_window_ordered_by_a_related_table_is_accepted() {
         for reference in ["title", "b.title", "publisher", "stars"] {
@@ -240,6 +286,86 @@ mod tests {
         def.joins[4].cardinality = Cardinality::OneToOne;
         // awards -> publishers is one-to-one, so books -> publishers -> awards
         // steps forward, then back along it.
+        assert!(validate_window_dimensions(&def).is_ok());
+    }
+
+    /// Reviewbot on #348: relatedness is measured from the inner metric's
+    /// table, whose rows the window runs over. A window declared on the
+    /// authors over the books' pages, ordered by the authors' country, orders
+    /// books across the bridge, and is refused.
+    #[test]
+    fn a_window_is_related_through_its_inner_metrics_table() {
+        let mut def = view("title");
+        def.metrics[1].source_table = Some("a".to_string());
+        def.metrics[1]
+            .window_spec
+            .as_mut()
+            .expect("window")
+            .order_by[0]
+            .expr = "country".to_string();
+        let err = validate_window_dimensions(&def).expect_err("books ordered by country");
+        assert!(err.message.contains("'b'"), "{}", err.message);
+        // ... and a window on the books over an author count, ordered by
+        // country, runs over the authors' rows, and is accepted.
+        let mut def = view("country");
+        def.metrics.push(Metric {
+            name: "authors".to_string(),
+            expr: "COUNT(a.id)".to_string(),
+            source_table: Some("a".to_string()),
+            ..Default::default()
+        });
+        def.metrics[1]
+            .window_spec
+            .as_mut()
+            .expect("window")
+            .inner_metric = "authors".to_string();
+        assert!(validate_window_dimensions(&def).is_ok());
+    }
+
+    /// ... and a derived inner metric is measured from every base table: a
+    /// window on the authors over the books' doubled pages is refused too.
+    #[test]
+    fn a_window_over_a_derived_metric_is_related_through_its_bases() {
+        let mut def = view("country");
+        def.metrics.push(Metric {
+            name: "double_pages".to_string(),
+            expr: "pages * 2".to_string(),
+            ..Default::default()
+        });
+        def.metrics[1].source_table = Some("a".to_string());
+        def.metrics[1]
+            .window_spec
+            .as_mut()
+            .expect("window")
+            .inner_metric = "double_pages".to_string();
+        assert!(validate_window_dimensions(&def).is_err());
+    }
+
+    /// Reviewbot on #348: a window's own `USING` applies to its inner metric,
+    /// so a window with one over a metric on another table, or a derived one,
+    /// is refused.
+    #[test]
+    fn a_windows_using_over_an_inner_metric_off_its_table_is_refused() {
+        for (table, expr) in [(Some("p"), "COUNT(p.id)"), (None, "pages * 2")] {
+            let mut def = view("title");
+            def.metrics.push(Metric {
+                name: "inner_m".to_string(),
+                expr: expr.to_string(),
+                source_table: table.map(str::to_string),
+                ..Default::default()
+            });
+            def.metrics[1]
+                .window_spec
+                .as_mut()
+                .expect("window")
+                .inner_metric = "inner_m".to_string();
+            def.metrics[1].using_relationships = vec!["b_p".to_string()];
+            let err = validate_window_dimensions(&def).expect_err("USING off its table");
+            assert!(err.message.contains("USING"), "{table:?}: {}", err.message);
+        }
+        // Control: the inner metric on the window's own table.
+        let mut def = view("title");
+        def.metrics[1].using_relationships = vec!["b_p".to_string()];
         assert!(validate_window_dimensions(&def).is_ok());
     }
 }

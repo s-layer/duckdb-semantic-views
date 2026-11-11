@@ -57,25 +57,19 @@ pub fn dimensions_for_metric<'a>(
         return def.dimensions.iter().collect();
     }
     // A window metric runs over the rows its inner metric gives (Phase 7 PR
-    // 5), so it can be grouped by whatever its inner metric can, and by the
-    // dimensions its window clause names.
+    // 5), so it can be grouped by whatever its inner metric can. Every query
+    // of it holds the dimensions its window clause names, so when the inner
+    // metric cannot be grouped by one of them no query answers, and nothing
+    // is listed (reviewbot on #348).
     if let Some(inner) = window_inner(def, met) {
-        let listed: HashSet<*const Dimension> = dimensions_for_metric(def, inner)
-            .into_iter()
-            .map(std::ptr::from_ref)
-            .collect();
-        let required: HashSet<String> = super::window::window_required_dimensions(def, met)
-            .iter()
-            .map(|d| crate::ident::normalize_ident_part(d))
-            .collect();
-        return def
-            .dimensions
-            .iter()
-            .filter(|d| {
-                listed.contains(&std::ptr::from_ref(*d))
-                    || required.contains(&crate::ident::normalize_ident_part(&d.name))
-            })
-            .collect();
+        let listed = dimensions_for_metric(def, inner);
+        let required = super::window::window_required_dimensions(def, met);
+        let answers = required.iter().all(|r| {
+            listed
+                .iter()
+                .any(|d| crate::ident::ident_matches(&d.name, r))
+        });
+        return if answers { listed } else { Vec::new() };
     }
     let met_tables: Vec<String> = if let Some(ref st) = met.source_table {
         vec![st.to_ascii_lowercase()]

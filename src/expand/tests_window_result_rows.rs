@@ -486,3 +486,164 @@ fn a_window_over_a_private_metric_is_queryable() {
         "the private inner metric alone stays refused"
     );
 }
+
+/// Reviewbot on #348: the query a window is computed over is not routed to a
+/// materialization, as a query holding a window is not, so EXPLAIN (which
+/// asks about the outer request) and the SQL agree.
+#[test]
+fn a_window_query_is_not_routed_to_a_materialization() {
+    let view = |order: [usize; 3]| {
+        let mut def = books(order);
+        def.materializations.push(crate::model::Materialization {
+            name: "pages_by_title".to_string(),
+            table: "mat_pages_by_title".to_string(),
+            dimensions: vec!["title".to_string()],
+            metrics: vec!["total_pages".to_string()],
+        });
+        def
+    };
+    let request = req(&["title"], &["running_by_title"], None);
+    let sql = expand("v", &view([0, 1, 2]), &request).expect("expands");
+    assert!(
+        !sql.contains("mat_pages_by_title"),
+        "the inner query was routed to the materialization:\n{sql}"
+    );
+}
+
+/// Fixture 6's view with a `legs` table under the flights, the flights given
+/// no PRIMARY KEY, and a window with its own `USING` over `flight_count`.
+fn air_with_legs() -> SemanticViewDefinition {
+    let mut def = air([0, 1, 2]);
+    def.tables[0].pk_columns.clear();
+    def.tables.push(table("l", "legs", &["leg_id"]));
+    def.joins.push(rel(
+        "leg_flight",
+        "l",
+        "f",
+        "flight_id",
+        "flight_id",
+        Cardinality::ManyToOne,
+    ));
+    def.dimensions.push(dim("kind", "l.kind", "l"));
+    def.metrics
+        .push(metric("flight_count", "f", "COUNT(f.flight_id)", &[]));
+    let mut w = window(
+        "arr_running",
+        "f",
+        "SUM",
+        "flight_count",
+        &[],
+        &["terminal"],
+    );
+    w.using_relationships = vec!["arr_airport".to_string()];
+    def.metrics.push(w);
+    def
+}
+
+/// Reviewbot on #348: an error from the query a window's own `USING` reaches
+/// its inner metric through names the window the user queried, not an
+/// internal copy of the inner metric.
+#[test]
+fn an_error_through_a_windows_own_using_names_the_window() {
+    let def = air_with_legs();
+    let err = expand(
+        "v",
+        &def,
+        &req(&["terminal", "kind"], &["arr_running"], None),
+    )
+    .expect_err("a fan-out of a table with no PRIMARY KEY is refused");
+    let msg = err.to_string();
+    assert!(
+        msg.contains("arr_running") && !msg.contains("__sv_"),
+        "got: {msg}"
+    );
+}
+
+/// ... and a view declaring a metric named like an internal one keeps the
+/// window's `USING`.
+#[test]
+fn a_windows_own_using_survives_a_metric_named_like_an_internal_one() {
+    let view = |order: [usize; 3]| {
+        let mut def = air(order);
+        def.metrics
+            .push(metric("flight_count", "f", "COUNT(f.flight_id)", &[]));
+        def.metrics.push(metric(
+            "__sv_window_0",
+            "f",
+            "COUNT(f.flight_id)",
+            &["dep_airport"],
+        ));
+        let mut w = window(
+            "arr_running",
+            "f",
+            "SUM",
+            "flight_count",
+            &[],
+            &["terminal"],
+        );
+        w.using_relationships = vec!["arr_airport".to_string()];
+        def.metrics.push(w);
+        def
+    };
+    assert_answer(
+        view,
+        &req(&["terminal"], &["arr_running"], None),
+        &[&["T2", "1"], &["T4", "2"], &["T5", "3"]],
+    );
+}
+
+/// Reviewbot on #348: a window's own `USING` names a relationship from the
+/// window's table, so it cannot be followed by an inner metric on another
+/// table, or by a derived one (which has no table). Such a window is refused
+/// rather than answered along the default path.
+#[test]
+fn a_windows_own_using_over_an_inner_metric_off_its_table_is_refused() {
+    for (inner, inner_table, expr) in [
+        ("airport_count", Some("ap"), "COUNT(ap.code)"),
+        ("arrivals_twice", None, "arrivals * 2"),
+    ] {
+        let mut def = air([0, 1, 2]);
+        def.metrics.push(Metric {
+            name: inner.to_string(),
+            expr: expr.to_string(),
+            source_table: inner_table.map(str::to_string),
+            ..Default::default()
+        });
+        let mut w = window("w", "f", "SUM", inner, &[], &["terminal"]);
+        w.using_relationships = vec!["arr_airport".to_string()];
+        def.metrics.push(w);
+        let err = expand("v", &def, &req(&["terminal"], &["w"], None))
+            .expect_err("a window USING over an inner metric off its table");
+        assert!(
+            matches!(&err, ExpandError::WindowUsingOffItsTable { metric_name, inner_metric, .. }
+                if metric_name == "w" && inner_metric == inner),
+            "{inner}: got: {err}"
+        );
+    }
+}
+
+/// Reviewbot on #348: a window whose clause names a dimension its inner
+/// metric cannot be grouped by answers no query, so it lists nothing. Books
+/// with no PRIMARY KEY cannot be counted once per bridge row's role.
+#[test]
+fn a_window_that_answers_no_query_lists_nothing() {
+    let mut def = books([0, 1, 2]);
+    for t in &mut def.tables {
+        if t.alias == "b" {
+            t.pk_columns.clear();
+        }
+    }
+    def.dimensions.push(dim("role", "ba.role", "ba"));
+    def.metrics
+        .push(window("by_role", "b", "SUM", "total_pages", &[], &["role"]));
+    let w = def.metrics.last().expect("window");
+    let listed: Vec<&str> = crate::expand::dimensions_for_metric(&def, w)
+        .iter()
+        .map(|d| d.name.as_str())
+        .collect();
+    assert!(listed.is_empty(), "listed: {listed:?}");
+    assert!(
+        expand("v", &def, &req(&["role"], &["by_role"], None)).is_err(),
+        "no query of the window answers"
+    );
+}

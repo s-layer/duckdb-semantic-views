@@ -161,6 +161,28 @@ CREATE SEMANTIC VIEW wr_ww AS
 ----
 inner metric 'running_pages' is itself a window function metric
 
+# A window's own USING applies to its inner metric, which must then be on the
+# window metric's table: here the window is on the bridge and its inner
+# metric on the books.
+statement error
+CREATE SEMANTIC VIEW wr_wu AS
+  TABLES (
+    a  AS wr_authors      PRIMARY KEY (author_id),
+    b  AS wr_books        PRIMARY KEY (book_id),
+    ba AS wr_book_authors PRIMARY KEY (book_id, author_id)
+  )
+  RELATIONSHIPS (
+    ba_author AS ba (author_id) REFERENCES a,
+    ba_book   AS ba (book_id)   REFERENCES b
+  )
+  DIMENSIONS (b.title AS title)
+  METRICS (
+    b.total_pages    AS SUM(pages),
+    ba.running_pages USING (ba_book) AS SUM(total_pages) OVER (ORDER BY title)
+  );
+----
+inner metric 'total_pages' is not on its table
+
 statement ok
 DROP SEMANTIC VIEW wr_q
 
