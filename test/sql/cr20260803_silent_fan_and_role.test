@@ -166,16 +166,19 @@ CREATE SEMANTIC VIEW cr803_rp AS
 # while the metric counted a__arr. Counting ARRIVALS filtered by DEPARTURE
 # city returned 1 (flight 1 departs NYC), where arrivals into NYC is also 1 --
 # the numbers coincide here, which is exactly why a value assertion alone
-# cannot be trusted for this bug and the error is the right outcome.
-statement error
+# cannot be trusted for this bug. It was refused until Phase 7 PR 4b, which
+# reads the filter on the role the metric names (Snowflake fixture 6, R5):
+# the predicate now names `a__arr`, the instance the metric counts. The
+# numbers that tell the two roles apart are in role_playing_back_crossing.test.
+query I
 SELECT * FROM SEMANTIC_VIEW(cr803_rp METRICS arr_count WHERE city = 'NYC');
 ----
-where_clause member 'city' is ambiguous
+1
 
-# EXP-10 case 2: no USING in the query at all -- still ambiguous, because the
-# predicate's join instance is picked by declaration order either way.
+# EXP-10 case 2: metrics naming two roles give the predicate none to follow,
+# so its join instance would be picked by declaration order: still ambiguous.
 statement error
-SELECT * FROM SEMANTIC_VIEW(cr803_rp METRICS dep_count WHERE city = 'NYC');
+SELECT * FROM SEMANTIC_VIEW(cr803_rp METRICS dep_count, arr_count WHERE city = 'NYC');
 ----
 where_clause member 'city' is ambiguous
 
