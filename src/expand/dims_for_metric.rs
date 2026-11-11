@@ -4,8 +4,9 @@
 //! included, and leaves out one the query refuses: a range relationship
 //! walked backwards (Phase 7 fixture 8's S1-S3 and F4). The rule is restated
 //! here from the relationship graph rather than by expanding a query per
-//! dimension, because a window metric's listing also carries the dimensions
-//! it requires, which a query of it grouped by one other dimension refuses.
+//! dimension, because a window metric lists the dimensions its window clause
+//! requires, and a query of it grouped by one other dimension alone refuses
+//! for lacking them.
 //! `tests/dag_proptest.rs` checks the two agree: every dimension a query of
 //! the metric alone answers is listed, and a listed one it refuses is reached
 //! two ways.
@@ -33,9 +34,11 @@ struct Step {
 /// a plain aggregate on a table with a PRIMARY KEY, or a semi-additive metric
 /// grouped by its `NON ADDITIVE BY` dimension), back along any
 /// relationship that is not ASOF or range. The query refuses a fan-out back
-/// across a temporal relationship (010956), and a window metric, a
-/// semi-additive one grouped by another dimension, or a metric on a table
-/// with no key refuses them all.
+/// across a temporal relationship (010956), and a semi-additive metric
+/// grouped by another dimension, or a metric on a table with no key, refuses
+/// them all. A window metric lists what its inner metric lists, or nothing
+/// when its inner metric cannot be grouped by a dimension its window clause
+/// names.
 ///
 /// Every path counts, not only the one through a spanning tree: in a diamond
 /// (orders reach regions through customers and through stores) the tree walked
@@ -54,6 +57,21 @@ pub fn dimensions_for_metric<'a>(
 ) -> Vec<&'a Dimension> {
     if def.joins.is_empty() {
         return def.dimensions.iter().collect();
+    }
+    // A window metric runs over the rows its inner metric gives (Phase 7 PR
+    // 5), so it can be grouped by whatever its inner metric can. Every query
+    // of it holds the dimensions its window clause names, so when the inner
+    // metric cannot be grouped by one of them no query answers, and nothing
+    // is listed (reviewbot on #348).
+    if let Some(inner) = window_inner(def, met) {
+        let listed = dimensions_for_metric(def, inner);
+        let required = super::window::window_required_dimensions(def, met);
+        let answers = required.iter().all(|r| {
+            listed
+                .iter()
+                .any(|d| crate::ident::ident_matches(&d.name, r))
+        });
+        return if answers { listed } else { Vec::new() };
     }
     let met_tables: Vec<String> = if let Some(ref st) = met.source_table {
         vec![st.to_ascii_lowercase()]
@@ -181,4 +199,14 @@ fn walk(from: &[String], to: &str, steps: &HashMap<&str, Vec<&str>>) -> bool {
         }
     }
     false
+}
+
+/// The metric a window metric `met` is computed over, unless that is itself a
+/// window (which the query refuses, `WindowOverWindow`).
+fn window_inner<'a>(def: &'a SemanticViewDefinition, met: &Metric) -> Option<&'a Metric> {
+    let inner = &met.window_spec.as_ref()?.inner_metric;
+    def.metrics
+        .iter()
+        .find(|m| crate::ident::ident_matches(&m.name, inner))
+        .filter(|m| !m.is_window())
 }

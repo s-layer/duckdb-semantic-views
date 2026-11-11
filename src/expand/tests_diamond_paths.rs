@@ -346,12 +346,11 @@ fn both_middle_tables_are_one_path_each() {
     );
 }
 
-/// A window metric over `rev_by_store`: only the per-grain planner joins
-/// along the path a `USING` picks, and it does not plan window metrics yet,
-/// so the query is refused rather than joined through customers
+/// A window metric over `rev_by_store` reads the rows `rev_by_store` gives
+/// by region, along the store path: EU 40, US 30, summed over every row
 /// (TECH-DEBT #109).
 #[test]
-fn window_beside_a_pinned_path_is_refused() {
+fn window_over_a_pinned_path_follows_it() {
     for order in ORDERS {
         let mut def = diamond(order);
         def.metrics.push(Metric {
@@ -369,11 +368,13 @@ fn window_beside_a_pinned_path_is_refused() {
             }),
             ..Default::default()
         });
-        let err = expand("dv", &def, &req(&["region_name"], &["store_window"], None))
-            .expect_err("a window over a pinned path is refused");
-        assert!(
-            matches!(err, ExpandError::UnfollowedUsingPath { .. }),
-            "TABLES order {order}: got {err}"
+        let request = req(&["region_name"], &["rev_by_store", "store_window"], None);
+        let sql =
+            expand("dv", &def, &request).unwrap_or_else(|e| panic!("TABLES order {order}: {e}"));
+        assert_eq!(
+            rows(&sql),
+            table_of(&[&["EU", "40", "70"], &["US", "30", "70"]]),
+            "TABLES order {order}"
         );
     }
 }

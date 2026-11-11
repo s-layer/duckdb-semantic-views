@@ -192,6 +192,9 @@ pub(super) trait TestFixtureExt {
         dims: &[(&str, SortOrder, NullsOrder)],
     ) -> Self;
     fn with_window_spec(self, metric_name: &str, spec: WindowSpec) -> Self;
+    /// Add a window metric `name` over `spec.inner_metric`, on the inner
+    /// metric's own table.
+    fn with_window_metric(self, name: &str, spec: WindowSpec) -> Self;
     fn with_materialization(
         self,
         name: &str,
@@ -341,6 +344,22 @@ impl TestFixtureExt for SemanticViewDefinition {
         if let Some(m) = self.metrics.iter_mut().find(|m| m.name == metric_name) {
             m.window_spec = Some(spec);
         }
+        self
+    }
+
+    fn with_window_metric(mut self, name: &str, spec: WindowSpec) -> Self {
+        let source_table = self
+            .metrics
+            .iter()
+            .find(|m| crate::ident::ident_matches(&m.name, &spec.inner_metric))
+            .and_then(|m| m.source_table.clone());
+        self.metrics.push(Metric {
+            name: name.to_string(),
+            expr: crate::render_ddl::render_window_spec(&spec),
+            source_table,
+            window_spec: Some(spec),
+            ..Default::default()
+        });
         self
     }
 

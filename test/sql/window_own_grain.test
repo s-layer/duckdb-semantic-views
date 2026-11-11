@@ -161,27 +161,45 @@ SELECT * FROM SEMANTIC_VIEW(wog_sv DIMENSIONS segment METRICS seg_balance WHERE 
 Referenced column "balance" was not found
 
 # ============================================================
-# Test 6: the boundary this increment keeps. Two window metrics whose inner
-# aggregates sit at DIFFERENT grains would need those grains joined before the
-# window runs, which one anchored CTE cannot express — so it is declined and the
-# fence still reports it, rather than emitting a silently wrong shape.
+# Test 6: two window metrics whose inner aggregates sit at DIFFERENT grains.
+# Each window runs over the rows its inner metric gives (Phase 7 PR 5): the
+# inner query computes each aggregate at its own grain and joins them, as
+# `segment METRICS total_balance, order_count` does. One anchored CTE could not
+# express it, so it used to be refused as a fan trap.
 # ============================================================
 
-statement error
+query TII rowsort
 SELECT * FROM SEMANTIC_VIEW(wog_sv DIMENSIONS segment METRICS seg_balance, running_orders);
 ----
-fan trap detected
+ENT	300	4
+SMB	50	2
 
 # ============================================================
-# Test 7: a dimension BELOW the inner aggregate's grain is still an error. An
-# order-grain dimension against a customer-grain aggregate has no single value
-# per group in either engine; the retained metric x dimension check reports it.
+# Test 7: a dimension BELOW the inner aggregate's grain. Each customer's
+# balance counts once per order group (Phase 7 PR 4c, Snowflake fixture 7), and
+# the window sums those rows per segment: ENT 100 x 3 + 200 = 500, SMB 50 x 2 =
+# 100. It used to be refused as a fan trap.
 # ============================================================
 
-statement error
-SELECT * FROM SEMANTIC_VIEW(wog_sv DIMENSIONS order_id METRICS seg_balance);
+query ITI rowsort
+SELECT * FROM SEMANTIC_VIEW(wog_sv DIMENSIONS order_id, segment METRICS seg_balance);
 ----
-fan trap detected
+10	ENT	500
+11	ENT	500
+12	ENT	500
+20	ENT	500
+30	SMB	100
+31	SMB	100
+
+query ITI rowsort
+SELECT * FROM SEMANTIC_VIEW(wog_sv DIMENSIONS order_id, segment METRICS total_balance);
+----
+10	ENT	100
+11	ENT	100
+12	ENT	100
+20	ENT	200
+30	SMB	50
+31	SMB	50
 
 # ============================================================
 # Test 8 (PR #175 review): the SG-8 interaction. `c` declares UNIQUE (id)

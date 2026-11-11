@@ -161,7 +161,9 @@ SELECT report_date, customer_id, double_balance FROM SEMANTIC_VIEW(cr0806_bal
 
 # ============================================================
 # EXP-20: a window metric whose INNER metric is semi-additive took the same
-# path -- __sv_agg was built from the raw aggregate, not the snapshot.
+# path -- __sv_agg was built from the raw aggregate, not the snapshot. It was
+# then refused; since Phase 7 PR 5 the window runs over the rows its inner
+# metric gives, which is the snapshot itself: 150 and 70, as above.
 # ============================================================
 
 statement ok
@@ -178,13 +180,14 @@ CREATE SEMANTIC VIEW cr0806_win AS
     a.rolling AS SUM(balance) OVER (PARTITION BY customer_id)
   );
 
-statement error
+query II rowsort
 SELECT * FROM SEMANTIC_VIEW(cr0806_win
     DIMENSIONS customer_id
     METRICS rolling
 );
 ----
-depends on semi-additive metric
+1	150
+2	70
 
 # ============================================================
 # EXP-22: an UNQUALIFIED where_clause member was spliced into a re-anchored

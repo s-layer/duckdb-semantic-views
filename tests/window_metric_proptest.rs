@@ -2,7 +2,7 @@
 //! 2026-07-18 PBT-1 follow-up — the window facet of "no randomized coverage of
 //! the hardest expansion semantics").
 //!
-//! `expand_window_metrics` (src/expand/window.rs) turns a window metric into a
+//! `expand_over_result` (src/expand/window.rs) turns a window metric into a
 //! two-level query: a CTE (`__sv_agg`) that aggregates the inner metric by ALL
 //! queried dimensions, then an outer SELECT that applies the window function
 //! over that CTE with a computed `PARTITION BY`. The partition is derived three
@@ -13,12 +13,22 @@
 //! example tests pin a handful of fixed shapes (three dims, one EXCLUDING set);
 //! nothing exercised the partition math over random dim subsets with NULL keys.
 //!
-//! Shape: a single table `s(c0, c1, c2, v)`, three dimensions `d{i} = s.c{i}`,
-//! and one window metric `w = <FUNC>(SUM(s.v)) OVER (…)`. The declared
-//! partition config (EXCLUDING, explicit PARTITION or none, and which dims),
-//! an optional `ORDER BY` on one dim (direction and NULLS placement drawn), and
-//! the queried dim subset (always a superset of the required dims) are
-//! randomized, as is `<FUNC>`.
+//! Shape: a table `s(id, c0, c1, c2, v)` with three dimensions `d{i} = s.c{i}`,
+//! tags `t(t_id, tag)` reached through the many-to-many bridge `st(s_id,
+//! t_id)` with a fourth, `d3 = t.tag`, the inner metric `m = SUM(s.v)` and the
+//! window metric `w = <FUNC>(m) OVER (…)`. The declared partition config
+//! (EXCLUDING, explicit PARTITION or none, and which of `s`'s dims), an
+//! optional `ORDER BY` on one of them (direction and NULLS placement drawn),
+//! the queried dim subset (always a superset of the required dims, the tag
+//! among the extras), whether `m` is queried beside `w`, and the bridge rows
+//! are randomized, as is `<FUNC>`.
+//!
+//! Phase 7 PR 5: Snowflake computes a window over the rows the rest of the
+//! query gives, so with the tag queried or filtered each row of `s` counts
+//! once per group, however many tags it has (fixture 4, W4-W6), and the inner
+//! metric queried beside the window reads the same rows (W2). The oracle keeps
+//! one row per (row of `s`, group) with a `DISTINCT` over the bridged join
+//! before it sums.
 //!
 //! For every query, the extension's SQL is compared against an **independently
 //! written** oracle via the same symmetric `EXCEPT ALL` multiset diff the
@@ -53,12 +63,20 @@
 use proptest::prelude::*;
 use semantic_views::expand::{expand, DimensionName, MetricName, QueryRequest};
 use semantic_views::model::{
-    AccessModifier, Dimension, Metric, NullsOrder, SemanticViewDefinition, SortOrder, TableRef,
-    WindowOrderBy, WindowSpec,
+    AccessModifier, Cardinality, Dimension, Join, Metric, NullsOrder, SemanticViewDefinition,
+    SortOrder, TableRef, WindowOrderBy, WindowSpec,
 };
 
-/// Number of dimensions (physical `s.c{i}` ↔ logical `d{i}` by index).
+/// Number of dimensions on `s` (physical `s.c{i}` ↔ logical `d{i}` by index).
 const NDIMS: usize = 3;
+
+/// The index of `d3 = t.tag`, the dimension across the `st` bridge. The window
+/// spec never names it (Snowflake refuses a window clause naming a dimension
+/// across a bridge at CREATE, 010211); a query groups or filters on it.
+const TAG: usize = 3;
+
+/// Every dimension index, `s`'s and the bridged tag.
+const NALL: usize = 4;
 
 /// A generated pre-aggregation predicate over the dimensions (PBT-6).
 ///
@@ -136,11 +154,11 @@ impl Pred {
 fn arb_pred() -> impl Strategy<Value = Pred> {
     let leaf = prop_oneof![
         3 => (
-            0..NDIMS,
+            0..NALL,
             prop_oneof![Just("<"), Just("<="), Just("="), Just("<>"), Just(">="), Just(">")],
             -1i64..=3,
         ).prop_map(|(i, op, k)| Pred::Cmp(i, op, k)),
-        2 => (0..NDIMS).prop_map(Pred::Filter),
+        2 => (0..NALL).prop_map(Pred::Filter),
     ];
     leaf.prop_recursive(3, 8, 2, |inner| {
         prop_oneof![
@@ -151,23 +169,39 @@ fn arb_pred() -> impl Strategy<Value = Pred> {
     })
 }
 
-/// Logical dimension name for index `i` (`d0`/`d1`/`d2`).
+/// Logical dimension name for index `i` (`d0`..`d3`).
 fn dim_name(i: usize) -> String {
     format!("d{i}")
 }
 
-/// Physical column expression for dimension index `i` (`s.c0`/`s.c1`/`s.c2`).
+/// Physical column expression for dimension index `i` (`s.c0`/`s.c1`/`s.c2`,
+/// and `t.tag` across the bridge).
 fn dim_col(i: usize) -> String {
-    format!("s.c{i}")
+    if i == TAG {
+        "t.tag".to_string()
+    } else {
+        format!("s.c{i}")
+    }
 }
 
-/// A generated instance: rows of `(c0, c1, c2, v)`. `None` is a SQL NULL. Small
-/// dim domains force duplicate dim-tuples (so partitions hold several rows) and
-/// NULL partition keys; the value domain includes NULL so the inner `SUM` can
-/// itself be NULL for a group (exercising `COUNT`/`MIN`/`MAX` NULL handling).
+/// The oracle's FROM: every `s` row with its tags, NULL-extended for a row
+/// with no tag, as a many-to-many bridge reads.
+const BRIDGED_FROM: &str = "s LEFT JOIN st ON st.s_id = s.id LEFT JOIN t ON t.t_id = st.t_id";
+
+/// A generated instance: rows of `(c0, c1, c2, v)`, whose `id` is the row's
+/// index. `None` is a SQL NULL. Small dim domains force duplicate dim-tuples
+/// (so partitions hold several rows) and NULL partition keys; the value domain
+/// includes NULL so the inner `SUM` can itself be NULL for a group
+/// (exercising `COUNT`/`MIN`/`MAX` NULL handling).
+///
+/// Phase 7 PR 5: `tags` are the three rows of `t` (`t_id` = index), and
+/// `links` the `st` bridge rows `(s id, t_id)`, each pair once. A row of `s`
+/// with two tags fans out across the bridge; one with none reads a NULL tag.
 #[derive(Debug, Clone)]
 struct Instance {
     rows: Vec<(Option<i64>, Option<i64>, Option<i64>, Option<i64>)>,
+    tags: Vec<Option<i64>>,
+    links: Vec<(usize, usize)>,
 }
 
 /// The window function under test — all exact over integer inputs, so the
@@ -228,6 +262,9 @@ struct Case {
     /// The pre-aggregation predicate (PBT-6). `None` one case in four, keeping
     /// the original no-predicate coverage rather than replacing it.
     where_pred: Option<Pred>,
+    /// Whether the window's inner metric `m` is queried beside it (Phase 7
+    /// PR 5, fixture 4 W2).
+    with_inner: bool,
 }
 
 fn arb_instance() -> impl Strategy<Value = Instance> {
@@ -242,7 +279,19 @@ fn arb_instance() -> impl Strategy<Value = Instance> {
         ]
     };
     let row = (dim_cell(), dim_cell(), dim_cell(), v_cell);
-    prop::collection::vec(row, 0..=20).prop_map(|rows| Instance { rows })
+    let tags = prop::collection::vec(dim_cell(), 3);
+    (prop::collection::vec(row, 0..=20), tags).prop_flat_map(|(rows, tags)| {
+        let n = rows.len();
+        // Each (row, tag) pair at most once: a subset of every pair.
+        let pairs: Vec<(usize, usize)> = (0..n).flat_map(|r| (0..3).map(move |t| (r, t))).collect();
+        let len = pairs.len();
+        (
+            Just(rows),
+            Just(tags),
+            prop::sample::subsequence(pairs, 0..=len),
+        )
+            .prop_map(|(rows, tags, links)| Instance { rows, tags, links })
+    })
 }
 
 fn arb_func() -> impl Strategy<Value = WFunc> {
@@ -281,7 +330,7 @@ fn arb_case() -> impl Strategy<Value = Case> {
                         required.push(o.dim);
                     }
                 }
-                let rest: Vec<usize> = (0..NDIMS).filter(|d| !required.contains(d)).collect();
+                let rest: Vec<usize> = (0..NALL).filter(|d| !required.contains(d)).collect();
                 let rest_len = rest.len();
                 let extra = prop::sample::subsequence(rest, 0..=rest_len);
                 let where_pred = prop_oneof![
@@ -297,9 +346,20 @@ fn arb_case() -> impl Strategy<Value = Case> {
                     Just(required),
                     extra,
                     where_pred,
+                    any::<bool>(),
                 )
                     .prop_map(
-                        |(inst, func, mode, order, req, required, extra, where_pred)| {
+                        |(
+                            inst,
+                            func,
+                            mode,
+                            order,
+                            req,
+                            required,
+                            extra,
+                            where_pred,
+                            with_inner,
+                        )| {
                             let mut sel_dims: Vec<usize> =
                                 required.into_iter().chain(extra).collect();
                             sel_dims.sort_unstable();
@@ -315,6 +375,7 @@ fn arb_case() -> impl Strategy<Value = Case> {
                                 order,
                                 sel_dims,
                                 where_pred,
+                                with_inner,
                             }
                         },
                     )
@@ -323,29 +384,52 @@ fn arb_case() -> impl Strategy<Value = Case> {
     })
 }
 
-/// Build the semantic-view definition: single table `s`, three dimensions, and
-/// one window metric `w` wrapping its own inner `SUM(s.v)` with the given
-/// function, partition config and `ORDER BY`.
-fn build_def(func: WFunc, mode: &PartMode, order: Option<Order>) -> SemanticViewDefinition {
-    let tables = vec![TableRef {
-        alias: "s".to_string(),
-        table: "s".to_string(),
+/// A table `name` with primary key `pk`.
+fn table(name: &str, pk: &[&str]) -> TableRef {
+    TableRef {
+        alias: name.to_string(),
+        table: name.to_string(),
         definition: None,
-        pk_columns: vec![],
+        pk_columns: pk.iter().map(|c| (*c).to_string()).collect(),
         unique_constraints: vec![],
         comment: None,
         synonyms: vec![],
         tags: Vec::new(),
         distinct_ranges: vec![],
-    }];
-    let dimensions = (0..NDIMS)
+    }
+}
+
+/// `st(<fk>) REFERENCES <to>(<pk>)`.
+fn bridge_rel(name: &str, fk: &str, to: &str, pk: &str) -> Join {
+    Join {
+        table: to.to_string(),
+        from_alias: "st".to_string(),
+        fk_columns: vec![fk.to_string()],
+        ref_columns: vec![pk.to_string()],
+        name: Some(name.to_string()),
+        cardinality: Cardinality::ManyToOne,
+        ..Default::default()
+    }
+}
+
+/// Build the semantic-view definition: table `s` with three dimensions, the
+/// tags `t` across the `st` bridge with a fourth, the inner metric `m =
+/// SUM(s.v)`, and the window metric `w` over `m` with the given function,
+/// partition config and `ORDER BY`.
+fn build_def(func: WFunc, mode: &PartMode, order: Option<Order>) -> SemanticViewDefinition {
+    let tables = vec![
+        table("s", &["id"]),
+        table("st", &["s_id", "t_id"]),
+        table("t", &["t_id"]),
+    ];
+    let dimensions = (0..NALL)
         .map(|i| Dimension {
             cortex_search_service: None,
             is_enum: false,
             sample_values: Vec::new(),
             name: dim_name(i),
             expr: dim_col(i),
-            source_table: Some("s".to_string()),
+            source_table: Some(if i == TAG { "t" } else { "s" }.to_string()),
             output_type: None,
             comment: None,
             synonyms: vec![],
@@ -356,13 +440,13 @@ fn build_def(func: WFunc, mode: &PartMode, order: Option<Order>) -> SemanticView
         // partition config, named only by a generated `where_clause`. Compound
         // expressions, so a splice that loses its parentheses changes which
         // rows reach the pre-aggregation.
-        .chain((0..NDIMS).map(|i| Dimension {
+        .chain((0..NALL).map(|i| Dimension {
             cortex_search_service: None,
             is_enum: false,
             sample_values: Vec::new(),
             name: format!("f{i}"),
             expr: filter_expr(i),
-            source_table: Some("s".to_string()),
+            source_table: Some(if i == TAG { "t" } else { "s" }.to_string()),
             output_type: None,
             comment: None,
             synonyms: vec![],
@@ -392,29 +476,43 @@ fn build_def(func: WFunc, mode: &PartMode, order: Option<Order>) -> SemanticView
             }]
         })
         .unwrap_or_default();
-    let metrics = vec![Metric {
-        name: "w".to_string(),
-        expr: "SUM(s.v)".to_string(),
-        source_table: Some("s".to_string()),
-        output_type: None,
-        using_relationships: vec![],
-        comment: None,
-        synonyms: vec![],
-        access: AccessModifier::Public,
-        non_additive_by: vec![],
-        window_spec: Some(WindowSpec {
-            window_function: func.name().to_string(),
-            // Self-referential inner metric (the metric wraps its own aggregate),
-            // matching how the window example tests model a window metric.
-            inner_metric: "w".to_string(),
-            extra_args: vec![],
-            excluding_dims,
-            partition_dims,
-            order_by,
-            frame_clause: None,
-        }),
-        tags: Vec::new(),
-    }];
+    let spec = WindowSpec {
+        window_function: func.name().to_string(),
+        inner_metric: "m".to_string(),
+        extra_args: vec![],
+        excluding_dims,
+        partition_dims,
+        order_by,
+        frame_clause: None,
+    };
+    let metrics = vec![
+        Metric {
+            name: "m".to_string(),
+            expr: "SUM(s.v)".to_string(),
+            source_table: Some("s".to_string()),
+            output_type: None,
+            using_relationships: vec![],
+            comment: None,
+            synonyms: vec![],
+            access: AccessModifier::Public,
+            non_additive_by: vec![],
+            window_spec: None,
+            tags: Vec::new(),
+        },
+        Metric {
+            name: "w".to_string(),
+            expr: format!("{}(m) OVER (...)", func.name()),
+            source_table: Some("s".to_string()),
+            output_type: None,
+            using_relationships: vec![],
+            comment: None,
+            synonyms: vec![],
+            access: AccessModifier::Public,
+            non_additive_by: vec![],
+            window_spec: Some(spec),
+            tags: Vec::new(),
+        },
+    ];
     SemanticViewDefinition {
         variables: Vec::new(),
         max_staleness: None,
@@ -423,7 +521,10 @@ fn build_def(func: WFunc, mode: &PartMode, order: Option<Order>) -> SemanticView
         tables,
         dimensions,
         metrics,
-        joins: vec![],
+        joins: vec![
+            bridge_rel("st_s", "s_id", "s", "id"),
+            bridge_rel("st_t", "t_id", "t", "t_id"),
+        ],
         // PIN: a window metric is an aggregate shape; FACTS returns unaggregated rows. TECH-DEBT #66
         facts: vec![],
         materializations: vec![],
@@ -440,17 +541,41 @@ fn build_def(func: WFunc, mode: &PartMode, order: Option<Order>) -> SemanticView
 /// Create the physical table and insert the generated rows.
 fn make_db(inst: &Instance) -> duckdb::Connection {
     let conn = duckdb::Connection::open_in_memory().expect("in-memory DuckDB");
-    conn.execute_batch("CREATE TABLE s (c0 INTEGER, c1 INTEGER, c2 INTEGER, v INTEGER);")
-        .expect("create table");
+    conn.execute_batch(
+        "CREATE TABLE s (id INTEGER, c0 INTEGER, c1 INTEGER, c2 INTEGER, v INTEGER);
+         CREATE TABLE st (s_id INTEGER, t_id INTEGER);
+         CREATE TABLE t (t_id INTEGER, tag INTEGER);",
+    )
+    .expect("create tables");
     let cell = |c: &Option<i64>| c.map_or_else(|| "NULL".to_string(), |v| v.to_string());
     if !inst.rows.is_empty() {
         let values: Vec<String> = inst
             .rows
             .iter()
-            .map(|(a, b, c, d)| format!("({},{},{},{})", cell(a), cell(b), cell(c), cell(d)))
+            .enumerate()
+            .map(|(id, (a, b, c, d))| {
+                format!("({id},{},{},{},{})", cell(a), cell(b), cell(c), cell(d))
+            })
             .collect();
         conn.execute_batch(&format!("INSERT INTO s VALUES {};", values.join(",")))
             .expect("insert rows");
+    }
+    let tags: Vec<String> = inst
+        .tags
+        .iter()
+        .enumerate()
+        .map(|(id, tag)| format!("({id},{})", cell(tag)))
+        .collect();
+    conn.execute_batch(&format!("INSERT INTO t VALUES {};", tags.join(",")))
+        .expect("insert tags");
+    if !inst.links.is_empty() {
+        let links: Vec<String> = inst
+            .links
+            .iter()
+            .map(|(s_id, t_id)| format!("({s_id},{t_id})"))
+            .collect();
+        conn.execute_batch(&format!("INSERT INTO st VALUES {};", links.join(",")))
+            .expect("insert links");
     }
     conn
 }
@@ -489,21 +614,32 @@ fn oracle_sql(case: &Case) -> String {
         .as_ref()
         .map_or_else(String::new, |p| format!(" WHERE {}", p.to_raw_sql()));
 
-    // The pre-aggregation CTE: SUM(s.v) grouped by all queried dims.
+    // The pre-aggregation CTE: SUM(s.v) grouped by all queried dims, each row
+    // of `s` once per group however many tags it has (Snowflake, fixture 4
+    // W4-W6): the DISTINCT keeps one row per (s row, group) of the bridged
+    // join before the SUM, a formulation independent of the extension's.
+    let rows_sql = std::iter::once("s.id AS __id, s.v AS __v".to_string())
+        .chain(
+            sel.iter()
+                .map(|&i| format!("{} AS {}", dim_col(i), dim_name(i))),
+        )
+        .collect::<Vec<_>>()
+        .join(", ");
+    let rows = format!("SELECT DISTINCT {rows_sql} FROM {BRIDGED_FROM}{where_sql}");
     let agg = if sel.is_empty() {
-        format!("SELECT SUM(s.v) AS w FROM s{where_sql}")
+        format!("SELECT SUM(__v) AS w FROM ({rows}) r")
     } else {
         let agg_select = sel
             .iter()
-            .map(|&i| format!("{} AS {}", dim_col(i), dim_name(i)))
-            .chain(std::iter::once("SUM(s.v) AS w".to_string()))
+            .map(|&i| dim_name(i))
+            .chain(std::iter::once("SUM(__v) AS w".to_string()))
             .collect::<Vec<_>>()
             .join(", ");
         let group_by = (1..=sel.len())
             .map(|n| n.to_string())
             .collect::<Vec<_>>()
             .join(", ");
-        format!("SELECT {agg_select} FROM s{where_sql} GROUP BY {group_by}")
+        format!("SELECT {agg_select} FROM ({rows}) r GROUP BY {group_by}")
     };
 
     let part = partition_dims(case);
@@ -536,6 +672,7 @@ fn oracle_sql(case: &Case) -> String {
     let outer_select = sel
         .iter()
         .map(|&i| format!("a1.{}", dim_name(i)))
+        .chain(case.with_inner.then(|| "a1.w AS m".to_string()))
         .chain(std::iter::once(window_col))
         .collect::<Vec<_>>()
         .join(", ");
@@ -552,18 +689,24 @@ proptest! {
         let req = QueryRequest {
             where_clause: case.where_pred.as_ref().map(Pred::to_member_sql),
             dimensions: case.sel_dims.iter().map(|&i| DimensionName::new(dim_name(i))).collect(),
-            // Always query the (single) window metric so the window path fires.
-            metrics: vec![MetricName::new("w")],
+            // Always query the window metric so the window path fires, and its
+            // inner metric beside it in half the cases.
+            metrics: if case.with_inner {
+                vec![MetricName::new("m"), MetricName::new("w")]
+            } else {
+                vec![MetricName::new("w")]
+            },
             // PIN: a window metric is an aggregate shape; FACTS returns unaggregated rows. TECH-DEBT #66
             facts: vec![],
         };
 
-        // Single table, no joins -> no fan trap; every generated query (whose
-        // dim-set is a superset of the required dims) is accepted.
+        // Every generated query (whose dim-set is a superset of the required
+        // dims) is accepted: a tag across the bridge counts each row of `s`
+        // once per group.
         let expanded = match expand("win", &def, &req) {
             Ok(sql) => sql,
             Err(e) => {
-                prop_assert!(false, "single-table window query unexpectedly rejected: {e}\ncase: {case:?}");
+                prop_assert!(false, "window query unexpectedly rejected: {e}\ncase: {case:?}");
                 unreachable!()
             }
         };
@@ -573,6 +716,9 @@ proptest! {
         // difference between the two formulations is not a false diff.
         let mut proj_cols: Vec<String> = case.sel_dims.iter().map(|&i| dim_name(i)).collect();
         proj_cols.push("w".to_string());
+        if case.with_inner {
+            proj_cols.push("m".to_string());
+        }
         proj_cols.sort();
         let proj = proj_cols.join(", ");
 
@@ -594,8 +740,9 @@ proptest! {
         prop_assert_eq!(
             diff, 0,
             "window-metric expansion disagrees with the independent partition oracle \
-             (symmetric multiset diff = {}); func={:?} mode={:?} order={:?} dims={:?}\n--- expanded:\n{}\n--- oracle:\n{}",
-            diff, case.func, case.mode, case.order, case.sel_dims, expanded, oracle
+             (symmetric multiset diff = {}); func={:?} mode={:?} order={:?} dims={:?} \
+             with_inner={}\n--- expanded:\n{}\n--- oracle:\n{}",
+            diff, case.func, case.mode, case.order, case.sel_dims, case.with_inner, expanded, oracle
         );
     }
 }
@@ -626,6 +773,8 @@ fn generator_varies_the_predicate_and_reaches_non_partition_dims() {
     // peer frame is vacuous. Counted over the rows the predicate keeps.
     let (mut whole_multi_row, mut ordered, mut ordered_with_peers) = (0usize, 0usize, 0usize);
     let mut whole_ordered = 0usize;
+    // Phase 7 PR 5: the bridge and the inner metric beside the window.
+    let (mut tag_queried, mut tag_filtered, mut fanned, mut with_inner) = (0, 0, 0, 0);
 
     for _ in 0..400 {
         let case = arb_case()
@@ -633,6 +782,26 @@ fn generator_varies_the_predicate_and_reaches_non_partition_dims() {
             .expect("strategy must produce a value")
             .current();
         let part = partition_dims(&case);
+        let mut pred_dims = Vec::new();
+        if let Some(p) = &case.where_pred {
+            p.dims(&mut pred_dims);
+        }
+        let reads_tag = case.sel_dims.contains(&TAG) || pred_dims.contains(&TAG);
+        tag_queried += usize::from(case.sel_dims.contains(&TAG));
+        tag_filtered += usize::from(pred_dims.contains(&TAG));
+        with_inner += usize::from(case.with_inner);
+        // A row of `s` with two tags, in a query that reads the tag: the
+        // fan-out the once-per-group rule must undo.
+        let rows_tags = |r: usize| {
+            case.inst
+                .links
+                .iter()
+                .filter(|(s_id, _)| *s_id == r)
+                .count()
+        };
+        if reads_tag && (0..case.inst.rows.len()).any(|r| rows_tags(r) > 1) {
+            fanned += 1;
+        }
         // The result's groups: the queried dims' distinct values over the rows
         // the predicate keeps, read from DuckDB so NULLs filter as in SQL.
         let groups: HashSet<Vec<Option<i64>>> = {
@@ -652,7 +821,9 @@ fn generator_varies_the_predicate_and_reaches_non_partition_dims() {
                 .map_or_else(String::new, |p| format!(" WHERE {}", p.to_raw_sql()));
             let n = case.sel_dims.len();
             let mut stmt = conn
-                .prepare(&format!("SELECT DISTINCT {cols} FROM s{where_sql}"))
+                .prepare(&format!(
+                    "SELECT DISTINCT {cols} FROM {BRIDGED_FROM}{where_sql}"
+                ))
                 .expect("group query binds");
             stmt.query_map([], |r| (0..n).map(|i| r.get::<_, Option<i64>>(i)).collect())
                 .expect("group query runs")
@@ -732,6 +903,15 @@ fn generator_varies_the_predicate_and_reaches_non_partition_dims() {
     assert!(
         ordered > 0 && ordered_with_peers > 0,
         "ordered windows: {ordered}, with peers in a partition: {ordered_with_peers}"
+    );
+    assert!(
+        tag_queried >= 100 && tag_filtered >= 50 && fanned >= 100,
+        "the bridge is barely reached: tag queried {tag_queried}, filtered {tag_filtered}, \
+         a row fanned across it {fanned} (of 400)"
+    );
+    assert!(
+        (100..=300).contains(&with_inner),
+        "the inner metric beside the window in {with_inner}/400 cases"
     );
     assert!(
         distinct.len() > 50,

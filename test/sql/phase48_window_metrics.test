@@ -1,5 +1,5 @@
 # Phase 48: Window function metrics
-# Tests WIN-02 through WIN-05: expansion pipeline, mixing error, fan trap skip,
+# Tests WIN-02 through WIN-05: expansion pipeline, a window beside an aggregate, fan trap skip,
 # SHOW DIMS required=TRUE, GET_DDL round-trip, DESCRIBE
 
 require semantic_views
@@ -136,7 +136,10 @@ SELECT * FROM SEMANTIC_VIEW(p48_sales_view DIMENSIONS store, date METRICS total_
 metric 'total_qty' is private
 
 # ========================================
-# Test 4b: Mixed window + aggregate error (with public aggregate metric)
+# Test 4b: a window metric beside the public aggregate it runs over. The
+# window reads the rows the aggregate gives (Phase 7 PR 5, Snowflake fixture 4
+# W2); this used to be refused as mixing the two. The running average per
+# store, by date.
 # ========================================
 
 statement ok
@@ -148,10 +151,19 @@ METRICS (
     s.avg_qty AS AVG(total_qty) OVER (PARTITION BY EXCLUDING date ORDER BY date ASC NULLS LAST)
 )
 
-statement error
-SELECT * FROM SEMANTIC_VIEW(p48_mix_view DIMENSIONS store, date METRICS total_qty, avg_qty);
+query TTIR rowsort
+SELECT store, date, total_qty, ROUND(avg_qty, 3) FROM SEMANTIC_VIEW(p48_mix_view DIMENSIONS store, date METRICS total_qty, avg_qty);
 ----
-cannot mix window function metrics
+LA	2024-01-01	5	5.0
+LA	2024-01-02	8	6.5
+LA	2024-01-03	12	8.333
+LA	2024-01-04	7	8.0
+LA	2024-01-05	18	10.0
+NYC	2024-01-01	10	10.0
+NYC	2024-01-02	20	15.0
+NYC	2024-01-03	15	15.0
+NYC	2024-01-04	25	17.5
+NYC	2024-01-05	30	20.0
 
 # ========================================
 # Test 5: Missing required dimension error

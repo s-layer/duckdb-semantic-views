@@ -282,8 +282,10 @@ fn test_window_inner_aggregate_quoted_name_gets_rewrite() {
         metrics: vec![MetricName::new("rolling_items")],
     };
     let sql = expand("orders", &def, &req).unwrap();
+    // The column keeps the stored name's logical spelling, which DuckDB
+    // matches case-insensitively.
     assert!(
-        sql.contains("COUNT(\"li\".\"id\") AS \"item_count\""),
+        sql.contains("COUNT(\"li\".\"id\") AS \"Item_Count\""),
         "window CTE inner aggregate on a QUOTED-name base metric must still use \
          the rewritten count: {sql}"
     );

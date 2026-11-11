@@ -60,16 +60,14 @@
 //!   definition that declares role-playing somewhere does not lose per-grain
 //!   emission for queries that never reach it.
 //!
-//! Window metrics are no longer in that list. [`window_cte_anchor`] picks the
-//! grain for an all-window query and `expand_window_metrics` anchors its
-//! `__sv_agg` CTE there — the window function is not grain-sensitive, so moving
-//! the CTE is the whole fix. That path does not build [`Plan`] groups; it reuses
-//! only [`anchor_joins`] and the fence's per-grain mode.
+//! Window metrics never reach the planner: `window::expand_over_result`
+//! expands the query with each window replaced by its inner metric as an
+//! ordinary query, which may be planned here, and runs the windows over its
+//! rows.
 //!
-//! *Active* semi-additive metrics are no longer in that list either. A single
+//! *Active* semi-additive metrics are no longer in that list. A single
 //! grain re-points `__sv_snapshot` at the metric's own table via
-//! [`snapshot_cte_anchor`] — the move [`window_cte_anchor`] makes for `__sv_agg`
-//! — and is left to the base-anchored emitter. A query spanning several grains
+//! [`snapshot_cte_anchor`], and is left to the base-anchored emitter. A query spanning several grains
 //! emits the snapshot as ONE GROUP's CTE, nested as `SELECT <outer> FROM
 //! (<inner>)` so its rows are ranked before that grain aggregates them, while
 //! sibling groups aggregate normally (see [`render_snapshot_group`]).
@@ -1041,35 +1039,11 @@ fn role_playing_affects_query(
     })
 }
 
-/// The declared table a window query's `__sv_agg` CTE should anchor at, or
-/// `None` to leave it anchored at the base table.
-///
-/// A window metric's inner aggregate is the grain-sensitive part: the window
-/// function itself runs over the already-grouped CTE, so anchoring the CTE at
-/// the inner metric's own table is the whole fix (TECH-DEBT #36). With
-/// `total_balance = SUM(c.balance)` on the parent `customers`, a base-anchored
-/// CTE joins `orders` and sums each customer's balance once per order — the
-/// inflation the v0.11.0 fence turned into `RootGrainFanTrap`. Anchored at `c`
-/// the inner aggregate sees one row per customer.
-///
-/// Returns `None` — leaving the query base-anchored with the full fence — when:
-/// - the anchor would be the root anyway (base-anchoring is already correct);
-/// - the window metrics' inner aggregates span **several** grains, which would
-///   need those grains joined before the window runs. That is the next
-///   increment, not this one;
-/// - a queried dimension is unqualified (its binding would move with the
-///   anchor), or the view role-plays, matching [`is_eligible`]'s conservatism;
-/// - a queried dimension is unreachable from the anchor.
-///
-/// A dimension *below* the anchor's grain is deliberately NOT screened here: it
-/// has no single value per group in either engine, and the fan-trap fence's
-/// metric × dimension check — which per-grain mode keeps — is what reports it.
 /// The table an active semi-additive metric's `__sv_snapshot` CTE should anchor
 /// at, or `None` to leave it base-anchored.
 ///
-/// The sibling of [`window_cte_anchor`], and deliberately the same shape: both
-/// re-anchor a single base-anchored CTE, so both carry the same restrictions.
-/// Probed against Snowflake (TECH-DEBT #36): it computes the snapshot inside the
+/// It re-anchors a single base-anchored CTE, so it carries the restrictions
+/// [`is_eligible`] does. Probed against Snowflake (TECH-DEBT #36): it computes the snapshot inside the
 /// metric's own-grain aggregation and joins pre-aggregated results, rather than
 /// ranking rows a base-anchored join has already multiplied.
 ///
@@ -1145,100 +1119,6 @@ pub(super) fn snapshot_cte_anchor(
     // ...and the NA dimensions / `where_clause` members.
     for table in extra_tables {
         graph.path(&anchor, &table.to_ascii_lowercase())?;
-    }
-    Some(anchor)
-}
-
-pub(super) fn window_cte_anchor(
-    def: &SemanticViewDefinition,
-    resolved_dims: &[&Dimension],
-    resolved_mets: &[&Metric],
-    where_tables: &[String],
-    where_has_unqualified_member: bool,
-) -> Option<String> {
-    if def.joins.is_empty() || resolved_mets.is_empty() {
-        return None;
-    }
-    // EXP-22: an unqualified `where_clause` member rebinds with the anchor.
-    if where_has_unqualified_member {
-        return None;
-    }
-    // Only an all-window query reaches the window emitter — mixing window and
-    // aggregate metrics is rejected upstream — and only then is `__sv_agg` the
-    // shape being anchored.
-    if !resolved_mets.iter().all(|m| m.is_window()) {
-        return None;
-    }
-    if resolved_dims.iter().any(|d| d.source_table.is_none())
-        || role_playing_affects_query(def, resolved_dims, resolved_mets, where_tables, false)
-    {
-        return None;
-    }
-    // `USING` on a window metric, its inner aggregate or anything that reaches
-    // (`using_scopes_a_touched_table` walks them all): the window emitter does
-    // not thread a role into `__sv_agg`, so decline unless the relationship
-    // targets a table this query never reaches (TECH-DEBT #71).
-    if using_scopes_a_touched_table(def, resolved_dims, resolved_mets, where_tables) {
-        return None;
-    }
-
-    let graph = GrainGraph::build(def)?;
-    let root = graph.root().to_string();
-
-    // Every window metric's INNER aggregate must sit at the same single table.
-    //
-    // The inner metric is deliberately what is measured, not the window metric
-    // itself: DDL qualifies a window metric with a source alias
-    // (`o.running_balance AS SUM(total_balance) OVER (…)`), and
-    // `metric_grain` unions that alias with the inner's for its own
-    // conservative fan-trap purpose. Here that union would report two grains for
-    // every DDL-declared window metric and decline unconditionally. The alias on
-    // a window metric is declarative — emission never references it, because the
-    // window function runs over `__sv_agg`'s columns — so the inner aggregate's
-    // grain is the one the CTE must anchor at.
-    let mut anchor: Option<String> = None;
-    for met in resolved_mets {
-        let ws = met.window_spec.as_ref()?;
-        // EXP-12: `ident_matches`, not raw case-folding — the anchor decision
-        // must resolve the reference exactly as the fence and the emitter do,
-        // or a quoted reference declines the re-anchor here while the fence
-        // (which would have caught the resulting base-anchored fan) also lost
-        // the grain, and the query is silently computed over the fanned join.
-        if crate::ident::ident_matches(&met.name, &ws.inner_metric) {
-            return None; // Self-referential; not a shape to re-anchor.
-        }
-        let inner = def
-            .metrics
-            .iter()
-            .find(|m| crate::ident::ident_matches(&m.name, &ws.inner_metric))?;
-        let grains = metric_grain(inner, def).anchored(&root);
-        let [only] = grains.as_slice() else {
-            return None; // An inner aggregate spanning several grains — decline.
-        };
-        match &anchor {
-            None => anchor = Some(only.clone()),
-            Some(existing) if existing == only => {}
-            Some(_) => return None, // Two inner aggregates at different grains.
-        }
-    }
-    let anchor = anchor?;
-    if anchor == root {
-        return None; // Already correct as-is.
-    }
-    // Re-anchor in EITHER direction (TECH-DEBT #71). On the "one" side of the
-    // root this removes the inflation a base-anchored join would cause. On the
-    // "many" side it is the home-table rule: `FROM child LEFT JOIN base` counts
-    // a child row whose foreign key is NULL and gives a childless parent no
-    // group, which is what the inner metric gets queried on its own (Snowflake,
-    // D1). This used to be declined because `FROM base LEFT JOIN child` kept the
-    // childless parent as a `COUNT` of 0 — the very base-anchored answer #71
-    // retires.
-    //
-    // Each queried dimension must be joinable from the anchor, or the CTE's
-    // FROM could not reach the column its SELECT names.
-    for dim in resolved_dims {
-        let table = dim.source_table.as_ref()?.to_ascii_lowercase();
-        graph.path(&anchor, &table)?;
     }
     Some(anchor)
 }

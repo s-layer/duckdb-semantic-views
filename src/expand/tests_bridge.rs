@@ -659,41 +659,42 @@ fn semi_additive_metric_across_the_bridge_is_refused() {
     assert!(e.to_string().contains("counted once per group only"), "{e}");
 }
 
-/// A window metric across the bridge is refused, and the message says a bridge
-/// is the reason: the window path does not deduplicate its inner aggregate.
+/// A window metric across the bridge runs over the rows its inner metric
+/// gives by country (B1: FR 300, UK 500, the authorless Orphan 50), as
+/// Snowflake does (fixture 4, W4).
 #[test]
-fn window_metric_across_the_bridge_is_refused() {
-    let mut def = bridge_def("b");
-    def.metrics.push(Metric {
-        name: "avg_pages".to_string(),
-        expr: "AVG(total_pages)".to_string(),
-        source_table: Some("b".to_string()),
-        window_spec: Some(crate::model::WindowSpec {
-            window_function: "AVG".to_string(),
-            inner_metric: "total_pages".to_string(),
-            extra_args: vec![],
-            excluding_dims: vec![],
-            partition_dims: vec!["country".to_string()],
-            order_by: vec![],
-            frame_clause: None,
-        }),
-        ..Default::default()
-    });
-    let e = refusal(&def, &["country"], &["avg_pages"]);
-    assert!(
-        matches!(&e, ExpandError::FanTrap { detail } if detail.counts_once),
-        "{e}"
-    );
-    assert!(e.to_string().contains("counted once per group only"), "{e}");
+fn window_metric_across_the_bridge_reads_each_group_once() {
+    for first in ["b", "a", "ba"] {
+        let mut def = bridge_def(first);
+        def.metrics.push(Metric {
+            name: "avg_pages".to_string(),
+            expr: "AVG(total_pages)".to_string(),
+            source_table: Some("b".to_string()),
+            window_spec: Some(crate::model::WindowSpec {
+                window_function: "AVG".to_string(),
+                inner_metric: "total_pages".to_string(),
+                extra_args: vec![],
+                excluding_dims: vec![],
+                partition_dims: vec!["country".to_string()],
+                order_by: vec![],
+                frame_clause: None,
+            }),
+            ..Default::default()
+        });
+        assert_eq!(
+            run(&def, &["country"], &["avg_pages"], None),
+            table_of(&[&["FR", "300.0"], &["UK", "500.0"], &["NULL", "50.0"]]),
+            "{first} first"
+        );
+    }
 }
 
-/// A window metric and a semi-additive one across the bridge after a hop up are
-/// refused as across a bridge reached directly: neither path deduplicates the
-/// reviews per group. Snowflake refuses the semi-additive one too (fixture 3,
-/// S7); it answers window metrics across a bridge (fixture 4), which is the
-/// parity plan's PR 5.
+/// A window metric across the bridge after a hop up reads the rows its inner
+/// metric gives: Duo's two reviews and Mixed's one count for FR, Mixed's for
+/// UK. A semi-additive metric there is still refused, as Snowflake refuses it
+/// (fixture 3, S7).
 #[test]
-fn window_and_semi_additive_across_the_bridge_after_a_hop_up_are_refused() {
+fn window_across_the_bridge_after_a_hop_up_reads_its_inner_rows() {
     let mut def = bridge_def("b");
     def.metrics.push(Metric {
         name: "avg_reviews".to_string(),
@@ -710,19 +711,27 @@ fn window_and_semi_additive_across_the_bridge_after_a_hop_up_are_refused() {
         }),
         ..Default::default()
     });
+    assert_eq!(
+        run(&def, &["country"], &["review_count", "avg_reviews"], None),
+        table_of(&[&["FR", "3", "3.0"], &["UK", "1", "1.0"]]),
+    );
+}
+
+/// The semi-additive half of the case above stays refused (fixture 3, S7).
+#[test]
+fn semi_additive_across_the_bridge_after_a_hop_up_is_refused() {
+    let mut def = bridge_def("b");
     let mut last = metric("last_stars", "SUM(r.stars)", Some("r"));
     last.non_additive_by = vec![NonAdditiveDim {
         dimension: "stars".to_string(),
         ..Default::default()
     }];
     def.metrics.push(last);
-    for met in ["avg_reviews", "last_stars"] {
-        let e = refusal(&def, &["country"], &[met]);
-        assert!(
-            matches!(&e, ExpandError::FanTrap { detail } if detail.counts_once),
-            "{met}: {e}"
-        );
-    }
+    let e = refusal(&def, &["country"], &["last_stars"]);
+    assert!(
+        matches!(&e, ExpandError::FanTrap { detail } if detail.counts_once),
+        "{e}"
+    );
 }
 
 /// A plain child and a table across the bridge in one query: each book once

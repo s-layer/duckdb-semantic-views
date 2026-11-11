@@ -128,16 +128,18 @@ METRICS (
     o.running AS SUM(total) OVER (PARTITION BY EXCLUDING snap_date ORDER BY snap_date ASC NULLS LAST)
 )
 
-# o.* on metrics expands to {total, running} — an aggregate + a window
-# metric, which the engine forbids in one query. The wildcard expansion must
-# surface the same mix error as the explicit list (routing via wildcards).
-statement error
+# o.* on metrics expands to {total, running} — an aggregate beside a window
+# metric over it, which the window reads row by row (Phase 7 PR 5, Snowflake
+# fixture 4 W2). It used to be refused as mixing the two.
+query TTRR rowsort
 SELECT * FROM SEMANTIC_VIEW(cvb_win
     DIMENSIONS region, snap_date
     METRICS o.*
 );
 ----
-cannot mix window function metrics
+east	2024-01-01	10.00	10.00
+east	2024-01-02	25.00	35.00
+west	2024-01-01	30.00	30.00
 
 # Explicit window metric alongside a dims wildcard is mix-free and works.
 query TTR

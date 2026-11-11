@@ -14,10 +14,12 @@
 //! two returned numbers that were not in a 1:2 ratio (verified against DuckDB:
 //! 150/70 vs 500/240 where 300/140 was required).
 //!
-//! Both are now rejected. Composing a snapshot with an outer expression is a
-//! real feature, not a bug fix — see TECH-DEBT #55 for what would finish it —
-//! so the fence errors rather than guessing, exactly as the SG-5 co-query
-//! guard does for the shapes its CTE cannot decompose.
+//! A derived metric over one is rejected. Composing a snapshot with an outer
+//! expression is a real feature, not a bug fix — see TECH-DEBT #55 for what
+//! would finish it — so the fence errors rather than guessing, exactly as the
+//! SG-5 co-query guard does for the shapes its CTE cannot decompose. A window
+//! metric over one is answered since Phase 7 PR 5: the window runs over the
+//! rows its inner metric gives as an ordinary query, the snapshot itself.
 
 use super::*;
 use crate::expand::test_helpers::{minimal_def, TestFixtureExt};
@@ -119,10 +121,12 @@ fn a_transitively_derived_metric_over_a_semi_additive_base_errors() {
     );
 }
 
-// EXP-20 — window metric whose inner metric is semi-additive.
+// EXP-20 — window metric whose inner metric is semi-additive. Refused until
+// Phase 7 PR 5; the window now runs over the rows the inner metric gives as an
+// ordinary query, which is the snapshot.
 
 #[test]
-fn a_window_metric_over_a_semi_additive_inner_metric_errors() {
+fn a_window_metric_over_a_semi_additive_inner_metric_reads_the_snapshot() {
     let def = semi_additive_def()
         .with_metric("rolling_balance", "", None)
         .with_window_spec(
@@ -138,23 +142,19 @@ fn a_window_metric_over_a_semi_additive_inner_metric_errors() {
             },
         );
 
-    let result = expand(
+    let sql = expand(
         "test_view",
         &def,
         &req(&["customer_id"], &["rolling_balance"]),
+    )
+    .expect("a window over a semi-additive metric runs over its snapshot");
+    let snapshot = expand("test_view", &def, &req(&["customer_id"], &["balance"]))
+        .expect("the snapshot alone");
+    assert!(snapshot.contains("RANK()"), "{snapshot}");
+    assert!(
+        sql.contains(&format!("WITH __sv_agg AS (\n{snapshot}\n)")),
+        "the window must run over the snapshot's rows: {sql}"
     );
-
-    match result {
-        Err(ExpandError::SemiAdditiveThroughDependency {
-            ref metric_name,
-            ref semi_metric_name,
-            ..
-        }) => {
-            assert_eq!(metric_name, "rolling_balance");
-            assert_eq!(semi_metric_name, "balance");
-        }
-        other => panic!("expected SemiAdditiveThroughDependency, got: {other:?}"),
-    }
 }
 
 // Controls — the guard must fire on the dependency, not on the shapes that

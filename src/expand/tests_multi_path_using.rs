@@ -439,17 +439,29 @@ fn a_window_over_a_using_metric_groups_through_its_path() {
     );
 }
 
-/// A window over a metric with no `USING` names no path, and two windows over
-/// different paths cannot be split per path: both stay refused.
+/// A window over a metric with no `USING` names no path, so it stays refused.
 #[test]
-fn a_window_without_a_path_or_beside_another_path_is_refused() {
-    for mets in [&["wf"][..], &["wd", "wa"][..]] {
-        let err = expand("v", &window_def(), &req(&["city"], mets)).unwrap_err();
-        assert!(
-            matches!(err, ExpandError::AmbiguousPath { .. }),
-            "{mets:?}: expected AmbiguousPath, got: {err}"
-        );
-    }
+fn a_window_without_a_path_is_refused() {
+    let err = expand("v", &window_def(), &req(&["city"], &["wf"])).unwrap_err();
+    assert!(
+        matches!(err, ExpandError::AmbiguousPath { .. }),
+        "expected AmbiguousPath, got: {err}"
+    );
+}
+
+/// Two windows over different paths each read their own: the windows run
+/// over the rows `departures` and `arrivals` give by city, each through its
+/// own airport, as the two metrics do on their own (Snowflake fixture 6, R4).
+#[test]
+fn two_windows_over_different_paths_each_follow_their_own() {
+    assert_eq!(
+        run(&window_def(), &["city"], &["wd", "wa"]),
+        table_of(&[
+            &["Alpha", "3", "1"],
+            &["Beta", "1", "2"],
+            &["Gamma", "NULL", "1"]
+        ])
+    );
 }
 
 // ---------------------------------------------------------------------------

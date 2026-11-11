@@ -4308,8 +4308,7 @@ mod tests {
     // the quote characters as data).
     //
     // These two sites, the fan-trap fence's `metric_grain`, and
-    // `per_grain::window_cte_anchor` all resolve the SAME reference and must
-    // agree. `expand::window` already used the canonical key, so the CREATE
+    // `expand::window` all resolve the SAME reference and must agree. `expand::window` already used the canonical key, so the CREATE
     // side was the stricter one -- it rejected definitions the emitter could
     // have computed.
     // ---------------------------------------------------------------------
@@ -4409,6 +4408,80 @@ mod tests {
             "a quoted EXCLUDING dimension names the declared dimension, exactly \
              as the ORDER BY slot beside it already accepts: {:?}",
             result.err().map(|e| e.message)
+        );
+    }
+
+    /// Phase 7 PR 5 (Snowflake fixture 4, W0): a window clause may name its
+    /// dimensions qualified, `PARTITION BY EXCLUDING b.title`, as Snowflake
+    /// documents and accepts. Only ORDER BY took the dotted form before.
+    #[test]
+    fn parse_keyword_body_window_qualified_excluding_dim_accepted() {
+        let body = "AS TABLES (o AS orders PRIMARY KEY (id)) \
+                     DIMENSIONS (o.region AS o.region) \
+                     METRICS (\
+                         o.total_qty AS SUM(o.qty), \
+                         o.avg_qty AS AVG(total_qty) OVER (PARTITION BY EXCLUDING o.region)\
+                     )";
+        let result = parse_keyword_body(body, 0);
+        assert!(
+            result.is_ok(),
+            "a qualified EXCLUDING dimension names the declared dimension: {:?}",
+            result.err().map(|e| e.message)
+        );
+    }
+
+    /// ... and in `PARTITION BY`.
+    #[test]
+    fn parse_keyword_body_window_qualified_partition_dim_accepted() {
+        let body = "AS TABLES (o AS orders PRIMARY KEY (id)) \
+                     DIMENSIONS (o.region AS o.region) \
+                     METRICS (\
+                         o.total_qty AS SUM(o.qty), \
+                         o.avg_qty AS AVG(total_qty) OVER (PARTITION BY o.region)\
+                     )";
+        let result = parse_keyword_body(body, 0);
+        assert!(
+            result.is_ok(),
+            "a qualified PARTITION BY dimension names the declared dimension: {:?}",
+            result.err().map(|e| e.message)
+        );
+    }
+
+    /// Control: a qualifier naming another table does not resolve.
+    #[test]
+    fn parse_keyword_body_window_wrongly_qualified_dims_rejected() {
+        for (clause, needle) in [
+            ("PARTITION BY EXCLUDING x.region", "EXCLUDING dimension"),
+            ("PARTITION BY x.region", "PARTITION BY dimension"),
+        ] {
+            let body = format!(
+                "AS TABLES (o AS orders PRIMARY KEY (id)) \
+                 DIMENSIONS (o.region AS o.region) \
+                 METRICS (o.total_qty AS SUM(o.qty), \
+                          o.avg_qty AS AVG(total_qty) OVER ({clause}))"
+            );
+            let err = parse_keyword_body(&body, 0).expect_err("another table's qualifier");
+            assert!(err.message.contains(needle), "{clause}: {}", err.message);
+        }
+    }
+
+    /// Phase 7 PR 5: a window over a window metric is refused at CREATE. It
+    /// used to fail the CREATE bind (the expansion nested one window inside
+    /// another); the expansion now refuses it, which CREATE's bind leaves to
+    /// the checks that own the rule, so the rule is checked here.
+    #[test]
+    fn parse_keyword_body_window_over_a_window_rejected() {
+        let body = "AS TABLES (o AS orders PRIMARY KEY (id)) \
+                    DIMENSIONS (o.day AS o.day) \
+                    METRICS (o.total_qty AS SUM(o.qty), \
+                             o.running AS SUM(total_qty) OVER (ORDER BY day), \
+                             o.running_avg AS AVG(running) OVER (ORDER BY day))";
+        let err = parse_keyword_body(body, 0).expect_err("a window over a window");
+        assert!(
+            err.message.contains("'running_avg'")
+                && err.message.contains("itself a window function metric"),
+            "{}",
+            err.message
         );
     }
 

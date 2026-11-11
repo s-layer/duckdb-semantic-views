@@ -363,8 +363,7 @@ table to declare a ``PRIMARY KEY`` whenever that table was reached through a
 count. A table that anchors its own grain produces no such rows, so the key is
 not required there. Since every metric is now anchored at its own table, a
 ``COUNT(*)`` on a child table without a key is answered too. Only the few shapes
-that still fall back to the base table, such as the one-to-one window pair
-described under :ref:`explanation-grain-refused`, need the key.
+that still fall back to the base table need the key.
 
 
 .. _explanation-grain-below:
@@ -404,24 +403,23 @@ What Is Still Refused, and Why
 ==============================
 
 Per-grain assembly widens what a semantic view can answer; it does not remove the
-guard rails. Four shapes still raise an error, and the reason behind each one is
+guard rails. Three shapes still raise an error, and the reason behind each one is
 useful to keep in mind while you model. A dimension below a metric's grain is
-also refused for a window metric, an active semi-additive metric, a metric table
-with no ``PRIMARY KEY``, and a fan-out across an ``ASOF`` or range relationship
-(see :ref:`howto-fan-errors`).
+also refused for an active semi-additive metric, a metric table with no
+``PRIMARY KEY``, and a fan-out across an ``ASOF`` or range relationship (see
+:ref:`howto-fan-errors`).
 
-**Window metrics whose inner aggregates sit at different grains.**
-   A window metric wraps an inner aggregate, and the window function runs over the
-   already-grouped rows, so the window itself is not grain-sensitive -- the inner
-   aggregate is. One window metric whose inner aggregate lives on a non-base table
-   is computed at that table's grain. Two of them at *different* grains are not,
-   because those grains would have to be joined before the window could run.
-   Where joining the two tables would repeat one side's rows, the query is
-   refused with a fan trap error. Where the relationship between them is
-   one-to-one, nothing fans out and the pair is answered, but it is computed
-   from the base table rather than per grain: an inner aggregate on a child of
-   the base table then leaves out orphan child rows (a known limitation). See
-   :ref:`howto-window-metrics`.
+A window metric is not among them. The window function runs over the rows its
+inner metric gives, so the extension answers the query without the window
+first, with the inner metric in it, and computes the window over that result.
+Whatever grains the inner metrics sit at, the window sees the numbers they give
+on their own. See :ref:`howto-window-relationships`.
+
+.. versionchanged:: 0.19.0
+
+   Two window metrics whose inner metrics sit at different grains used to be
+   refused with a fan trap error, and a window metric could not be grouped
+   below its grain or across a bridge.
 
 **A role-played table reached without** ``USING``.
    When one table is reachable through two named relationships -- ``flights``

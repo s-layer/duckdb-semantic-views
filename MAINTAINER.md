@@ -109,15 +109,19 @@ src/
 │   │                          #   another table (TECH-DEBT #52 / PAR-3)
 │   ├── same_table_metrics.rs  #   a metric written over metrics on its own table (Phase 6.3): CREATE
 │   │                          #   checks, and the inlining `expand()` applies before anything else
+│   ├── window_dims.rs         #   CREATE-time checks: a window clause names only dimensions of tables
+│   │                          #   related to its inner metric's (Snowflake 010211, Phase 7 PR 5), and a
+│   │                          #   window's own USING needs its inner metric on its table
 │   └── mod.rs
 ├── expand/                    # Query expansion: definition + QueryRequest → SQL (pure, always compiled)
 │   ├── mod.rs resolution.rs join_resolver.rs sql_gen.rs select_spec.rs types.rs
-│   ├── facts.rs fan_trap.rs semi_additive.rs window.rs wildcard.rs role_playing.rs materialization.rs
+│   ├── facts.rs fan_trap.rs semi_additive.rs wildcard.rs role_playing.rs materialization.rs
+│   ├── window.rs              #   window metrics: expands the query without them (each window's inner
+│   │                          #   metric added) as `__sv_agg`, then computes the windows over its rows
 │   ├── where_clause.rs        #   pre-aggregation `where_clause :=` predicate: resolves the members it
 │   │                          #   names and the tables its FACT CHAINS reach (`WhereMember::fact_tables`),
 │   │                          #   which both fan-trap and role-playing fences must walk (EXP-27 / EXP-31)
-│   ├── per_grain.rs           #   multi-grain queries: one CTE per metric grain, joined (Snowflake parity);
-│   │                          #   also `window_cte_anchor`, which picks the grain window.rs anchors __sv_agg at
+│   ├── per_grain.rs           #   multi-grain queries: one CTE per metric grain, joined (Snowflake parity)
 │   ├── multi_path.rs          #   tables reached by two paths through different tables (a diamond): refuses
 │   │                          #   a query no `USING` picks a path for, and gives per_grain the path one picks
 │   ├── dims_for_metric.rs     #   which dimensions SHOW SEMANTIC DIMENSIONS ... FOR METRIC lists (those a query

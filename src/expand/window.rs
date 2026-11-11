@@ -2,7 +2,8 @@
 //!
 //! Window metrics wrap another metric in a SQL window function (e.g., `AVG(total_qty)`
 //! OVER (PARTITION BY ... ORDER BY ...)). The expansion generates:
-//! 1. A CTE that aggregates the inner metric(s) by ALL queried dimensions
+//! 1. A CTE holding the rows the query gives with each window metric replaced by
+//!    its inner metric, expanded as an ordinary query
 //! 2. An outer SELECT that applies the window function over the CTE results
 //!
 //! PARTITION BY EXCLUDING is resolved at expansion time: the partition columns
@@ -11,15 +12,13 @@
 
 use std::collections::{HashMap, HashSet};
 
-use crate::model::{Metric, NullsOrder, SemanticViewDefinition, SortOrder};
-
-use super::join_resolver::{push_join_clauses, resolve_joins_pkfk};
-use super::resolution::{quote_ident, quote_stored_ident};
-use super::select_spec::{
-    push_from_anchor, push_from_base, push_group_by_ordinals, FromSource, GroupBy, SelectItem,
-    SelectSpec,
+use crate::model::{
+    AccessModifier, Dimension, Metric, NullsOrder, SemanticViewDefinition, SortOrder,
 };
-use super::types::{ExpandError, ResolvedDim};
+
+use super::resolution::{quote_ident, quote_stored_ident};
+use super::select_spec::{FromSource, GroupBy, SelectItem, SelectSpec};
+use super::types::{ExpandError, MetricName, QueryRequest};
 
 /// Resolve a window dimension reference (bare, dotted, or quoted) to the
 /// `__sv_agg` CTE-alias column it must emit in the OVER clause — i.e.
@@ -41,7 +40,7 @@ fn window_dim_column(def: &SemanticViewDefinition, reference: &str) -> String {
 
 /// The dimensions a window metric cannot be queried without: every
 /// `PARTITION BY EXCLUDING`, `PARTITION BY` and `ORDER BY` reference in its
-/// spec, which the query-time guard in [`expand_window_metrics`] insists are
+/// spec, which the query-time guard in [`expand_over_result`] insists are
 /// queried alongside it (`WindowMetricRequiredDimension`).
 ///
 /// Each reference is resolved (bare, dotted or quoted) to its declared
@@ -75,337 +74,331 @@ pub(crate) fn window_required_dimensions(
     out
 }
 
-/// Generate CTE-based expansion SQL for queries containing window function metrics.
+/// Refuse a window metric queried without a dimension its spec names: every
+/// `PARTITION BY EXCLUDING`, `PARTITION BY` and `ORDER BY` reference must be a
+/// queried dimension (`WindowMetricRequiredDimension`).
 ///
-/// Called from `expand()` when all resolved metrics are window metrics.
-/// Receives already-resolved dims, metrics, expressions, and scoped aliases.
+/// The matching is quote- and dotted-aware: each reference is resolved
+/// through the shared bare-AND-dotted resolver (`resolution::dim_ref_key`),
+/// the same key the queried dims use, so a reference written quoted
+/// (`"Region"`) or dotted (`o."order date"`) classifies identically to its
+/// bare spelling (TECH-DEBT #28/#30).
+fn check_required_dimensions(
+    view_name: &str,
+    def: &SemanticViewDefinition,
+    resolved_dims: &[&Dimension],
+    resolved_mets: &[&Metric],
+) -> Result<(), ExpandError> {
+    let queried_dim_keys: HashSet<String> = resolved_dims
+        .iter()
+        .map(|d| crate::ident::normalize_ident_part(&d.name))
+        .collect();
+    for met in resolved_mets {
+        let Some(ref ws) = met.window_spec else {
+            continue;
+        };
+        let refs = ws
+            .excluding_dims
+            .iter()
+            .map(|d| (d, "PARTITION BY EXCLUDING"))
+            .chain(ws.partition_dims.iter().map(|d| (d, "PARTITION BY")))
+            .chain(ws.order_by.iter().map(|ob| (&ob.expr, "ORDER BY")));
+        for (dim, reason) in refs {
+            if !queried_dim_keys.contains(&super::resolution::dim_ref_key(def, dim)) {
+                return Err(ExpandError::WindowMetricRequiredDimension {
+                    view_name: view_name.to_string(),
+                    metric_name: met.name.clone(),
+                    dimension_name: dim.clone(),
+                    reason: reason.to_string(),
+                });
+            }
+        }
+    }
+    Ok(())
+}
+
+/// The `OVER (...)` text of a window metric over `__sv_agg`, whose columns are
+/// the queried dimensions under their stored names.
+///
+/// With neither `PARTITION BY` nor `PARTITION BY EXCLUDING` the window runs
+/// over every result row, as in Snowflake (fixture 4, W2/W5): `SUM(m) OVER
+/// (ORDER BY d)` is a running total across the result, not one partition per
+/// row. `PARTITION BY EXCLUDING` partitions by every queried dimension but the
+/// excluded ones.
+fn over_clause(
+    def: &SemanticViewDefinition,
+    resolved_dims: &[&Dimension],
+    ws: &crate::model::WindowSpec,
+) -> String {
+    let partition_cols: Vec<String> =
+        if ws.partition_dims.is_empty() && ws.excluding_dims.is_empty() {
+            Vec::new()
+        } else if ws.partition_dims.is_empty() {
+            // Keyed through the shared resolver, so a quoted or dotted EXCLUDING
+            // reference still matches its declared dimension.
+            let excluding_set: HashSet<String> = ws
+                .excluding_dims
+                .iter()
+                .map(|d| super::resolution::dim_ref_key(def, d))
+                .collect();
+            resolved_dims
+                .iter()
+                .filter(|d| !excluding_set.contains(&crate::ident::normalize_ident_part(&d.name)))
+                .map(|d| quote_stored_ident(&d.name))
+                .collect()
+        } else {
+            // Each listed dimension's resolved column, so a quoted or dotted
+            // reference binds to the `__sv_agg` column, not a doubled-quote or
+            // dotted non-column.
+            ws.partition_dims
+                .iter()
+                .map(|d| window_dim_column(def, d))
+                .collect()
+        };
+    let mut over_parts: Vec<String> = Vec::new();
+    if !partition_cols.is_empty() {
+        over_parts.push(format!("PARTITION BY {}", partition_cols.join(", ")));
+    }
+    if !ws.order_by.is_empty() {
+        let order_items: Vec<String> = ws
+            .order_by
+            .iter()
+            .map(|ob| {
+                let dir = match ob.order {
+                    SortOrder::Asc => "ASC",
+                    SortOrder::Desc => "DESC",
+                };
+                let nulls = match ob.nulls {
+                    NullsOrder::First => "NULLS FIRST",
+                    NullsOrder::Last => "NULLS LAST",
+                };
+                format!("{} {} {}", window_dim_column(def, &ob.expr), dir, nulls)
+            })
+            .collect();
+        over_parts.push(format!("ORDER BY {}", order_items.join(", ")));
+    }
+    if let Some(ref frame) = ws.frame_clause {
+        over_parts.push(frame.clone());
+    }
+    over_parts.join(" ")
+}
+
+/// The query a window is computed over, built by [`inner_request`].
+struct InnerRequest {
+    /// The definition it reads: no materializations, the inner metrics
+    /// public, and in place of a window with its own `USING`, a copy of its
+    /// inner metric carrying it, under the window's name.
+    def: SemanticViewDefinition,
+    /// Its metrics: the queried non-window ones, then each window's inner one.
+    metrics: Vec<MetricName>,
+    /// The `__sv_agg` column each window metric reads, by its position in
+    /// `resolved_mets`.
+    window_columns: HashMap<usize, String>,
+}
+
+/// The query a window is computed over (see [`expand_over_result`]).
+///
+/// # Errors
+///
+/// [`ExpandError::UnknownMetric`] for an inner metric no metric is named,
+/// [`ExpandError::WindowOverWindow`] for one that is a window metric, and
+/// [`ExpandError::WindowUsingOffItsTable`] for a window's own `USING` over an
+/// inner metric on another table or a derived one.
+fn inner_request(
+    view_name: &str,
+    def: &SemanticViewDefinition,
+    resolved_mets: &[&Metric],
+) -> Result<InnerRequest, ExpandError> {
+    let mut inner_def = def.clone();
+    // A query holding a window metric is not routed to a materialization,
+    // and neither is the query it is computed over: EXPLAIN asks about the
+    // request as written, so the two must agree (reviewbot on #348).
+    inner_def.materializations.clear();
+    let mut inner_metrics: Vec<MetricName> = Vec::new();
+    let mut seen: HashSet<String> = HashSet::new();
+    let mut add = |name: &str, inner_metrics: &mut Vec<MetricName>| {
+        if seen.insert(crate::ident::normalize_ident_part(name)) {
+            inner_metrics.push(MetricName::new(name));
+        }
+    };
+    for met in resolved_mets.iter().filter(|m| !m.is_window()) {
+        add(&met.name, &mut inner_metrics);
+    }
+    let mut window_columns: HashMap<usize, String> = HashMap::new();
+    for (i, met) in resolved_mets.iter().enumerate() {
+        let Some(ref ws) = met.window_spec else {
+            continue;
+        };
+        let inner = def
+            .metrics
+            .iter()
+            .find(|m| crate::ident::ident_matches(&m.name, &ws.inner_metric))
+            .ok_or_else(|| {
+                let available: Vec<String> = def.metrics.iter().map(|m| m.name.clone()).collect();
+                ExpandError::UnknownMetric {
+                    view_name: view_name.to_string(),
+                    name: ws.inner_metric.clone(),
+                    suggestion: crate::util::suggest_closest(&ws.inner_metric, &available),
+                    available,
+                }
+            })?;
+        if inner.is_window() {
+            return Err(ExpandError::WindowOverWindow {
+                view_name: view_name.to_string(),
+                metric_name: met.name.clone(),
+                inner_metric: inner.name.clone(),
+            });
+        }
+        // A window's own `USING` reaches an inner metric that names none
+        // through a copy of the inner metric carrying it, which takes the
+        // window's own name: no other member reads a window metric (a derived
+        // metric over one does not bind at CREATE, a window over one is
+        // refused), so the copy collides with nothing, and an error the inner
+        // query raises about it names the metric the user queried.
+        let column = if !met.using_relationships.is_empty() && inner.using_relationships.is_empty()
+        {
+            let same_table = matches!(
+                (&met.source_table, &inner.source_table),
+                (Some(w), Some(t)) if crate::ident::ident_matches(w, t)
+            );
+            if !same_table {
+                return Err(ExpandError::WindowUsingOffItsTable {
+                    view_name: view_name.to_string(),
+                    metric_name: met.name.clone(),
+                    inner_metric: inner.name.clone(),
+                });
+            }
+            let copy = Metric {
+                name: met.name.clone(),
+                using_relationships: met.using_relationships.clone(),
+                ..inner.clone()
+            };
+            if let Some(slot) = inner_def
+                .metrics
+                .iter_mut()
+                .find(|m| crate::ident::ident_matches(&m.name, &met.name))
+            {
+                *slot = copy;
+            }
+            met.name.clone()
+        } else {
+            inner.name.clone()
+        };
+        add(&column, &mut inner_metrics);
+        window_columns.insert(i, column);
+    }
+    let reads: HashSet<String> = inner_metrics
+        .iter()
+        .map(|m| crate::ident::normalize_ident_part(m.as_ref()))
+        .collect();
+    for m in &mut inner_def.metrics {
+        if reads.contains(&crate::ident::normalize_ident_part(&m.name)) {
+            m.access = AccessModifier::Public;
+        }
+    }
+    Ok(InnerRequest {
+        def: inner_def,
+        metrics: inner_metrics,
+        window_columns,
+    })
+}
+
+/// Expand a query holding a window metric over the rows the rest of the query
+/// gives, as Snowflake computes it (Phase 7 fixture 4, W2-W6).
 ///
 /// # Strategy
 ///
-/// 1. **CTE `__sv_agg`**: Aggregates all inner metrics by ALL queried dimensions
-///    (standard GROUP BY). This pre-aggregates the data so that window functions
-///    operate on grouped results, not raw rows.
+/// 1. **CTE `__sv_agg`**: the query with each window metric replaced by the
+///    metric it is computed over — the queried dimensions, the queried
+///    non-window metrics and each window's inner metric, under the same
+///    filter — expanded by `expand_inner` exactly as it would be on its own.
+///    So every check and plan an ordinary query takes applies unchanged: a
+///    dimension across a bridge counts each row once per group, a `USING`
+///    follows its path (TECH-DEBT #109), a role reaches back across a
+///    role-played table and a filter follows the metrics' role (#111).
 ///
-/// 2. **Outer SELECT**: Applies each window function over the CTE results with
-///    computed PARTITION BY (all queried dims minus EXCLUDING dims, the listed
-///    dims of an explicit PARTITION BY, or none: every result row) and ORDER BY.
-///    No GROUP BY in the outer query -- window functions are row-level operations.
+/// 2. **Outer SELECT**: each window function over those rows, partitioned
+///    and ordered by `__sv_agg`'s dimension columns; every other column is
+///    read as it is. No GROUP BY: a window function is a row-level operation.
 ///
-/// # Grain
-///
-/// `grain_anchor` re-anchors the CTE in step 1 at a declared table other than the
-/// base table — see [`super::per_grain::window_cte_anchor`], which decides it and
-/// documents when it declines. Step 2 is unaffected: the window function runs over
-/// the already-grouped CTE, so only the inner aggregate is grain-sensitive.
-/// `None` keeps the base-anchored shape, byte-identical to before.
-#[allow(clippy::too_many_lines, clippy::unnecessary_wraps)]
-pub(super) fn expand_window_metrics(
+/// The inner metrics are made public in the definition the inner query reads,
+/// because a window over a `PRIVATE` metric is queryable where its inner
+/// metric alone is not. A window metric's own `USING` reaches an inner metric
+/// that names none through a copy of that metric carrying it.
+pub(super) fn expand_over_result(
     view_name: &str,
     def: &SemanticViewDefinition,
-    resolved_dims: &[ResolvedDim],
+    req: &QueryRequest,
+    resolved_dims: &[&Dimension],
     resolved_mets: &[&Metric],
-    resolved_exprs: &HashMap<String, String>,
-    where_clause: Option<&super::where_clause::ResolvedWhere>,
-    grain_anchor: Option<&str>,
+    expand_inner: impl FnOnce(&SemanticViewDefinition, &QueryRequest) -> Result<String, ExpandError>,
 ) -> Result<String, ExpandError> {
-    // 1. Validate required dimensions for each window metric.
-    //
-    // Both the inner-*metric* keying (below) and this dimension-side matching
-    // are quote- and dotted-aware: every EXCLUDING / PARTITION BY / ORDER BY
-    // dimension reference is resolved through the shared bare-AND-dotted
-    // resolver (`resolution::dim_ref_key`), the same key the queried dims use,
-    // so a reference written quoted (`"Region"`) or dotted (`o."order date"`)
-    // classifies identically to its bare spelling. This closes the window half
-    // of the dimension-side pass whose semi-additive half landed as #30
-    // (TECH-DEBT #28/#30). A dotted ORDER BY reference is accepted at CREATE
-    // (Phase 48 / D-08) but previously failed this bare-only check at query
-    // time; a quoted reference previously emitted a doubled-quote non-column in
-    // the OVER clause (uncaught because the pre-#30 tests never executed the
-    // window query, only inspected DDL / EXPLAIN text).
-    let queried_dim_keys: HashSet<String> = resolved_dims
-        .iter()
-        .map(|rd| crate::ident::normalize_ident_part(&rd.dim.name))
-        .collect();
+    check_required_dimensions(view_name, def, resolved_dims, resolved_mets)?;
 
-    for met in resolved_mets {
-        let Some(ref ws) = met.window_spec else {
-            continue;
-        };
-        // Check EXCLUDING dims are all in the query
-        for excl_dim in &ws.excluding_dims {
-            if !queried_dim_keys.contains(&super::resolution::dim_ref_key(def, excl_dim)) {
-                return Err(ExpandError::WindowMetricRequiredDimension {
-                    view_name: view_name.to_string(),
-                    metric_name: met.name.clone(),
-                    dimension_name: excl_dim.clone(),
-                    reason: "PARTITION BY EXCLUDING".to_string(),
-                });
-            }
-        }
-        // Check explicit PARTITION BY dims are all in the query
-        for part_dim in &ws.partition_dims {
-            if !queried_dim_keys.contains(&super::resolution::dim_ref_key(def, part_dim)) {
-                return Err(ExpandError::WindowMetricRequiredDimension {
-                    view_name: view_name.to_string(),
-                    metric_name: met.name.clone(),
-                    dimension_name: part_dim.clone(),
-                    reason: "PARTITION BY".to_string(),
-                });
-            }
-        }
-        // Check ORDER BY dims are all in the query
-        for ob in &ws.order_by {
-            if !queried_dim_keys.contains(&super::resolution::dim_ref_key(def, &ob.expr)) {
-                return Err(ExpandError::WindowMetricRequiredDimension {
-                    view_name: view_name.to_string(),
-                    metric_name: met.name.clone(),
-                    dimension_name: ob.expr.clone(),
-                    reason: "ORDER BY".to_string(),
-                });
-            }
-        }
-    }
+    let InnerRequest {
+        def: inner_def,
+        metrics: inner_metrics,
+        window_columns,
+    } = inner_request(view_name, def, resolved_mets)?;
 
-    // 2. Collect distinct inner metric names needed for the CTE.
-    let mut inner_metric_set: HashSet<String> = HashSet::new();
-    let mut inner_metric_order: Vec<String> = Vec::new();
-    for met in resolved_mets {
-        let Some(ref ws) = met.window_spec else {
-            continue;
-        };
-        // Canonical identifier key (quote-stripped + case-folded) so a quoted
-        // inner-metric reference (`"Total_Qty"`) keys, and later aliases,
-        // identically to its stored `total_qty` — TECH-DEBT #28 Slice 3.
-        let key = crate::ident::normalize_ident_part(&ws.inner_metric);
-        if inner_metric_set.insert(key.clone()) {
-            inner_metric_order.push(key);
-        }
-    }
-
-    // Resolve inner metric expressions via resolved_exprs.
-    let mut inner_metric_exprs: HashMap<String, String> = HashMap::new();
-    for inner_name in &inner_metric_order {
-        let expr = resolved_exprs.get(inner_name).cloned().unwrap_or_else(|| {
-            // Fall back to finding the metric definition directly, then — when
-            // the reference resolves to no declared metric — to the reference
-            // itself as a column, `quote_ident`'d (fail-clean, matching
-            // `window_dim_column`). `inner_name` is a canonical identifier key,
-            // so emitting it BARE leaked a literal `"` for a quoted-with-embedded
-            // -quote reference (`"a""b"` → normalized `a"b`), producing
-            // structurally invalid SQL — the alias side and the outer OVER
-            // reference already quote it, so the expression side must too
-            // (fuzz_sql_expand crash, issue #145).
-            def.metrics
-                .iter()
-                .find(|m| crate::ident::ident_matches(&m.name, inner_name))
-                .map_or_else(|| quote_ident(inner_name), |m| m.expr.clone())
-        });
-        inner_metric_exprs.insert(inner_name.clone(), expr);
-    }
-
-    // 3. Build CTE __sv_agg
-    let mut sql = String::with_capacity(512);
-    sql.push_str("WITH __sv_agg AS (\n    SELECT\n");
-
-    let mut cte_select_items: Vec<String> = Vec::new();
-
-    // Dimension columns in CTE
-    for rd in resolved_dims {
-        let dim = rd.dim;
-        let mut base_expr = super::facts::inline_dimension_facts(&dim.expr, &def.facts);
-        if let Some(ref scoped) = rd.scoped_alias {
-            if let Some(ref st) = dim.source_table {
-                base_expr = super::join_resolver::rewrite_to_scoped_alias(&base_expr, st, scoped);
-            }
-        }
-        let item = SelectItem::new(
-            base_expr,
-            dim.output_type.clone(),
-            quote_stored_ident(&dim.name),
-        );
-        cte_select_items.push(format!("        {}", item.render()));
-    }
-
-    // Inner metric aggregated columns in CTE
-    for inner_name in &inner_metric_order {
-        let expr = &inner_metric_exprs[inner_name];
-        // The inner metric expression is already an aggregate (e.g., SUM(s.quantity))
-        // so we include it directly in the CTE SELECT with GROUP BY.
-        cte_select_items.push(format!("        {} AS {}", expr, quote_ident(inner_name)));
-    }
-
-    sql.push_str(&cte_select_items.join(",\n"));
-
-    // CTE FROM clause + JOINs.
-    let dims: Vec<&crate::model::Dimension> = resolved_dims.iter().map(|rd| rd.dim).collect();
-    // Tables named only by the predicate must be joined inside the CTE, where
-    // the filter is applied.
-    let where_tables: Vec<String> = where_clause
-        .map(|w| w.source_tables.clone())
-        .unwrap_or_default();
-    // Anchored at the inner aggregate's own grain when the base-anchored FROM
-    // would fan it (TECH-DEBT #36): the joins then reach out from THAT table to
-    // the queried dimensions, rather than from the base table inward. Only the
-    // CTE moves — the outer window SELECT still runs over `__sv_agg` unchanged,
-    // because the window function is not grain-sensitive.
-    let resolved_joins = if let Some(anchor) = grain_anchor {
-        push_from_anchor(&mut sql, def, anchor, "\n    ");
-        // Off the base table, the facts the inner metrics and the dimensions
-        // inline must be joined here explicitly: `anchor_joins` walks only the
-        // tables it is handed, where `resolve_joins_pkfk` below collects them
-        // itself (reviewbot, #250 -- a child-anchored `__sv_agg` emitted
-        // `FROM li` with no join for a parent fact).
-        let needs = super::per_grain::anchor_needs(def, resolved_mets, &dims, &where_tables);
-        // The window path declines every role-played query (`window_cte_anchor`
-        // is strict), so it never has a dimension role to honour and passes
-        // none; `needs.scoped` is empty for the same reason, since a `USING`
-        // that scopes a reached fact declines the anchor. Were that to change,
-        // `__sv_agg`'s SELECT list would need the same scoped-alias rewrite the
-        // grain CTEs do.
-        super::per_grain::anchor_joins(
-            def,
-            anchor,
-            &dims,
-            &needs.bare,
-            &std::collections::HashMap::new(),
-            &std::collections::HashMap::new(),
-            &needs.scoped,
-        )
-    } else {
-        push_from_base(&mut sql, def, "\n    ");
-        resolve_joins_pkfk(def, &dims, resolved_mets, &where_tables)
+    let inner_req = QueryRequest {
+        dimensions: req.dimensions.clone(),
+        metrics: inner_metrics,
+        facts: Vec::new(),
+        where_clause: req.where_clause.clone(),
     };
-    push_join_clauses(&mut sql, &resolved_joins, def, "\n    LEFT JOIN ");
+    let inner_sql = expand_inner(&inner_def, &inner_req)?;
 
-    // Inside the CTE and before its GROUP BY, so the inner aggregates the
-    // window function reads are computed over only the matching rows. On the
-    // outer query the predicate would filter the window's OUTPUT instead of its
-    // input, which for a running total or rank is a different number entirely.
-    if let Some(w) = where_clause {
-        sql.push_str("\n    WHERE ");
-        sql.push_str(&w.sql);
-    }
-
-    // CTE GROUP BY (all dimension columns)
-    if !resolved_dims.is_empty() {
-        push_group_by_ordinals(&mut sql, resolved_dims.len(), "\n    ", "        ");
-    }
-
-    sql.push_str("\n)\n");
-
-    // 4. Build the outer SELECT over the aggregation CTE.
-    let mut outer_items: Vec<SelectItem> = Vec::new();
-
-    // Dimension columns: reference CTE aliases (outer query over the CTE, so
-    // referencing the alias is safe here).
-    for rd in resolved_dims {
-        outer_items.push(SelectItem::new(
-            quote_stored_ident(&rd.dim.name),
-            None,
-            quote_stored_ident(&rd.dim.name),
-        ));
-    }
-
-    // Window metric columns
-    for met in resolved_mets {
-        let Some(ref ws) = met.window_spec else {
-            continue;
+    let mut items: Vec<SelectItem> = resolved_dims
+        .iter()
+        .map(|d| {
+            SelectItem::new(
+                quote_stored_ident(&d.name),
+                None,
+                quote_stored_ident(&d.name),
+            )
+        })
+        .collect();
+    for (i, met) in resolved_mets.iter().enumerate() {
+        let expr = match (&met.window_spec, window_columns.get(&i)) {
+            (Some(ws), Some(column)) => {
+                let mut args = vec![quote_stored_ident(column)];
+                args.extend(ws.extra_args.iter().cloned());
+                format!(
+                    "{}({}) OVER ({})",
+                    ws.window_function,
+                    args.join(", "),
+                    over_clause(def, resolved_dims, ws)
+                )
+            }
+            _ => quote_stored_ident(&met.name),
         };
-
-        // Build the function call: window_function(inner_metric_alias, extra_args...)
-        // The canonical key (computed once here) is the same one the CTE column
-        // above was aliased with, so a quoted inner-metric reference aliases and
-        // references identically.
-        let inner_key = crate::ident::normalize_ident_part(&ws.inner_metric);
-        let inner_alias = quote_ident(&inner_key);
-        let mut func_args = vec![inner_alias];
-        for arg in &ws.extra_args {
-            func_args.push(arg.clone());
-        }
-        let func_call = format!("{}({})", ws.window_function, func_args.join(", "));
-
-        // Compute PARTITION BY columns. With neither `PARTITION BY` nor
-        // `PARTITION BY EXCLUDING` the window runs over every result row, as in
-        // Snowflake (fixture 4, W2/W5): `SUM(m) OVER (ORDER BY d)` is a running
-        // total across the result, not one partition per row.
-        let partition_cols: Vec<String> =
-            if ws.partition_dims.is_empty() && ws.excluding_dims.is_empty() {
-                Vec::new()
-            } else if ws.partition_dims.is_empty() {
-                // PARTITION BY EXCLUDING: all queried dims minus excluding_dims.
-                // Key the excluded set through the shared resolver so a quoted/dotted
-                // EXCLUDING reference still matches its declared dimension.
-                let excluding_set: HashSet<String> = ws
-                    .excluding_dims
-                    .iter()
-                    .map(|d| super::resolution::dim_ref_key(def, d))
-                    .collect();
-                resolved_dims
-                    .iter()
-                    .filter(|rd| {
-                        !excluding_set.contains(&crate::ident::normalize_ident_part(&rd.dim.name))
-                    })
-                    .map(|rd| quote_stored_ident(&rd.dim.name))
-                    .collect()
-            } else {
-                // Explicit PARTITION BY: emit each listed dim's resolved CTE alias so
-                // a quoted/dotted reference binds to the CTE column, not a
-                // doubled-quote/dotted non-column.
-                ws.partition_dims
-                    .iter()
-                    .map(|d| window_dim_column(def, d))
-                    .collect()
-            };
-
-        // Build OVER clause
-        let mut over_parts: Vec<String> = Vec::new();
-        if !partition_cols.is_empty() {
-            over_parts.push(format!("PARTITION BY {}", partition_cols.join(", ")));
-        }
-        if !ws.order_by.is_empty() {
-            let order_items: Vec<String> = ws
-                .order_by
-                .iter()
-                .map(|ob| {
-                    let dir = match ob.order {
-                        SortOrder::Asc => "ASC",
-                        SortOrder::Desc => "DESC",
-                    };
-                    let nulls = match ob.nulls {
-                        NullsOrder::First => "NULLS FIRST",
-                        NullsOrder::Last => "NULLS LAST",
-                    };
-                    format!("{} {} {}", window_dim_column(def, &ob.expr), dir, nulls)
-                })
-                .collect();
-            over_parts.push(format!("ORDER BY {}", order_items.join(", ")));
-        }
-        if let Some(ref frame) = ws.frame_clause {
-            over_parts.push(frame.clone());
-        }
-
-        let over_clause = over_parts.join(" ");
-        let window_expr = format!("{func_call} OVER ({over_clause})");
-
-        outer_items.push(SelectItem::new(
-            window_expr,
-            met.output_type.clone(),
+        let output_type = if met.is_window() {
+            met.output_type.clone()
+        } else {
+            None
+        };
+        items.push(SelectItem::new(
+            expr,
+            output_type,
             quote_stored_ident(&met.name),
         ));
     }
 
-    // Window functions are row-level ⇒ no GROUP BY in the outer query.
+    let mut sql = String::with_capacity(inner_sql.len() + 256);
+    sql.push_str("WITH __sv_agg AS (\n");
+    sql.push_str(&inner_sql);
+    sql.push_str("\n)\n");
     sql.push_str(
         &SelectSpec {
             where_clause: None,
             distinct: false,
-            items: outer_items,
+            items,
             from: FromSource::Named("__sv_agg".to_string()),
             group_by: GroupBy::None,
         }
         .render(),
     );
-
     Ok(sql)
 }
 
@@ -415,54 +408,15 @@ mod tests {
     use crate::expand::{expand, DimensionName, ExpandError, MetricName, QueryRequest};
     use crate::model::{NullsOrder, SortOrder, WindowOrderBy, WindowSpec};
 
-    /// Mirror of the `fuzz_sql_expand` quote/paren-balance oracle
-    /// (`fuzz/fuzz_targets/fuzz_sql_expand.rs`): walk the text honoring `''`
-    /// string and `""` identifier escapes. Balanced input fragments must yield
-    /// balanced output — an odd bare `"` in the generated SQL is the exact
-    /// structural corruption the fuzzer trips on.
-    fn quotes_balanced(sql: &str) -> bool {
-        let bytes = sql.as_bytes();
-        let mut in_string = false;
-        let mut in_ident = false;
-        let mut i = 0;
-        while i < bytes.len() {
-            let b = bytes[i];
-            if in_string {
-                if b == b'\'' {
-                    if i + 1 < bytes.len() && bytes[i + 1] == b'\'' {
-                        i += 2;
-                        continue;
-                    }
-                    in_string = false;
-                }
-            } else if in_ident {
-                if b == b'"' {
-                    if i + 1 < bytes.len() && bytes[i + 1] == b'"' {
-                        i += 2;
-                        continue;
-                    }
-                    in_ident = false;
-                }
-            } else if b == b'\'' {
-                in_string = true;
-            } else if b == b'"' {
-                in_ident = true;
-            }
-            i += 1;
-        }
-        !in_string && !in_ident
-    }
-
     /// Regression for the `fuzz_sql_expand` crash (issue #145): a window
     /// metric whose `inner_metric` is a quoted identifier carrying an embedded
     /// quote (`"a""b"`, logical name `a"b`) that resolves to no declared
-    /// metric. The CTE builder fell back to emitting the normalized name as a
-    /// BARE expression (`a"b AS "a""b"`), leaking a lone `"` and producing
-    /// structurally invalid SQL — the balance oracle panicked. The alias side
-    /// and the outer OVER reference already went through `quote_ident`, so the
-    /// expression side must too (fail-clean, matching `window_dim_column`).
+    /// metric. The CTE builder once emitted the normalized name as a BARE
+    /// expression, leaking a lone `"`. The inner query now names the inner
+    /// metric as a member, so a reference to no declared metric is refused as
+    /// an unknown metric, with no SQL at all.
     #[test]
-    fn window_unresolved_quoted_inner_metric_emits_balanced_sql() {
+    fn window_over_no_declared_metric_is_refused() {
         let def = minimal_def("sales", "store", "store", "total_qty", "SUM(s.quantity)")
             .with_window_spec(
                 "total_qty",
@@ -485,21 +439,11 @@ mod tests {
             metrics: vec![MetricName::new("total_qty")],
         };
 
-        let sql = expand("test_view", &def, &req)
-            .expect("window metric with an unresolved inner metric should still expand");
+        let err = expand("test_view", &def, &req)
+            .expect_err("a window over no declared metric is refused");
         assert!(
-            quotes_balanced(&sql),
-            "generated SQL must have balanced quotes (no bare stored-name quote leak): {sql}"
-        );
-        // The inner reference must be quoted on BOTH sides of the CTE alias,
-        // never emitted bare.
-        assert!(
-            !sql.contains("a\"b AS"),
-            "inner-metric reference must not be emitted as a bare identifier: {sql}"
-        );
-        assert!(
-            sql.contains("\"a\"\"b\" AS \"a\"\"b\""),
-            "inner-metric reference must be quote_ident'd on both sides: {sql}"
+            matches!(&err, ExpandError::UnknownMetric { name, .. } if name == "\"a\"\"b\""),
+            "got: {err}"
         );
     }
 
@@ -510,8 +454,8 @@ mod tests {
         let def = minimal_def("sales", "store", "store", "total_qty", "SUM(s.quantity)")
             .with_dimension("date", "date", None)
             .with_dimension("year", "year", None)
-            .with_window_spec(
-                "total_qty",
+            .with_window_metric(
+                "total_qty_w",
                 WindowSpec {
                     window_function: "AVG".to_string(),
                     inner_metric: "total_qty".to_string(),
@@ -535,7 +479,7 @@ mod tests {
                 DimensionName::new("date"),
                 DimensionName::new("year"),
             ],
-            metrics: vec![MetricName::new("total_qty")],
+            metrics: vec![MetricName::new("total_qty_w")],
         };
 
         let sql = expand("test_view", &def, &req).unwrap();
@@ -571,8 +515,8 @@ mod tests {
     fn test_window_quoted_inner_metric() {
         let def = minimal_def("sales", "store", "store", "total_qty", "SUM(s.quantity)")
             .with_dimension("date", "date", None)
-            .with_window_spec(
-                "total_qty",
+            .with_window_metric(
+                "total_qty_w",
                 WindowSpec {
                     window_function: "AVG".to_string(),
                     inner_metric: "\"Total_Qty\"".to_string(),
@@ -592,7 +536,7 @@ mod tests {
             where_clause: None,
             facts: vec![],
             dimensions: vec![DimensionName::new("store"), DimensionName::new("date")],
-            metrics: vec![MetricName::new("total_qty")],
+            metrics: vec![MetricName::new("total_qty_w")],
         };
 
         let sql = expand("test_view", &def, &req).unwrap();
@@ -619,8 +563,8 @@ mod tests {
         let def = minimal_def("sales", "store", "store", "total_qty", "SUM(quantity)")
             .with_dimension("date", "date", None)
             .with_dimension("year", "year", None)
-            .with_window_spec(
-                "total_qty",
+            .with_window_metric(
+                "total_qty_w",
                 WindowSpec {
                     window_function: "AVG".to_string(),
                     inner_metric: "total_qty".to_string(),
@@ -644,7 +588,7 @@ mod tests {
                 DimensionName::new("date"),
                 DimensionName::new("year"),
             ],
-            metrics: vec![MetricName::new("total_qty")],
+            metrics: vec![MetricName::new("total_qty_w")],
         };
 
         let sql = expand("test_view", &def, &req).unwrap();
@@ -665,8 +609,8 @@ mod tests {
     fn test_window_with_frame_clause() {
         let def = minimal_def("sales", "store", "store", "total_qty", "SUM(quantity)")
             .with_dimension("date", "date", None)
-            .with_window_spec(
-                "total_qty",
+            .with_window_metric(
+                "total_qty_w",
                 WindowSpec {
                     window_function: "AVG".to_string(),
                     inner_metric: "total_qty".to_string(),
@@ -688,7 +632,7 @@ mod tests {
             where_clause: None,
             facts: vec![],
             dimensions: vec![DimensionName::new("store"), DimensionName::new("date")],
-            metrics: vec![MetricName::new("total_qty")],
+            metrics: vec![MetricName::new("total_qty_w")],
         };
 
         let sql = expand("test_view", &def, &req).unwrap();
@@ -703,8 +647,8 @@ mod tests {
     fn test_window_with_extra_args() {
         let def = minimal_def("sales", "store", "store", "total_qty", "SUM(quantity)")
             .with_dimension("date", "date", None)
-            .with_window_spec(
-                "total_qty",
+            .with_window_metric(
+                "total_qty_w",
                 WindowSpec {
                     window_function: "LAG".to_string(),
                     inner_metric: "total_qty".to_string(),
@@ -724,7 +668,7 @@ mod tests {
             where_clause: None,
             facts: vec![],
             dimensions: vec![DimensionName::new("store"), DimensionName::new("date")],
-            metrics: vec![MetricName::new("total_qty")],
+            metrics: vec![MetricName::new("total_qty_w")],
         };
 
         let sql = expand("test_view", &def, &req).unwrap();
@@ -741,8 +685,8 @@ mod tests {
             .with_dimension("date", "date", None)
             .with_dimension("year", "year", None)
             .with_metric("avg_7", "SUM(quantity)", None)
-            .with_window_spec(
-                "total_qty",
+            .with_window_metric(
+                "total_qty_w",
                 WindowSpec {
                     window_function: "AVG".to_string(),
                     inner_metric: "total_qty".to_string(),
@@ -757,8 +701,8 @@ mod tests {
                     frame_clause: None,
                 },
             )
-            .with_window_spec(
-                "avg_7",
+            .with_window_metric(
+                "avg_7_w",
                 WindowSpec {
                     window_function: "AVG".to_string(),
                     inner_metric: "avg_7".to_string(),
@@ -782,7 +726,7 @@ mod tests {
                 DimensionName::new("date"),
                 DimensionName::new("year"),
             ],
-            metrics: vec![MetricName::new("total_qty"), MetricName::new("avg_7")],
+            metrics: vec![MetricName::new("total_qty_w"), MetricName::new("avg_7_w")],
         };
 
         let sql = expand("test_view", &def, &req).unwrap();
@@ -799,14 +743,16 @@ mod tests {
         );
     }
 
-    /// Mixing window + regular aggregate metric returns error.
+    /// A window metric beside an aggregate metric: the aggregate is a column of
+    /// `__sv_agg` beside the window's inner metric, read as it is (Snowflake,
+    /// fixture 4 W2). It used to be refused as mixing the two.
     #[test]
-    fn test_window_aggregate_mixing_error() {
+    fn test_window_beside_an_aggregate_metric() {
         let def = minimal_def("sales", "store", "store", "total_qty", "SUM(quantity)")
             .with_dimension("date", "date", None)
             .with_metric("avg_price", "AVG(price)", None)
-            .with_window_spec(
-                "total_qty",
+            .with_window_metric(
+                "total_qty_w",
                 WindowSpec {
                     window_function: "AVG".to_string(),
                     inner_metric: "total_qty".to_string(),
@@ -826,24 +772,21 @@ mod tests {
             where_clause: None,
             facts: vec![],
             dimensions: vec![DimensionName::new("store"), DimensionName::new("date")],
-            metrics: vec![MetricName::new("total_qty"), MetricName::new("avg_price")],
+            metrics: vec![MetricName::new("total_qty_w"), MetricName::new("avg_price")],
         };
 
-        let result = expand("test_view", &def, &req);
-        assert!(result.is_err(), "Should error on mixing: {:?}", result);
-        let err = result.unwrap_err();
-        let msg = err.to_string();
+        let sql = expand("test_view", &def, &req).unwrap();
         assert!(
-            msg.contains("cannot mix window function metrics"),
-            "Error message should mention mixing: {msg}"
+            sql.contains("AVG(price) AS \"avg_price\""),
+            "the aggregate is computed in __sv_agg: {sql}"
         );
         assert!(
-            msg.contains("total_qty"),
-            "Should mention window metric name: {msg}"
+            sql.contains("\"avg_price\" AS \"avg_price\""),
+            "and read from it as it is: {sql}"
         );
         assert!(
-            msg.contains("avg_price"),
-            "Should mention aggregate metric name: {msg}"
+            sql.contains("AVG(\"total_qty\") OVER (PARTITION BY \"store\" ORDER BY \"date\" ASC NULLS LAST) AS \"total_qty_w\""),
+            "the window runs over the inner metric's column: {sql}"
         );
     }
 
@@ -852,8 +795,8 @@ mod tests {
     fn test_window_missing_required_dim() {
         let def = minimal_def("sales", "store", "store", "total_qty", "SUM(quantity)")
             .with_dimension("date", "date", None)
-            .with_window_spec(
-                "total_qty",
+            .with_window_metric(
+                "total_qty_w",
                 WindowSpec {
                     window_function: "AVG".to_string(),
                     inner_metric: "total_qty".to_string(),
@@ -874,7 +817,7 @@ mod tests {
             where_clause: None,
             facts: vec![],
             dimensions: vec![DimensionName::new("store")],
-            metrics: vec![MetricName::new("total_qty")],
+            metrics: vec![MetricName::new("total_qty_w")],
         };
 
         let result = expand("test_view", &def, &req);
@@ -894,10 +837,10 @@ mod tests {
     /// SG-6 (code review 2026-07-02): window metrics get the standard
     /// fan-trap check. The previous unconditional `is_window()` skip was
     /// based on the incorrect premise that the CTE pre-aggregation handles
-    /// fan-out — but the CTE's inner aggregate is computed OVER the
-    /// already-fanned join, so it is inflated before the window function
-    /// runs. This fixture (metric grain on `c`, dims on `a`, where a->c is
-    /// `ManyToOne`) fans `c`'s rows and must now error.
+    /// fan-out — but the CTE's inner aggregate was computed OVER the
+    /// already-fanned join, so it was inflated before the window function
+    /// ran. This fixture has the metric grain on `c` and dims on `a`, where
+    /// a->c is `ManyToOne`, so `c`'s rows fan out.
     #[test]
     fn test_fan_trap_checks_window_metrics() {
         // Multi-table view: window metric crosses many-to-one boundary
@@ -911,8 +854,8 @@ mod tests {
             .with_dimension("acct_name", "a.name", Some("a"))
             .with_dimension("date", "a.report_date", Some("a"))
             .with_metric("total_balance", "SUM(a.balance)", Some("c"))
-            .with_window_spec(
-                "total_balance",
+            .with_window_metric(
+                "total_balance_w",
                 WindowSpec {
                     window_function: "AVG".to_string(),
                     inner_metric: "total_balance".to_string(),
@@ -933,14 +876,26 @@ mod tests {
             where_clause: None,
             facts: vec![],
             dimensions: vec![DimensionName::new("acct_name"), DimensionName::new("date")],
-            metrics: vec![MetricName::new("total_balance")],
+            metrics: vec![MetricName::new("total_balance_w")],
         };
 
-        // Window metrics are checked like any other aggregate: fan-out error.
-        let result = expand("test_view", &def, &req);
+        // The inner aggregate goes through every check an ordinary query
+        // does: the window runs over exactly the rows `total_balance` gives on
+        // its own, here each customer once per account group (Phase 7.3, PR
+        // 4c), never over the fanned join.
+        let sql = expand("test_view", &def, &req).unwrap();
+        let plain = expand(
+            "test_view",
+            &def,
+            &QueryRequest {
+                metrics: vec![MetricName::new("total_balance")],
+                ..req.clone()
+            },
+        )
+        .unwrap();
         assert!(
-            matches!(result, Err(ExpandError::FanTrap { .. })),
-            "Window metric over a fanning join must be a fan trap error, got: {result:?}"
+            sql.contains(&format!("WITH __sv_agg AS (\n{plain}\n)")),
+            "the window must run over the plain query's rows: {sql}"
         );
     }
 
@@ -951,8 +906,8 @@ mod tests {
             .with_dimension("store", "o.store_id", Some("o"))
             .with_dimension("date", "o.sale_date", Some("o"))
             .with_metric("total_qty", "SUM(o.qty)", Some("o"))
-            .with_window_spec(
-                "total_qty",
+            .with_window_metric(
+                "total_qty_w",
                 WindowSpec {
                     window_function: "AVG".to_string(),
                     inner_metric: "total_qty".to_string(),
@@ -972,7 +927,7 @@ mod tests {
             where_clause: None,
             facts: vec![],
             dimensions: vec![DimensionName::new("store"), DimensionName::new("date")],
-            metrics: vec![MetricName::new("total_qty")],
+            metrics: vec![MetricName::new("total_qty_w")],
         };
 
         let sql = expand("test_view", &def, &req).unwrap();
@@ -994,8 +949,8 @@ mod tests {
             .with_dimension("store", "o.store_id", Some("o"))
             .with_dimension("date", "o.sale_date", Some("o"))
             .with_metric("total_qty", "SUM(o.qty)", Some("o"))
-            .with_window_spec(
-                "total_qty",
+            .with_window_metric(
+                "total_qty_w",
                 WindowSpec {
                     window_function: "AVG".to_string(),
                     inner_metric: "total_qty".to_string(),
@@ -1015,7 +970,7 @@ mod tests {
             where_clause: None,
             facts: vec![],
             dimensions: vec![DimensionName::new("date")],
-            metrics: vec![MetricName::new("total_qty")],
+            metrics: vec![MetricName::new("total_qty_w")],
         };
 
         let result = expand("test_view", &def, &req);
@@ -1039,8 +994,8 @@ mod tests {
     fn test_window_dotted_order_by_resolves_to_cte_alias() {
         let def = minimal_def("sales", "store", "store", "total_qty", "SUM(s.quantity)")
             .with_dimension("date", "s.sale_date", Some("s"))
-            .with_window_spec(
-                "total_qty",
+            .with_window_metric(
+                "total_qty_w",
                 WindowSpec {
                     window_function: "AVG".to_string(),
                     inner_metric: "total_qty".to_string(),
@@ -1061,7 +1016,7 @@ mod tests {
             where_clause: None,
             facts: vec![],
             dimensions: vec![DimensionName::new("store"), DimensionName::new("date")],
-            metrics: vec![MetricName::new("total_qty")],
+            metrics: vec![MetricName::new("total_qty_w")],
         };
 
         // Must not error the required-dimension check (dotted `s.date` resolves).
@@ -1089,8 +1044,8 @@ mod tests {
     fn test_window_dotted_quoted_order_by_matches_cte_alias() {
         let def = minimal_def("sales", "store", "store", "total_qty", "SUM(s.quantity)")
             .with_dimension("\"order date\"", "s.\"order date\"", Some("s"))
-            .with_window_spec(
-                "total_qty",
+            .with_window_metric(
+                "total_qty_w",
                 WindowSpec {
                     window_function: "AVG".to_string(),
                     inner_metric: "total_qty".to_string(),
@@ -1113,7 +1068,7 @@ mod tests {
                 DimensionName::new("store"),
                 DimensionName::new("order date"),
             ],
-            metrics: vec![MetricName::new("total_qty")],
+            metrics: vec![MetricName::new("total_qty_w")],
         };
 
         let sql = expand("test_view", &def, &req).expect("dotted-quoted ORDER BY must resolve");
@@ -1153,8 +1108,8 @@ mod tests {
     fn where_clause_is_injected_inside_the_agg_cte_not_the_outer_query() {
         let def = minimal_def("sales", "store", "store", "total_qty", "SUM(s.quantity)")
             .with_dimension("date", "date", None)
-            .with_window_spec(
-                "total_qty",
+            .with_window_metric(
+                "total_qty_w",
                 WindowSpec {
                     window_function: "AVG".to_string(),
                     inner_metric: "total_qty".to_string(),
@@ -1173,7 +1128,7 @@ mod tests {
             where_clause: Some("date >= DATE '2024-01-01'".to_string()),
             facts: vec![],
             dimensions: vec![DimensionName::new("store"), DimensionName::new("date")],
-            metrics: vec![MetricName::new("total_qty")],
+            metrics: vec![MetricName::new("total_qty_w")],
         };
         let sql = expand("test_view", &def, &req).unwrap();
 

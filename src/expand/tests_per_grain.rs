@@ -710,17 +710,17 @@ fn window_metric_on_a_child_table_is_anchored_at_the_child() {
     let sql = expand("sales", &def, &req(&["order_status"], &["rolling_items"]))
         .expect("a child-grain window metric was always answerable");
     assert!(
-        sql.contains("FROM \"line_items\" AS \"li\"\n    LEFT JOIN \"orders\" AS \"o\""),
+        sql.contains("FROM \"line_items\" AS \"li\"\nLEFT JOIN \"orders\" AS \"o\""),
         "__sv_agg must anchor at the inner metric's own table and join OUT: {sql}"
     );
 }
 
-/// The boundary this increment keeps: window metrics whose inner aggregates sit
-/// at DIFFERENT grains would need those grains joined before the window runs,
-/// which the single-anchor CTE cannot express. Declined, so the fence still
-/// reports it rather than emitting a silently wrong shape.
+/// Window metrics whose inner aggregates sit at DIFFERENT grains: the inner
+/// query computes each at its own grain and joins the grains, and the windows
+/// run over the joined rows. The single-anchor CTE could not express it, so
+/// it used to be refused.
 #[test]
-fn window_metrics_at_two_different_grains_still_error() {
+fn window_metrics_at_two_different_grains_each_read_their_own() {
     let def = orders_with_parent_customers()
         .with_metric("running_balance", "SUM(total_balance)", Some("o"))
         .with_window_spec(
@@ -748,18 +748,16 @@ fn window_metrics_at_two_different_grains_still_error() {
                 frame_clause: None,
             },
         );
-    let err = expand(
-        "sales",
+    let sql = window_reads_plain(
         &def,
-        &req(&["segment"], &["running_balance", "running_orders"]),
+        &["segment"],
+        &["running_balance", "running_orders"],
+        &["total_balance", "order_count"],
     )
-    .expect_err("inner aggregates at two grains are not answerable by one anchored CTE");
+    .expect("each inner metric is computed at its own grain");
     assert!(
-        matches!(
-            err,
-            ExpandError::RootGrainFanTrap { .. } | ExpandError::MetricFanTrap { .. }
-        ),
-        "expected a fan-trap error, got: {err}"
+        sql.contains("__sv_grain_0") && sql.contains("__sv_grain_1"),
+        "the inner query plans one CTE per grain: {sql}"
     );
 }
 
@@ -896,8 +894,8 @@ fn where_clause_on_a_single_grain_plan_filters_before_aggregation() {
 /// through real DDL, and it is load-bearing. D-06 rejects a table that an FK
 /// references unless it declares a PRIMARY KEY **or** a UNIQUE, so a parent with
 /// neither cannot be created at all (`65_pk_error.test`). `UNIQUE` satisfies
-/// D-06, and it also makes `c` the "one" side that [`window_cte_anchor`]
-/// re-anchors toward — while leaving `pk_columns` empty, so the
+/// D-06, and it also makes `c` the "one" side a metric on it anchors at —
+/// while leaving `pk_columns` empty, so the
 /// `COUNT(*)` → `COUNT(<pk>)` rewrite is impossible and SG-8 records the metric.
 ///
 /// Declaring `c` with neither constraint would be a fixture DDL cannot produce —
@@ -934,6 +932,28 @@ fn sum_over(inner: &str, partition_dim: &str) -> WindowSpec {
     }
 }
 
+/// A window query reads the rows its inner metrics give as an ordinary
+/// query: its SQL holds that query's SQL whole as `__sv_agg`, or it is
+/// refused exactly as that query is (Phase 7 PR 5).
+fn window_reads_plain(
+    def: &SemanticViewDefinition,
+    dims: &[&str],
+    windows: &[&str],
+    plain: &[&str],
+) -> Result<String, ExpandError> {
+    let window = expand("sales", def, &req(dims, windows));
+    let inner = expand("sales", def, &req(dims, plain));
+    match (&window, &inner) {
+        (Ok(w), Ok(p)) => assert!(
+            w.contains(&format!("WITH __sv_agg AS (\n{p}\n)")),
+            "the window must run over the plain query's rows:\n{w}\n--- plain:\n{p}"
+        ),
+        (Err(w), Err(p)) => assert_eq!(w.to_string(), p.to_string()),
+        _ => panic!("window {window:?} disagrees with its inner query {inner:?}"),
+    }
+    window
+}
+
 /// SG-8 must not reject a query the anchor makes safe (PR #175 review).
 ///
 /// `customer_count` is a bare `COUNT(*)` on the PK-less parent `customers`.
@@ -944,9 +964,10 @@ fn sum_over(inner: &str, partition_dim: &str) -> WindowSpec {
 /// exempts the per-grain path.
 ///
 /// This regressed on nothing — it was never answerable — but the guard ran
-/// before `window_anchor` was computed, so a subset of the shape this change set
-/// out to support still errored. Verified red before the fix, with
-/// `CountStarRequiresPrimaryKey`.
+/// before the window's anchor was computed, so a subset of the shape this
+/// change set out to support still errored. Verified red before the fix, with
+/// `CountStarRequiresPrimaryKey`. The window now reads its inner query, which
+/// anchors at `customers` the same way.
 #[test]
 fn anchored_window_count_star_needs_no_primary_key() {
     let def = orders_with_unique_only_parent()
@@ -968,56 +989,47 @@ fn anchored_window_count_star_needs_no_primary_key() {
     );
 }
 
-/// The invariant that makes the SG-8 bypass above sound, and the reason it is a
-/// bypass rather than a deletion.
-///
-/// A dimension BELOW the anchor's grain pulls a "many"-side join back into the
-/// anchored CTE (`FROM customers JOIN orders`), where `COUNT(*)` would count
-/// orders rather than customers. The retained metric × dimension fan-trap check
-/// rejects that shape before emission, so skipping SG-8 cannot turn a loud error
-/// into a silently inflated number — it only changes WHICH error is reported
-/// (`CountStarRequiresPrimaryKey` before, `FanTrap` now). Were that check ever
-/// dropped, this test emits inflated SQL and fails.
+/// A dimension BELOW the counted table's grain fans the PK-less parent's
+/// `COUNT(*)` out over orders. The window runs over its inner metric's rows,
+/// so it is refused exactly as `customer_count` by `order_status` is: the
+/// count cannot be told apart from NULL-extended rows without a PRIMARY KEY.
 #[test]
-fn anchored_window_count_star_below_its_grain_still_errors() {
+fn window_count_star_below_its_grain_is_refused_as_its_inner_metric_is() {
     let def = orders_with_unique_only_parent()
         .with_metric("running_customers", "SUM(customer_count)", Some("o"))
         .with_window_spec(
             "running_customers",
             sum_over("customer_count", "order_status"),
         );
-    let err = expand(
-        "sales",
+    let err = window_reads_plain(
         &def,
-        &req(&["order_status"], &["running_customers"]),
+        &["order_status"],
+        &["running_customers"],
+        &["customer_count"],
     )
-    .expect_err("a dimension below the anchor grain re-fans the CTE");
+    .expect_err("a dimension below the counted grain re-fans the count");
     assert!(
-        matches!(
-            err,
-            ExpandError::FanTrap { .. } | ExpandError::MetricFanTrap { .. }
-        ),
-        "expected a fan-trap error, got: {err}"
+        matches!(err, ExpandError::CountStarRequiresPrimaryKey { .. }),
+        "got: {err}"
     );
 }
 
-/// The same invariant for an inner `SUM` on a PK-ful parent, independent of
-/// SG-8: a dimension below the anchor's grain must error rather than emit a CTE
-/// whose fanning join re-inflates the very aggregate this change set out to fix.
+/// An inner `SUM` on a PK-ful parent by a dimension below its grain: the
+/// window runs over the rows `total_balance` gives by `order_status`, each
+/// customer counted once per status (Phase 7.3, PR 4c), not over a fanned
+/// join.
 #[test]
-fn anchored_window_sum_below_its_grain_still_errors() {
+fn window_sum_below_its_grain_reads_its_inner_rows() {
     let def = orders_with_parent_customers()
         .with_metric("running_balance", "SUM(total_balance)", Some("o"))
         .with_window_spec("running_balance", sum_over("total_balance", "order_status"));
-    let err = expand("sales", &def, &req(&["order_status"], &["running_balance"]))
-        .expect_err("a dimension below the anchor grain re-fans the inner SUM");
-    assert!(
-        matches!(
-            err,
-            ExpandError::FanTrap { .. } | ExpandError::MetricFanTrap { .. }
-        ),
-        "expected a fan-trap error, got: {err}"
-    );
+    window_reads_plain(
+        &def,
+        &["order_status"],
+        &["running_balance"],
+        &["total_balance"],
+    )
+    .expect("the inner metric is answered once per group");
 }
 
 // ---------------------------------------------------------------------------

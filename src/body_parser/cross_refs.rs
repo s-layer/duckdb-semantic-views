@@ -88,10 +88,11 @@ fn validate_window_references(dimensions: &[Dimension], metrics: &[Metric]) -> R
         let Some(ref ws) = metric.window_spec else {
             continue;
         };
+        // Phase 7 PR 5: every window slot takes the D-08 dotted form, as
+        // Snowflake does (fixture 4, W0); EXCLUDING and PARTITION BY used to
+        // take the bare form only.
         for dim in &ws.excluding_dims {
-            // EXCLUDING takes the BARE form only (no dotted acceptance), as
-            // the inline check did.
-            if !dimensions.iter().any(|d| ident_matches(&d.name, dim)) {
+            if !dimension_exists(dimensions, dim) {
                 return Err(with_suggestion(
                     format!(
                         "Window metric '{}': EXCLUDING dimension '{}' not found in semantic view dimensions.",
@@ -103,7 +104,7 @@ fn validate_window_references(dimensions: &[Dimension], metrics: &[Metric]) -> R
             }
         }
         for dim in &ws.partition_dims {
-            if !dimensions.iter().any(|d| ident_matches(&d.name, dim)) {
+            if !dimension_exists(dimensions, dim) {
                 return Err(with_suggestion(
                     format!(
                         "Window metric '{}': PARTITION BY dimension '{}' not found in semantic view dimensions.",
@@ -114,7 +115,6 @@ fn validate_window_references(dimensions: &[Dimension], metrics: &[Metric]) -> R
                 ));
             }
         }
-        // Phase 68 B2 / D-08: ORDER BY accepts the dotted qualifier too.
         for ob in &ws.order_by {
             if !dimension_exists(dimensions, &ob.expr) {
                 return Err(with_suggestion(
@@ -135,6 +135,19 @@ fn validate_window_references(dimensions: &[Dimension], metrics: &[Metric]) -> R
                 ),
                 &ws.inner_metric,
                 &met_names,
+            ));
+        }
+        // Phase 7 PR 5: a window is computed over an aggregate metric's
+        // result, so its inner metric cannot be a window metric itself. The
+        // query refuses one too (`ExpandError::WindowOverWindow`).
+        if metrics
+            .iter()
+            .any(|m| m.is_window() && ident_matches(&m.name, &ws.inner_metric))
+        {
+            return Err(format!(
+                "Window metric '{}': inner metric '{}' is itself a window function metric. \
+                 A window metric must be computed over an aggregate metric.",
+                metric.name, ws.inner_metric
             ));
         }
     }

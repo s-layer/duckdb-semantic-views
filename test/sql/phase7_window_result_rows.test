@@ -1,0 +1,190 @@
+# Window metrics over the query's result rows (Phase 7 PR 5), with Snowflake's
+# answers from Phase 7 fixture 4 (W0-W7, 2026-11-10) and fixture 3 (N0).
+#
+# A window metric runs over the rows the rest of the query gives: its inner
+# metric is aggregated per group as it would be on its own, and the window
+# function runs over those groups. So a window beside an aggregate metric, a
+# window grouped by a dimension across a bridge and a window filtered across
+# one each read the plain query's rows. Each used to be refused, as a fan trap
+# or as a window mixed with an aggregate.
+#
+# Duo has two French authors, Mixed a French and a UK author, Solo a UK author,
+# Orphan none.
+
+require semantic_views
+
+statement ok
+CREATE TABLE wr_authors (author_id INT, name VARCHAR, country VARCHAR);
+
+statement ok
+CREATE TABLE wr_books (book_id INT, title VARCHAR, pages INT);
+
+statement ok
+CREATE TABLE wr_book_authors (book_id INT, author_id INT);
+
+statement ok
+INSERT INTO wr_authors VALUES (1, 'Ana', 'FR'), (2, 'Ben', 'FR'), (3, 'Cleo', 'UK'), (4, 'Dan', 'DE');
+
+statement ok
+INSERT INTO wr_books VALUES (10, 'Duo', 100), (11, 'Mixed', 200), (12, 'Solo', 300), (13, 'Orphan', 50);
+
+statement ok
+INSERT INTO wr_book_authors VALUES (10, 1), (10, 2), (11, 1), (11, 3), (12, 3);
+
+# W0: the window clauses name book dimensions, qualified. It used to be
+# refused: "EXCLUDING dimension 'b.title' not found".
+statement ok
+CREATE SEMANTIC VIEW wr_q AS
+  TABLES (
+    a  AS wr_authors      PRIMARY KEY (author_id),
+    b  AS wr_books        PRIMARY KEY (book_id),
+    ba AS wr_book_authors PRIMARY KEY (book_id, author_id)
+  )
+  RELATIONSHIPS (
+    ba_author AS ba (author_id) REFERENCES a,
+    ba_book   AS ba (book_id)   REFERENCES b
+  )
+  DIMENSIONS (a.country AS country, b.title AS title)
+  METRICS (
+    b.total_pages       AS SUM(pages),
+    b.avg_excl_title    AS AVG(total_pages) OVER (PARTITION BY EXCLUDING b.title),
+    b.running_by_title  AS SUM(total_pages) OVER (ORDER BY b.title)
+  );
+
+# W1: the same view with the window dimensions unqualified.
+statement ok
+CREATE SEMANTIC VIEW wr_u AS
+  TABLES (
+    a  AS wr_authors      PRIMARY KEY (author_id),
+    b  AS wr_books        PRIMARY KEY (book_id),
+    ba AS wr_book_authors PRIMARY KEY (book_id, author_id)
+  )
+  RELATIONSHIPS (
+    ba_author AS ba (author_id) REFERENCES a,
+    ba_book   AS ba (book_id)   REFERENCES b
+  )
+  DIMENSIONS (a.country AS country, b.title AS title)
+  METRICS (
+    b.total_pages       AS SUM(pages),
+    b.avg_excl_title    AS AVG(total_pages) OVER (PARTITION BY EXCLUDING title),
+    b.running_by_title  AS SUM(total_pages) OVER (ORDER BY title)
+  );
+
+# W2: the running total beside the aggregate it runs over.
+query TII rowsort
+SELECT * FROM SEMANTIC_VIEW(wr_q DIMENSIONS b.title METRICS b.total_pages, b.running_by_title);
+----
+Duo	100	100
+Mixed	200	300
+Orphan	50	350
+Solo	300	650
+
+# W3: with the title the only dimension, the EXCLUDING partition is every row.
+query TR rowsort
+SELECT * FROM SEMANTIC_VIEW(wr_q DIMENSIONS b.title METRICS b.avg_excl_title);
+----
+Duo	162.5
+Mixed	162.5
+Orphan	162.5
+Solo	162.5
+
+# W4: per (country, title) pages, averaged per country across the bridge.
+query TTIR rowsort
+SELECT * FROM SEMANTIC_VIEW(wr_q DIMENSIONS a.country, b.title METRICS b.total_pages, b.avg_excl_title);
+----
+FR	Duo	100	150.0
+FR	Mixed	200	150.0
+NULL	Orphan	50	50.0
+UK	Mixed	200	250.0
+UK	Solo	300	250.0
+
+# W5: across the bridge, running by title over every result row; the two Mixed
+# rows are peers.
+query TTII rowsort
+SELECT * FROM SEMANTIC_VIEW(wr_q DIMENSIONS a.country, b.title METRICS b.total_pages, b.running_by_title);
+----
+FR	Duo	100	100
+FR	Mixed	200	500
+NULL	Orphan	50	550
+UK	Mixed	200	500
+UK	Solo	300	850
+
+# W6: filtered across the bridge to the French books.
+query TI rowsort
+SELECT * FROM SEMANTIC_VIEW(wr_q DIMENSIONS b.title METRICS b.running_by_title WHERE a.country = 'FR');
+----
+Duo	100
+Mixed	300
+
+# W7: W2 on the unqualified view.
+query TII rowsort
+SELECT * FROM SEMANTIC_VIEW(wr_u DIMENSIONS b.title METRICS b.total_pages, b.running_by_title);
+----
+Duo	100	100
+Mixed	200	300
+Orphan	50	350
+Solo	300	650
+
+# N0: a window ordered by a dimension across the bridge is refused at CREATE,
+# as Snowflake refuses it (010211: "A metric cannot refer to another dimension
+# from an unrelated entity").
+statement error
+CREATE SEMANTIC VIEW wr_n AS
+  TABLES (
+    a  AS wr_authors      PRIMARY KEY (author_id),
+    b  AS wr_books        PRIMARY KEY (book_id),
+    ba AS wr_book_authors PRIMARY KEY (book_id, author_id)
+  )
+  RELATIONSHIPS (
+    ba_author AS ba (author_id) REFERENCES a,
+    ba_book   AS ba (book_id)   REFERENCES b
+  )
+  DIMENSIONS (a.country AS country, b.title AS title)
+  METRICS (
+    b.total_pages   AS SUM(pages),
+    b.running_pages AS SUM(total_pages) OVER (ORDER BY a.country)
+  );
+----
+unrelated to the metric's table 'b'
+
+# A window over a window metric is refused at CREATE: a window runs over its
+# inner metric's per-group rows, and a window metric gives none of its own.
+statement error
+CREATE SEMANTIC VIEW wr_ww AS
+  TABLES (b AS wr_books PRIMARY KEY (book_id))
+  DIMENSIONS (b.title AS title)
+  METRICS (
+    b.total_pages   AS SUM(pages),
+    b.running_pages AS SUM(total_pages) OVER (ORDER BY title),
+    b.running_avg   AS AVG(running_pages) OVER (ORDER BY title)
+  );
+----
+inner metric 'running_pages' is itself a window function metric
+
+# A window's own USING applies to its inner metric, which must then be on the
+# window metric's table: here the window is on the bridge and its inner
+# metric on the books.
+statement error
+CREATE SEMANTIC VIEW wr_wu AS
+  TABLES (
+    a  AS wr_authors      PRIMARY KEY (author_id),
+    b  AS wr_books        PRIMARY KEY (book_id),
+    ba AS wr_book_authors PRIMARY KEY (book_id, author_id)
+  )
+  RELATIONSHIPS (
+    ba_author AS ba (author_id) REFERENCES a,
+    ba_book   AS ba (book_id)   REFERENCES b
+  )
+  DIMENSIONS (b.title AS title)
+  METRICS (
+    b.total_pages    AS SUM(pages),
+    ba.running_pages USING (ba_book) AS SUM(total_pages) OVER (ORDER BY title)
+  );
+----
+inner metric 'total_pages' is not on its table
+
+statement ok
+DROP SEMANTIC VIEW wr_q
+
+statement ok
+DROP SEMANTIC VIEW wr_u
