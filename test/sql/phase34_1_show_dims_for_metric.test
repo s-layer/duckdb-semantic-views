@@ -221,6 +221,7 @@ CREATE SEMANTIC VIEW p34fm8_sv AS
     o.order_count  AS COUNT(order_id),
     li.item_count  AS COUNT(item_id),
     o.latest_orders NON ADDITIVE BY (placed_at) AS COUNT(order_id),
+    o.orders_at_qty NON ADDITIVE BY (qty) AS COUNT(order_id),
     o.running_orders AS SUM(order_count) OVER (ORDER BY placed_at)
   )
 
@@ -270,6 +271,28 @@ p34fm8_regions	region	VARCHAR	false	[]	(empty)
 
 statement error
 SELECT * FROM SEMANTIC_VIEW(p34fm8_sv DIMENSIONS li.qty METRICS o.latest_orders);
+----
+fan trap
+
+# Grouped by its own NON ADDITIVE BY dimension a semi-additive metric is
+# counted once per group like any other, so it lists that fanned dimension.
+# Grouped by any other, its snapshot joins the items across the fan-out and is
+# refused, its own table's dimensions included, so it lists nothing else.
+query TTTTTT rowsort
+SHOW SEMANTIC DIMENSIONS IN p34fm8_sv FOR METRIC orders_at_qty
+----
+p34fm8_items	qty	INTEGER	false	[]	(empty)
+
+query II
+SELECT * FROM SEMANTIC_VIEW(p34fm8_sv DIMENSIONS li.qty METRICS o.orders_at_qty) ORDER BY ALL;
+----
+1	1
+2	1
+5	1
+7	1
+
+statement error
+SELECT * FROM SEMANTIC_VIEW(p34fm8_sv DIMENSIONS o.placed_at METRICS o.orders_at_qty);
 ----
 fan trap
 

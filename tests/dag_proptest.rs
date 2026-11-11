@@ -63,7 +63,7 @@ use semantic_views::expand::{
     dimensions_for_metric, expand, DimensionName, MetricName, QueryRequest,
 };
 use semantic_views::model::{
-    Cardinality, Dimension, Join, Metric, SemanticViewDefinition, TableRef,
+    Cardinality, Dimension, Join, Metric, NonAdditiveDim, SemanticViewDefinition, TableRef,
 };
 
 /// One table's rows: `(g, v, fks)`, `fks` aligned with [`Graph::out_edges`].
@@ -862,8 +862,30 @@ enum Listing {
 /// (or is near the role-played table, [`Listing::ListedNearRoles`]).
 /// So the listing follows the query, which the other properties check
 /// against Snowflake's rules.
-fn check_listing(case: &Case) -> Result<Vec<Listing>, TestCaseError> {
-    let def = build_def(case, &case.orders[0], false);
+fn check_listing(case: &Case) -> Result<Vec<(Listing, bool)>, TestCaseError> {
+    let mut def = build_def(case, &case.orders[0], false);
+    // Beside each sum, a semi-additive one by the next table's dimension: a
+    // query by that dimension answers it like any sum, and one by another
+    // dimension takes the snapshot path, which refuses every fan-out and is
+    // refused itself when its NON ADDITIVE BY dimension is reached only across
+    // one. So the listing must follow the dimension queried. Not drawn beside
+    // a doubled relationship: a snapshot joined through the role-played table
+    // needs a role a metric with no USING lacks (`semi_additive_proptest`
+    // covers that). Only this property sees these metrics.
+    let semi = if case.doubled.is_some() { 0 } else { case.n };
+    def.metrics.extend((0..semi).map(|k| {
+        let na = (k + 1) % case.n;
+        Metric {
+            name: format!("s{k}_na"),
+            expr: format!("SUM(t{k}.v)"),
+            source_table: Some(format!("t{k}")),
+            non_additive_by: vec![NonAdditiveDim {
+                dimension: format!("g{na}"),
+                ..Default::default()
+            }],
+            ..Default::default()
+        }
+    }));
     let mut out = Vec::new();
     for met in &def.metrics {
         let listed: Vec<&str> = dimensions_for_metric(&def, met)
@@ -908,7 +930,7 @@ fn check_listing(case: &Case) -> Result<Vec<Listing>, TestCaseError> {
                     )))
                 }
             };
-            out.push(outcome);
+            out.push((outcome, !met.non_additive_by.is_empty()));
         }
     }
     Ok(out)
@@ -932,13 +954,17 @@ fn listing_reaches_every_outcome() {
 
     let mut runner = TestRunner::deterministic();
     let mut seen: std::collections::HashMap<Listing, usize> = std::collections::HashMap::new();
+    let mut semi: std::collections::HashMap<Listing, usize> = std::collections::HashMap::new();
     for _ in 0..300 {
         let case = arb_case()
             .new_tree(&mut runner)
             .expect("strategy must produce a value")
             .current();
-        for outcome in check_listing(&case).expect("the listing property holds") {
+        for (outcome, semi_additive) in check_listing(&case).expect("the listing property holds") {
             *seen.entry(outcome).or_default() += 1;
+            if semi_additive {
+                *semi.entry(outcome).or_default() += 1;
+            }
         }
     }
     for outcome in [
@@ -951,6 +977,15 @@ fn listing_reaches_every_outcome() {
             seen.get(&outcome).copied().unwrap_or(0) >= 20,
             "{outcome:?} reached {} times: {seen:?}",
             seen.get(&outcome).copied().unwrap_or(0)
+        );
+    }
+    // A semi-additive metric answered across a fan-out (by its NON ADDITIVE
+    // BY dimension) and refused across one (by another).
+    for outcome in [Listing::AnsweredFanned, Listing::Refused] {
+        assert!(
+            semi.get(&outcome).copied().unwrap_or(0) >= 20,
+            "semi-additive {outcome:?} reached {} times: {semi:?}",
+            semi.get(&outcome).copied().unwrap_or(0)
         );
     }
 }
@@ -1053,7 +1088,6 @@ fn a_chain_is_followed_beside_a_shorter_path_that_fans_out() {
         doubled: None,
         using: None,
     };
-    let def = build_def(&case, &case.orders[0], false);
-    println!("{:?}", expand("dag", &def, &request(&case)));
-    println!("{:?}", check_listing(&case));
+    check_case(&case).unwrap();
+    check_listing(&case).unwrap();
 }

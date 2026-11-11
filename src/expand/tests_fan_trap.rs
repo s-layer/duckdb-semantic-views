@@ -543,6 +543,85 @@ fn semi_additive_na_dim_queried_counts_once_per_group() {
     assert!(counts_once_per_group(&sql), "{sql}");
 }
 
+/// `SHOW ... FOR METRIC` lists that dimension, since the query answers it
+/// (Phase 7 PR 4e). It leaves out every other dimension, the metric's own
+/// table's included: grouped by one of them the metric is active, and its
+/// snapshot joins the NA dimension across the fan-out, which is refused.
+#[test]
+fn show_lists_a_fanned_na_dimension_the_query_answers() {
+    let mut def = semi_additive_na_dim_fans_def();
+    def.dimensions.push(Dimension {
+        name: "carrier".to_string(),
+        expr: "li.carrier".to_string(),
+        source_table: Some("li".to_string()),
+        ..Default::default()
+    });
+    let listed: Vec<&str> = crate::expand::dimensions_for_metric(&def, &def.metrics[0])
+        .iter()
+        .map(|d| d.name.as_str())
+        .collect();
+    assert_eq!(listed, ["ship_ts"]);
+    let by = |dim: &str| QueryRequest {
+        where_clause: None,
+        facts: vec![],
+        dimensions: vec![DimensionName::new(dim)],
+        metrics: vec![MetricName::new("balance_at")],
+    };
+    assert!(expand("sales", &def, &by("ship_ts")).is_ok());
+    assert!(expand("sales", &def, &by("carrier")).is_err());
+    assert!(expand("sales", &def, &by("region")).is_err());
+}
+
+/// Two relationships between the same pair, one of them ASOF, are one step
+/// for `SHOW ... FOR METRIC`, temporal as the query reads it, whichever is
+/// declared last: a metric on the referenced table does not list the
+/// referencing table's dimensions.
+#[test]
+fn show_reads_a_pair_with_an_asof_relationship_as_temporal_in_either_order() {
+    let table = |alias: &str| TableRef {
+        alias: alias.to_string(),
+        table: alias.to_string(),
+        pk_columns: vec!["id".to_string()],
+        ..Default::default()
+    };
+    let plain = Join {
+        table: "q".to_string(),
+        from_alias: "t".to_string(),
+        fk_columns: vec!["quote_id".to_string()],
+        ref_columns: vec!["id".to_string()],
+        name: Some("t_quote".to_string()),
+        cardinality: Cardinality::ManyToOne,
+        ..Default::default()
+    };
+    let asof = Join {
+        fk_columns: vec!["sym".to_string(), "ts".to_string()],
+        ref_columns: vec!["sym".to_string(), "ts".to_string()],
+        name: Some("t_quote_asof".to_string()),
+        asof: Some(1),
+        ..plain.clone()
+    };
+    for joins in [vec![plain.clone(), asof.clone()], vec![asof, plain]] {
+        let def = SemanticViewDefinition {
+            tables: vec![table("q"), table("t")],
+            dimensions: vec![Dimension {
+                name: "side".to_string(),
+                expr: "t.side".to_string(),
+                source_table: Some("t".to_string()),
+                ..Default::default()
+            }],
+            metrics: vec![Metric {
+                name: "quote_count".to_string(),
+                expr: "COUNT(q.id)".to_string(),
+                source_table: Some("q".to_string()),
+                ..Default::default()
+            }],
+            joins,
+            ..Default::default()
+        };
+        assert!(crate::expand::dimensions_for_metric(&def, &def.metrics[0]).is_empty());
+    }
+}
+
 /// Control: an NA dimension on a table that does NOT fan the metric's grain
 /// stays legal, so the fix cannot degenerate into "reject every NA dimension
 /// on another table".

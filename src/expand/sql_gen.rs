@@ -497,8 +497,8 @@ fn meeting_table(def: &SemanticViewDefinition, members: &[String]) -> Option<Str
     };
     def.metrics
         .iter()
-        .filter_map(|m| m.source_table.as_deref())
-        .any(qualifies)
+        .filter_map(|m| m.source_table.as_deref().map(str::to_ascii_lowercase))
+        .any(|t| qualifies(&t))
         .then(|| (**meet).clone())
 }
 

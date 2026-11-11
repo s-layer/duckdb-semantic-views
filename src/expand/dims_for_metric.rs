@@ -17,7 +17,7 @@ use crate::model::{Cardinality, Dimension, Metric, SemanticViewDefinition};
 /// A relationship as [`dimensions_for_metric`] walks it.
 #[derive(Clone, Copy)]
 struct Step {
-    cardinality: Cardinality,
+    one_to_one: bool,
     /// An ASOF or range relationship.
     temporal: bool,
 }
@@ -30,10 +30,12 @@ struct Step {
 /// some path from it to the dimension's table steps only forward along
 /// foreign keys or back along one-to-one relationships, or, when the metric
 /// answers a fan-out once per group ([`super::fan_trap::metric_answers_fan_outs`]:
-/// a plain aggregate on a table with a PRIMARY KEY), back along any
+/// a plain aggregate on a table with a PRIMARY KEY, or a semi-additive metric
+/// grouped by its `NON ADDITIVE BY` dimension), back along any
 /// relationship that is not ASOF or range. The query refuses a fan-out back
-/// across a temporal relationship (010956), and a window or semi-additive
-/// metric, or one on a table with no key, refuses them all.
+/// across a temporal relationship (010956), and a window metric, a
+/// semi-additive one grouped by another dimension, or a metric on a table
+/// with no key refuses them all.
 ///
 /// Every path counts, not only the one through a spanning tree: in a diamond
 /// (orders reach regions through customers and through stores) the tree walked
@@ -61,38 +63,88 @@ pub fn dimensions_for_metric<'a>(
             .map(|s| s.to_ascii_lowercase())
             .collect()
     };
-    let card_map: HashMap<(String, String), Step> = def
-        .joins
-        .iter()
-        .filter(|j| !j.fk_columns.is_empty())
-        .map(|j| {
-            (
-                (
-                    j.from_alias.to_ascii_lowercase(),
-                    j.table.to_ascii_lowercase(),
-                ),
-                Step {
-                    cardinality: j.cardinality,
-                    temporal: j.asof.is_some() || j.range_end.is_some(),
-                },
-            )
-        })
-        .collect();
-    let fans_out = super::fan_trap::metric_answers_fan_outs(def, met);
+    // Two relationships between the same pair (a second role) are one step:
+    // temporal when either is, as the query's `fan_trap::temporal_edges`
+    // reads it, and one-to-one only when both are.
+    let mut card_map: HashMap<(String, String), Step> = HashMap::new();
+    for j in def.joins.iter().filter(|j| !j.fk_columns.is_empty()) {
+        let step = Step {
+            one_to_one: j.cardinality == Cardinality::OneToOne,
+            temporal: j.asof.is_some() || j.range_end.is_some(),
+        };
+        card_map
+            .entry((
+                j.from_alias.to_ascii_lowercase(),
+                j.table.to_ascii_lowercase(),
+            ))
+            .and_modify(|s| {
+                s.one_to_one &= step.one_to_one;
+                s.temporal |= step.temporal;
+            })
+            .or_insert(step);
+    }
 
     // Steps: forward along any FK; backward along a one-to-one one, or along
     // any plain one when the metric answers a fan-out.
-    let mut steps: HashMap<&str, Vec<&str>> = HashMap::new();
-    for ((from, to), step) in &card_map {
-        steps.entry(from.as_str()).or_default().push(to.as_str());
-        if step.cardinality == Cardinality::OneToOne || (fans_out && !step.temporal) {
-            steps.entry(to.as_str()).or_default().push(from.as_str());
+    let steps = |fans_out: bool| {
+        let mut steps: HashMap<&str, Vec<&str>> = HashMap::new();
+        for ((from, to), step) in &card_map {
+            steps.entry(from.as_str()).or_default().push(to.as_str());
+            if step.one_to_one || (fans_out && !step.temporal) {
+                steps.entry(to.as_str()).or_default().push(from.as_str());
+            }
         }
-    }
-
+        steps
+    };
+    let any_dim = super::fan_trap::metric_answers_fan_outs(def, met, None);
+    let (plain, fanning) = (steps(false), steps(true));
+    let snapshots = fanning_snapshots(def, met, &plain);
     def.dimensions
         .iter()
-        .filter(|d| reached(def, d, &met_tables, &steps))
+        .filter(|d| {
+            let key = crate::ident::normalize_ident_part(&d.name);
+            let snapshot_fans = snapshots
+                .iter()
+                .any(|na_keys| met.source_table.is_none() || na_keys.iter().any(|k| *k != key));
+            let fans = any_dim || super::fan_trap::metric_answers_fan_outs(def, met, Some(d));
+            !snapshot_fans && reached(def, d, &met_tables, if fans { &fanning } else { &plain })
+        })
+        .collect()
+}
+
+/// The `NON ADDITIVE BY` keys of each semi-additive metric `met` is built
+/// from whose snapshot joins a `NON ADDITIVE BY` dimension across a fan-out.
+/// A query of `met` grouped by any dimension but those (the metric is then
+/// active and takes the snapshot path) is refused as a fan trap, its own
+/// table's dimensions included (EXP-9,
+/// `tests_fan_trap::semi_additive_na_dim_fans_def`).
+fn fanning_snapshots(
+    def: &SemanticViewDefinition,
+    met: &Metric,
+    plain: &HashMap<&str, Vec<&str>>,
+) -> Vec<Vec<String>> {
+    let names: HashSet<String> = if met.source_table.is_some() {
+        HashSet::from([crate::ident::normalize_ident_part(&met.name)])
+    } else {
+        super::facts::collect_transitive_metric_names(met, &def.metrics)
+    };
+    def.metrics
+        .iter()
+        .filter(|m| names.contains(&crate::ident::normalize_ident_part(&m.name)))
+        .filter_map(|m| {
+            let home = vec![m.source_table.as_deref()?.to_ascii_lowercase()];
+            let fans = m.non_additive_by.iter().any(|na| {
+                super::resolution::find_dimension(def, &na.dimension)
+                    .and_then(|nd| nd.source_table.as_deref())
+                    .is_some_and(|t| !walk(&home, &t.to_ascii_lowercase(), plain))
+            });
+            fans.then(|| {
+                m.non_additive_by
+                    .iter()
+                    .map(|na| super::semi_additive::na_dim_match_key(def, &na.dimension))
+                    .collect()
+            })
+        })
         .collect()
 }
 
@@ -109,21 +161,24 @@ fn reached(
     };
     let dim_table = dim_table_raw.to_ascii_lowercase();
     met_tables.iter().any(|met_table| {
-        if super::refused_as_many_to_many(def, met_table, &dim_table) {
-            return false;
-        }
-        let mut seen: HashSet<&str> = HashSet::from([met_table.as_str()]);
-        let mut stack = vec![met_table.as_str()];
-        while let Some(current) = stack.pop() {
-            if current == dim_table {
-                return true;
-            }
-            for next in steps.get(current).into_iter().flatten() {
-                if seen.insert(next) {
-                    stack.push(next);
-                }
-            }
-        }
-        false
+        !super::refused_as_many_to_many(def, met_table, &dim_table)
+            && walk(std::slice::from_ref(met_table), &dim_table, steps)
     })
+}
+
+/// Whether `to` is reached from one of `from` along `steps`.
+fn walk(from: &[String], to: &str, steps: &HashMap<&str, Vec<&str>>) -> bool {
+    let mut seen: HashSet<&str> = from.iter().map(String::as_str).collect();
+    let mut stack: Vec<&str> = seen.iter().copied().collect();
+    while let Some(current) = stack.pop() {
+        if current == to {
+            return true;
+        }
+        for next in steps.get(current).into_iter().flatten() {
+            if seen.insert(next) {
+                stack.push(next);
+            }
+        }
+    }
+    false
 }

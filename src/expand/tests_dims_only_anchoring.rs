@@ -997,6 +997,26 @@ fn a_metric_off_the_members_paths_answers_from_the_meeting_table() {
     );
 }
 
+/// A metric's table written in another case than the relationships name it
+/// is the same table: identifiers match case-insensitively.
+fn with_metric_tables_upper(mut def: SemanticViewDefinition) -> SemanticViewDefinition {
+    for m in &mut def.metrics {
+        m.source_table = m.source_table.as_deref().map(str::to_ascii_uppercase);
+    }
+    def
+}
+
+/// N8 with the orders metric's table written `O`.
+#[test]
+fn a_meeting_table_metric_matches_its_table_in_any_case() {
+    case_in_every_order(
+        |base| with_metric_tables_upper(notes_def(base, &["o"])),
+        &NOTE_TABLES,
+        &dims_req(&["qty", "kind"], None),
+        &["1/gift", "1/rush", "2/gift", "5/gift", "5/rush"],
+    );
+}
+
 /// Two places where paths meet (`li -> o <- sh -> c <- tr`): from either, a
 /// member is reached by climbing and then fanning out again, so neither is the
 /// meeting table and the query is refused, though every table has a metric.

@@ -1,6 +1,6 @@
 use std::collections::{HashMap, HashSet, VecDeque};
 
-use crate::model::{Cardinality, Metric, SemanticViewDefinition};
+use crate::model::{Cardinality, Dimension, Metric, SemanticViewDefinition};
 
 use super::facts::{
     collect_derived_metric_grain, collect_referenced_facts, collect_transitive_metric_names,
@@ -518,11 +518,31 @@ fn fan_out_counts_once(path: &[String], card_map: &CardMap, temporal: &TemporalE
 }
 
 /// Whether a query of `met` answers a dimension its rows fan out to, once per
-/// group (Phase 7 PR 4c), when grouped by it alone: every base metric it is
-/// built from is a plain aggregate (no window, no `NON ADDITIVE BY`, which
-/// both still refuse a fan-out) on a table with a PRIMARY KEY.
-/// `SHOW SEMANTIC DIMENSIONS ... FOR METRIC` lists such dimensions.
-pub(super) fn metric_answers_fan_outs(def: &SemanticViewDefinition, met: &Metric) -> bool {
+/// group (Phase 7 PR 4c), when grouped by `grouped_by` alone (`None`: by any
+/// dimension): every base metric it is built from is a plain aggregate (no
+/// window, no `NON ADDITIVE BY`, which both still refuse a fan-out) on a table
+/// with a PRIMARY KEY. A semi-additive base metric grouped by its only
+/// `NON ADDITIVE BY` dimension counts too: with that dimension queried it is
+/// not active, and is counted once per group like any other
+/// (`tests_fan_trap::semi_additive_na_dim_queried_counts_once_per_group`). A
+/// derived metric over one is not: the per-grain plan declines a semi-additive
+/// component whatever is queried. `SHOW SEMANTIC DIMENSIONS ... FOR METRIC`
+/// lists such dimensions.
+pub(super) fn metric_answers_fan_outs(
+    def: &SemanticViewDefinition,
+    met: &Metric,
+    grouped_by: Option<&Dimension>,
+) -> bool {
+    let inactive = |m: &Metric| {
+        m.non_additive_by.is_empty()
+            || (met.source_table.is_some()
+                && grouped_by.is_some_and(|d| {
+                    let key = crate::ident::normalize_ident_part(&d.name);
+                    m.non_additive_by
+                        .iter()
+                        .all(|na| super::semi_additive::na_dim_match_key(def, &na.dimension) == key)
+                }))
+    };
     let names: HashSet<String> = if met.source_table.is_some() {
         HashSet::from([crate::ident::normalize_ident_part(&met.name)])
     } else {
@@ -537,7 +557,7 @@ pub(super) fn metric_answers_fan_outs(def: &SemanticViewDefinition, met: &Metric
         && used.iter().any(|m| m.source_table.is_some())
         && used.iter().all(|m| {
             !m.is_window()
-                && m.non_additive_by.is_empty()
+                && inactive(m)
                 && m.source_table.as_deref().is_none_or(|t| {
                     def.tables
                         .iter()
