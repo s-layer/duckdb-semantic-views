@@ -499,10 +499,19 @@ Both systems refuse a dimension on a role-played table when a metric in the
 query names no path to it. Both also accept a dimension *beyond* the
 role-played table (``regions`` reached from ``airports``), taking the path
 from the metric's ``USING`` and following the single relationship onward.
-A dimension on a table that *references* the role-played one
-(``airport_details``, one row per airport) is refused here for now, even
-when the metric's ``USING`` names the role: the details would have to be
-joined to that role's airport, which only the onward direction does yet.
+Both follow the role back down, too: a dimension on a table that
+*references* the role-played one (``airport_details``, one row per airport)
+is read for the airport the metric's ``USING`` names, so ``arrivals`` by
+terminal gives the arriving airport's terminal and ``departures`` the
+departing one's. A ``WHERE`` on the airports or their details follows the
+same role when every metric names it; beside metrics naming two roles, or
+none, it is refused here. A metric on the airports themselves reads each
+airport once, by its own dimensions or its details'.
+
+.. versionchanged:: 0.19.0
+
+   A dimension on ``airport_details`` beside a role-naming metric, and a
+   ``WHERE`` on the role-played table, used to be refused.
 
 ``USING`` also picks a path through a diamond, where a table is reached
 along two chains of relationships through different tables (orders reach

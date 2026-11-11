@@ -197,6 +197,23 @@ A dimension one relationship further on follows the same path. If
 dimension groups by the departure airport's region, and ``departure_count,
 arrival_count`` by region merges the two per region, as by city.
 
+So does a dimension on a table that references ``airports``, such as an
+``airport_details`` table with one row per airport. ``arrival_count`` by a
+terminal on the details reads the arriving airport's terminal, and
+``departure_count`` the departing one's. The details are joined to the role's
+airport, so two metrics with different paths each get their own terminal.
+
+A filter on ``airports``, or on a table reached through it, follows the
+metrics' path when every metric names the same one: ``arrival_count`` with
+``where_clause := 'city = ''London'''`` counts the flights arriving in London.
+Beside metrics naming two different paths, or none, the filter is refused.
+
+.. versionchanged:: 0.19.0
+
+   A dimension on a table that references the role-playing one, and a filter
+   on the role-playing table, used to be refused even when every metric named
+   a path.
+
 A window metric names its path through its inner metric: a window over
 ``departure_count`` is grouped by departure city. Two window metrics over
 different paths cannot be grouped by ``city`` together, and neither can metrics

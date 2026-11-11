@@ -116,6 +116,7 @@ test/sql/cr20260808_small_fixes.test
 test/sql/cr20260808_yaml_ingress.test
 test/sql/function_descriptions.test
 test/sql/graph_connectivity.test
+test/sql/role_playing_back_crossing.test
 test/sql/role_playing_facts_and_quoted_names.test
 test/sql/relationship_names_and_qualifiers.test
 test/sql/role_playing_window_and_table_metrics.test

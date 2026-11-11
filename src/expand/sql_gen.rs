@@ -1493,6 +1493,36 @@ fn expand_unhoisted(
         }
     }
 
+    // TECH-DEBT #111: a predicate on a role-played table, or on one reached
+    // through or back across it, is read on the role every metric names
+    // (Snowflake fixture 6, R5). The per-grain plan reads it so in each grain
+    // CTE (`role_playing::where_role_dims`), and the base-anchored emission
+    // below rewrites the predicate and joins those instances. The snapshot and
+    // window paths take no scopes (the planner declines such a query beside
+    // a semi-additive or window metric), so for them it stays refused.
+    let has_window = resolved_mets.iter().any(|m| m.is_window());
+    let where_scopes: Vec<(String, String)> = match &resolved_where {
+        Some(rw) if !has_active_semi_additive && !has_window => {
+            super::role_playing::where_role_scopes(def, &rw.members, &resolved_mets)
+        }
+        _ => Vec::new(),
+    };
+    // EXP-10: and the role-playing seam the fan-trap check does not cover —
+    // reaching the member's table is unambiguous only if no role-playing
+    // table sits on the path. Runs on every emission path because it is
+    // decided here, above the per-grain / anchored / base-anchored split, and
+    // before the fan-trap checks, like the dimensions' role check above: off
+    // the per-grain path a fan trap depends on which table is declared first.
+    if let Some(rw) = &resolved_where {
+        check_where_clause_role_playing_path(
+            view_name,
+            def,
+            &rw.members,
+            &resolved_mets,
+            &where_scopes,
+        )?;
+    }
+
     // Phase 31: Check for fan traps before generating SQL. In per-grain mode the
     // fence keeps only the metric × dimension check — the other two guard the
     // base-anchored topology the per-grain plan replaces. An anchored window CTE
@@ -1534,20 +1564,6 @@ fn expand_unhoisted(
         &resolved_mets,
         &where_tables,
     )?;
-    // TECH-DEBT #111: a predicate on a role-played table, or on one reached
-    // through or back across it, is read on the role every metric names
-    // (Snowflake fixture 6, R5). Only the base-anchored emission below
-    // rewrites the predicate and joins those instances: the per-grain plan
-    // declines a role-played predicate table (`role_playing_affects_query`),
-    // and the snapshot and window paths do not take the scopes, so for them
-    // the predicate stays refused.
-    let has_window = resolved_mets.iter().any(|m| m.is_window());
-    let where_scopes: Vec<(String, String)> = match &resolved_where {
-        Some(rw) if grain_plan.is_none() && !has_active_semi_additive && !has_window => {
-            super::role_playing::where_role_scopes(def, &rw.members, &resolved_mets)
-        }
-        _ => Vec::new(),
-    };
     if let Some(rw) = &resolved_where {
         super::fan_trap::check_where_clause_fan_traps(
             view_name,
@@ -1555,17 +1571,6 @@ fn expand_unhoisted(
             &rw.members,
             &resolved_mets,
             bridges,
-        )?;
-        // EXP-10: and the role-playing seam the fan-trap check does not cover —
-        // reaching the member's table is unambiguous only if no role-playing
-        // table sits on the path. Runs on every emission path because it is
-        // decided here, above the per-grain / anchored / base-anchored split.
-        check_where_clause_role_playing_path(
-            view_name,
-            def,
-            &rw.members,
-            &resolved_mets,
-            &where_scopes,
         )?;
     }
 

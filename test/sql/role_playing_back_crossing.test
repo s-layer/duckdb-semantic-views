@@ -1,0 +1,211 @@
+# A table reached back across a role-played table follows the metric's role
+# (TECH-DEBT #111, Phase 7 PR 4b), and a metric on the role-played table reads
+# its own rows (TECH-DEBT #86).
+#
+# Flights reference airports twice (dep_airport, arr_airport), and
+# airport_details references airports one-to-one. Snowflake's answers are
+# Phase 7 fixture 6 (R1-R7, 2026-11-11). Each case used to be refused as
+# ambiguous. The details' key is named apart from the airports' so a join
+# walked the wrong way round fails to bind. Two views declare the tables in
+# opposite orders and give the same rows.
+#
+# Flights: 1 CDG -> LHR, 2 LHR -> CDG, 3 CDG -> JFK.
+# Terminals: CDG T2, LHR T5, JFK T4.
+
+require semantic_views
+
+statement ok
+CREATE TABLE rbx_airports (code VARCHAR, city VARCHAR);
+
+statement ok
+CREATE TABLE rbx_flights (flight_id INTEGER, dep VARCHAR, arr VARCHAR);
+
+statement ok
+CREATE TABLE rbx_details (airport_code VARCHAR, terminal VARCHAR);
+
+statement ok
+INSERT INTO rbx_airports VALUES ('CDG', 'Paris'), ('LHR', 'London'), ('JFK', 'New York');
+
+statement ok
+INSERT INTO rbx_flights VALUES (1, 'CDG', 'LHR'), (2, 'LHR', 'CDG'), (3, 'CDG', 'JFK');
+
+statement ok
+INSERT INTO rbx_details VALUES ('CDG', 'T2'), ('LHR', 'T5'), ('JFK', 'T4');
+
+statement ok
+CREATE SEMANTIC VIEW rbx_air
+  TABLES (
+    f AS rbx_flights PRIMARY KEY (flight_id),
+    ap AS rbx_airports PRIMARY KEY (code),
+    d AS rbx_details PRIMARY KEY (airport_code)
+  )
+  RELATIONSHIPS (
+    dep_airport AS f (dep) REFERENCES ap,
+    arr_airport AS f (arr) REFERENCES ap,
+    d_airport AS d (airport_code) REFERENCES ap
+  )
+  DIMENSIONS (
+    ap.city AS ap.city,
+    d.terminal AS d.terminal
+  )
+  METRICS (
+    f.flight_count AS COUNT(f.flight_id),
+    f.arrivals USING (arr_airport) AS COUNT(f.flight_id),
+    f.departures USING (dep_airport) AS COUNT(f.flight_id),
+    ap.airport_count AS COUNT(ap.code)
+  );
+
+# The same view with the details declared first and the flights last.
+statement ok
+CREATE SEMANTIC VIEW rbx_air_rev
+  TABLES (
+    d AS rbx_details PRIMARY KEY (airport_code),
+    ap AS rbx_airports PRIMARY KEY (code),
+    f AS rbx_flights PRIMARY KEY (flight_id)
+  )
+  RELATIONSHIPS (
+    dep_airport AS f (dep) REFERENCES ap,
+    arr_airport AS f (arr) REFERENCES ap,
+    d_airport AS d (airport_code) REFERENCES ap
+  )
+  DIMENSIONS (
+    ap.city AS ap.city,
+    d.terminal AS d.terminal
+  )
+  METRICS (
+    f.flight_count AS COUNT(f.flight_id),
+    f.arrivals USING (arr_airport) AS COUNT(f.flight_id),
+    f.departures USING (dep_airport) AS COUNT(f.flight_id),
+    ap.airport_count AS COUNT(ap.code)
+  );
+
+# R1: arrivals by the arriving airport's terminal.
+query TI rowsort
+SELECT * FROM SEMANTIC_VIEW(rbx_air DIMENSIONS terminal METRICS arrivals);
+----
+T2	1
+T4	1
+T5	1
+
+query TI rowsort
+SELECT * FROM SEMANTIC_VIEW(rbx_air_rev DIMENSIONS terminal METRICS arrivals);
+----
+T2	1
+T4	1
+T5	1
+
+# R2: departures by the departing airport's terminal.
+query TI rowsort
+SELECT * FROM SEMANTIC_VIEW(rbx_air DIMENSIONS terminal METRICS departures);
+----
+T2	2
+T5	1
+
+query TI rowsort
+SELECT * FROM SEMANTIC_VIEW(rbx_air_rev DIMENSIONS terminal METRICS departures);
+----
+T2	2
+T5	1
+
+# R3: a metric with no USING names no airport, so it stays refused.
+statement error
+SELECT * FROM SEMANTIC_VIEW(rbx_air DIMENSIONS terminal METRICS flight_count);
+----
+is ambiguous
+
+# R4: both roles in one query, each through its own airport.
+query TII rowsort
+SELECT * FROM SEMANTIC_VIEW(rbx_air DIMENSIONS terminal METRICS arrivals, departures);
+----
+T2	1	2
+T4	1	NULL
+T5	1	1
+
+query TII rowsort
+SELECT * FROM SEMANTIC_VIEW(rbx_air_rev DIMENSIONS terminal METRICS arrivals, departures);
+----
+T2	1	2
+T4	1	NULL
+T5	1	1
+
+# R5: arrivals filtered on the arriving airport's terminal.
+query I
+SELECT * FROM SEMANTIC_VIEW(rbx_air METRICS arrivals WHERE terminal = 'T2');
+----
+1
+
+query I
+SELECT * FROM SEMANTIC_VIEW(rbx_air_rev METRICS arrivals WHERE terminal = 'T2');
+----
+1
+
+# R6: the city and the terminal of the same arriving airport.
+query TTI rowsort
+SELECT * FROM SEMANTIC_VIEW(rbx_air DIMENSIONS city, terminal METRICS arrivals);
+----
+London	T5	1
+New York	T4	1
+Paris	T2	1
+
+query TTI rowsort
+SELECT * FROM SEMANTIC_VIEW(rbx_air_rev DIMENSIONS city, terminal METRICS arrivals);
+----
+London	T5	1
+New York	T4	1
+Paris	T2	1
+
+# R7: the terminals alone list the details' rows.
+query T rowsort
+SELECT * FROM SEMANTIC_VIEW(rbx_air DIMENSIONS terminal);
+----
+T2
+T4
+T5
+
+# A filter on the city follows the metric's role: one flight arrives in Paris,
+# two depart from it.
+query I
+SELECT * FROM SEMANTIC_VIEW(rbx_air METRICS arrivals WHERE city = 'Paris');
+----
+1
+
+query I
+SELECT * FROM SEMANTIC_VIEW(rbx_air_rev METRICS departures WHERE city = 'Paris');
+----
+2
+
+# Beside two roles the filter names no airport, and is refused.
+statement error
+SELECT * FROM SEMANTIC_VIEW(rbx_air METRICS arrivals, departures WHERE city = 'Paris');
+----
+ambiguous
+
+# TECH-DEBT #86: the airports' own metric by their own city reads each airport
+# once. It was refused as ambiguous, since the details also reference airports.
+query TI rowsort
+SELECT * FROM SEMANTIC_VIEW(rbx_air DIMENSIONS city METRICS airport_count);
+----
+London	1
+New York	1
+Paris	1
+
+query TI rowsort
+SELECT * FROM SEMANTIC_VIEW(rbx_air_rev DIMENSIONS city METRICS airport_count);
+----
+London	1
+New York	1
+Paris	1
+
+# ... and by the terminal on its one-to-one details.
+query TI rowsort
+SELECT * FROM SEMANTIC_VIEW(rbx_air DIMENSIONS terminal METRICS airport_count);
+----
+T2	1
+T4	1
+T5	1
+
+# ... and filtered on its own city.
+query I
+SELECT * FROM SEMANTIC_VIEW(rbx_air METRICS airport_count WHERE city = 'Paris');
+----
+1

@@ -1153,6 +1153,9 @@ fn flights_with_role_playing_and_child_legs() -> SemanticViewDefinition {
 /// is the declaration-order-dependent mis-binding this gate exists to prevent,
 /// and answering it silently is strictly worse than the `MetricFanTrap` this
 /// shape raised before per-grain ever looked at it.
+///
+/// Since Phase 7 PR 4b the role check runs before the fan-trap checks and
+/// names the reason: `leg_count` names no role for the filter to follow.
 #[test]
 fn where_clause_reaching_a_role_played_table_declines_per_grain() {
     let def = flights_with_role_playing_and_child_legs();
@@ -1174,8 +1177,9 @@ fn where_clause_reaching_a_role_played_table_declines_per_grain() {
                 | ExpandError::FanTrap { .. }
                 | ExpandError::RootGrainFanTrap { .. }
                 | ExpandError::WhereClauseFanTrap { .. }
+                | ExpandError::AmbiguousWhereClausePath { .. }
         ),
-        "expected the base-anchored fence's error, got: {err}"
+        "expected a refusal, got: {err}"
     );
 }
 

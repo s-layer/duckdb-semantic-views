@@ -502,9 +502,17 @@ Troubleshooting
 
 **A filter member on a role-played table is rejected**
    When a table is reachable through two named relationships, a predicate has no
-   way to say which role it means, so the query errors rather than binding to
-   whichever relationship was declared first. Filter on a member of a table that
-   is reached one way only. See :ref:`howto-role-playing`.
+   way to say which role it means on its own. It follows the metrics' role when
+   every metric's ``USING`` names the same one: ``arrivals`` filtered on
+   ``city = 'Paris'`` counts the flights arriving in Paris. Beside metrics that
+   name two different roles, or none, the query errors rather than binding to
+   whichever relationship was declared first. Query the metrics separately, or
+   filter on a member of a table that is reached one way only. See
+   :ref:`howto-role-playing`.
+
+   .. versionchanged:: 0.19.0
+
+      A filter beside metrics that all name one role used to be rejected too.
 
 **The predicate fails on a type error the first time it is used**
    A named filter's ``BOOLEAN`` requirement is enforced by DuckDB's binder when

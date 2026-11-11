@@ -312,3 +312,174 @@ fn a_filter_beside_no_role_is_refused() {
         }
     }
 }
+
+/// A filter on the airports beside a metric on a child of the flights (legs),
+/// which names no role, is refused for its role in every `TABLES` order. With
+/// another child of the flights (crew) declared first, the query used to be
+/// refused as a fan trap instead, the legs fanning out from the crew, so the
+/// reason depended on the order (`dag_proptest`).
+#[test]
+fn a_filter_beside_a_child_metric_names_its_role_in_any_order() {
+    let tables = [
+        table("l", "legs", "leg_id"),
+        table("c", "crew", "crew_id"),
+        table("f", "flights", "flight_id"),
+        table("ap", "airports", "code"),
+    ];
+    let mut orders: Vec<Vec<usize>> = vec![vec![]];
+    for _ in 0..tables.len() {
+        orders = orders
+            .into_iter()
+            .flat_map(|o| {
+                (0..tables.len())
+                    .filter(|i| !o.contains(i))
+                    .map(|i| [o.clone(), vec![i]].concat())
+                    .collect::<Vec<_>>()
+            })
+            .collect();
+    }
+    let to_flight = |name: &str, from: &str| Join {
+        ref_columns: vec!["flight_id".to_string()],
+        ..rel(name, from, "flight_id", "f", Cardinality::ManyToOne)
+    };
+    for order in orders {
+        let def = SemanticViewDefinition {
+            tables: order.iter().map(|i| tables[*i].clone()).collect(),
+            joins: vec![
+                rel("dep_airport", "f", "dep", "ap", Cardinality::ManyToOne),
+                rel("arr_airport", "f", "arr", "ap", Cardinality::ManyToOne),
+                to_flight("l_flight", "l"),
+                to_flight("c_flight", "c"),
+            ],
+            dimensions: vec![dim("city", "ap.city", "ap")],
+            metrics: vec![metric("leg_count", "l", "COUNT(l.leg_id)", &[])],
+            ..Default::default()
+        };
+        match expand(
+            "air",
+            &def,
+            &req(&[], &["leg_count"], Some("city = 'Paris'")),
+        ) {
+            Err(ExpandError::AmbiguousWhereClausePath {
+                role_playing_table, ..
+            }) => assert_eq!(role_playing_table, "ap"),
+            other => panic!("{order:?}: expected the role refusal, got {other:?}"),
+        }
+    }
+}
+
+/// Fixture 8's `t_roles`: notes reference orders twice (`n_order`,
+/// `n_order2`), and line items reference orders once. Orders 1, 2, 3; items:
+/// order 1 qty 5 and 1, order 2 qty 2, order 3 qty 7; notes 1 gift (orders 1
+/// and 3), 2 rush (order 1), 3 gift (orders 2 and 1).
+fn t_roles(order: &[usize]) -> SemanticViewDefinition {
+    let tables = [
+        table("o", "orders", "order_id"),
+        table("li", "line_items", "item_id"),
+        table("n", "notes", "note_id"),
+    ];
+    let rel = |name: &str, from: &str, fk: &str| Join {
+        table: "o".to_string(),
+        from_alias: from.to_string(),
+        fk_columns: vec![fk.to_string()],
+        ref_columns: vec!["order_id".to_string()],
+        name: Some(name.to_string()),
+        cardinality: Cardinality::ManyToOne,
+        ..Default::default()
+    };
+    SemanticViewDefinition {
+        tables: order.iter().map(|i| tables[*i].clone()).collect(),
+        joins: vec![
+            rel("li_order", "li", "order_id"),
+            rel("n_order", "n", "order_id"),
+            rel("n_order2", "n", "order_id2"),
+        ],
+        dimensions: vec![
+            dim("order_no", "o.order_id", "o"),
+            dim("qty", "li.qty", "li"),
+            dim("kind", "n.kind", "n"),
+        ],
+        metrics: vec![
+            metric("order_count", "o", "COUNT(o.order_id)", &[]),
+            metric("notes_by_first", "n", "COUNT(n.note_id)", &["n_order"]),
+        ],
+        ..Default::default()
+    }
+}
+
+fn t_roles_run(order: &[usize], dims: &[&str], mets: &[&str]) -> Result<Vec<String>, ExpandError> {
+    let sql = expand("t_roles", &t_roles(order), &req(dims, mets, None))?;
+    let con = duckdb::Connection::open_in_memory().expect("in-memory DuckDB");
+    con.execute_batch(
+        "CREATE TABLE orders (order_id INT, region_id INT);
+         CREATE TABLE line_items (item_id INT, order_id INT, qty INT);
+         CREATE TABLE notes (note_id INT, order_id INT, order_id2 INT, kind VARCHAR);
+         INSERT INTO orders VALUES (1, 1), (2, NULL), (3, 2);
+         INSERT INTO line_items VALUES (1, 1, 5), (2, 1, 1), (3, 2, 2), (4, 3, 7);
+         INSERT INTO notes VALUES (1, 1, 3, 'gift'), (2, 1, NULL, 'rush'), (3, 2, 1, 'gift');",
+    )
+    .expect("fixture data");
+    let mut stmt = con
+        .prepare(&sql)
+        .unwrap_or_else(|e| panic!("emitted SQL must bind, got: {e}\nSQL:\n{sql}"));
+    let mut out: Vec<String> = stmt
+        .query_map([], |r| {
+            let n = r.as_ref().column_count();
+            (0..n)
+                .map(|i| {
+                    Ok(match r.get::<_, duckdb::types::Value>(i)? {
+                        duckdb::types::Value::Null => "NULL".to_string(),
+                        duckdb::types::Value::BigInt(n) => n.to_string(),
+                        duckdb::types::Value::Int(n) => n.to_string(),
+                        other => format!("{other:?}"),
+                    })
+                })
+                .collect::<Result<Vec<_>, _>>()
+                .map(|cols| cols.join("/"))
+        })
+        .expect("query runs")
+        .map(Result::unwrap)
+        .collect();
+    out.sort();
+    Ok(out)
+}
+
+/// The role-played table's own metric across a plain fan-out to the items,
+/// which reference it once: each order counted once per qty (fixture 9's O1
+/// asks Snowflake; fixture 7 answers a single-path fan-out so). It was
+/// refused as a fan trap (TECH-DEBT #111).
+#[test]
+fn an_order_metric_across_a_plain_fan_out() {
+    for order in ORDERS {
+        assert_eq!(
+            t_roles_run(&order, &["qty"], &["order_count"])
+                .unwrap_or_else(|e| panic!("{order:?}: {e}")),
+            ["1/1", "2/1", "5/1", "7/1"],
+            "{order:?}"
+        );
+    }
+}
+
+/// Across one of the orders' roles (the notes) it is refused: which order a
+/// note names is the role, and the metric names none.
+#[test]
+fn an_order_metric_across_a_role_is_refused() {
+    for order in ORDERS {
+        assert!(
+            t_roles_run(&order, &["kind"], &["order_count"]).is_err(),
+            "{order:?}: order_count by kind crosses a role"
+        );
+    }
+}
+
+/// A note metric across its role and then a fan-out to the items is refused,
+/// as Snowflake refuses it (fixture 8, T3b: 000002, multi-path in many-to-many).
+#[test]
+fn a_role_then_a_fan_out_is_refused() {
+    for order in ORDERS {
+        assert!(
+            t_roles_run(&order, &["qty"], &["notes_by_first"]).is_err(),
+            "{order:?}: notes_by_first by qty"
+        );
+    }
+}

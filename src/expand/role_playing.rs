@@ -406,6 +406,7 @@ pub(super) fn check_where_clause_role_playing_path(
             if scopes
                 .iter()
                 .any(|(t, _)| t.eq_ignore_ascii_case(member_table))
+                || reads_own_rows(resolved_mets, member_table)
             {
                 continue;
             }
@@ -454,6 +455,44 @@ pub(super) fn where_role_scopes(
             if let Ok(Some(scoped)) = find_using_context("", def, &dim, mets) {
                 out.push((table, scoped));
             }
+        }
+    }
+    out
+}
+
+/// A stand-in dimension on each of `where_tables` that [`where_role_scopes`]
+/// would scope: one every metric of `mets` reads on the same role, or the
+/// role-played table itself when every metric is on it. The
+/// per-grain planner resolves each group's roles over these beside the queried
+/// dimensions, so a grain CTE joins such a table under the role's scoped alias
+/// and its predicate is rewritten to name it.
+pub(super) fn where_role_dims(
+    def: &SemanticViewDefinition,
+    where_tables: &[String],
+    mets: &[&crate::model::Metric],
+) -> Vec<crate::model::Dimension> {
+    let mut out: Vec<crate::model::Dimension> = Vec::new();
+    for table in where_tables {
+        let table = table.to_ascii_lowercase();
+        if out
+            .iter()
+            .any(|d| d.source_table.as_deref() == Some(table.as_str()))
+        {
+            continue;
+        }
+        let dim = crate::model::Dimension {
+            source_table: Some(table.clone()),
+            ..Default::default()
+        };
+        // Read on one role, or (unscoped) on the rows of the role-played
+        // table every metric is on.
+        let read = match find_using_context("", def, &dim, mets) {
+            Ok(Some(_)) => true,
+            Ok(None) => is_role_playing_target(def, &table),
+            Err(_) => false,
+        };
+        if read {
+            out.push(dim);
         }
     }
     out
@@ -886,11 +925,7 @@ pub(super) fn find_using_context(
     // Multiple relationships -> role-playing table. A query whose every
     // metric is on the table reads the dimension from the metrics' own rows,
     // which no role picks (TECH-DEBT #111: an airport count by city).
-    if !resolved_mets.is_empty()
-        && resolved_mets
-            .iter()
-            .all(|met| met_is_on(met, &dim_table_lower))
-    {
+    if reads_own_rows(resolved_mets, &dim_table_lower) {
         return Ok(None);
     }
     // Otherwise look for USING context.
@@ -1002,6 +1037,13 @@ fn using_edges_to<'a>(
         }
     }
     using_rels_for_table
+}
+
+/// Whether every one of `mets`, and there is one, is declared on `table`: a
+/// member there is read from the metrics' own rows, which no role picks
+/// (TECH-DEBT #86, #111).
+fn reads_own_rows(mets: &[&crate::model::Metric], table: &str) -> bool {
+    !mets.is_empty() && mets.iter().all(|met| met_is_on(met, table))
 }
 
 /// Whether `met` is declared on `table` itself.

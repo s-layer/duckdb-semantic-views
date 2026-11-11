@@ -386,6 +386,62 @@ impl Partition {
     }
 }
 
+/// Partition the metrics into grains, decomposing a metric whose own grain
+/// spans several tables into one component per referenced base metric.
+/// `None` when a metric cannot be decomposed.
+fn partition_metrics(
+    def: &SemanticViewDefinition,
+    resolved_mets: &[&Metric],
+    resolved_exprs: &HashMap<String, String>,
+    root: &str,
+    role_dims: &[&Dimension],
+    member_tables: &[String],
+) -> Option<(Partition, Vec<Output>)> {
+    let mut partition = Partition::new();
+    let mut outputs: Vec<Output> = Vec::with_capacity(resolved_mets.len());
+    for met in resolved_mets {
+        // `anchored` supplies the root for any component that names no table —
+        // both a metric with no source table at all and (EXP-11) a source-less
+        // aggregate reached through a derived metric's dependency graph. The
+        // latter is why this cannot read the table list directly: it would see
+        // one grain for a metric that has two, and the fast path below would
+        // anchor the root component at the other one.
+        let grains = metric_grain(met, def).anchored(root);
+        // A metric whose components reach a role-played dimension table through
+        // different relationships has no one role, so it is decomposed like a
+        // multi-grain metric: each component is grouped through its own.
+        let roles = metric_roles(def, role_dims, met);
+        // Likewise a derived metric whose components follow different paths
+        // to a table reached several ways.
+        let paths = metric_paths(def, met, root, member_tables);
+        match (grains.len(), roles, paths) {
+            (1, Some(roles), Some(paths)) => {
+                let expr = resolved_exprs
+                    .get(&crate::ident::normalize_ident_part(&met.name))
+                    .cloned()
+                    .unwrap_or_else(|| met.expr.clone());
+                let (group, column) = partition.push(
+                    &grains[0],
+                    &roles,
+                    &paths,
+                    expr,
+                    crate::ident::normalize_ident_part(&met.name),
+                );
+                outputs.push(Output::Direct { group, column });
+            }
+            _ => outputs.push(decompose(
+                def,
+                role_dims,
+                member_tables,
+                met,
+                resolved_exprs,
+                &mut partition,
+            )?),
+        }
+    }
+    Some((partition, outputs))
+}
+
 /// Decide whether this query must be computed per-grain, and how.
 ///
 /// Returns `None` — meaning "leave the query on the base-anchored path, with the
@@ -428,51 +484,24 @@ pub(super) fn plan(
     let member_tables: Vec<String> = touched_tables(def, resolved_dims, &[], where_tables, false)
         .into_iter()
         .collect();
+    // The queried dimensions, and a stand-in for each `where_clause` table read
+    // on the one role every metric names (TECH-DEBT #111): each group's roles
+    // are resolved over both.
+    let role_where = super::role_playing::where_role_dims(def, where_tables, resolved_mets);
+    let role_dims: Vec<&Dimension> = resolved_dims
+        .iter()
+        .copied()
+        .chain(role_where.iter())
+        .collect();
 
-    // Partition the metrics into grains, decomposing a metric whose own grain
-    // spans several tables into one component per referenced base metric.
-    let mut partition = Partition::new();
-    let mut outputs: Vec<Output> = Vec::with_capacity(resolved_mets.len());
-    for met in resolved_mets {
-        // `anchored` supplies the root for any component that names no table —
-        // both a metric with no source table at all and (EXP-11) a source-less
-        // aggregate reached through a derived metric's dependency graph. The
-        // latter is why this cannot read the table list directly: it would see
-        // one grain for a metric that has two, and the fast path below would
-        // anchor the root component at the other one.
-        let grains = metric_grain(met, def).anchored(&root);
-        // A metric whose components reach a role-played dimension table through
-        // different relationships has no one role, so it is decomposed like a
-        // multi-grain metric: each component is grouped through its own.
-        let roles = metric_roles(def, resolved_dims, met);
-        // Likewise a derived metric whose components follow different paths
-        // to a table reached several ways.
-        let paths = metric_paths(def, met, &root, &member_tables);
-        match (grains.len(), roles, paths) {
-            (1, Some(roles), Some(paths)) => {
-                let expr = resolved_exprs
-                    .get(&crate::ident::normalize_ident_part(&met.name))
-                    .cloned()
-                    .unwrap_or_else(|| met.expr.clone());
-                let (group, column) = partition.push(
-                    &grains[0],
-                    &roles,
-                    &paths,
-                    expr,
-                    crate::ident::normalize_ident_part(&met.name),
-                );
-                outputs.push(Output::Direct { group, column });
-            }
-            _ => outputs.push(decompose(
-                def,
-                resolved_dims,
-                &member_tables,
-                met,
-                resolved_exprs,
-                &mut partition,
-            )?),
-        }
-    }
+    let (mut partition, outputs) = partition_metrics(
+        def,
+        resolved_mets,
+        resolved_exprs,
+        &root,
+        &role_dims,
+        &member_tables,
+    )?;
 
     // Per-grain only helps when every queried dimension is reachable from every
     // anchor without fanning it, or (Phase 7.3, PR 4c) by a fan-out the group
@@ -924,13 +953,29 @@ fn role_playing_affects_query(
     // means and stays ineligible. A metric's grain table is likewise strict:
     // `USING` scopes the dimension a metric is grouped BY, not the table a
     // metric is aggregated AT.
+    //
+    // TECH-DEBT #111: unless every metric reads it on one role, which the
+    // predicate is then rewritten to name (`where_role_dims`): such a table is
+    // rescued like a dimension's below.
+    let role_where = super::role_playing::where_role_dims(def, where_tables, resolved_mets);
     let strict: HashSet<String> = where_tables
         .iter()
         .map(|t| t.to_ascii_lowercase())
+        .filter(|t| {
+            !role_where
+                .iter()
+                .any(|d| d.source_table.as_deref() == Some(t.as_str()))
+        })
         .collect();
     if strict.iter().any(|t| ambiguity(t).is_some()) {
         return true;
     }
+    let role_dims: Vec<&Dimension> = resolved_dims
+        .iter()
+        .copied()
+        .chain(role_where.iter())
+        .collect();
+    let resolved_dims: &[&Dimension] = &role_dims;
     // A metric's grain table is its group's anchor, so its own rows are read:
     // it is ambiguous only where the own-table check finds a role on the way
     // to it from another table the query reads (or it is role-played and the
@@ -1279,8 +1324,15 @@ fn is_eligible(
     // (and, in a diamond, along the path the `USING` starts, see
     // [`Group::paths`]), and `anchor_needs` joins its scoped instance for the
     // facts the metric inlines (TECH-DEBT #81).
+    // A `where_clause` table read on one role is threaded like a dimension's.
+    let role_where = super::role_playing::where_role_dims(def, where_tables, resolved_mets);
+    let role_dims: Vec<&Dimension> = resolved_dims
+        .iter()
+        .copied()
+        .chain(role_where.iter())
+        .collect();
     let using_is_threaded = |m: &Metric| {
-        let roles = metric_roles(def, resolved_dims, m).unwrap_or_default();
+        let roles = metric_roles(def, &role_dims, m).unwrap_or_default();
         m.using_relationships.iter().all(|rel| {
             let named = crate::graph::RelNameMatch::new(&def.joins, rel);
             def.joins.iter().any(|j| {
@@ -1507,7 +1559,7 @@ fn render_plain_group(
     // already-combined result — a post-aggregation filter.
     if let Some(w) = where_clause {
         sql.push_str("\n    WHERE ");
-        sql.push_str(&w.sql);
+        sql.push_str(&group_predicate(w, roles));
     }
     push_group_by_ordinals(&mut sql, resolved_dims.len(), "\n    ", "        ");
     sql
@@ -1663,7 +1715,7 @@ fn render_single_grain(
     SelectSpec {
         // Filters the anchor's rows on their way into the aggregation, the same
         // position the base-anchored path uses.
-        where_clause: where_clause.map(|w| w.sql.clone()),
+        where_clause: where_clause.map(|w| group_predicate(w, roles)),
         distinct: false,
         items,
         from: FromSource::AnchorTable {
@@ -1890,7 +1942,7 @@ fn bridged_pairs_query(
     if let Some(w) = where_clause {
         sql.push_str(&lead);
         sql.push_str("WHERE ");
-        sql.push_str(&w.sql);
+        sql.push_str(&group_predicate(w, &group.roles));
     }
     sql
 }
@@ -2163,6 +2215,24 @@ pub(super) fn anchor_joins<'a>(
 ///
 /// Mirrors what the base-anchored path does with [`ResolvedDim::scoped_alias`],
 /// so both paths emit `a__dep.city` for the same query.
+/// The predicate as a group's CTE evaluates it: each `where_clause` table the
+/// group reads on a role (TECH-DEBT #111, [`super::role_playing::where_role_dims`])
+/// named by that role's scoped alias, as [`dim_expr`] names a dimension's.
+fn group_predicate(w: &ResolvedWhere, roles: &HashMap<String, String>) -> String {
+    let mut sql = w.sql.clone();
+    for table in &w.source_tables {
+        let table = table.to_ascii_lowercase();
+        if let Some(rel) = roles.get(&table) {
+            sql = super::join_resolver::rewrite_to_scoped_alias(
+                &sql,
+                &table,
+                &super::join_resolver::scoped_join_alias(&table, rel),
+            );
+        }
+    }
+    sql
+}
+
 fn dim_expr(
     dim: &Dimension,
     roles: &HashMap<String, String>,
