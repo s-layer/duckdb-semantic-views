@@ -1616,12 +1616,13 @@ Unrelated tables
 .. code-block:: text
 
    semantic view '<view>': tables '<table_a>' and '<table_b>' are not related
-   -- no table reaches both by following relationships many-to-one, so no rows
-   hold their members together. Query them separately
+   -- no table reaches both by following relationships many-to-one, and no
+   table with a metric is where their paths meet, so no rows hold their
+   members together. Query them separately
 
-**Cause:** A query with dimensions and no metrics reads the one table that every queried dimension, and every member its ``WHERE`` names, can be reached from by following relationships toward the referenced table. When no table reaches two of them, there is none: the usual shape is dimensions on two children of one parent, such as ``orders`` and ``tickets`` that both reference ``customers``. Adding a dimension on the parent does not relate them. Snowflake refuses the same query: ``The entities ... are not related``.
+**Cause:** A query with dimensions and no metrics reads the one table that every queried dimension, and every member its ``WHERE`` names, can be reached from by following relationships toward the referenced table. When no table reaches two of them, the query is still answered if the table where their paths meet has a metric (see :ref:`Dimensions only <ref-sv-modes>`). The error means neither holds. The usual shape is dimensions on two children of one parent, such as ``orders`` and ``tickets`` that both reference ``customers``, when ``customers`` has no metric. Adding a dimension on the parent does not relate them. Snowflake refuses the same query: ``The entities ... are not related``.
 
-**Fix:** Query each child's dimensions separately, each with the parent's if you need them.
+**Fix:** Query each child's dimensions separately, each with the parent's if you need them. If a metric on the parent belongs in the view, declaring it makes the query answerable, as in Snowflake.
 
 
 .. _err-multi-path:

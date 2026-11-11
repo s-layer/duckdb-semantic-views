@@ -235,9 +235,20 @@ Generates ``SELECT DISTINCT <dims> FROM ...``.
      through several relationships), or on a table above it, lists that
      table's own rows. Beside a member on the referencing table it is refused
      as ambiguous, since no metric names a relationship to follow.
-   - When no single table reaches every member, such as dimensions on two
-     children of one parent, the query is refused: the two tables are not
-     related, as Snowflake says.
+   - When no single table reaches every member, the query is answered from
+     the table where the members' paths meet, if that table has a metric, as
+     Snowflake answers it. Each member is reached from there by one or more
+     one-to-many hops, then hops toward referenced tables: an item's ``qty``
+     and a note's ``kind``, both children of ``orders``, meet at ``orders``;
+     a review's ``stars`` and an author's ``country`` meet at ``books``,
+     across the ``book_authors`` bridge. The rows are the distinct member
+     tuples that table reaches. No tuple is padded with ``NULL`` for a member
+     it reaches no row of, so an order with no notes lists none of its items'
+     values. A ``WHERE`` member counts as a member.
+   - Otherwise the query is refused: the tables are not related, as Snowflake
+     says. That is the case for dimensions on two children of a parent with
+     no metric, and for members whose paths meet across an ``ASOF`` or range
+     relationship, or more than once.
 
    A ``FACTS`` query reads the same table and joins up from it the same way,
    but lists every row of it rather than each distinct one.

@@ -374,6 +374,10 @@ struct Case {
     dims: Vec<usize>,
     mets: Vec<usize>,
     pred: Option<Pred>,
+    /// Whether `h` has its metrics. Only a dims-only case drops them: `h` is
+    /// where the paths of members no table reaches by foreign keys meet, and
+    /// Snowflake answers those only when it has a metric (fixture 7, D1-D10).
+    h_metrics: bool,
 }
 
 impl Case {
@@ -460,6 +464,7 @@ fn arb_case() -> impl Strategy<Value = Case> {
             dims,
             mets,
             pred,
+            h_metrics: true,
         })
 }
 
@@ -514,6 +519,7 @@ fn build_def(case: &Case) -> SemanticViewDefinition {
         .collect();
     let metrics = METS
         .iter()
+        .filter(|(_, t, _)| case.h_metrics || *t != "h")
         .map(|(name, t, col)| Metric {
             name: (*name).to_string(),
             expr: col.map_or_else(|| "COUNT(*)".to_string(), |c| format!("SUM({t}.{c})")),
@@ -759,9 +765,68 @@ fn anchor_rows<'a>(inst: &'a Instance, anchor: &str) -> Vec<Wide<'a>> {
     }
 }
 
+/// The member tuples `h` reaches when the members' paths meet there (no table
+/// reaches them all by foreign keys: a member on `c` or `s` beside one on the
+/// other, or on `bt`, `x` or `y`). Each `h` row is paired with every row it
+/// reaches on each member's table and the tables between, and a tuple missing
+/// one of those rows is not listed: Snowflake's answer for fixture 7's D4 and
+/// N8 (Phase 7 PR 4d).
+fn meet_rows<'a>(inst: &'a Instance, members: &[usize]) -> Vec<Wide<'a>> {
+    let on = |t: &str| members.iter().any(|d| DIMS[*d].1 == t);
+    let (need_y, need_z) = (on("y"), on("z"));
+    let need_x = need_y || on("x");
+    let need_bt = need_x || on("bt");
+    let children = |rows: &[Cell], i: usize, needed: bool| -> Vec<Option<usize>> {
+        if !needed {
+            return vec![None];
+        }
+        (0..rows.len())
+            .filter(|j| lookup(rows[*j], inst.h.len()) == Some(i))
+            .map(Some)
+            .collect()
+    };
+    let c_fk: Vec<Cell> = inst.c.iter().map(|r| r.0).collect();
+    let s_fk: Vec<Cell> = inst.s.iter().map(|r| r.0).collect();
+    let bt_fk: Vec<Cell> = inst.bt.iter().map(|r| r.0).collect();
+    let mut out = Vec::new();
+    for i in 0..inst.h.len() {
+        let z = lookup(inst.h[i].0, inst.z.len());
+        if need_z && z.is_none() {
+            continue;
+        }
+        for c in children(&c_fk, i, on("c")) {
+            for s in children(&s_fk, i, on("s")) {
+                for bt in children(&bt_fk, i, need_bt) {
+                    let x = bt.and_then(|b| lookup(inst.bt[b].1, inst.x.len()));
+                    let y = x.and_then(|x| lookup(inst.x[x].0, inst.y.len()));
+                    if (need_x && x.is_none()) || (need_y && y.is_none()) {
+                        continue;
+                    }
+                    out.push(Wide {
+                        inst: Some(inst),
+                        h: Some(i),
+                        x,
+                        z,
+                        y,
+                        bt,
+                        c,
+                        s,
+                    });
+                }
+            }
+        }
+    }
+    out
+}
+
 /// The distinct dimension tuples of the anchor's rows the predicate is TRUE on.
 fn dims_only_oracle(inst: &Instance, case: &Case, anchor: &str) -> Vec<Vec<Option<i128>>> {
-    let rows: BTreeSet<Vec<Option<i128>>> = anchor_rows(inst, anchor)
+    tuples(case, anchor_rows(inst, anchor))
+}
+
+/// The distinct dimension tuples of `rows` the predicate is TRUE on.
+fn tuples(case: &Case, rows: Vec<Wide<'_>>) -> Vec<Vec<Option<i128>>> {
+    let rows: BTreeSet<Vec<Option<i128>>> = rows
         .into_iter()
         .filter(|w| case.pred.as_ref().is_none_or(|p| p.eval(w) == Some(true)))
         .map(|w| {
@@ -786,14 +851,16 @@ fn arb_dims_only_case() -> impl Strategy<Value = Case> {
                 Just(first),
                 prop::sample::subsequence((0..n_dims).collect::<Vec<usize>>(), 1..=3),
                 prop::option::weighted(0.4, arb_pred(n_dims)),
+                prop::bool::weighted(0.7),
             )
         })
-        .prop_map(|(inst, first, dims, pred)| Case {
+        .prop_map(|(inst, first, dims, pred, h_metrics)| Case {
             inst,
             first,
             dims,
             mets: vec![],
             pred,
+            h_metrics,
         })
 }
 
@@ -813,17 +880,25 @@ proptest! {
     /// members, joined up from there, whichever table is declared first: one
     /// table's own values, a child's rows beside its parent, the bridge's rows
     /// across it. Dangling and NULL foreign keys give NULL parent columns.
-    /// Members no single table is under are refused.
+    /// Members no single table is under meet at `h`: they are listed from
+    /// there when `h` has a metric (`meet_rows`), and refused otherwise.
     #[test]
     fn dims_only_lists_the_rows_of_the_table_under_its_members(case in arb_dims_only_case()) {
         let members = dims_only_members(&case);
         let def = build_def(&case);
-        // A member on `c` beside one across the bridge has no table under both:
-        // Snowflake refuses it, the two "are not related".
+        // A member on `c` beside one across the bridge has no table under both.
         let Some(anchor) = dims_only_anchor(&members) else {
+            if case.h_metrics {
+                let sql = expand("v", &def, &request(&case))
+                    .map_err(|e| TestCaseError::fail(format!("refused at the meeting table: {e}")))?;
+                let got = run(&make_db(&case.inst), &sql);
+                let want = tuples(&case, meet_rows(&case.inst, &members));
+                prop_assert_eq!(got, want, "meeting at h, SQL:\n{}", sql);
+                return Ok(());
+            }
             let err = expand("v", &def, &request(&case))
                 .err()
-                .ok_or_else(|| TestCaseError::fail("no table under every member, yet answered"))?;
+                .ok_or_else(|| TestCaseError::fail("no metric where the paths meet, yet answered"))?;
             prop_assert!(err.to_string().contains("are not related"), "{}", err);
             return Ok(());
         };
@@ -847,6 +922,7 @@ fn dims_only_generator_reaches_every_anchor() {
     let mut off_base = 0;
     let mut filtered = 0;
     let mut unrelated = 0;
+    let mut met = 0;
     // 3000 draws: with `s` beside `c` more member sets reach no single table.
     for _ in 0..3000 {
         let case = arb_dims_only_case()
@@ -854,7 +930,11 @@ fn dims_only_generator_reaches_every_anchor() {
             .unwrap()
             .current();
         let Some(anchor) = dims_only_anchor(&dims_only_members(&case)) else {
-            unrelated += 1;
+            if case.h_metrics {
+                met += 1;
+            } else {
+                unrelated += 1;
+            }
             continue;
         };
         anchors.insert(anchor);
@@ -867,8 +947,8 @@ fn dims_only_generator_reaches_every_anchor() {
     }
     assert_eq!(anchors.len(), TABLES.len(), "{anchors:?}");
     assert!(
-        off_base > 500 && filtered > 300 && unrelated > 50,
-        "{off_base} {filtered} {unrelated}"
+        off_base > 500 && filtered > 300 && unrelated > 50 && met > 100,
+        "{off_base} {filtered} {unrelated} {met}"
     );
 }
 
@@ -905,6 +985,7 @@ fn pinned_once_per_group() {
         dims: vec![1],
         mets: vec![0, 1],
         pred: None,
+        h_metrics: true,
     };
     assert_eq!(
         oracle(&case.inst, &case),

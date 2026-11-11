@@ -69,7 +69,18 @@ fn db() -> duckdb::Connection {
          CREATE TABLE forders (order_id INT, cust_id INT, status VARCHAR, amount INT);
          INSERT INTO fcustomers VALUES (1, 'Ana', 100), (2, 'Ben', 100), (3, 'Cleo', 50);
          INSERT INTO forders VALUES (1, 1, 'open', 10), (2, 1, 'shipped', 10), (3, 2, 'open', 20),
-                                    (4, NULL, 'lost', 5), (5, 9, 'stray', 7);",
+                                    (4, NULL, 'lost', 5), (5, 9, 'stray', 7);
+         CREATE TABLE reviews (review_id INT, book_id INT, stars INT);
+         INSERT INTO reviews VALUES (1, 10, 5), (2, 10, 3), (3, 12, 4), (4, 13, 2),
+                                    (5, NULL, 1), (6, 11, 4);
+         CREATE TABLE nregions (region_id INT, region VARCHAR);
+         CREATE TABLE norders (order_id INT, region_id INT);
+         CREATE TABLE nitems (item_id INT, order_id INT, qty INT);
+         CREATE TABLE nnotes (note_id INT, order_id INT, kind VARCHAR);
+         INSERT INTO nregions VALUES (1, 'EU');
+         INSERT INTO norders VALUES (1, 1), (2, NULL), (3, 1);
+         INSERT INTO nitems VALUES (1, 1, 5), (2, 1, 1), (3, 2, 2), (4, 3, 7);
+         INSERT INTO nnotes VALUES (1, 1, 'gift'), (2, 1, 'rush'), (3, 2, 'gift');",
     )
     .expect("fixture data");
     con
@@ -750,4 +761,302 @@ fn f8_parent_fact_filtered_by_child() {
         &facts_req(&["credit"], Some("o.status = 'open'")),
         &["100", "100"],
     );
+}
+
+// ---------------------------------------------------------------------------
+// Phase 7 PR 4d: members no table reaches by foreign keys, whose paths meet at
+// a table with a metric (fixture 7's D1-D10 and N8). Snowflake lists the
+// distinct member tuples that table reaches, with none padded with NULLs.
+// ---------------------------------------------------------------------------
+
+fn metric(name: &str, expr: &str, table: &str) -> Metric {
+    Metric {
+        name: name.to_string(),
+        expr: expr.to_string(),
+        source_table: Some(table.to_string()),
+        ..Default::default()
+    }
+}
+
+/// Fixture 7's `d*` views (`reviews -> books <- book_authors -> authors`),
+/// with a metric on the reviews and, for `books_metric`, one on the books (D4,
+/// D6) or not (D1, D8). The bridge row `(12, 99)` names no author, so a LEFT
+/// JOIN would list Solo's review under a NULL country.
+fn reviews_def(base: &str, books_metric: bool) -> SemanticViewDefinition {
+    let mut metrics = vec![metric("review_count", "COUNT(rv.review_id)", "rv")];
+    if books_metric {
+        metrics.push(metric("total_pages", "SUM(b.pages)", "b"));
+    }
+    SemanticViewDefinition {
+        tables: first(
+            vec![
+                table("a", "authors", &["author_id"]),
+                table("b", "books", &["book_id"]),
+                table("ba", "book_authors", &["book_id", "author_id"]),
+                table("rv", "reviews", &["review_id"]),
+            ],
+            base,
+        ),
+        dimensions: vec![
+            dim("country", "a.country", "a"),
+            dim("name", "a.name", "a"),
+            dim("title", "b.title", "b"),
+            dim("stars", "rv.stars", "rv"),
+        ],
+        metrics,
+        joins: vec![
+            rel("ba_author", "ba", "a", "author_id", "author_id"),
+            rel("ba_book", "ba", "b", "book_id", "book_id"),
+            rel("rv_book", "rv", "b", "book_id", "book_id"),
+        ],
+        ..Default::default()
+    }
+}
+
+fn reviews_with_books_metric(base: &str) -> SemanticViewDefinition {
+    reviews_def(base, true)
+}
+
+fn reviews_without_books_metric(base: &str) -> SemanticViewDefinition {
+    reviews_def(base, false)
+}
+
+const REVIEW_TABLES: [&str; 4] = ["a", "b", "ba", "rv"];
+
+/// D4 / D6: stars with country meet at books, which has a metric. Review 4's
+/// book has no author and review 5 no book, so neither is listed, and the
+/// ghost bridge row adds no NULL country.
+#[test]
+fn d4_reviews_and_authors_meet_at_books_with_a_metric() {
+    case_in_every_order(
+        reviews_with_books_metric,
+        &REVIEW_TABLES,
+        &dims_req(&["stars", "country"], None),
+        &["3/FR", "4/FR", "4/UK", "5/FR"],
+    );
+}
+
+/// D1 / D7 / D8: the same query with no metric on books is refused, whatever
+/// metric the reviews have.
+#[test]
+fn d8_reviews_and_authors_with_no_books_metric_are_unrelated() {
+    refused_in_every_order(
+        reviews_without_books_metric,
+        &REVIEW_TABLES,
+        &dims_req(&["stars", "country"], None),
+        is_unrelated,
+    );
+}
+
+/// D10: stars filtered on the authors' country: Duo's 3 and 5, Mixed's 4.
+#[test]
+fn d10_reviews_filtered_by_authors_meet_at_books() {
+    case_in_every_order(
+        reviews_with_books_metric,
+        &REVIEW_TABLES,
+        &dims_req(&["stars"], Some("a.country = 'FR'")),
+        &["3", "4", "5"],
+    );
+}
+
+/// A member on the meeting table itself is listed beside the rest.
+#[test]
+fn meeting_tables_own_member_is_listed_beside_the_others() {
+    case_in_every_order(
+        reviews_with_books_metric,
+        &REVIEW_TABLES,
+        &dims_req(&["title", "stars", "name"], None),
+        &[
+            "Duo/3/Ana",
+            "Duo/3/Ben",
+            "Duo/5/Ana",
+            "Duo/5/Ben",
+            "Mixed/4/Ana",
+            "Mixed/4/Cleo",
+            "Solo/4/Cleo",
+        ],
+    );
+}
+
+/// Fixture 7's `nv` in small: items and notes are children of orders, and
+/// orders reference regions. `metric_on` names the tables with a metric.
+fn notes_def(base: &str, metric_on: &[&str]) -> SemanticViewDefinition {
+    let metrics = [
+        ("order_count", "COUNT(o.order_id)", "o"),
+        ("item_count", "COUNT(li.item_id)", "li"),
+        ("note_count", "COUNT(n.note_id)", "n"),
+        ("region_count", "COUNT(r.region_id)", "r"),
+    ]
+    .iter()
+    .filter(|(_, _, t)| metric_on.contains(t))
+    .map(|(name, expr, t)| metric(name, expr, t))
+    .collect();
+    SemanticViewDefinition {
+        tables: first(
+            vec![
+                table("r", "nregions", &["region_id"]),
+                table("o", "norders", &["order_id"]),
+                table("li", "nitems", &["item_id"]),
+                table("n", "nnotes", &["note_id"]),
+            ],
+            base,
+        ),
+        dimensions: vec![
+            dim("region", "r.region", "r"),
+            dim("qty", "li.qty", "li"),
+            dim("kind", "n.kind", "n"),
+        ],
+        metrics,
+        joins: vec![
+            rel("o_region", "o", "r", "region_id", "region_id"),
+            rel("li_order", "li", "o", "order_id", "order_id"),
+            rel("n_order", "n", "o", "order_id", "order_id"),
+        ],
+        ..Default::default()
+    }
+}
+
+fn notes_with_every_metric(base: &str) -> SemanticViewDefinition {
+    notes_def(base, &["o", "li", "n", "r"])
+}
+
+fn notes_without_orders_metric(base: &str) -> SemanticViewDefinition {
+    notes_def(base, &["li", "n", "r"])
+}
+
+const NOTE_TABLES: [&str; 4] = ["r", "o", "li", "n"];
+
+/// N8: an item's qty with a note's kind meet at orders, which has a metric.
+/// Order 3 (qty 7) has no notes, so no `7/NULL`.
+#[test]
+fn n8_items_and_notes_meet_at_orders_with_a_metric() {
+    case_in_every_order(
+        notes_with_every_metric,
+        &NOTE_TABLES,
+        &dims_req(&["qty", "kind"], None),
+        &["1/gift", "1/rush", "2/gift", "5/gift", "5/rush"],
+    );
+}
+
+/// With no metric on orders the same query is refused, though items and notes
+/// have metrics: they are not where the paths meet (fixture 2's W1).
+#[test]
+fn n8_items_and_notes_with_no_orders_metric_are_unrelated() {
+    refused_in_every_order(
+        notes_without_orders_metric,
+        &NOTE_TABLES,
+        &dims_req(&["qty", "kind"], None),
+        is_unrelated,
+    );
+}
+
+/// A member above the meeting table is joined like the rest: order 2 has no
+/// region, so its `2/gift` is not listed. Snowflake has not been asked about
+/// this shape (TECH-DEBT #112).
+#[test]
+fn member_above_the_meeting_table_is_inner_joined() {
+    case_in_every_order(
+        notes_with_every_metric,
+        &NOTE_TABLES,
+        &dims_req(&["qty", "kind", "region"], None),
+        &["1/gift/EU", "1/rush/EU", "5/gift/EU", "5/rush/EU"],
+    );
+}
+
+/// The meeting table is the lowest one: regions also reach every member by
+/// fanning out, but the paths meet at orders, and with no metric there the
+/// query is refused (TECH-DEBT #112).
+#[test]
+fn meeting_table_is_the_lowest_one() {
+    refused_in_every_order(
+        notes_without_orders_metric,
+        &NOTE_TABLES,
+        &dims_req(&["qty", "kind", "region"], None),
+        is_unrelated,
+    );
+}
+
+/// Two places where paths meet (`li -> o <- sh -> c <- tr`): from either, a
+/// member is reached by climbing and then fanning out again, so neither is the
+/// meeting table and the query is refused, though every table has a metric.
+#[test]
+fn members_whose_paths_meet_twice_are_unrelated() {
+    let def = SemanticViewDefinition {
+        tables: vec![
+            table("o", "norders", &["order_id"]),
+            table("li", "nitems", &["item_id"]),
+            table("sh", "nships", &["ship_id"]),
+            table("c", "ncarriers", &["carrier_id"]),
+            table("tr", "ntrucks", &["truck_id"]),
+        ],
+        dimensions: vec![dim("qty", "li.qty", "li"), dim("plate", "tr.plate", "tr")],
+        metrics: vec![
+            metric("order_count", "COUNT(o.order_id)", "o"),
+            metric("item_count", "COUNT(li.item_id)", "li"),
+            metric("ship_count", "COUNT(sh.ship_id)", "sh"),
+            metric("carrier_count", "COUNT(c.carrier_id)", "c"),
+            metric("truck_count", "COUNT(tr.truck_id)", "tr"),
+        ],
+        joins: vec![
+            rel("li_order", "li", "o", "order_id", "order_id"),
+            rel("sh_order", "sh", "o", "order_id", "order_id"),
+            rel("sh_carrier", "sh", "c", "carrier_id", "carrier_id"),
+            rel("tr_carrier", "tr", "c", "carrier_id", "carrier_id"),
+        ],
+        ..Default::default()
+    };
+    match expand("v", &def, &dims_req(&["qty", "plate"], None)) {
+        Err(e) if is_unrelated(&e) => {}
+        other => panic!("expected not related, got {other:?}"),
+    }
+}
+
+/// A fan-out across an ASOF relationship walked backwards is not answered with
+/// metrics (fixture 1's A5), so it does not meet the members either.
+#[test]
+fn members_meeting_across_an_asof_relationship_are_unrelated() {
+    let mut def = notes_with_every_metric("o");
+    let n_order = def
+        .joins
+        .iter_mut()
+        .find(|j| j.name.as_deref() == Some("n_order"))
+        .expect("n_order");
+    n_order.fk_columns.push("noted_at".to_string());
+    n_order.ref_columns.push("placed_at".to_string());
+    n_order.asof = Some(1);
+    match expand("v", &def, &dims_req(&["qty", "kind"], None)) {
+        Err(e) if is_unrelated(&e) => {}
+        other => panic!("expected not related, got {other:?}"),
+    }
+}
+
+/// The emitted query inner-joins every hop from the meeting table.
+#[test]
+fn meeting_table_query_inner_joins_every_hop() {
+    let sql = expand(
+        "v",
+        &notes_with_every_metric("r"),
+        &dims_req(&["qty", "kind"], None),
+    )
+    .expect("answered");
+    assert!(sql.contains("FROM \"norders\""), "{sql}");
+    assert!(!sql.contains("LEFT JOIN"), "{sql}");
+    assert_eq!(sql.matches("\nJOIN ").count(), 2, "{sql}");
+}
+
+/// A materialization's rows were grouped by whatever built it, and nothing ties
+/// them to the tuples the meeting table reaches (a grouped metric keeps an
+/// order with no notes under a `NULL` kind), so it does not answer a
+/// meeting-table query.
+#[test]
+fn meeting_table_query_is_not_routed_to_a_materialization() {
+    let mut def = notes_with_every_metric("o");
+    def.materializations = vec![crate::model::Materialization {
+        name: "by_qty_kind".to_string(),
+        table: "nmat".to_string(),
+        dimensions: vec!["qty".to_string(), "kind".to_string()],
+        metrics: vec![],
+    }];
+    let sql = expand("v", &def, &dims_req(&["qty", "kind"], None)).expect("answered");
+    assert!(!sql.contains("nmat"), "{sql}");
 }

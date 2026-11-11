@@ -1676,6 +1676,7 @@ fn render_single_grain(
                 &group.paths,
                 &needs.scoped,
             ),
+            inner: false,
         },
         group_by,
     }

@@ -1034,8 +1034,9 @@ impl fmt::Display for ExpandError {
                 write!(
                     f,
                     "semantic view '{view_name}': tables '{table_a}' and '{table_b}' are not \
-                     related -- no table reaches both by following relationships many-to-one, so \
-                     no rows hold their members together. Query them separately"
+                     related -- no table reaches both by following relationships many-to-one, and \
+                     no table with a metric is where their paths meet, so no rows hold their \
+                     members together. Query them separately"
                 )
             }
             Self::MultiPath { detail } => {

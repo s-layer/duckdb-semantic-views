@@ -253,6 +253,10 @@ fn phantom_row_filter(
 pub(super) enum Anchor {
     /// Read the rows of this table and join up from it.
     At(String),
+    /// No table reaches every member, but their paths meet at this table,
+    /// which has a metric: list the distinct member tuples it reaches, every
+    /// hop an inner join (Phase 7 PR 4d, see [`meeting_table`]).
+    Meet(String),
     /// No table reaches both of these members, so no rows hold them together.
     Unrelated(String, String),
     /// The anchor reaches a member's table by more than one path (a diamond),
@@ -306,9 +310,11 @@ pub(super) fn dims_only_members(
 /// Of the tables that reach every member, the one closest to them is chosen:
 /// the candidate no other candidate sits above.
 ///
-/// - When no table reaches every member (two children of one parent), the
-///   answer is [`Anchor::Unrelated`]: Snowflake refuses such a query ("the
-///   entities are not related").
+/// - When no table reaches every member (two children of one parent), but
+///   their paths meet at a table with a metric, the answer is
+///   [`Anchor::Meet`] (see [`meeting_table`]). Otherwise it is
+///   [`Anchor::Unrelated`]: Snowflake refuses such a query ("the entities are
+///   not related").
 /// - When a hop on the way from the anchor to a member has more than one
 ///   relationship (a role-played table, queried from below), the answer is
 ///   [`Anchor::Undecided`]: no relationship picks the role, and the
@@ -340,6 +346,9 @@ pub(super) fn member_anchor(def: &SemanticViewDefinition, members: &[String]) ->
         .filter(|t| members.iter().all(|m| reaches(t, m)))
         .collect();
     if candidates.is_empty() {
+        if let Some(meet) = meeting_table(def, &members) {
+            return Anchor::Meet(meet);
+        }
         for (i, a) in members.iter().enumerate() {
             for b in &members[i + 1..] {
                 if !tables.iter().any(|t| reaches(t, a) && reaches(t, b)) {
@@ -394,6 +403,96 @@ pub(super) fn member_anchor(def: &SemanticViewDefinition, members: &[String]) ->
         }
     }
     Anchor::At((**anchor).clone())
+}
+
+/// The table a dimensions-only query's members meet at when no table reaches
+/// them all by foreign keys, if Snowflake answers the query from it (Phase 7
+/// PR 4d; fixture 7's D1-D10 and N8, fixture 2's W1-W4).
+///
+/// Snowflake answers such a query when the table where the members' paths
+/// meet has a metric: reviews' stars with authors' countries meet at books
+/// (`reviews -> books <- book_authors -> authors`), a line item's qty with a
+/// note's kind at orders. The rows are the distinct member tuples that table
+/// reaches, with no tuple padded with NULLs for a member it reaches no row of:
+/// a book with no author lists none of its reviews, an order with no notes
+/// none of its items. Without a metric there, it refuses ("not related"), as
+/// for two children of a customer table with no metric (W1-W4).
+///
+/// The meeting table is the table on the paths between the members from which
+/// each member is reached by fanning out and then climbing foreign keys,
+/// never fanning out again. Of several (a member above it), the lowest. `None`
+/// when there is none, when two members are joined by more than one path, or
+/// when a hop on the way is a role-played table's or an ASOF or range
+/// relationship's: a fan-out across a temporal relationship is not answered
+/// with metrics either, and the role is not chosen. A member above the
+/// meeting table is inner-joined like the rest; Snowflake has not been asked
+/// about that shape (TECH-DEBT #112).
+fn meeting_table(def: &SemanticViewDefinition, members: &[String]) -> Option<String> {
+    let mut between: Vec<String> = Vec::new();
+    for (i, a) in members.iter().enumerate() {
+        for b in &members[i + 1..] {
+            if super::multi_path::two_undirected_paths(def, a, b).is_some() {
+                return None;
+            }
+            for t in super::multi_path::undirected_path(def, a, b, None)? {
+                if !between.contains(&t) {
+                    between.push(t);
+                }
+            }
+        }
+    }
+    between.sort();
+    // `Some(true)` when `from` references `to` (a hop up), `Some(false)` when
+    // `to` references `from` (a fan-out), `None` when the hop is not one plain
+    // relationship.
+    let climbs = |from: &str, to: &str| -> Option<bool> {
+        let hops: Vec<&crate::model::Join> = def
+            .joins
+            .iter()
+            .filter(|j| !j.fk_columns.is_empty())
+            .filter(|j| {
+                let (f, t) = (&j.from_alias, &j.table);
+                (f.eq_ignore_ascii_case(from) && t.eq_ignore_ascii_case(to))
+                    || (f.eq_ignore_ascii_case(to) && t.eq_ignore_ascii_case(from))
+            })
+            .collect();
+        let [hop] = hops.as_slice() else {
+            return None;
+        };
+        if hop.asof.is_some() || hop.range_end.is_some() {
+            return None;
+        }
+        Some(hop.from_alias.eq_ignore_ascii_case(from))
+    };
+    // The hops from `from` to `to`, each `true` for a climb: `None` when one
+    // is not a plain relationship.
+    let hops = |from: &str, to: &str| -> Option<Vec<bool>> {
+        let path = super::multi_path::undirected_path(def, from, to, None)?;
+        path.windows(2).map(|w| climbs(&w[0], &w[1])).collect()
+    };
+    let fans_then_climbs = |from: &str, to: &str| {
+        hops(from, to).is_some_and(|h| h.iter().skip_while(|up| !**up).all(|up| *up))
+    };
+    let only_fans = |from: &str, to: &str| hops(from, to).is_some_and(|h| h.iter().all(|up| !*up));
+    let meeting: Vec<&String> = between
+        .iter()
+        .filter(|t| members.iter().all(|m| fans_then_climbs(t, m)))
+        .collect();
+    let lowest: Vec<&&String> = meeting
+        .iter()
+        .filter(|t| !meeting.iter().any(|o| o != *t && only_fans(t, o)))
+        .collect();
+    let [meet] = lowest.as_slice() else {
+        return None;
+    };
+    def.metrics
+        .iter()
+        .any(|m| {
+            m.source_table
+                .as_deref()
+                .is_some_and(|t| t.eq_ignore_ascii_case(meet))
+        })
+        .then(|| (**meet).clone())
 }
 
 /// Whether `alias` sits BELOW `base` in the relationship graph — i.e. following
@@ -799,7 +898,12 @@ fn expand_facts(
             where_clause: resolved_where.map(|rw| rw.sql),
             distinct: false,
             items,
-            from: FromSource::AnchorTable { def, anchor, joins },
+            from: FromSource::AnchorTable {
+                def,
+                anchor,
+                joins,
+                inner: false,
+            },
             group_by: GroupBy::None,
         }
         .render());
@@ -1036,6 +1140,10 @@ fn expand_unhoisted(
     // from whichever table is declared first (see `member_anchor`). Every hop
     // from there is many-to-one with one relationship, so no fan-trap,
     // role-playing or phantom-row guard below has anything to catch on it.
+    // Phase 7 PR 4d: or from the table their paths meet at, whose hops fan out
+    // and are inner-joined. A query with no metrics aggregates nothing, so the
+    // fan-outs are taken away by the DISTINCT and the fan-trap guard has
+    // nothing to protect; each hop is still one relationship.
     if resolved_mets.is_empty() {
         let where_tables: Vec<String> = resolved_where
             .as_ref()
@@ -1046,10 +1154,17 @@ fn expand_unhoisted(
             .is_some_and(|w| w.members.iter().any(|m| m.table.is_none()));
         let anchor = dims_only_members(def, &resolved_dims, &where_tables, unqualified)
             .map_or(Anchor::Undecided, |members| member_anchor(def, &members));
+        let inner = matches!(anchor, Anchor::Meet(_));
         match anchor {
-            Anchor::At(anchor) => {
-                if let Some(routed_sql) = route() {
-                    return Ok(routed_sql);
+            Anchor::At(anchor) | Anchor::Meet(anchor) => {
+                // A materialization's rows were grouped by whatever built it,
+                // which nothing ties to the tuples a meeting table reaches
+                // (a grouped metric keeps an order with no notes under a NULL
+                // kind), so only a query read from below is routed.
+                if !inner {
+                    if let Some(routed_sql) = route() {
+                        return Ok(routed_sql);
+                    }
                 }
                 let mut extra = where_tables;
                 for dim in &resolved_dims {
@@ -1080,7 +1195,12 @@ fn expand_unhoisted(
                     where_clause: resolved_where.map(|rw| rw.sql),
                     distinct: true,
                     items,
-                    from: FromSource::AnchorTable { def, anchor, joins },
+                    from: FromSource::AnchorTable {
+                        def,
+                        anchor,
+                        joins,
+                        inner,
+                    },
                     group_by: GroupBy::None,
                 }
                 .render());

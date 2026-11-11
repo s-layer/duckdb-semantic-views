@@ -185,6 +185,10 @@ pub(super) enum FromSource<'a> {
         def: &'a SemanticViewDefinition,
         anchor: String,
         joins: Vec<ResolvedJoin<'a>>,
+        /// Inner joins rather than `LEFT JOIN`s: a dimensions-only query read
+        /// from the table its members meet at keeps only the tuples it
+        /// reaches (Phase 7 PR 4d). Never set with an ASOF hop.
+        inner: bool,
     },
     /// A bare, already-safe relation name — a CTE alias such as `__sv_snapshot`
     /// / `__sv_agg`: emitted as `FROM <name>`, with no qualification, no `AS`
@@ -253,9 +257,15 @@ impl SelectSpec<'_> {
                 push_from_base(&mut sql, def, "\n");
                 push_join_clauses(&mut sql, joins, def, "\nLEFT JOIN ");
             }
-            FromSource::AnchorTable { def, anchor, joins } => {
+            FromSource::AnchorTable {
+                def,
+                anchor,
+                joins,
+                inner,
+            } => {
                 push_from_anchor(&mut sql, def, anchor, "\n");
-                push_join_clauses(&mut sql, joins, def, "\nLEFT JOIN ");
+                let prefix = if *inner { "\nJOIN " } else { "\nLEFT JOIN " };
+                push_join_clauses(&mut sql, joins, def, prefix);
             }
             FromSource::Named(name) => {
                 sql.push_str("\nFROM ");

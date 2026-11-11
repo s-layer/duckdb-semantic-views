@@ -1,0 +1,293 @@
+# Phase 7 PR 4d: a query with no metrics whose members no table reaches by
+# foreign keys.
+#
+# Snowflake answers it when the table where the members' paths meet has a
+# metric, listing the distinct member tuples that table reaches. A tuple is
+# never padded with NULLs for a member it reaches no row of. Without a metric
+# on that table Snowflake refuses (010959, "The entities ... are not related"),
+# whatever metrics the other tables have. Every expected value below is
+# Snowflake's answer to the same view and data (Phase 7 fixture 7, D1-D10, N8).
+#
+#   reviews -> books <- book_authors -> authors
+#
+#   Duo (Ana FR, Ben FR): reviews 1 (5 stars), 2 (3)
+#   Mixed (Ana FR, Cleo UK): review 6 (4)
+#   Solo (Cleo UK): review 3 (4)
+#   Orphan (no author): review 4 (2); review 5 has no book (1)
+
+require semantic_views
+
+statement ok
+CREATE TABLE p7m_authors (author_id INT, name VARCHAR, country VARCHAR);
+
+statement ok
+CREATE TABLE p7m_books (book_id INT, title VARCHAR, pages INT);
+
+statement ok
+CREATE TABLE p7m_book_authors (book_id INT, author_id INT, role VARCHAR);
+
+statement ok
+CREATE TABLE p7m_reviews (review_id INT, book_id INT, stars INT);
+
+statement ok
+INSERT INTO p7m_authors VALUES (1, 'Ana', 'FR'), (2, 'Ben', 'FR'), (3, 'Cleo', 'UK'), (4, 'Dan', 'DE');
+
+statement ok
+INSERT INTO p7m_books VALUES (10, 'Duo', 100), (11, 'Mixed', 200), (12, 'Solo', 300), (13, 'Orphan', 50);
+
+statement ok
+INSERT INTO p7m_book_authors VALUES (10, 1, 'lead'), (10, 2, 'co'), (11, 1, 'lead'), (11, 3, 'co'), (12, 3, 'lead');
+
+statement ok
+INSERT INTO p7m_reviews VALUES (1, 10, 5), (2, 10, 3), (3, 12, 4), (4, 13, 2), (5, NULL, 1), (6, 11, 4);
+
+# D1: no metric on books. Refused.
+statement ok
+CREATE SEMANTIC VIEW p7m_d1 AS
+  TABLES (
+    a  AS p7m_authors      PRIMARY KEY (author_id),
+    b  AS p7m_books        PRIMARY KEY (book_id),
+    ba AS p7m_book_authors PRIMARY KEY (book_id, author_id),
+    rv AS p7m_reviews      PRIMARY KEY (review_id)
+  )
+  RELATIONSHIPS (
+    ba_author AS ba(author_id) REFERENCES a,
+    ba_book   AS ba(book_id)   REFERENCES b,
+    rv_book   AS rv(book_id)   REFERENCES b
+  )
+  DIMENSIONS (a.country AS country, a.name AS name, b.title AS title, rv.review_id AS review_id, rv.stars AS stars)
+  METRICS (rv.review_count AS COUNT(review_id));
+
+statement error
+SELECT * FROM SEMANTIC_VIEW(p7m_d1 DIMENSIONS rv.stars, a.country);
+----
+are not related
+
+# D9: the other pair on D1, review id with author name. Refused.
+statement error
+SELECT * FROM SEMANTIC_VIEW(p7m_d1 DIMENSIONS rv.review_id, a.name);
+----
+are not related
+
+# D4: D1 plus a books metric. The paths meet at books, so the pairs books
+# reach are listed. Review 4 (no author) and review 5 (no book) are not.
+statement ok
+CREATE SEMANTIC VIEW p7m_d4 AS
+  TABLES (
+    a  AS p7m_authors      PRIMARY KEY (author_id),
+    b  AS p7m_books        PRIMARY KEY (book_id),
+    ba AS p7m_book_authors PRIMARY KEY (book_id, author_id),
+    rv AS p7m_reviews      PRIMARY KEY (review_id)
+  )
+  RELATIONSHIPS (
+    ba_author AS ba(author_id) REFERENCES a,
+    ba_book   AS ba(book_id)   REFERENCES b,
+    rv_book   AS rv(book_id)   REFERENCES b
+  )
+  DIMENSIONS (a.country AS country, a.name AS name, b.title AS title, rv.review_id AS review_id, rv.stars AS stars)
+  METRICS (rv.review_count AS COUNT(review_id), b.total_pages AS SUM(pages));
+
+query IT rowsort
+SELECT * FROM SEMANTIC_VIEW(p7m_d4 DIMENSIONS rv.stars, a.country);
+----
+3	FR
+4	FR
+4	UK
+5	FR
+
+# D5: D1 plus a second reviews metric. Still no metric where the paths meet.
+statement ok
+CREATE SEMANTIC VIEW p7m_d5 AS
+  TABLES (
+    a  AS p7m_authors      PRIMARY KEY (author_id),
+    b  AS p7m_books        PRIMARY KEY (book_id),
+    ba AS p7m_book_authors PRIMARY KEY (book_id, author_id),
+    rv AS p7m_reviews      PRIMARY KEY (review_id)
+  )
+  RELATIONSHIPS (
+    ba_author AS ba(author_id) REFERENCES a,
+    ba_book   AS ba(book_id)   REFERENCES b,
+    rv_book   AS rv(book_id)   REFERENCES b
+  )
+  DIMENSIONS (a.country AS country, a.name AS name, b.title AS title, rv.review_id AS review_id, rv.stars AS stars)
+  METRICS (rv.review_count AS COUNT(review_id), rv.total_stars AS SUM(stars));
+
+statement error
+SELECT * FROM SEMANTIC_VIEW(p7m_d5 DIMENSIONS rv.stars, a.country);
+----
+are not related
+
+# D6: fixture 3's view, with a books metric. Answered as D4.
+statement ok
+CREATE SEMANTIC VIEW p7m_d6 AS
+  TABLES (
+    a  AS p7m_authors      PRIMARY KEY (author_id),
+    b  AS p7m_books        PRIMARY KEY (book_id),
+    ba AS p7m_book_authors PRIMARY KEY (book_id, author_id),
+    rv AS p7m_reviews      PRIMARY KEY (review_id)
+  )
+  RELATIONSHIPS (
+    ba_author AS ba(author_id) REFERENCES a,
+    ba_book   AS ba(book_id)   REFERENCES b,
+    rv_book   AS rv(book_id)   REFERENCES b
+  )
+  DIMENSIONS (a.country AS country, b.title AS title, rv.stars AS stars)
+  METRICS (rv.review_count AS COUNT(review_id), rv.total_stars AS SUM(stars), b.total_pages AS SUM(pages));
+
+query IT rowsort
+SELECT * FROM SEMANTIC_VIEW(p7m_d6 DIMENSIONS rv.stars, a.country);
+----
+3	FR
+4	FR
+4	UK
+5	FR
+
+# D10: stars filtered on the authors' country: Duo's 3 and 5, Mixed's 4.
+query I rowsort
+SELECT * FROM SEMANTIC_VIEW(p7m_d6 DIMENSIONS rv.stars WHERE a.country = 'FR');
+----
+3
+4
+5
+
+# The standard SQL form takes the same path.
+query IT rowsort
+SELECT stars, country FROM p7m_d6 GROUP BY stars, country;
+----
+3	FR
+4	FR
+4	UK
+5	FR
+
+# D7: D6 without the books metric. Refused.
+statement ok
+CREATE SEMANTIC VIEW p7m_d7 AS
+  TABLES (
+    a  AS p7m_authors      PRIMARY KEY (author_id),
+    b  AS p7m_books        PRIMARY KEY (book_id),
+    ba AS p7m_book_authors PRIMARY KEY (book_id, author_id),
+    rv AS p7m_reviews      PRIMARY KEY (review_id)
+  )
+  RELATIONSHIPS (
+    ba_author AS ba(author_id) REFERENCES a,
+    ba_book   AS ba(book_id)   REFERENCES b,
+    rv_book   AS rv(book_id)   REFERENCES b
+  )
+  DIMENSIONS (a.country AS country, b.title AS title, rv.stars AS stars)
+  METRICS (rv.review_count AS COUNT(review_id), rv.total_stars AS SUM(stars));
+
+statement error
+SELECT * FROM SEMANTIC_VIEW(p7m_d7 DIMENSIONS rv.stars, a.country);
+----
+are not related
+
+# D8: the smallest view, two dimensions and one reviews metric. Refused.
+statement ok
+CREATE SEMANTIC VIEW p7m_d8 AS
+  TABLES (
+    a  AS p7m_authors      PRIMARY KEY (author_id),
+    b  AS p7m_books        PRIMARY KEY (book_id),
+    ba AS p7m_book_authors PRIMARY KEY (book_id, author_id),
+    rv AS p7m_reviews      PRIMARY KEY (review_id)
+  )
+  RELATIONSHIPS (
+    ba_author AS ba(author_id) REFERENCES a,
+    ba_book   AS ba(book_id)   REFERENCES b,
+    rv_book   AS rv(book_id)   REFERENCES b
+  )
+  DIMENSIONS (a.country AS country, rv.stars AS stars)
+  METRICS (rv.review_count AS COUNT(review_id));
+
+statement error
+SELECT * FROM SEMANTIC_VIEW(p7m_d8 DIMENSIONS rv.stars, a.country);
+----
+are not related
+
+# N8: two children of orders, which has a metric. Order 1 (items qty 5 and 1,
+# notes gift and rush), order 2 (item qty 2, note gift); order 3 (item qty 7)
+# has no notes, so 7 is not listed.
+statement ok
+CREATE TABLE p7m_orders (order_id INT, region VARCHAR);
+
+statement ok
+CREATE TABLE p7m_line_items (item_id INT, order_id INT, qty INT);
+
+statement ok
+CREATE TABLE p7m_notes (note_id INT, order_id INT, kind VARCHAR);
+
+statement ok
+INSERT INTO p7m_orders VALUES (1, 'EU'), (2, 'EU'), (3, 'US');
+
+statement ok
+INSERT INTO p7m_line_items VALUES (1, 1, 5), (2, 1, 1), (3, 2, 2), (4, 3, 7);
+
+statement ok
+INSERT INTO p7m_notes VALUES (1, 1, 'gift'), (2, 1, 'rush'), (3, 2, 'gift');
+
+statement ok
+CREATE SEMANTIC VIEW p7m_nv AS
+  TABLES (
+    o  AS p7m_orders     PRIMARY KEY (order_id),
+    li AS p7m_line_items PRIMARY KEY (item_id),
+    n  AS p7m_notes      PRIMARY KEY (note_id)
+  )
+  RELATIONSHIPS (
+    li_order AS li(order_id) REFERENCES o,
+    n_order  AS n(order_id)  REFERENCES o
+  )
+  DIMENSIONS (o.region AS region, li.qty AS qty, n.kind AS kind)
+  METRICS (o.order_count AS COUNT(order_id), li.item_count AS COUNT(item_id), n.note_count AS COUNT(note_id));
+
+query IT rowsort
+SELECT * FROM SEMANTIC_VIEW(p7m_nv DIMENSIONS li.qty, n.kind);
+----
+1	gift
+1	rush
+2	gift
+5	gift
+5	rush
+
+# With the orders metric dropped the same query is refused, as for fixture 2's
+# two children of a customer table with no metric.
+statement ok
+CREATE SEMANTIC VIEW p7m_nv_no_orders_metric AS
+  TABLES (
+    o  AS p7m_orders     PRIMARY KEY (order_id),
+    li AS p7m_line_items PRIMARY KEY (item_id),
+    n  AS p7m_notes      PRIMARY KEY (note_id)
+  )
+  RELATIONSHIPS (
+    li_order AS li(order_id) REFERENCES o,
+    n_order  AS n(order_id)  REFERENCES o
+  )
+  DIMENSIONS (o.region AS region, li.qty AS qty, n.kind AS kind)
+  METRICS (li.item_count AS COUNT(item_id), n.note_count AS COUNT(note_id));
+
+statement error
+SELECT * FROM SEMANTIC_VIEW(p7m_nv_no_orders_metric DIMENSIONS li.qty, n.kind);
+----
+are not related
+
+statement ok
+DROP SEMANTIC VIEW p7m_nv_no_orders_metric;
+
+statement ok
+DROP SEMANTIC VIEW p7m_nv;
+
+statement ok
+DROP SEMANTIC VIEW p7m_d8;
+
+statement ok
+DROP SEMANTIC VIEW p7m_d7;
+
+statement ok
+DROP SEMANTIC VIEW p7m_d6;
+
+statement ok
+DROP SEMANTIC VIEW p7m_d5;
+
+statement ok
+DROP SEMANTIC VIEW p7m_d4;
+
+statement ok
+DROP SEMANTIC VIEW p7m_d1;
