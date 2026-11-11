@@ -520,8 +520,10 @@ fn fan_out_counts_once(path: &[String], card_map: &CardMap, temporal: &TemporalE
 /// Whether a query of `met` answers a dimension its rows fan out to, once per
 /// group (Phase 7 PR 4c), when grouped by `grouped_by` alone (`None`: by any
 /// dimension): every base metric it is built from is a plain aggregate (no
-/// window, no `NON ADDITIVE BY`, which both still refuse a fan-out) on a table
-/// with a PRIMARY KEY. A semi-additive base metric grouped by its only
+/// `NON ADDITIVE BY`, which still refuses a fan-out) on a table with a PRIMARY
+/// KEY. A window metric is answered over its inner metric's result (Phase 7
+/// PR 5), so `dims_for_metric` lists for it what its inner metric lists and
+/// never asks here; a derived metric over a window one is not answered. A semi-additive base metric grouped by its only
 /// `NON ADDITIVE BY` dimension counts too: with that dimension queried it is
 /// not active, and is counted once per group like any other
 /// (`tests_fan_trap::semi_additive_na_dim_queried_counts_once_per_group`). A
@@ -589,8 +591,8 @@ fn temporal_edges(def: &SemanticViewDefinition) -> TemporalEdges {
 ///   tables via the dependency graph.
 /// - Window metric: additionally the INNER metric's source tables — the inner
 ///   aggregate is what is computed over the joined row set (the window
-///   function itself runs over the pre-aggregated CTE), so the inner metric's
-///   grain is what fan-out inflates.
+///   function itself runs over its result, `window::expand_over_result`), so
+///   the inner metric's grain is what fan-out inflates.
 ///
 /// The list names only the tables metrics *declare*. A component that
 /// aggregates at the root grain without naming it declares nothing, and shows
@@ -614,10 +616,10 @@ pub(super) fn metric_grain(met: &Metric, def: &SemanticViewDefinition) -> Metric
         // EXP-12: resolve the inner-metric reference through `ident_matches`,
         // the same canonical rule `expand::window` uses to emit it. A raw
         // `eq_ignore_ascii_case` compares the quote characters as data, so a
-        // quoted reference (`"total"`) matched no metric, the inner aggregate's
-        // table dropped out of the grain set, and the root-grain check below
-        // had nothing to fire on — leaving the base-anchored `__sv_agg` CTE to
-        // compute that aggregate over a fanned join.
+        // quoted reference (`"total"`) matched no metric and the inner
+        // aggregate's table dropped out of the grain set, so the fan-trap
+        // check had nothing to fire on (before Phase 7 PR 5 the base-anchored
+        // `__sv_agg` CTE then computed that aggregate over a fanned join).
         if !crate::ident::ident_matches(&met.name, &ws.inner_metric) {
             if let Some(inner) = def
                 .metrics

@@ -77,8 +77,7 @@ impl LoweredItems {
 
     /// An error from expanding the lowered request, about the request as
     /// written: an added member is not offered as an available name or a
-    /// suggestion (it is one of the request's own items), and is named by its
-    /// item where the error lists the query's metrics. Where the message
+    /// suggestion (it is one of the request's own items). Where the message
     /// quotes one, [`relabel`](Self::relabel) names it.
     #[must_use]
     pub fn for_request(&self, mut e: ExpandError) -> ExpandError {
@@ -88,37 +87,26 @@ impl LoweredItems {
                 .find(|(added, _)| added == name)
                 .map(|(_, text)| text)
         };
-        match &mut e {
-            ExpandError::UnknownDimension {
-                available,
-                suggestion,
-                ..
+        if let ExpandError::UnknownDimension {
+            available,
+            suggestion,
+            ..
+        }
+        | ExpandError::UnknownMetric {
+            available,
+            suggestion,
+            ..
+        }
+        | ExpandError::UnknownFact {
+            available,
+            suggestion,
+            ..
+        } = &mut e
+        {
+            available.retain(|n| item_of(n).is_none());
+            if suggestion.as_deref().and_then(item_of).is_some() {
+                *suggestion = None;
             }
-            | ExpandError::UnknownMetric {
-                available,
-                suggestion,
-                ..
-            }
-            | ExpandError::UnknownFact {
-                available,
-                suggestion,
-                ..
-            } => {
-                available.retain(|n| item_of(n).is_none());
-                if suggestion.as_deref().and_then(item_of).is_some() {
-                    *suggestion = None;
-                }
-            }
-            ExpandError::WindowAggregateMixing {
-                aggregate_metrics, ..
-            } => {
-                for n in aggregate_metrics.iter_mut() {
-                    if let Some(text) = item_of(n) {
-                        n.clone_from(text);
-                    }
-                }
-            }
-            _ => {}
         }
         e
     }
@@ -1926,8 +1914,7 @@ mod tests {
     }
 
     /// The added members are the request's own items: an unknown name's
-    /// error does not offer them, and an error listing the query's metrics
-    /// names them by their items.
+    /// error does not offer them.
     #[test]
     fn an_expansion_error_does_not_offer_the_added_members() {
         let lowered = lower(&["lower(region)"], &["max(o.amount)"], &[]);
@@ -1945,16 +1932,6 @@ mod tests {
             &unknown,
             ExpandError::UnknownDimension { available, suggestion: None, .. }
                 if available == &["region", "order_date"]
-        ));
-        let mixing = lowered.for_request(ExpandError::WindowAggregateMixing {
-            view_name: "v".to_string(),
-            window_metrics: vec!["running".to_string()],
-            aggregate_metrics: vec!["revenue".to_string(), "__sv_expr_2".to_string()],
-        });
-        assert!(matches!(
-            &mixing,
-            ExpandError::WindowAggregateMixing { aggregate_metrics, .. }
-                if aggregate_metrics == &["revenue", "max(o.amount)"]
         ));
     }
 }

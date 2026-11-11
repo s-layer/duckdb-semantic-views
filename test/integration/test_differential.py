@@ -744,23 +744,20 @@ def run_window_section(conn) -> tuple[int, int]:
         "SELECT g, d, SUM(t) OVER (PARTITION BY g ORDER BY d ASC NULLS LAST) FROM agg",
     )
 
-    # Window + aggregate metrics in one request is an EXPLICIT engine
-    # rejection (mirrors the SG-5 decomposability contract) — pin the error.
+    # Window + aggregate metrics in one request: the window runs over the rows
+    # the aggregate gives (Phase 7 PR 5, Snowflake fixture 4 W2). Reference is
+    # the same aggregate-then-window, with the aggregate kept as a column.
     total += 1
-    try:
-        conn.execute(
-            "SELECT * FROM semantic_view('diff_win', "
-            "dimensions := ['region_norm', 'snap_date'], "
-            "metrics := ['total_balance', 'running_total'])"
-        ).fetchall()
-        failures += 1
-        print("FAIL window+aggregate co-query: expected mix error, query succeeded")
-    except Exception as exc:  # noqa: BLE001
-        if "cannot mix window function metrics" in str(exc):
-            print("  PASS: window+aggregate co-query raises the mix error")
-        else:
-            failures += 1
-            print(f"FAIL window+aggregate co-query: wrong error: {exc}")
+    failures += _check(
+        conn,
+        "window beside its aggregate",
+        "SELECT * FROM semantic_view('diff_win', "
+        "dimensions := ['region_norm', 'snap_date'], "
+        "metrics := ['total_balance', 'running_total'])",
+        "WITH agg AS (SELECT upper(region) AS g, snap_date AS d, SUM(balance) AS t "
+        "FROM snapshots GROUP BY 1, 2) "
+        "SELECT g, d, t, SUM(t) OVER (PARTITION BY g ORDER BY d ASC NULLS LAST) FROM agg",
+    )
     return total, failures
 
 
@@ -795,24 +792,20 @@ def run_wildcard_section(conn) -> tuple[int, int]:
             failures += 1
             print(f"FAIL bare-star wildcard: wrong error: {exc}")
     # Wildcard routing with a WINDOW metric in the view: `s.*` expands to
-    # {total_balance, running_total}, which is the window+aggregate mix —
-    # the expansion must surface the same mix error as the explicit list.
+    # {total_balance, running_total}, a window beside its aggregate, and must
+    # equal the explicit list.
     total += 1
-    try:
-        conn.execute(
-            "SELECT * FROM semantic_view('diff_win', "
-            "dimensions := ['region_norm', 'snap_date'], metrics := ['s.*'])"
-        ).fetchall()
-        failures += 1
-        print("FAIL wildcard-window mix: expected mix error, query succeeded")
-    except Exception as exc:  # noqa: BLE001
-        if "cannot mix window function metrics" in str(exc):
-            print("  PASS: s.* expanding to window+aggregate raises the mix error")
-        else:
-            failures += 1
-            print(f"FAIL wildcard-window mix: wrong error: {exc}")
-    # Wildcard equivalence including a window metric, mix-free: request the
-    # window metric explicitly alongside a dims wildcard.
+    failures += _check(
+        conn,
+        "metrics wildcard with a window == explicit list (diff_win)",
+        "SELECT * FROM semantic_view('diff_win', "
+        "dimensions := ['region_norm', 'snap_date'], metrics := ['s.*'])",
+        "SELECT * FROM semantic_view('diff_win', "
+        "dimensions := ['region_norm', 'snap_date'], "
+        "metrics := ['total_balance', 'running_total'])",
+    )
+    # Wildcard equivalence including a window metric: request the window
+    # metric explicitly alongside a dims wildcard.
     total += 1
     failures += _check(
         conn,

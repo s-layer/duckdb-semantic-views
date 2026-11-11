@@ -143,7 +143,6 @@ When the Extension Raises a Fan Trap Error
 The fan-out is refused with ``fan trap detected``, rather than counted once per group, when:
 
 - the metric's table has no ``PRIMARY KEY``;
-- the metric is a window metric;
 - the metric is semi-additive and its ``NON ADDITIVE BY`` dimension is not in the query;
 - the fan-out crosses an ``ASOF`` or range relationship in reverse;
 - the path to the dimension runs through a role-played table, or the query has a dimension or filter whose expression names no table.
@@ -158,10 +157,10 @@ For example, in a view where ``line_items`` (``li``, declared without a ``PRIMAR
    PK/UNIQUE). This would inflate aggregation results. Remove the dimension,
    use a metric from the same table, or restructure the relationship. A
    fan-out like this one is counted once per group only for ordinary metrics
-   on a table with a PRIMARY KEY: not for a window metric, a semi-additive
-   metric whose NON ADDITIVE BY dimension is not queried, a role-played table,
-   a query with a dimension or filter that names no table, or a metric table
-   with no PRIMARY KEY.
+   on a table with a PRIMARY KEY: not for a semi-additive metric whose NON
+   ADDITIVE BY dimension is not queried, a role-played table, a query with a
+   dimension or filter that names no table, or a metric table with no PRIMARY
+   KEY.
 
 Metrics that merely sit at *different grains from each other* are not an error either: they are computed one grain at a time and joined, see :ref:`howto-fan-per-grain`.
 
@@ -243,7 +242,9 @@ The same applies to these shapes:
 - Metrics on two child tables of one parent (a *chasm trap*).
 - A derived metric that combines two grains, such as
   ``order_total / item_count``.
-- A window metric whose inner aggregate is on a non-base table.
+- A window metric over any of these. The window is computed over its inner
+  metric's result, so it sees the numbers that metric gives on its own (see
+  :ref:`howto-window-relationships`).
 - An active semi-additive metric (``NON ADDITIVE BY`` with its snapshot
   dimension left out of the query).
 - A role-played table, when every metric's ``USING`` names a relationship to
@@ -259,12 +260,11 @@ customers but no orders reports its balance and a ``NULL`` order count.
 These multi-grain queries still raise the fan trap error. Query each part at a
 single grain instead:
 
-- Two window metrics whose inner aggregates sit at different grains.
 - A role-played dimension together with an active semi-additive metric.
 - A role-played table reached by a metric with no ``USING`` to say which
   relationship is meant.
-- A window metric, or an active semi-additive metric, grouped or filtered
-  across a many-to-many bridge.
+- An active semi-additive metric grouped or filtered across a many-to-many
+  bridge.
 
 :ref:`explanation-grain-multi` explains how the per-grain results are joined,
 and :ref:`explanation-grain-refused` explains why these three shapes are

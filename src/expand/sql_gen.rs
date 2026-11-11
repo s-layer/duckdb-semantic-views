@@ -1083,6 +1083,20 @@ fn expand_unhoisted(
     // inline_derived_metrics resolves expressions, not access modifiers.
     let resolved_mets = resolve_names::<Metric, _>(&req.metrics, view_name, def)?;
 
+    // Phase 48 / Phase 7 PR 5: a window metric runs over the rows the rest of
+    // the query gives, so the query with each window replaced by its inner
+    // metric is expanded on its own first, through every check below.
+    if resolved_mets.iter().any(|m| m.is_window()) {
+        return super::window::expand_over_result(
+            view_name,
+            def,
+            req,
+            &resolved_dims,
+            &resolved_mets,
+            |inner_def, inner_req| expand_unhoisted(view_name, inner_def, inner_req),
+        );
+    }
+
     // Resolve the pre-aggregation predicate up front: it decides materialization
     // routing below, participates in the fan-trap checks, and is rejected by the
     // strategies that cannot yet inject it.
@@ -1347,23 +1361,10 @@ fn expand_unhoisted(
         }
     }
 
-    // An all-window query whose inner aggregate lives at a non-root grain is
-    // answered by anchoring `__sv_agg` there instead of at the base table
-    // (TECH-DEBT #36). Decided BEFORE the checks below, because the checks the
-    // anchor supersedes are the ones that would otherwise reject this shape —
-    // the same reason `grain_plan` is decided before them.
-    let window_anchor = super::per_grain::window_cte_anchor(
-        def,
-        &resolved_dims,
-        &resolved_mets,
-        &where_tables,
-        where_has_unqualified_member,
-    );
-
     // An ACTIVE semi-additive metric at a non-root grain is answered by
     // anchoring `__sv_snapshot` there instead of at the base table (TECH-DEBT
-    // #36). Decided here for the same reason as `window_anchor`: the checks
-    // below are the ones this supersedes, so it cannot be decided after them.
+    // #36). Decided before the checks below for the same reason as
+    // `grain_plan`: they are the ones this supersedes.
     //
     // `queried_dim_keys` are canonical (quote-stripped + folded) so a dotted or
     // quoted NA reference resolves against the queried dims (#30); the same set
@@ -1377,16 +1378,15 @@ fn expand_unhoisted(
         .any(|m| super::semi_additive::is_active_semi_additive(def, m, &queried_dim_keys));
     // EXP-19/EXP-20 (code-review 2026-08-06): `is_active_semi_additive` asks
     // only about a metric's OWN `non_additive_by`, so a metric that merely
-    // DEPENDS on an active semi-additive one — a derived metric referencing it,
-    // or a window metric naming it as its inner aggregate — routed to the
-    // regular path and inlined the dependency's raw aggregate, evaluating it
+    // DEPENDS on an active semi-additive one — a derived metric referencing
+    // it — routed to the regular path and inlined the dependency's raw aggregate, evaluating it
     // over every row and silently dropping `NON ADDITIVE BY`. The result did
     // not even agree with the same snapshot queried directly (`double_balance`
     // != 2 x `balance`).
     //
     // Checked here, before any dispatch, because every emission path shares the
-    // defect: the base-anchored path inlines the raw aggregate, the window path
-    // feeds it to `__sv_agg`, and per-grain's `is_snapshot_group` classifies by
+    // defect: the base-anchored path inlines the raw aggregate, and per-grain's
+    // `is_snapshot_group` classifies by
     // the group's own metrics so the dependent metric lands in a PLAIN group.
     //
     // Composing a snapshot with an outer expression is a feature, not a patch
@@ -1439,8 +1439,8 @@ fn expand_unhoisted(
         None
     };
 
-    // SG-8: fail loudly when a REQUESTED metric (directly, via a derived
-    // metric, or as a window metric's inner aggregate) depends on a COUNT(*)
+    // SG-8: fail loudly when a REQUESTED metric (directly, or via a derived
+    // metric) depends on a COUNT(*)
     // that could not be rewritten to COUNT(<pk>) — a non-base source table
     // with no PRIMARY KEY declared. Emitting it as-is would count
     // NULL-extended LEFT JOIN rows (one per childless base row).
@@ -1448,21 +1448,7 @@ fn expand_unhoisted(
     // On the per-grain path there is no such row: the metric's table anchors
     // its own CTE instead of being LEFT JOINed to the base table, so a bare
     // COUNT(*) counts exactly that table's rows and needs no PRIMARY KEY.
-    //
-    // An anchored window CTE removes the row for the same reason: `__sv_agg`
-    // anchors at the inner aggregate's own table, so a bare COUNT(*) there
-    // counts exactly that table's rows. The one shape that would re-fan it is a
-    // dimension BELOW the anchor's grain, which pulls a "many"-side join back
-    // into the CTE — and the retained metric × dimension fan-trap check below
-    // rejects that before emission (`anchored_window_count_star_...` pair in
-    // `tests_per_grain`). PR #175 review: without this the guard rejected
-    // eligible anchored-window queries, because it ran while `window_anchor`
-    // was still computed further down.
-    if grain_plan.is_none()
-        && window_anchor.is_none()
-        && snapshot_anchor.is_none()
-        && !resolved.count_star_no_pk.is_empty()
-    {
+    if grain_plan.is_none() && snapshot_anchor.is_none() && !resolved.count_star_no_pk.is_empty() {
         for met in &resolved_mets {
             for name in collect_transitive_metric_names(met, &def.metrics) {
                 if let Some(table_alias) = resolved.count_star_no_pk.get(&name) {
@@ -1497,12 +1483,11 @@ fn expand_unhoisted(
     // through or back across it, is read on the role every metric names
     // (Snowflake fixture 6, R5). The per-grain plan reads it so in each grain
     // CTE (`role_playing::where_role_dims`), and the base-anchored emission
-    // below rewrites the predicate and joins those instances. The snapshot and
-    // window paths take no scopes (the planner declines such a query beside
-    // a semi-additive or window metric), so for them it stays refused.
-    let has_window = resolved_mets.iter().any(|m| m.is_window());
+    // below rewrites the predicate and joins those instances. The snapshot
+    // path takes no scopes (the planner declines such a query beside a
+    // semi-additive metric), so for it this stays refused.
     let where_scopes: Vec<(String, String)> = match &resolved_where {
-        Some(rw) if !has_active_semi_additive && !has_window => {
+        Some(rw) if !has_active_semi_additive => {
             super::role_playing::where_role_scopes(def, &rw.members, &resolved_mets)
         }
         _ => Vec::new(),
@@ -1525,10 +1510,10 @@ fn expand_unhoisted(
 
     // Phase 31: Check for fan traps before generating SQL. In per-grain mode the
     // fence keeps only the metric × dimension check — the other two guard the
-    // base-anchored topology the per-grain plan replaces. An anchored window CTE
-    // replaces that topology in exactly the same way, so it uses the same mode;
-    // the retained metric × dimension check is what still reports a dimension
-    // below the metric's own grain.
+    // base-anchored topology the per-grain plan replaces. An anchored snapshot
+    // CTE replaces that topology in exactly the same way, so it uses the same
+    // mode; the retained metric × dimension check is what still reports a
+    // dimension below the metric's own grain.
     // Phase 7.3, PR 4c: only a per-grain plan that deduplicates its bridged
     // groups may let a dimension or filter that fans a metric's rows out
     // through (`Plan::crosses_bridge`).
@@ -1540,7 +1525,7 @@ fn expand_unhoisted(
         def,
         &resolved_dims,
         &resolved_mets,
-        grain_plan.is_some() || window_anchor.is_some() || snapshot_anchor.is_some(),
+        grain_plan.is_some() || snapshot_anchor.is_some(),
         bridges,
     )?;
     // PAR-6 (TECH-DEBT #53): a member reaching a fact on another table now
@@ -1613,37 +1598,6 @@ fn expand_unhoisted(
             &resolved_exprs,
             resolved_where.as_ref(),
             snapshot_anchor.as_deref(),
-        );
-    }
-
-    // Phase 48: a query with a window function metric.
-    if has_window {
-        // Window metrics cannot be mixed with aggregate metrics.
-        let window_names: Vec<String> = resolved_mets
-            .iter()
-            .filter(|m| m.is_window())
-            .map(|m| m.name.clone())
-            .collect();
-        let aggregate_names: Vec<String> = resolved_mets
-            .iter()
-            .filter(|m| !m.is_window())
-            .map(|m| m.name.clone())
-            .collect();
-        if !aggregate_names.is_empty() {
-            return Err(ExpandError::WindowAggregateMixing {
-                view_name: view_name.to_string(),
-                window_metrics: window_names,
-                aggregate_metrics: aggregate_names,
-            });
-        }
-        return super::window::expand_window_metrics(
-            view_name,
-            def,
-            &resolved,
-            &resolved_mets,
-            &resolved_exprs,
-            resolved_where.as_ref(),
-            window_anchor.as_deref(),
         );
     }
 

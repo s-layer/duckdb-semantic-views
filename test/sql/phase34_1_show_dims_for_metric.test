@@ -296,17 +296,25 @@ SELECT * FROM SEMANTIC_VIEW(p34fm8_sv DIMENSIONS o.placed_at METRICS o.orders_at
 ----
 fan trap
 
-# Nor does a window metric (Phase 7 PR 5 reworks window emission).
+# A window metric runs over the rows its inner metric gives (Phase 7 PR 5), so
+# it lists what `order_count` lists, its ORDER BY dimension required.
 query TTTTTT rowsort
 SHOW SEMANTIC DIMENSIONS IN p34fm8_sv FOR METRIC running_orders
 ----
+p34fm8_items	qty	INTEGER	false	[]	(empty)
+p34fm8_notes	kind	VARCHAR	false	[]	(empty)
 p34fm8_orders	placed_at	DATE	true	[]	(empty)
 p34fm8_regions	region	VARCHAR	false	[]	(empty)
 
-statement error
-SELECT * FROM SEMANTIC_VIEW(p34fm8_sv DIMENSIONS li.qty, o.placed_at METRICS o.running_orders);
+# ... and the query across the fan-out runs over `order_count`'s rows, each
+# order once per qty: the two qty groups of order 1 are peers on 2024-01-10.
+query TTII rowsort
+SELECT * FROM SEMANTIC_VIEW(p34fm8_sv DIMENSIONS li.qty, o.placed_at METRICS o.order_count, o.running_orders);
 ----
-fan trap
+1	2024-01-10	1	2
+2	2024-02-10	1	3
+5	2024-01-10	1	2
+7	2024-03-10	1	4
 
 # A metric on a table with no PRIMARY KEY can't count its rows once per group
 # (Snowflake's 010933), so it lists no fanned dimension either.

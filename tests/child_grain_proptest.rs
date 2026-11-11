@@ -95,9 +95,9 @@
 //! now. The oracle answers a fanned grain over [`fanned_rows_sql`]: the
 //! DISTINCT (home row, descendant columns) pairs, enumerated by correlated
 //! `LATERAL` subqueries, with a home row that has no descendants kept once
-//! under NULLs. The shapes still refused BY DESIGN (a window metric or an
-//! active semi-additive one across the fan, a metric table with no PRIMARY
-//! KEY) are not generated, and `fan_outs_are_answered_or_refused_by_design`
+//! under NULLs. The shapes still refused BY DESIGN (an active semi-additive
+//! metric across the fan, a metric table with no PRIMARY KEY) are not
+//! generated, and `fan_outs_are_answered_or_refused_by_design`
 //! pins each refusal, and that the drawn shapes take the deduplicating path.
 
 use proptest::prelude::*;
@@ -145,10 +145,12 @@ const D_LDAMT: usize = 2;
 ///
 /// `w_parent` is a window metric over `s_parent` with no `PARTITION BY` clause,
 /// which runs over every result row (as in Snowflake), so each row holds the
-/// sum of every group's `s_parent`. Its `__sv_agg` CTE is re-anchored at `li`, the inner
-/// metric's home table, and has to join `o` for the inlined parent fact even
-/// when no queried dimension reaches `o` (reviewbot on #250: it did not, and
-/// the query failed with a Binder Error).
+/// sum of every group's `s_parent`. Since Phase 7 PR 5 it is computed over the
+/// result of the query for `s_parent`, which is anchored at `li` and has to
+/// join `o` for the inlined parent fact even when no queried dimension reaches
+/// `o` (reviewbot on #250: the old window CTE did not, and the query failed
+/// with a Binder Error). Grouped by the grandchild's `ldamt` it runs over
+/// `s_parent`'s once-per-group numbers.
 ///
 /// `snap_parent` is `SUM(orate) NON ADDITIVE BY (lamt)`: a semi-additive
 /// metric on the child reaching a parent fact. Its `__sv_snapshot` CTE is
@@ -519,8 +521,9 @@ fn arb_case() -> impl Strategy<Value = Case> {
         prop::bool::weighted(0.25),
         prop::bool::weighted(0.25),
         prop::option::weighted(0.6, arb_pred()),
-        // 1 in 5 child-only metric requests is the window metric. It cannot
-        // share a request with a plain aggregate, so it is drawn on its own.
+        // 1 in 5 child-only metric requests is the window metric, drawn on its
+        // own: the oracle computes it over its grain's groups alone, so a group
+        // only another grain has would hold a different total.
         prop::bool::weighted(0.2),
         // About 1 in 6 is the semi-additive metric, also drawn on its own.
         prop::bool::weighted(0.2),
@@ -582,16 +585,15 @@ fn arb_case() -> impl Strategy<Value = Case> {
                 } else if grains == Grains::LI_ONLY && want_snap {
                     sel_metrics = vec![M_SNAP];
                 }
-                // A window metric, and a semi-additive one whose NON ADDITIVE
-                // BY dimension (`lamt`) is not queried, stay refused across a
-                // fan-out (`fan_outs_are_answered_or_refused_by_design` pins
-                // it): the only fan for these child metrics is the
-                // grandchild's `ldamt`. With `lamt` queried the semi-additive
-                // metric is a plain sum, and is counted once per group, so a
-                // drawn `ldamt` brings `lamt` with it there.
-                if sel_metrics == [M_WINDOW] {
-                    sel_dims.retain(|&i| i != D_LDAMT);
-                } else if sel_metrics == [M_SNAP]
+                // A semi-additive metric whose NON ADDITIVE BY dimension
+                // (`lamt`) is not queried stays refused across a fan-out
+                // (`fan_outs_are_answered_or_refused_by_design` pins it): the
+                // only fan for these child metrics is the grandchild's
+                // `ldamt`. With `lamt` queried it is a plain sum, and is
+                // counted once per group, so a drawn `ldamt` brings `lamt`
+                // with it there. The window metric is answered across the fan
+                // since Phase 7 PR 5, over `s_parent`'s once-per-group rows.
+                if sel_metrics == [M_SNAP]
                     && sel_dims.contains(&D_LDAMT)
                     && !sel_dims.contains(&D_LAMT)
                 {
@@ -1650,22 +1652,31 @@ fn generator_draws_grandchild_metrics_in_every_mix() {
         "only {o_child_pred}/256 base requests fanned by a child-side predicate"
     );
     let mut snap_fanned = 0;
+    let mut window_fanned = 0;
     for c in &cases {
         let refused = match &c.ask {
-            Ask::Metrics(m) if m == &[M_WINDOW] => true,
             Ask::Metrics(m) if m == &[M_SNAP] => !c.sel_dims.contains(&D_LAMT),
             _ => false,
         };
         if refused {
             assert!(
                 !c.sel_dims.contains(&D_LDAMT),
-                "a window or active semi-additive metric fanned by ldamt: {c:?}"
+                "an active semi-additive metric fanned by ldamt: {c:?}"
             );
         }
         if matches!(&c.ask, Ask::Metrics(m) if m == &[M_SNAP]) && c.sel_dims.contains(&D_LDAMT) {
             snap_fanned += 1;
         }
+        if matches!(&c.ask, Ask::Metrics(m) if m == &[M_WINDOW]) && c.sel_dims.contains(&D_LDAMT) {
+            window_fanned += 1;
+        }
     }
+    // Phase 7 PR 5: the window metric across the fan, over its inner metric's
+    // once-per-group rows.
+    assert!(
+        window_fanned >= 4,
+        "only {window_fanned}/256 window requests were fanned by ldamt"
+    );
     assert!(
         snap_fanned >= 4,
         "only {snap_fanned}/256 semi-additive requests fanned by ldamt with lamt queried"
@@ -1766,9 +1777,10 @@ fn grandchild_requests_are_accepted_as_per_grain_plans() {
 /// once per group, keyed on its PRIMARY KEY), not on a plain join that happens
 /// to agree with the oracle on small data. The shapes it still leaves out are
 /// left out because the engine refuses them BY DESIGN, not because they would
-/// fail the oracle — a window metric across a fan-out (TECH-DEBT #109, PR 5),
-/// a semi-additive metric whose NON ADDITIVE BY dimension is not queried, and
-/// any fan-out of a metric table with no PRIMARY KEY (Snowflake's 010933).
+/// fail the oracle — a semi-additive metric whose NON ADDITIVE BY dimension is
+/// not queried, and any fan-out of a metric table with no PRIMARY KEY
+/// (Snowflake's 010933). A window metric across a fan-out is answered since
+/// Phase 7 PR 5, over its inner metric's deduplicated result.
 /// Pinned here, so an exclusion cannot quietly outlive the refusal it stands
 /// for.
 #[test]
@@ -1798,11 +1810,17 @@ fn fan_outs_are_answered_or_refused_by_design() {
             "{dims:?} x {mets:?} WHERE {pred:?}: not on the deduplicating path:\n{sql}"
         );
     }
-    for mets in [&["w_parent"][..], &["snap_parent"][..]] {
-        match expand("child", &def, &req(&["ldamt"], mets, None)) {
-            Err(ExpandError::FanTrap { .. }) => {}
-            other => panic!("ldamt x {mets:?}: expected FanTrap, got {other:?}"),
-        }
+    let sql = expand("child", &def, &req(&["ldamt"], &["w_parent"], None))
+        .unwrap_or_else(|e| panic!("ldamt x w_parent: refused: {e}"));
+    assert!(
+        sql.starts_with("WITH __sv_agg AS (")
+            && sql.contains("SELECT DISTINCT")
+            && sql.contains("__sv_bridge"),
+        "ldamt x w_parent: not over a deduplicated inner result:\n{sql}"
+    );
+    match expand("child", &def, &req(&["ldamt"], &["snap_parent"], None)) {
+        Err(ExpandError::FanTrap { .. }) => {}
+        other => panic!("ldamt x snap_parent: expected FanTrap, got {other:?}"),
     }
     // With its NON ADDITIVE BY dimension queried, the semi-additive metric is
     // a plain sum, and is counted once per group.

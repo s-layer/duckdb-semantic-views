@@ -361,8 +361,8 @@ Look for the predicate ahead of the ``GROUP BY``. It is placed before
 aggregation on every emission path -- including inside each grain's aggregate in
 a :ref:`multi-grain query <explanation-metric-grain>`, inside the snapshot step
 of a semi-additive metric so that filtering changes which row wins, and inside
-the aggregate step of a window metric so that a filtered window number is
-recomputed rather than trimmed afterwards.
+the query a window metric is computed over, so that a filtered window number
+is recomputed rather than trimmed afterwards.
 
 An omitted, empty, or whitespace-only ``where_clause`` is treated as absent,
 so ``where_clause := ''`` returns the unfiltered numbers.
@@ -505,8 +505,8 @@ Troubleshooting
    way to say which role it means on its own. It follows the metrics' role when
    every metric's ``USING`` names the same one: ``arrivals`` filtered on
    ``city = 'Paris'`` counts the flights arriving in Paris. Beside metrics that
-   name two different roles, or none, or beside a window metric or a
-   semi-additive metric whose ``NON ADDITIVE BY`` dimension is not queried,
+   name two different roles, or none, or beside a semi-additive metric whose
+   ``NON ADDITIVE BY`` dimension is not queried,
    the query errors rather than binding to
    whichever relationship was declared first. Query the metrics separately, or
    filter on a member of a table that is reached one way only. See

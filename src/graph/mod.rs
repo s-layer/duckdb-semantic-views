@@ -10,6 +10,7 @@ mod relationship;
 mod same_table_metrics;
 mod toposort;
 mod using;
+mod window_dims;
 
 #[cfg(test)]
 mod test_helpers;
@@ -27,3 +28,4 @@ pub use relationship::{validate_graph, RelationshipGraph};
 pub(crate) use same_table_metrics::inline_same_table_metrics;
 pub use same_table_metrics::{has_same_table_metric_refs, validate_same_table_metric_refs};
 pub use using::validate_using_relationships;
+pub use window_dims::validate_window_dimensions;

@@ -502,11 +502,13 @@ fn child_metric_grouped_by_its_role_played_dimension() {
 /// window metric and its direct inner metric were checked for `USING`, and
 /// neither carries one, so `__sv_agg` was re-anchored at `li` with no scoped
 /// join while the inlined fact already named `ap__dep`: a Binder Error. The
-/// window emitter cannot thread a role, so the query must keep the
-/// base-anchored route: items 0 and 1 depart from A (100) and B (200), so
-/// 2 * 300 = 600 for region 7.
+/// window now runs over the rows `li_dep_alt2` gives by region, at its home
+/// table like the metric on its own: items 0 and 1 depart from A (100) and B
+/// (200), so 2 * 300 = 600 for region 7, and the orphan item's NULL region,
+/// whose departure is unknown, adds nothing. The window sums every row: 600 on
+/// each.
 #[test]
-fn window_over_a_derived_metric_with_a_using_dependency_is_not_reanchored() {
+fn window_over_a_derived_metric_with_a_using_dependency_follows_it() {
     let def = role_def()
         .with_metric("li_dep_alt", "SUM(alt)", Some("li"))
         .with_using_relationship("li_dep_alt", &["dep"])
@@ -522,7 +524,12 @@ fn window_over_a_derived_metric_with_a_using_dependency_is_not_reanchored() {
         );
     assert_eq!(
         rows(&def, &role_db(), &req(&["region"], &["w_dep"], None)),
-        vec!["7|600"]
+        vec!["7|600", "NULL|600"]
+    );
+    assert_eq!(
+        rows(&def, &role_db(), &req(&["region"], &["li_dep_alt2"], None)),
+        vec!["7|600", "NULL|NULL"],
+        "the rows the window runs over"
     );
 }
 

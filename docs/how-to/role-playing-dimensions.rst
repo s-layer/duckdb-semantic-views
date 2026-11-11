@@ -207,8 +207,8 @@ A filter on ``airports``, or on a table reached through it, follows the
 metrics' path when every metric names the same one: ``arrival_count`` with
 ``where_clause := 'city = ''London'''`` counts the flights arriving in London.
 Beside metrics naming two different paths, or none, the filter is refused,
-and so is one beside a window metric or a semi-additive metric whose
-``NON ADDITIVE BY`` dimension is not queried.
+and so is one beside a semi-additive metric whose ``NON ADDITIVE BY``
+dimension is not queried.
 
 .. versionchanged:: 0.19.0
 
@@ -217,10 +217,16 @@ and so is one beside a window metric or a semi-additive metric whose
    a path.
 
 A window metric names its path through its inner metric: a window over
-``departure_count`` is grouped by departure city. Two window metrics over
-different paths cannot be grouped by ``city`` together, and neither can metrics
-on different paths beside a semi-additive metric whose ``NON ADDITIVE BY``
-dimension is not queried; query those metrics separately.
+``departure_count`` is grouped by departure city, and two window metrics over
+different paths each follow their own. Metrics on different paths beside a
+semi-additive metric whose ``NON ADDITIVE BY`` dimension is not queried cannot
+be grouped by ``city`` together; query those metrics separately.
+
+.. versionchanged:: 0.19.0
+
+   A window metric used to be refused beside a filter on the role-playing
+   table, and two window metrics over different paths used to be refused
+   together.
 
 A metric on a table that has no relationship to ``airports``, such as a count
 of flight legs on a ``legs`` table under ``flights``, cannot name a path,

@@ -179,18 +179,15 @@ Dimensions referenced in ``PARTITION BY EXCLUDING``, ``PARTITION BY``, and ``ORD
    Use :ref:`SHOW SEMANTIC DIMENSIONS FOR METRIC <ref-show-dims-for-metric>` to see which dimensions are required for a window metric. Required dimensions have ``required = true`` in the output.
 
 
-.. _howto-window-mixing:
+.. _howto-window-beside:
 
-Mixing Restriction
-==================
+Query a Window Beside Other Metrics
+===================================
 
-.. warning::
-
-   Window function metrics and regular aggregate metrics cannot be mixed in the same query. A query must contain either all window metrics or all aggregate metrics.
+A query can hold window metrics and aggregate metrics together. Each row shows the aggregate and the window computed over it:
 
 .. code-block:: sql
 
-   -- This fails: mixing window metric 'rolling_avg' with aggregate metric 'total_qty'
    SELECT * FROM SEMANTIC_VIEW(sales
        DIMENSIONS store, date
        METRICS total_qty, rolling_avg
@@ -198,10 +195,40 @@ Mixing Restriction
 
 .. code-block:: text
 
-   semantic view 'sales': cannot mix window function metrics [rolling_avg]
-   with aggregate metrics [total_qty] in the same query
+   store | date       | total_qty | rolling_avg
+   ------+------------+-----------+------------
+   A     | 2024-01-01 |         5 |         5.0
+   A     | 2024-01-02 |         3 |         4.0
+   B     | 2024-01-01 |         7 |         7.0
 
-To get both, run two separate queries and join the results.
+The extension answers the query without the window metrics first, with each window's inner metric added to it, and then computes the windows over that result. So a window sees exactly the rows and values the same query without it returns, and a ``WHERE`` filter applies to the rows before the window runs.
+
+.. versionchanged:: 0.19.0
+
+   A query used to fail with *cannot mix window function metrics with aggregate metrics* when it held both kinds.
+
+
+.. _howto-window-relationships:
+
+Windows Across Relationships
+============================
+
+Because a window runs over its inner metric's result, it follows the same rules as that metric:
+
+- **Dimensions of other tables.** A window can be queried with dimensions of any table its inner metric can be queried with, including tables reached through a many-to-many bridge. Each group's value is counted once, as the inner metric counts it.
+- **USING paths and roles.** A window over a metric with ``USING`` reads its inner metric along that relationship. A ``USING`` written on the window metric itself applies to its inner metric when the inner metric has none of its own.
+- **Fan-outs.** A window queried with a dimension of a table that references the metric's table (orders by an item's quantity) counts each order once per group, as the inner metric does.
+
+The dimensions a window clause names (in ``PARTITION BY``, ``PARTITION BY EXCLUDING`` and ``ORDER BY``) can be written bare or as ``alias.name``. Each must be a dimension of the metric's own table, of a table it references, or of a table that references it. ``CREATE SEMANTIC VIEW`` refuses one on an unrelated table, such as a table on the other side of a many-to-many bridge or a sibling table under the same parent, as Snowflake does:
+
+.. code-block:: text
+
+   Window metric 'running_pages': its window clause names dimension 'a.country' of table 'a',
+   which is unrelated to the metric's table 'b': ...
+
+.. versionchanged:: 0.19.0
+
+   ``PARTITION BY`` and ``PARTITION BY EXCLUDING`` accept the ``alias.name`` form, which ``ORDER BY`` already accepted.
 
 
 .. _howto-window-verify:
@@ -215,7 +242,7 @@ Use :ref:`explain_semantic_view() <ref-explain-semantic-view>` to inspect the CT
 
    SELECT * FROM explain_semantic_view('sales',
        dimensions := ['store', 'date'],
-       metrics := ['rolling_avg']
+       metrics := ['total_qty', 'rolling_avg']
    );
 
 The ``-- Expanded SQL:`` section of the ``explain_output`` column shows two parts:
@@ -235,11 +262,12 @@ The ``-- Expanded SQL:`` section of the ``explain_output`` column shows two part
    SELECT
        "store" AS "store",
        "date" AS "date",
+       "total_qty" AS "total_qty",
        AVG("total_qty") OVER (PARTITION BY "store" ORDER BY "date" ASC NULLS LAST) AS "rolling_avg"
    FROM __sv_agg
 
-1. The ``WITH __sv_agg`` step aggregates the inner metric (``total_qty``) by all queried dimensions.
-2. The outer ``SELECT`` applies the window function to those aggregated rows. ``PARTITION BY EXCLUDING date`` has become ``PARTITION BY "store"``, because ``store`` is the only other queried dimension.
+1. The ``WITH __sv_agg`` step is the query without its window metrics, with each window's inner metric (here ``total_qty``) added. It aggregates by all queried dimensions.
+2. The outer ``SELECT`` reads the dimensions and aggregate metrics from those rows and applies the window function to them. ``PARTITION BY EXCLUDING date`` has become ``PARTITION BY "store"``, because ``store`` is the only other queried dimension.
 
 
 .. _howto-window-troubleshoot:
@@ -266,7 +294,10 @@ Troubleshooting
    Window metrics must use a qualified name (``alias.metric_name``). Derived metrics (those without a table alias) cannot have an ``OVER`` clause. The error message is: ``OVER clause not allowed on derived metric 'X'. Only qualified metrics (alias.name) can use OVER.``
 
 **Window metrics cannot be used as inner metrics**
-   A window metric cannot be the inner metric of another window metric; reference a base or derived metric instead. ``CREATE`` refuses the outer metric when it binds it, with ``metric '<name>' does not bind:`` followed by DuckDB's error, which may be a syntax error rather than a message about windows.
+   A window metric cannot be the inner metric of another window metric; reference a base or derived metric instead. The error message is: ``Window metric 'X': inner metric 'Y' is itself a window function metric. A window metric must be computed over an aggregate metric.``
+
+**Window clause names an unrelated dimension**
+   A dimension in ``PARTITION BY``, ``PARTITION BY EXCLUDING`` or ``ORDER BY`` must be on a table related to the metric's table (see :ref:`howto-window-relationships`). The error message starts: ``Window metric 'X': its window clause names dimension 'Y' of table 'T', which is unrelated to the metric's table 'M'``.
 
 
 .. _howto-window-related:

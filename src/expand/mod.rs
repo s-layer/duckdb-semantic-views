@@ -104,6 +104,9 @@ mod tests_role_back_crossing;
 mod tests_semi_additive_dependency;
 #[cfg(all(test, not(feature = "extension")))]
 mod tests_variables;
+// Pins ROWS (executes the SQL in-memory), so gated the same way.
+#[cfg(all(test, not(feature = "extension")))]
+mod tests_window_result_rows;
 
 // Public API (the pre-split expand.rs surface, plus the boxed fan-trap detail
 // structs re-exported for R-9).

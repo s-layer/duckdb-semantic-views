@@ -33,9 +33,10 @@ struct Step {
 /// a plain aggregate on a table with a PRIMARY KEY, or a semi-additive metric
 /// grouped by its `NON ADDITIVE BY` dimension), back along any
 /// relationship that is not ASOF or range. The query refuses a fan-out back
-/// across a temporal relationship (010956), and a window metric, a
-/// semi-additive one grouped by another dimension, or a metric on a table
-/// with no key refuses them all.
+/// across a temporal relationship (010956), and a semi-additive metric
+/// grouped by another dimension, or a metric on a table with no key, refuses
+/// them all. A window metric lists what its inner metric lists, and the
+/// dimensions its window clause names.
 ///
 /// Every path counts, not only the one through a spanning tree: in a diamond
 /// (orders reach regions through customers and through stores) the tree walked
@@ -54,6 +55,27 @@ pub fn dimensions_for_metric<'a>(
 ) -> Vec<&'a Dimension> {
     if def.joins.is_empty() {
         return def.dimensions.iter().collect();
+    }
+    // A window metric runs over the rows its inner metric gives (Phase 7 PR
+    // 5), so it can be grouped by whatever its inner metric can, and by the
+    // dimensions its window clause names.
+    if let Some(inner) = window_inner(def, met) {
+        let listed: HashSet<*const Dimension> = dimensions_for_metric(def, inner)
+            .into_iter()
+            .map(std::ptr::from_ref)
+            .collect();
+        let required: HashSet<String> = super::window::window_required_dimensions(def, met)
+            .iter()
+            .map(|d| crate::ident::normalize_ident_part(d))
+            .collect();
+        return def
+            .dimensions
+            .iter()
+            .filter(|d| {
+                listed.contains(&std::ptr::from_ref(*d))
+                    || required.contains(&crate::ident::normalize_ident_part(&d.name))
+            })
+            .collect();
     }
     let met_tables: Vec<String> = if let Some(ref st) = met.source_table {
         vec![st.to_ascii_lowercase()]
@@ -181,4 +203,14 @@ fn walk(from: &[String], to: &str, steps: &HashMap<&str, Vec<&str>>) -> bool {
         }
     }
     false
+}
+
+/// The metric a window metric `met` is computed over, unless that is itself a
+/// window (which the query refuses, `WindowOverWindow`).
+fn window_inner<'a>(def: &'a SemanticViewDefinition, met: &Metric) -> Option<&'a Metric> {
+    let inner = &met.window_spec.as_ref()?.inner_metric;
+    def.metrics
+        .iter()
+        .find(|m| crate::ident::ident_matches(&m.name, inner))
+        .filter(|m| !m.is_window())
 }

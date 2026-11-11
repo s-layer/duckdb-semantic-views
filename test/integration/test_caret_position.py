@@ -411,7 +411,7 @@ def test_caret_drop_missing_name():
 # A position DuckDB attaches to an error raised while binding that SQL is an
 # offset into the generated text, so the caret it would draw points into the
 # JSON, which the user never wrote. Such errors carry no caret.
-_NESTED_WINDOW_BASE = (
+_BIND_ERROR_BASE = (
     "CREATE SEMANTIC VIEW cbe_v AS TABLES (o AS cbe_orders PRIMARY KEY (id)) "
     "DIMENSIONS (o.d AS o.d) "
     "METRICS (o.revenue AS SUM(o.amount), "
@@ -422,7 +422,7 @@ def _assert_bind_error_without_internal_caret(metrics):
     conn = make_connection()
     try:
         conn.execute("CREATE TABLE cbe_orders (id INTEGER, amount INTEGER, d DATE)")
-        query = _NESTED_WINDOW_BASE + metrics + ")"
+        query = _BIND_ERROR_BASE + metrics + ")"
         try:
             conn.execute(query)
             assert False, "Expected exception"
@@ -440,18 +440,22 @@ def _assert_bind_error_without_internal_caret(metrics):
         conn.close()
 
 
+# These used a window metric over another window metric, whose nested window
+# failed to bind. CREATE refuses that shape before binding since Phase 7 PR 5,
+# so a window frame that does not bind stands in for it.
+
+
 def test_create_bind_error_binder_no_internal_caret():
-    """A binder error from a window metric over another window metric."""
+    """A binder error from a window frame bound naming no column."""
     _assert_bind_error_without_internal_caret(
-        "o.sm AS AVG(revenue) OVER (ORDER BY d), o.sm2 AS AVG(sm) OVER (ORDER BY d)"
+        "o.sm2 AS AVG(revenue) OVER (ORDER BY d ROWS BETWEEN x PRECEDING AND CURRENT ROW)"
     )
 
 
 def test_create_bind_error_parser_no_internal_caret():
-    """A parser error from a window metric over another window metric."""
+    """A parser error from a window frame with no end bound."""
     _assert_bind_error_without_internal_caret(
-        "o.sm AS AVG(revenue) OVER (PARTITION BY EXCLUDING d ORDER BY d), "
-        "o.sm2 AS AVG(sm) OVER (ORDER BY d)"
+        "o.sm2 AS AVG(revenue) OVER (ORDER BY d ROWS BETWEEN 1 PRECEDING AND)"
     )
 
 

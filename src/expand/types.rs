@@ -618,11 +618,13 @@ pub enum ExpandError {
     ReferencedFactFanTrap {
         detail: Box<ReferencedFactFanTrapError>,
     },
-    /// Window function metrics cannot be mixed with aggregate metrics.
-    WindowAggregateMixing {
+    /// A window metric computed over another window metric. Each window runs
+    /// over the rows its inner metric gives per group, and a window metric
+    /// gives no such rows of its own.
+    WindowOverWindow {
         view_name: String,
-        window_metrics: Vec<String>,
-        aggregate_metrics: Vec<String>,
+        metric_name: String,
+        inner_metric: String,
     },
     /// A dimension required by a window metric (EXCLUDING or ORDER BY) is not in the query.
     WindowMetricRequiredDimension {
@@ -801,9 +803,8 @@ impl fmt::Display for ExpandError {
                     write!(
                         f,
                         " A fan-out like this one is counted once per group only for ordinary \
-                         metrics on a table with a PRIMARY KEY: not for a window metric, a \
-                         semi-additive metric whose NON ADDITIVE BY dimension is not queried, a \
-                         role-played table, a query with a dimension or filter that names no \
+                         metrics on a table with a PRIMARY KEY: not for a semi-additive metric \
+                         whose NON ADDITIVE BY dimension is not queried, a role-played table, a query with a dimension or filter that names no \
                          table, or a metric table with no PRIMARY KEY."
                     )?;
                 }
@@ -866,8 +867,8 @@ impl fmt::Display for ExpandError {
                      table '{dimension_table}' is reached via multiple relationships: [{}]. \
                      Give every metric in the query a USING that names one of them, or use a \
                      dimension from a non-ambiguous table. If every metric already has one, \
-                     this query cannot be split by path (two window metrics, or metrics \
-                     beside a semi-additive one): query the metrics separately.",
+                     this query cannot be split by path (metrics beside a semi-additive one): \
+                     query the metrics separately.",
                     available_relationships.join(", ")
                 )
             }
@@ -886,8 +887,8 @@ impl fmt::Display for ExpandError {
                      [{}]. Query it with metrics that each name one of them in their USING (a \
                      metric on '{role_playing_table}' itself cannot), or use a dimension from a \
                      non-ambiguous table. If every metric already has one, this query cannot be \
-                     split by path (two window metrics, or metrics beside a semi-additive one): \
-                     query the metrics separately.",
+                     split by path (metrics beside a semi-additive one): query the metrics \
+                     separately.",
                     available_relationships.join(", ")
                 )
             }
@@ -1090,8 +1091,8 @@ impl fmt::Display for ExpandError {
                      '{member_table}' along the path its USING names ({path}), which this query \
                      cannot follow: only the plan that computes each metric at its own grain \
                      follows a USING path, and this query does not fit that plan (for example, \
-                     it also holds a window or an active semi-additive metric, or a member \
-                     declared on no table). Query the metric with fewer members"
+                     it also holds an active semi-additive metric, or a member declared on no \
+                     table). Query the metric with fewer members"
                 )
             }
             Self::WhereClauseReferencesMetric {
@@ -1170,17 +1171,16 @@ impl fmt::Display for ExpandError {
                      '{member_table}'."
                 )
             }
-            Self::WindowAggregateMixing {
+            Self::WindowOverWindow {
                 view_name,
-                window_metrics,
-                aggregate_metrics,
+                metric_name,
+                inner_metric,
             } => {
                 write!(
                     f,
-                    "semantic view '{view_name}': cannot mix window function metrics [{}] \
-                     with aggregate metrics [{}] in the same query",
-                    window_metrics.join(", "),
-                    aggregate_metrics.join(", ")
+                    "semantic view '{view_name}': window function metric '{metric_name}' is \
+                     computed over '{inner_metric}', which is itself a window function metric. \
+                     A window metric must be computed over an aggregate metric."
                 )
             }
             Self::WindowMetricRequiredDimension {

@@ -71,14 +71,16 @@
 //! - **MM-4** — [`mm4_childless_parent_manufactures_a_null_group_under_a_child_dimension`]
 //!   (fixed by the same change — now live, and (d) groups by the child
 //!   dimension on metric requests)
-//! - **MM-5** — [`mm5_window_over_a_using_metric_under_a_role_played_root`]
-//!   (TECH-DEBT #87, OPEN): with the role-played table declared first, a
-//!   window over a metric off the root falls back to the base-anchored path and
-//!   joins through the first-declared relationship. Found when (e) gained the
+//! - **MM-5** — a window over a metric off the root, with the role-played
+//!   table declared first (TECH-DEBT #87, fixed in Phase 7 PR 5 — now live:
+//!   a window is computed over its inner metric's own query, which follows the
+//!   metric's `USING`, so (e)'s role-played-root variant draws windows over
+//!   any metric). It fell back to the base-anchored path and joined through
+//!   the first-declared relationship. Found when (e) gained the
 //!   role-played-root variant (v0.14.0 test-coverage review TC1).
 //!
 //! Every live property now ranges over the cells those findings had fenced
-//! off, except MM-5's; the other remaining scope is (d)'s FACTS requests, which
+//! off; the remaining scope is (d)'s FACTS requests, which
 //! keep the base-anchored row path and so never group by the child dimension
 //! (TECH-DEBT #67, residual (3)).
 
@@ -1858,17 +1860,6 @@ fn arb_order_case_partitioned() -> impl Strategy<Value = OrderCase> {
         )
 }
 
-/// [`arb_order_case`] with the role-played table declared first, unrestricted.
-/// Only [`mm5_window_over_a_using_metric_under_a_role_played_root`] draws from
-/// it: a window over a metric off the root still binds to the first-declared
-/// relationship (MM-5, TECH-DEBT #87).
-fn arb_root_order_case_unrestricted() -> impl Strategy<Value = OrderCase> {
-    arb_order_case().prop_map(|mut c| {
-        c.ap_root = true;
-        c
-    })
-}
-
 /// Whether pool metric `i` is declared on the role-played table.
 fn pool_on_ap(i: usize) -> bool {
     i >= BASE_METRICS.len() && ORDER_EXTRAS[i - BASE_METRICS.len()].2 == "ap"
@@ -1879,9 +1870,9 @@ fn pool_on_ap(i: usize) -> bool {
 /// under a window, no dimension and no filter): the only requests that need no
 /// relationship at all, which the unbiased draw almost never produces (3/512).
 /// The other half keep the full draw, where every other table is reached from
-/// the root across the role-playing pair, except that a window is kept only
-/// over a metric on the root: a window over any other metric is MM-5 (TECH-DEBT
-/// #87), drawn by [`arb_root_order_case_unrestricted`] instead.
+/// the root across the role-playing pair, windows over any metric included
+/// (MM-5, TECH-DEBT #87, which kept them to metrics on the root until Phase 7
+/// PR 5).
 fn arb_root_order_case() -> impl Strategy<Value = OrderCase> {
     let on_ap: Vec<usize> = (0..ORDER_EXTRAS.len())
         .filter(|&i| ORDER_EXTRAS[i].2 == "ap")
@@ -1900,8 +1891,6 @@ fn arb_root_order_case() -> impl Strategy<Value = OrderCase> {
                 c.window = window;
                 c.dims.clear();
                 c.pred = None;
-            } else if c.window.is_some_and(|i| !pool_on_ap(i)) {
-                c.window = None;
             }
             c
         })
@@ -2064,22 +2053,6 @@ proptest! {
     #[test]
     fn relationship_declaration_order_is_invisible_with_a_role_played_root(
         case in arb_root_order_case()
-    ) {
-        if let Err(msg) = check_order(&case) {
-            prop_assert!(false, "{}", msg);
-        }
-    }
-
-    /// MM-5 (TECH-DEBT #87): the same, with a window over ANY metric. A window
-    /// over a `USING` metric on `o` declines the anchored window CTE (the
-    /// emitter does not thread a role into `__sv_agg`) and falls back to the
-    /// base-anchored `FROM ap LEFT JOIN o`, which joins `o` through the
-    /// first-declared relationship: swapping the declaration order changes
-    /// the answer. Reproduction: `window = dep_alt`, `dims = [region]`.
-    #[test]
-    #[ignore = "MM-5 / TECH-DEBT #87: window under a role-played root binds to the first-declared relationship"]
-    fn mm5_window_over_a_using_metric_under_a_role_played_root(
-        case in arb_root_order_case_unrestricted()
     ) {
         if let Err(msg) = check_order(&case) {
             prop_assert!(false, "{}", msg);
@@ -2597,6 +2570,16 @@ fn generator_reaches_the_role_played_root_cells() {
     assert!(
         root_window >= 32,
         "only {root_window}/512 accepted cases put a window over a metric on the role-played root"
+    );
+    // MM-5 (TECH-DEBT #87): a window over a metric off the root, which reads
+    // its inner metric across the role-playing pair.
+    let off_root_window = cases
+        .iter()
+        .filter(|c| c.window.is_some_and(|i| !on_ap(i)) && accepted(c))
+        .count();
+    assert!(
+        off_root_window >= 32,
+        "only {off_root_window}/512 accepted cases put a window over a metric off the role-played root"
     );
     let role_metric = cases
         .iter()

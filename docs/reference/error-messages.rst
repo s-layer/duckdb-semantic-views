@@ -821,7 +821,29 @@ Window metric EXCLUDING dimension not found
 
 **Cause:** A window metric's ``PARTITION BY EXCLUDING`` clause references a dimension that does not exist.
 
-**Fix:** Check the dimension name. The error suggests close matches. All dimensions in ``EXCLUDING`` must be declared in the view's ``DIMENSIONS`` clause.
+**Fix:** Check the dimension name. The error suggests close matches. All dimensions in ``EXCLUDING`` must be declared in the view's ``DIMENSIONS`` clause, written bare (``title``) or qualified by their table (``b.title``).
+
+.. versionchanged:: 0.19.0
+
+   ``PARTITION BY EXCLUDING`` and ``PARTITION BY`` accept qualified dimension names, as ``ORDER BY`` already did.
+
+
+Window metric names an unrelated dimension
+-------------------------------------------
+
+.. versionadded:: 0.19.0
+
+.. code-block:: text
+
+   Window metric '<name>': its window clause names dimension '<dim>' of table
+   '<table>', which is unrelated to the metric's table '<metric_table>': neither
+   reaches the other along relationships (for example, they are joined through
+   a many-to-many bridge). A window clause may name dimensions of
+   '<metric_table>', of a table it references, or of a table referencing it.
+
+**Cause:** A window metric's ``PARTITION BY``, ``PARTITION BY EXCLUDING`` or ``ORDER BY`` names a dimension whose table is not related to the metric's own: books ordered by their authors' country, through a ``book_authors`` bridge, or orders ordered by a dimension of a table that only shares a parent with orders. A book has no single country to order it by. Snowflake refuses these at ``CREATE`` too (010211).
+
+**Fix:** Order or partition the window by dimensions of the metric's table or of tables related to it. To see a window's rows split by the other dimension, keep it out of the window clause and query it as a dimension beside the window metric: the window then runs over those rows.
 
 
 Window metric PARTITION BY dimension not found
@@ -1358,7 +1380,7 @@ Fan trap detected
 **Cause:** A dimension or filter sits below the metric's grain: reaching it from the metric's table crosses a one-to-many join boundary. Such a query is normally answered, each row of the metric's table counted once in every group it reaches, as in Snowflake (see :ref:`howto-fan-detect`). It is refused, as a fan trap, when that can't be done:
 
 - the metric's table has no ``PRIMARY KEY`` to count its rows by;
-- the metric is a window metric, or a semi-additive metric whose ``NON ADDITIVE BY`` dimension is not queried;
+- the metric is a semi-additive metric whose ``NON ADDITIVE BY`` dimension is not queried;
 - a role-played table is on the path, or a dimension or filter in the query is declared on no table;
 - the one-to-many hop walks an ASOF or range relationship backwards, from the referenced table to the referencing one, which Snowflake refuses for ASOF too.
 
@@ -1392,10 +1414,10 @@ Ambiguous dimension path
    is reached via multiple relationships: [<rel1>, <rel2>]. Give every metric
    in the query a USING that names one of them, or use a dimension from a
    non-ambiguous table. If every metric already has one, this query cannot be
-   split by path (two window metrics, or metrics beside a semi-additive one):
-   query the metrics separately.
+   split by path (metrics beside a semi-additive one): query the metrics
+   separately.
 
-**Cause:** A dimension comes from a table reachable via multiple named relationships (role-playing pattern), and a metric in the query has no ``USING`` clause that selects one path to it (or the query has no metrics and also names a member on the table that holds the relationships, so it has to cross one of them). With no metrics and every member on the role-playing table or above it, the query reads that table's own rows and needs no path. A metric on a table further from the dimension, such as a child of the table that holds the relationships, cannot name a path at all, because a ``USING`` relationship must start at the metric's own table. The same message appears when every metric names a path but they name different ones in a query that is not grouped per path: two window metrics, or metrics beside a semi-additive metric whose ``NON ADDITIVE BY`` dimension is not queried. A window metric names its path through its inner metric.
+**Cause:** A dimension comes from a table reachable via multiple named relationships (role-playing pattern), and a metric in the query has no ``USING`` clause that selects one path to it (or the query has no metrics and also names a member on the table that holds the relationships, so it has to cross one of them). With no metrics and every member on the role-playing table or above it, the query reads that table's own rows and needs no path. A metric on a table further from the dimension, such as a child of the table that holds the relationships, cannot name a path at all, because a ``USING`` relationship must start at the metric's own table. The same message appears when every metric names a path but they name different ones in a query that is not grouped per path: metrics beside a semi-additive metric whose ``NON ADDITIVE BY`` dimension is not queried. A window metric names its path through its inner metric, or through its own ``USING`` when the inner metric has none.
 
 **Fix:** See :ref:`howto-role-playing`. Give each metric ``USING (<rel_name>)``, for example by writing ``f.departures USING (<rel_name>) AS f.flight_count`` over a plain metric, or use a dimension from a table that is not a role-playing target.
 
@@ -1678,28 +1700,32 @@ Table reached by more than one path
    semantic view '<view>': metric '<metric>' reaches table '<table>' along the
    path its USING names (o -> s -> r), which this query cannot follow: only the
    plan that computes each metric at its own grain follows a USING path, and
-   this query does not fit that plan (for example, it also holds a window or an
-   active semi-additive metric, or a member declared on no table). Query the
-   metric with fewer members
+   this query does not fit that plan (for example, it also holds an active
+   semi-additive metric, or a member declared on no table). Query the metric
+   with fewer members
 
-**Cause:** Only part of the query planner follows a path a ``USING`` picks through a diamond. A window metric, a semi-additive metric whose ``NON ADDITIVE BY`` dimension is not queried, or a dimension or filter member declared on no table sends the query elsewhere, where it would follow the path declared first. When the query also has a dimension or filter below the metric's grain, it is reported as a fan trap instead, since the plan that would count each row once per group declined the query too.
+**Cause:** Only part of the query planner follows a path a ``USING`` picks through a diamond. A semi-additive metric whose ``NON ADDITIVE BY`` dimension is not queried, or a dimension or filter member declared on no table, sends the query elsewhere, where it would follow the path declared first. When the query also has a dimension or filter below the metric's grain, it is reported as a fan trap instead, since the plan that would count each row once per group declined the query too.
 
 **Fix:** Query the ``USING`` metric without the members the message names.
 
 
-Window and aggregate metric mixing
+Window metric over a window metric
 ------------------------------------
 
-.. versionadded:: 0.6.0
+.. versionadded:: 0.19.0
 
 .. code-block:: text
 
-   semantic view '<view>': cannot mix window function metrics [<window_metrics>]
-   with aggregate metrics [<aggregate_metrics>] in the same query
+   Window metric '<metric>': inner metric '<inner>' is itself a window function
+   metric. A window metric must be computed over an aggregate metric.
 
-**Cause:** The query requests both window function metrics and standard aggregate metrics. These produce different result shapes (row-level vs. grouped) and cannot be combined.
+**Cause:** ``CREATE SEMANTIC VIEW`` refuses a window metric whose inner metric is a window metric. A window metric runs over the rows its inner metric gives per group, and a window metric gives no such rows of its own. A view stored before 0.19.0 with such a metric is refused when it is queried, with ``semantic view '<view>': window function metric '<metric>' is computed over '<inner>', which is itself a window function metric.``
 
-**Fix:** Run separate queries for window metrics and aggregate metrics.
+**Fix:** Compute the window over the aggregate metric the inner window is built on.
+
+.. versionchanged:: 0.19.0
+
+   The error *cannot mix window function metrics with aggregate metrics* is gone: a window metric can be queried beside aggregate metrics (see :ref:`howto-window-beside`).
 
 
 Window metric required dimension missing

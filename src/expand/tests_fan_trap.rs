@@ -692,9 +692,11 @@ fn semi_additive_na_dim_fan_trap_reports_declared_table_spelling() {
 // EXP-12 (code-review 2026-08-03): a QUOTED window inner-metric reference must
 // behave exactly like its unquoted spelling.
 //
-// Four sites resolve `WindowSpec::inner_metric`: the CREATE-time validator
+// Four sites resolved `WindowSpec::inner_metric`: the CREATE-time validator
 // (`body_parser`), the fan-trap fence's `metric_grain`, the per-grain
-// planner's `window_cte_anchor`, and the emitter (`expand::window`). Only the
+// planner's `window_cte_anchor` (removed in Phase 7 PR 5, when a window came to
+// be computed over its inner metric's own query), and the emitter
+// (`expand::window`). Only the
 // emitter used the canonical identifier key; the other three compared raw
 // spellings, so `"total"` did not match a metric stored as `total`.
 //
