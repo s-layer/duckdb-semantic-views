@@ -5,8 +5,10 @@
 # metric, listing the distinct member tuples that table reaches. A tuple is
 # never padded with NULLs for a member it reaches no row of. Without a metric
 # on that table Snowflake refuses (010959, "The entities ... are not related"),
-# whatever metrics the other tables have. Every expected value below is
-# Snowflake's answer to the same view and data (Phase 7 fixture 7, D1-D10, N8).
+# whatever metrics the other tables have, unless a table above it, from which
+# every member is reached the same way, has one. Every expected value below is
+# Snowflake's answer to the same view and data (Phase 7 fixture 7, D1-D10, N8;
+# fixture 8, M1-M4).
 #
 #   reviews -> books <- book_authors -> authors
 #
@@ -267,6 +269,94 @@ statement error
 SELECT * FROM SEMANTIC_VIEW(p7m_nv_no_orders_metric DIMENSIONS li.qty, n.kind);
 ----
 are not related
+
+# Fixture 8 (Phase 7 PR 4e): a member above where the paths meet, and a metric
+# above them. Order 2 has no region.
+statement ok
+CREATE TABLE p7m8_regions (region_id INT, region VARCHAR);
+
+statement ok
+CREATE TABLE p7m8_orders (order_id INT, region_id INT);
+
+statement ok
+INSERT INTO p7m8_regions VALUES (1, 'EU'), (2, 'US');
+
+statement ok
+INSERT INTO p7m8_orders VALUES (1, 1), (2, NULL), (3, 2);
+
+statement ok
+CREATE SEMANTIC VIEW p7m8_sv AS
+  TABLES (
+    r  AS p7m8_regions   PRIMARY KEY (region_id),
+    o  AS p7m8_orders    PRIMARY KEY (order_id),
+    li AS p7m_line_items PRIMARY KEY (item_id),
+    n  AS p7m_notes      PRIMARY KEY (note_id)
+  )
+  RELATIONSHIPS (
+    o_region AS o(region_id) REFERENCES r,
+    li_order AS li(order_id) REFERENCES o,
+    n_order  AS n(order_id)  REFERENCES o
+  )
+  DIMENSIONS (r.region AS region, li.qty AS qty, n.kind AS kind)
+  METRICS (r.region_count AS COUNT(region_id), o.order_count AS COUNT(order_id));
+
+# M1: the region is inner-joined like the rest, so order 2 lists nothing.
+query ITT rowsort
+SELECT * FROM SEMANTIC_VIEW(p7m8_sv DIMENSIONS li.qty, n.kind, r.region);
+----
+1	gift	EU
+1	rush	EU
+5	gift	EU
+5	rush	EU
+
+# M4: filtered on the region and the kind.
+query I rowsort
+SELECT * FROM SEMANTIC_VIEW(p7m8_sv DIMENSIONS li.qty WHERE r.region = 'EU' AND n.kind = 'gift');
+----
+1
+5
+
+# M2: a metric on regions only, above where the paths meet, answers it too.
+statement ok
+CREATE SEMANTIC VIEW p7m8_regions_metric AS
+  TABLES (
+    r  AS p7m8_regions   PRIMARY KEY (region_id),
+    o  AS p7m8_orders    PRIMARY KEY (order_id),
+    li AS p7m_line_items PRIMARY KEY (item_id),
+    n  AS p7m_notes      PRIMARY KEY (note_id)
+  )
+  RELATIONSHIPS (
+    o_region AS o(region_id) REFERENCES r,
+    li_order AS li(order_id) REFERENCES o,
+    n_order  AS n(order_id)  REFERENCES o
+  )
+  DIMENSIONS (r.region AS region, li.qty AS qty, n.kind AS kind)
+  METRICS (r.region_count AS COUNT(region_id));
+
+query ITT rowsort
+SELECT * FROM SEMANTIC_VIEW(p7m8_regions_metric DIMENSIONS li.qty, n.kind, r.region);
+----
+1	gift	EU
+1	rush	EU
+5	gift	EU
+5	rush	EU
+
+# M2b: with no member on regions they are not joined, and order 2 lists its
+# item beside its note.
+query IT rowsort
+SELECT * FROM SEMANTIC_VIEW(p7m8_regions_metric DIMENSIONS li.qty, n.kind);
+----
+1	gift
+1	rush
+2	gift
+5	gift
+5	rush
+
+statement ok
+DROP SEMANTIC VIEW p7m8_regions_metric;
+
+statement ok
+DROP SEMANTIC VIEW p7m8_sv;
 
 statement ok
 DROP SEMANTIC VIEW p7m_nv_no_orders_metric;

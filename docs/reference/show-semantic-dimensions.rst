@@ -216,4 +216,4 @@ Because ``LIKE`` is case-insensitive, ``LIKE '%NAME%'`` produces the same result
 
 .. tip::
 
-   To see only the dimensions that are safe to use with a specific metric (avoiding fan traps in multi-table views), use :ref:`SHOW SEMANTIC DIMENSIONS ... FOR METRIC <ref-show-dims-for-metric>` instead.
+   To see only the dimensions a specific metric can be grouped by in a multi-table view, use :ref:`SHOW SEMANTIC DIMENSIONS ... FOR METRIC <ref-show-dims-for-metric>` instead.

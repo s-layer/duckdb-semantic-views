@@ -503,8 +503,8 @@ impl GrainGraph {
 /// The exception is a fanning hop across an ASOF or range relationship:
 /// Snowflake refuses a metric on the referenced table grouped by a column of
 /// the referencing one (010956, "higher level of granularity", the 7.0
-/// fixture's A5), so such a path is not counted. The range case is unprobed
-/// and refused like ASOF until a fixture checks it (TECH-DEBT #112).
+/// fixture's A5), so such a path is not counted. It refuses the range case
+/// the same way (fixture 8's F1 and F2).
 fn fan_out_counts_once(path: &[String], card_map: &CardMap, temporal: &TemporalEdges) -> bool {
     let fanning_hops: Vec<(&String, &String)> = path
         .windows(2)
@@ -515,6 +515,35 @@ fn fan_out_counts_once(path: &[String], card_map: &CardMap, temporal: &TemporalE
         && fanning_hops
             .iter()
             .all(|(from, to)| !temporal.contains(&((*to).clone(), (*from).clone())))
+}
+
+/// Whether a query of `met` answers a dimension its rows fan out to, once per
+/// group (Phase 7 PR 4c), when grouped by it alone: every base metric it is
+/// built from is a plain aggregate (no window, no `NON ADDITIVE BY`, which
+/// both still refuse a fan-out) on a table with a PRIMARY KEY.
+/// `SHOW SEMANTIC DIMENSIONS ... FOR METRIC` lists such dimensions.
+pub(super) fn metric_answers_fan_outs(def: &SemanticViewDefinition, met: &Metric) -> bool {
+    let names: HashSet<String> = if met.source_table.is_some() {
+        HashSet::from([crate::ident::normalize_ident_part(&met.name)])
+    } else {
+        super::facts::collect_transitive_metric_names(met, &def.metrics)
+    };
+    let used: Vec<&Metric> = def
+        .metrics
+        .iter()
+        .filter(|m| names.contains(&crate::ident::normalize_ident_part(&m.name)))
+        .collect();
+    !met.is_window()
+        && used.iter().any(|m| m.source_table.is_some())
+        && used.iter().all(|m| {
+            !m.is_window()
+                && m.non_additive_by.is_empty()
+                && m.source_table.as_deref().is_none_or(|t| {
+                    def.tables
+                        .iter()
+                        .any(|tr| tr.alias.eq_ignore_ascii_case(t) && !tr.pk_columns.is_empty())
+                })
+        })
 }
 
 /// The pairs [`TemporalEdges`] holds, keyed like [`CardMap`] (referencing

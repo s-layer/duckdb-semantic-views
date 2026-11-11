@@ -311,7 +311,8 @@ pub(super) fn dims_only_members(
 /// the candidate no other candidate sits above.
 ///
 /// - When no table reaches every member (two children of one parent), but
-///   their paths meet at a table with a metric, the answer is
+///   their paths meet at a table that a table with a metric reaches them
+///   through, the answer is
 ///   [`Anchor::Meet`] (see [`meeting_table`]). Otherwise it is
 ///   [`Anchor::Unrelated`]: Snowflake refuses such a query ("the entities are
 ///   not related").
@@ -407,26 +408,28 @@ pub(super) fn member_anchor(def: &SemanticViewDefinition, members: &[String]) ->
 
 /// The table a dimensions-only query's members meet at when no table reaches
 /// them all by foreign keys, if Snowflake answers the query from it (Phase 7
-/// PR 4d; fixture 7's D1-D10 and N8, fixture 2's W1-W4).
-///
-/// Snowflake answers such a query when the table where the members' paths
-/// meet has a metric: reviews' stars with authors' countries meet at books
-/// (`reviews -> books <- book_authors -> authors`), a line item's qty with a
-/// note's kind at orders. The rows are the distinct member tuples that table
-/// reaches, with no tuple padded with NULLs for a member it reaches no row of:
-/// a book with no author lists none of its reviews, an order with no notes
-/// none of its items. Without a metric there, it refuses ("not related"), as
-/// for two children of a customer table with no metric (W1-W4).
+/// PR 4d and 4e; fixture 7's D1-D10 and N8, fixture 2's W1-W4, fixture 8's
+/// M1-M4).
 ///
 /// The meeting table is the table on the paths between the members from which
 /// each member is reached by fanning out and then climbing foreign keys,
-/// never fanning out again. Of several (a member above it), the lowest. `None`
-/// when there is none, when two members are joined by more than one path, or
-/// when a hop on the way is a role-played table's or an ASOF or range
-/// relationship's: a fan-out across a temporal relationship is not answered
-/// with metrics either, and the role is not chosen. A member above the
-/// meeting table is inner-joined like the rest; Snowflake has not been asked
-/// about that shape (TECH-DEBT #112).
+/// never fanning out again. Of several (a member above it), the lowest. The
+/// rows are the distinct member tuples it reaches, every hop inner-joined, so
+/// no tuple is padded with NULLs for a member it reaches no row of: a book
+/// with no author lists none of its reviews, an order with no notes none of
+/// its items, an order with no region none of its items beside a region.
+///
+/// Snowflake answers such a query only when a table from which every member
+/// is reached that way has a metric: the meeting table, or one above it (a
+/// regions metric answers an item's qty with a note's kind, fixture 8's M2b,
+/// though regions is not on their paths and is not joined). Without one it
+/// refuses ("not related"), as for two children of a customer table with no
+/// metric (W1-W4) or a metric only on the members' own tables (D1).
+///
+/// `None` when there is no meeting table or no such metric, when two members
+/// are joined by more than one path, or when a hop on the way is a
+/// role-played table's or an ASOF or range relationship's (fixture 8's T1-T3
+/// refuse these).
 fn meeting_table(def: &SemanticViewDefinition, members: &[String]) -> Option<String> {
     let mut between: Vec<String> = Vec::new();
     for (i, a) in members.iter().enumerate() {
@@ -485,13 +488,17 @@ fn meeting_table(def: &SemanticViewDefinition, members: &[String]) -> Option<Str
     let [meet] = lowest.as_slice() else {
         return None;
     };
+    // The metric may sit on any table every member is reached from that way,
+    // on the paths or above them, each reached along one undirected path.
+    let qualifies = |t: &str| {
+        members.iter().all(|m| {
+            super::multi_path::two_undirected_paths(def, t, m).is_none() && fans_then_climbs(t, m)
+        })
+    };
     def.metrics
         .iter()
-        .any(|m| {
-            m.source_table
-                .as_deref()
-                .is_some_and(|t| t.eq_ignore_ascii_case(meet))
-        })
+        .filter_map(|m| m.source_table.as_deref())
+        .any(qualifies)
         .then(|| (**meet).clone())
 }
 

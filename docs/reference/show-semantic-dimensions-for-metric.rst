@@ -1,5 +1,5 @@
 .. meta::
-   :description: Syntax reference for SHOW SEMANTIC DIMENSIONS IN ... FOR METRIC, which returns the dimensions a given metric reaches without a fan-out
+   :description: Syntax reference for SHOW SEMANTIC DIMENSIONS IN ... FOR METRIC, which returns the dimensions a given metric can be grouped by
 
 .. _ref-show-dims-for-metric:
 
@@ -7,7 +7,7 @@
 SHOW SEMANTIC DIMENSIONS FOR METRIC
 =========================================
 
-Returns the dimensions a specific metric reaches without a fan-out. In single-table views, all dimensions are returned. In multi-table views, the extension analyzes the relationship graph and excludes dimensions whose join path to the metric's source table would traverse a one-to-many edge. A query that groups the metric by one of those is answered by counting each row of the metric's table once per group, or refused with a fan trap error (see :ref:`howto-fan-detect`).
+Returns the dimensions a specific metric can be grouped by, as in Snowflake. In single-table views, all dimensions are returned. In multi-table views, the extension follows the relationship graph from the metric's source table. A dimension the metric's rows fan out to (one reached across a one-to-many relationship) is listed when a query grouping the metric by it is answered, counting each row of the metric's table once per group, and left out when that query is refused with a fan trap error (see :ref:`howto-fan-detect`).
 
 For window function metrics, the ``required`` column indicates which dimensions must be included in the query because they appear in the metric's ``PARTITION BY EXCLUDING``, ``PARTITION BY``, or ``ORDER BY`` clauses.
 
@@ -61,7 +61,7 @@ Optional Filtering Clauses
 ``LIMIT <rows>``
    Restricts the output to the first *rows* results. Must be a non-negative integer; ``LIMIT 0`` is accepted and returns no rows. ``LIMIT`` must appear last.
 
-When ``LIKE`` and ``STARTS WITH`` are both present, a dimension must satisfy both conditions (they are combined with ``AND``). These filtering clauses are applied after fan trap filtering, so only dimensions that are safe for the specified metric are candidates for name matching.
+When ``LIKE`` and ``STARTS WITH`` are both present, a dimension must satisfy both conditions (they are combined with ``AND``). These filtering clauses are applied after the metric's dimensions are worked out, so only dimensions the metric can be grouped by are candidates for name matching.
 
 .. warning::
 
@@ -115,21 +115,26 @@ Returns one row per reachable dimension with 6 columns:
 
 .. _ref-show-dims-for-metric-filtering:
 
-Fan Trap Filtering
-==================
+Which Dimensions Are Listed
+===========================
 
-The filtering logic determines whether a dimension is reachable from a metric's source table without traversing any edge in the fan-out direction (from the "one" side to the "many" side of a relationship). The rules are:
+A dimension is listed when the metric's source table reaches the dimension's table along the relationships, in steps the query can answer. The rules are:
 
 - **Same table:** If the dimension and metric share the same source table, the dimension is always included.
-- **Many-to-one (forward):** Traversing from a table with a foreign key to the referenced table is always safe. Each row on the FK side maps to at most one row on the referenced side.
-- **One-to-many (reverse):** Traversing from the referenced table back to the FK table is fan-out. Dimensions reachable only through such an edge are excluded. A query by one of them is still answered when the metric's table has a ``PRIMARY KEY``, counting each of its rows once per group (see :ref:`howto-fan-detect`); this command lists only the dimensions the metric reaches without a fan-out.
-- **One-to-one:** If the FK columns match a ``PRIMARY KEY`` or ``UNIQUE`` constraint on the FK table, the relationship is one-to-one. Both directions are safe.
-- **Derived metrics:** For derived metrics (those without a table alias), the extension resolves all base metrics they depend on and uses the union of their source tables. A dimension is included if it is reachable from at least one of those source tables without fan-out.
-- **Window metrics:** A window metric is checked like any other metric on its table: dimensions reachable from that table only through a fan-out edge are excluded. Dimensions referenced in the ``PARTITION BY EXCLUDING``, ``PARTITION BY``, or ``ORDER BY`` clauses are marked ``required = TRUE``.
+- **Many-to-one (forward):** Following a foreign key to the referenced table is always allowed. Each row on the FK side maps to at most one row on the referenced side. This includes an ``ASOF`` or range relationship followed forward.
+- **One-to-one:** If the FK columns match a ``PRIMARY KEY`` or ``UNIQUE`` constraint on the FK table, the relationship is one-to-one, and both directions are allowed.
+- **One-to-many (reverse):** Stepping from the referenced table back to the FK table fans the metric's rows out. A query by such a dimension counts each row of the metric's table once per group, so the dimension is listed when the metric is a plain aggregate on a table with a ``PRIMARY KEY``. It is left out for a window metric, a semi-additive metric (``NON ADDITIVE BY``), and a metric on a table with no ``PRIMARY KEY``, which the query refuses across a fan-out. A step back across an ``ASOF`` or range relationship is never taken: a period metric grouped by an event dimension is refused, as in Snowflake.
+- **Derived metrics:** For derived metrics (those without a table alias), the extension resolves all base metrics they depend on and uses the union of their source tables. A dimension is included if it is reached from at least one of those source tables. It is listed across a fan-out only when every base metric could be.
+- **Window metrics:** A window metric is checked like any other metric on its table, without the fan-out step. Dimensions referenced in the ``PARTITION BY EXCLUDING``, ``PARTITION BY``, or ``ORDER BY`` clauses are marked ``required = TRUE``.
+- **Several paths:** A dimension reached along two paths (a diamond, or a table referenced twice) is listed. A query by it needs a metric whose ``USING`` picks one path, and is refused without one. A dimension reached by no chain of foreign keys and two ways is left out, as the query refuses it.
+
+.. versionchanged:: 0.19.0
+
+   Dimensions reached across a one-to-many relationship are listed when the query answers them, as Snowflake lists them. Earlier releases listed only the dimensions a metric reaches without a fan-out.
 
 .. warning::
 
-   For a derived metric whose components sit on **different** tables, this command is more permissive than the query. The "at least one source table" rule lists a dimension that is safe for one component even when it is below the grain of another, and :ref:`semantic_view() <ref-semantic-view-function>` then refuses that combination. For example, with ``items_per_order AS item_count / order_count`` (``item_count`` on ``line_items``, ``order_count`` on ``orders``), a ``line_items`` dimension is listed for ``items_per_order``, but querying the two together raises a fan trap error. For those metrics, check each component metric separately. See :ref:`explanation-grain-refused` for the shapes the query refuses.
+   For a derived metric whose components sit on **different** tables, one of which refuses a fan-out (a window or semi-additive metric, or one on a table with no ``PRIMARY KEY``), this command is more permissive than the query. The "at least one source table" rule lists a dimension one component reaches even when it is below the grain of the other, and :ref:`semantic_view() <ref-semantic-view-function>` then refuses that combination. For example, with ``items_per_order AS item_count / latest_orders`` (``item_count`` on ``line_items``, the semi-additive ``latest_orders`` on ``orders``), a ``line_items`` dimension is listed for ``items_per_order``, but the query refuses it. For those metrics, check each component metric separately. With plain components, as in ``item_count / order_count``, the query answers every listed dimension. See :ref:`explanation-grain-refused` for the shapes the query refuses.
 
 
 .. _ref-show-dims-for-metric-examples:
@@ -164,11 +169,11 @@ Examples
    │ sales      │ region  │ VARCHAR   │ false    │ []       │         │
    └────────────┴─────────┴───────────┴──────────┴──────────┴─────────┘
 
-With a single table, there are no joins, so every dimension is safe for every metric.
+With a single table, there are no joins, so every dimension is listed for every metric.
 
 The example tables use ``VARCHAR`` text columns, ``DATE`` dates, ``INTEGER`` quantities and ``DECIMAL(10,2)`` amounts and prices. ``data_type`` is each member's type as a query returns it -- an aggregate's own type, not its input's: ``COUNT`` is ``BIGINT``, ``SUM`` of a ``DECIMAL(10,2)`` is ``DECIMAL(38,2)``, and a ratio of two metrics is ``DOUBLE``. See :ref:`Reported Data Types <explanation-sf-data-types>`.
 
-**Multi-table view with fan trap filtering:**
+**Multi-table view with a fan-out:**
 
 Consider a three-table schema: ``customers <- orders <- line_items``, where orders has a many-to-one FK to customers, and line_items has a many-to-one FK to orders.
 
@@ -194,7 +199,7 @@ Consider a three-table schema: ``customers <- orders <- line_items``, where orde
        li.line_item_sum AS SUM(li.price * li.qty)
    );
 
-For ``order_total`` (source table: ``orders``), the path to ``customers`` is many-to-one (safe), but the path to ``line_items`` is one-to-many (fan-out). The ``item_qty`` dimension from ``line_items`` is excluded:
+For ``order_total`` (source table: ``orders``), the path to ``customers`` is many-to-one, and the path to ``line_items`` is one-to-many (a fan-out). ``orders`` has a ``PRIMARY KEY``, so a query by ``item_qty`` counts each order once per quantity, and all three dimensions are listed:
 
 .. code-block:: sql
 
@@ -207,9 +212,12 @@ For ``order_total`` (source table: ``orders``), the path to ``customers`` is man
    ├────────────┼──────────────────┼───────────┼──────────┼──────────┼─────────┤
    │ customers  │ customer_country │ VARCHAR   │ false    │ []       │         │
    │ customers  │ customer_name    │ VARCHAR   │ false    │ []       │         │
+   │ line_items │ item_qty         │ INTEGER   │ false    │ []       │         │
    └────────────┴──────────────────┴───────────┴──────────┴──────────┴─────────┘
 
-For ``line_item_sum`` (source table: ``line_items``), the path from ``line_items`` to ``orders`` to ``customers`` is all many-to-one (safe), and ``item_qty`` is on the same table. All three dimensions are included:
+A window or semi-additive metric on ``orders``, or a metric on an ``orders`` table declared with no ``PRIMARY KEY``, would not list ``item_qty``.
+
+For ``line_item_sum`` (source table: ``line_items``), the path from ``line_items`` to ``orders`` to ``customers`` is all many-to-one, and ``item_qty`` is on the same table. All three dimensions are included:
 
 .. code-block:: sql
 
@@ -269,9 +277,9 @@ In this example, ``region`` is required because it appears in ``EXCLUDING`` (it 
 
    Use the ``required`` column to build valid queries for window metrics. Omitting a required dimension produces a query-time error: ``semantic view 'monthly_sv': window function metric 'avg_qty' requires dimension 'month' to be included in the query (used in ORDER BY)``.
 
-**Filter safe dimensions with LIKE, STARTS WITH, and LIMIT:**
+**Filter the dimensions with LIKE, STARTS WITH, and LIMIT:**
 
-The filtering examples below use a two-table view in which every dimension is safe for ``total_amount``:
+The filtering examples below use a two-table view in which every dimension is listed for ``total_amount``:
 
 .. code-block:: sql
 
@@ -293,7 +301,7 @@ The filtering examples below use a two-table view in which every dimension is sa
        o.total_amount AS SUM(o.amount)
    );
 
-After fan trap filtering, narrow results further by name pattern. ``LIKE`` is case-insensitive:
+Narrow the results further by name pattern. ``LIKE`` is case-insensitive:
 
 .. code-block:: sql
 

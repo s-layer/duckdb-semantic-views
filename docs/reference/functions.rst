@@ -261,7 +261,7 @@ The example assumes a view named ``sales`` with a ``region`` dimension and a ``r
 
 .. tip::
 
-   A tool that starts knowing only the extension's name can learn the function surface from ``duckdb_functions()`` as above, list the views with :ref:`SHOW SEMANTIC VIEWS <ref-show-semantic-views>`, list a view's queryable members with :ref:`SHOW COLUMNS IN SEMANTIC VIEW <ref-show-columns>`, check which dimensions are safe with a metric with :ref:`SHOW SEMANTIC DIMENSIONS ... FOR METRIC <ref-show-dims-for-metric>`, and then query with :ref:`semantic_view() <ref-semantic-view-function>`.
+   A tool that starts knowing only the extension's name can learn the function surface from ``duckdb_functions()`` as above, list the views with :ref:`SHOW SEMANTIC VIEWS <ref-show-semantic-views>`, list a view's queryable members with :ref:`SHOW COLUMNS IN SEMANTIC VIEW <ref-show-columns>`, check which dimensions a metric can be grouped by with :ref:`SHOW SEMANTIC DIMENSIONS ... FOR METRIC <ref-show-dims-for-metric>`, and then query with :ref:`semantic_view() <ref-semantic-view-function>`.
 
 
 .. _ref-functions-search-path:

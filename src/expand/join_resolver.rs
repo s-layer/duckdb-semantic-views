@@ -408,9 +408,10 @@ pub(super) fn push_join_clauses(
 /// when `find_path` preferred a bridge too; since Phase 7 PR 4c it prefers no
 /// fanning shape over another. The two can differ only for a table reached by
 /// more than one fanning path, which `multi_path` refuses for a queried
-/// member, so the round only decides which tree is built. With a chain `o -> c -> r` beside a one-to-one
-/// `s -> o` and `s -> r`, walking both kinds of step at once could join `r`
-/// through `s`, off the one chain the multi-path check counted. With
+/// member, so the round only decides which tree is built. With a chain
+/// `o -> c -> r` beside a one-to-one `s -> o` and `s -> r`, walking both kinds
+/// of step at once could join `r` through `s`, off the one chain the
+/// multi-path check counted. With
 /// `t3 -> t2 -> t1` beside `t3 -> t0 <- t1`, a plain walk could reach `t1`
 /// through `t0`, fanning out, and read no `t1` row where the chain the query
 /// follows reads one. In a tree there is one path either way. Each round

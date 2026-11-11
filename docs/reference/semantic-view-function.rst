@@ -236,18 +236,22 @@ Generates ``SELECT DISTINCT <dims> FROM ...``.
      table's own rows. Beside a member on the referencing table it is refused
      as ambiguous, since no metric names a relationship to follow.
    - When no single table reaches every member, the query is answered from
-     the table where the members' paths meet, if that table has a metric, as
-     Snowflake answers it. Each member is reached from there by one-to-many
-     hops, then hops toward referenced tables (either may be none): an item's ``qty``
-     and a note's ``kind``, both children of ``orders``, meet at ``orders``;
-     a review's ``stars`` and an author's ``country`` meet at ``books``,
-     across the ``book_authors`` bridge. The rows are the distinct member
-     tuples that table reaches. No tuple is padded with ``NULL`` for a member
-     it reaches no row of, so an order with no notes lists none of its items'
-     values. A ``WHERE`` member counts as a member.
+     the table where the members' paths meet, as Snowflake answers it. Each
+     member is reached from there by one-to-many hops, then hops toward
+     referenced tables (either may be none): an item's ``qty`` and a note's
+     ``kind``, both children of ``orders``, meet at ``orders``; a review's
+     ``stars`` and an author's ``country`` meet at ``books``, across the
+     ``book_authors`` bridge. The view needs a metric on a table every member
+     is reached from in the same way, which can be the meeting table or one
+     above it, such as a count of ``regions`` that ``orders`` references. The
+     rows are the distinct member tuples the meeting table reaches. No tuple
+     is padded with ``NULL`` for a member it reaches no row of, so an order
+     with no notes lists none of its items' values, and with a region beside
+     them an order with no region lists nothing. A ``WHERE`` member counts as
+     a member.
    - Otherwise the query is refused: the tables are not related, as Snowflake
      says. That is the case for dimensions on two children of a parent with
-     no metric, and for members whose paths meet more than once, or cross an
+     no metric on it or above it, and for members whose paths meet more than once, or cross an
      ``ASOF`` or range relationship or a relationship declared twice (a
      table's second role) on the way.
 

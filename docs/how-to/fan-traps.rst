@@ -363,7 +363,7 @@ Because ``order_id`` is the PK of ``order_details``, the relationship is one-to-
 
 .. tip::
 
-   Before writing a query, you can ask the extension which dimensions a specific metric reaches without a fan-out. :ref:`SHOW SEMANTIC DIMENSIONS … FOR METRIC <ref-show-dims-for-metric>` lists them; a dimension it leaves out is one the metric is counted once per group by, or refused for:
+   Before writing a query, you can ask the extension which dimensions a specific metric can be grouped by. :ref:`SHOW SEMANTIC DIMENSIONS … FOR METRIC <ref-show-dims-for-metric>` lists them, those the metric is counted once per group by included; a dimension it leaves out is one the query refuses:
 
    .. code-block:: sql
 
@@ -379,7 +379,7 @@ Troubleshooting
    The dimension sits below the metric's grain, and the query is one of those
    listed in :ref:`howto-fan-errors`. Apply one of the fixes in
    :ref:`howto-fan-fix`, or run ``SHOW SEMANTIC DIMENSIONS IN <view> FOR METRIC
-   <metric>`` to list the dimensions the metric reaches without a fan-out.
+   <metric>`` to list the dimensions the metric can be grouped by.
 
 **A metric's groups add up to more than its total**
    The query groups the metric by a dimension below its grain, so a row that

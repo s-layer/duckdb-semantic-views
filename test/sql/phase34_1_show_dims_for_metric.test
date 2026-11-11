@@ -82,10 +82,10 @@ CREATE SEMANTIC VIEW star_sv AS
 # Test 2: order_total metric (source: o)
 # - customer_name (source: c): path o->c, ManyToOne forward = safe. INCLUDED.
 # - customer_country (source: c): same path. INCLUDED.
-# - item_qty (source: li): path o->li, reverse of li->o ManyToOne = fan-out. EXCLUDED.
-#   A query answers order_total by item_qty, counting each order once per group
-#   (Phase 7 PR 4c), but the listing still leaves fan-outs out until Snowflake's
-#   listing is probed (TECH-DEBT #112).
+# - item_qty (source: li): path o->li, reverse of li->o ManyToOne = fan-out.
+#   INCLUDED: a query answers order_total by item_qty, counting each order once
+#   per group (Phase 7 PR 4c), and Snowflake lists such a dimension (fixture 8,
+#   S1-S3; Phase 7 PR 4e).
 # ============================================================
 
 query TTTTTT rowsort
@@ -93,6 +93,7 @@ SHOW SEMANTIC DIMENSIONS IN star_sv FOR METRIC order_total
 ----
 p34fm_customers	customer_country	VARCHAR	false	[]	(empty)
 p34fm_customers	customer_name	VARCHAR	false	[]	(empty)
+p34fm_line_items	item_qty	INTEGER	false	[]	(empty)
 
 # ============================================================
 # Test 3: line_item_sum metric (source: li)
@@ -169,6 +170,228 @@ query TTTTTT rowsort
 show semantic dimensions in derived_sv for metric order_total
 ----
 p34fm_customers	customer_name	VARCHAR	false	[]	(empty)
+
+# ============================================================
+# Phase 7 PR 4e, Snowflake fixture 8: a metric lists every dimension it can be
+# grouped by, fanned out or not. Regions 1 EU, 2 US; orders 1 (EU), 2 (no
+# region), 3 (US); items of order 1 qty 5 and 1, order 2 qty 2, order 3 qty 7;
+# notes gift and rush on order 1, gift on order 2.
+# ============================================================
+
+statement ok
+CREATE TABLE p34fm8_regions (region_id INT, region VARCHAR);
+
+statement ok
+CREATE TABLE p34fm8_orders (order_id INT, region_id INT, placed_at DATE);
+
+statement ok
+CREATE TABLE p34fm8_items (item_id INT, order_id INT, qty INT);
+
+statement ok
+CREATE TABLE p34fm8_notes (note_id INT, order_id INT, kind VARCHAR);
+
+statement ok
+INSERT INTO p34fm8_regions VALUES (1, 'EU'), (2, 'US');
+
+statement ok
+INSERT INTO p34fm8_orders VALUES (1, 1, '2024-01-10'), (2, NULL, '2024-02-10'), (3, 2, '2024-03-10');
+
+statement ok
+INSERT INTO p34fm8_items VALUES (1, 1, 5), (2, 1, 1), (3, 2, 2), (4, 3, 7);
+
+statement ok
+INSERT INTO p34fm8_notes VALUES (1, 1, 'gift'), (2, 1, 'rush'), (3, 2, 'gift');
+
+statement ok
+CREATE SEMANTIC VIEW p34fm8_sv AS
+  TABLES (
+    r  AS p34fm8_regions PRIMARY KEY (region_id),
+    o  AS p34fm8_orders  PRIMARY KEY (order_id),
+    li AS p34fm8_items   PRIMARY KEY (item_id),
+    n  AS p34fm8_notes   PRIMARY KEY (note_id)
+  )
+  RELATIONSHIPS (
+    o_region AS o (region_id) REFERENCES r,
+    li_order AS li (order_id) REFERENCES o,
+    n_order  AS n (order_id)  REFERENCES o
+  )
+  DIMENSIONS (r.region AS region, o.placed_at AS placed_at, li.qty AS qty, n.kind AS kind)
+  METRICS (
+    r.region_count AS COUNT(region_id),
+    o.order_count  AS COUNT(order_id),
+    li.item_count  AS COUNT(item_id),
+    o.latest_orders NON ADDITIVE BY (placed_at) AS COUNT(order_id),
+    o.running_orders AS SUM(order_count) OVER (ORDER BY placed_at)
+  )
+
+# S1: an order metric lists the items' and the notes' dimensions, which fan
+# its rows out.
+query TTTTTT rowsort
+SHOW SEMANTIC DIMENSIONS IN p34fm8_sv FOR METRIC order_count
+----
+p34fm8_items	qty	INTEGER	false	[]	(empty)
+p34fm8_notes	kind	VARCHAR	false	[]	(empty)
+p34fm8_orders	placed_at	DATE	false	[]	(empty)
+p34fm8_regions	region	VARCHAR	false	[]	(empty)
+
+# S2: an item metric lists the notes' kind, reached up to orders and down.
+query TTTTTT rowsort
+SHOW SEMANTIC DIMENSIONS IN p34fm8_sv FOR METRIC item_count
+----
+p34fm8_items	qty	INTEGER	false	[]	(empty)
+p34fm8_notes	kind	VARCHAR	false	[]	(empty)
+p34fm8_orders	placed_at	DATE	false	[]	(empty)
+p34fm8_regions	region	VARCHAR	false	[]	(empty)
+
+# S3: a region metric lists every dimension below it.
+query TTTTTT rowsort
+SHOW SEMANTIC DIMENSIONS IN p34fm8_sv FOR METRIC region_count
+----
+p34fm8_items	qty	INTEGER	false	[]	(empty)
+p34fm8_notes	kind	VARCHAR	false	[]	(empty)
+p34fm8_orders	placed_at	DATE	false	[]	(empty)
+p34fm8_regions	region	VARCHAR	false	[]	(empty)
+
+# S4: and the query answers it, each order once per kind (order 3 has none).
+query TI
+SELECT * FROM SEMANTIC_VIEW(p34fm8_sv DIMENSIONS n.kind METRICS o.order_count) ORDER BY ALL NULLS LAST;
+----
+gift	2
+rush	1
+NULL	1
+
+# A semi-additive metric still refuses a fan-out, so it lists no fanned
+# dimension.
+query TTTTTT rowsort
+SHOW SEMANTIC DIMENSIONS IN p34fm8_sv FOR METRIC latest_orders
+----
+p34fm8_orders	placed_at	DATE	false	[]	(empty)
+p34fm8_regions	region	VARCHAR	false	[]	(empty)
+
+statement error
+SELECT * FROM SEMANTIC_VIEW(p34fm8_sv DIMENSIONS li.qty METRICS o.latest_orders);
+----
+fan trap
+
+# Nor does a window metric (Phase 7 PR 5 reworks window emission).
+query TTTTTT rowsort
+SHOW SEMANTIC DIMENSIONS IN p34fm8_sv FOR METRIC running_orders
+----
+p34fm8_orders	placed_at	DATE	true	[]	(empty)
+p34fm8_regions	region	VARCHAR	false	[]	(empty)
+
+statement error
+SELECT * FROM SEMANTIC_VIEW(p34fm8_sv DIMENSIONS li.qty, o.placed_at METRICS o.running_orders);
+----
+fan trap
+
+# A metric on a table with no PRIMARY KEY can't count its rows once per group
+# (Snowflake's 010933), so it lists no fanned dimension either.
+statement ok
+CREATE SEMANTIC VIEW p34fm8_unique AS
+  TABLES (
+    o  AS p34fm8_orders UNIQUE (order_id),
+    li AS p34fm8_items  PRIMARY KEY (item_id)
+  )
+  RELATIONSHIPS (li_order AS li (order_id) REFERENCES o (order_id))
+  DIMENSIONS (o.placed_at AS placed_at, li.qty AS qty)
+  METRICS (o.order_count AS COUNT(order_id))
+
+query TTTTTT rowsort
+SHOW SEMANTIC DIMENSIONS IN p34fm8_unique FOR METRIC order_count
+----
+p34fm8_orders	placed_at	DATE	false	[]	(empty)
+
+statement error
+SELECT * FROM SEMANTIC_VIEW(p34fm8_unique DIMENSIONS li.qty METRICS o.order_count);
+----
+fan trap
+
+# F4: across a range relationship walked backwards the query refuses a period
+# metric by an item's qty (010956, F1), so it is not listed; the period notes'
+# kind, reached back along a plain relationship, is.
+statement ok
+CREATE TABLE p34fm8_periods (period_id INT, start_ts DATE, end_ts DATE, label VARCHAR);
+
+statement ok
+CREATE TABLE p34fm8_timed_items (item_id INT, at_ts DATE, qty INT);
+
+statement ok
+CREATE TABLE p34fm8_period_notes (note_id INT, period_id INT, kind VARCHAR);
+
+statement ok
+INSERT INTO p34fm8_periods VALUES (1, '2024-01-01', '2024-02-01', 'jan'), (2, '2024-02-01', NULL, 'feb_on');
+
+statement ok
+INSERT INTO p34fm8_timed_items VALUES (1, '2024-01-05', 5), (2, '2024-02-05', 1), (3, '2023-12-01', 7);
+
+statement ok
+INSERT INTO p34fm8_period_notes VALUES (1, 1, 'gift'), (2, 1, 'rush'), (3, 2, 'gift');
+
+statement ok
+CREATE SEMANTIC VIEW p34fm8_range AS
+  TABLES (
+    p  AS p34fm8_periods      PRIMARY KEY (period_id)
+      CONSTRAINT period_range DISTINCT RANGE BETWEEN start_ts AND end_ts EXCLUSIVE,
+    ti AS p34fm8_timed_items  PRIMARY KEY (item_id),
+    pn AS p34fm8_period_notes PRIMARY KEY (note_id)
+  )
+  RELATIONSHIPS (
+    ti_period AS ti (at_ts) REFERENCES p (BETWEEN start_ts AND end_ts EXCLUSIVE),
+    pn_period AS pn (period_id) REFERENCES p
+  )
+  DIMENSIONS (p.label AS label, ti.qty AS qty, pn.kind AS kind)
+  METRICS (p.period_count AS COUNT(period_id), ti.item_count AS COUNT(item_id))
+
+query TTTTTT rowsort
+SHOW SEMANTIC DIMENSIONS IN p34fm8_range FOR METRIC period_count
+----
+p34fm8_period_notes	kind	VARCHAR	false	[]	(empty)
+p34fm8_periods	label	VARCHAR	false	[]	(empty)
+
+statement error
+SELECT * FROM SEMANTIC_VIEW(p34fm8_range DIMENSIONS ti.qty METRICS p.period_count);
+----
+fan trap
+
+# F3: forward across the range relationship an item metric lists every
+# dimension.
+query TTTTTT rowsort
+SHOW SEMANTIC DIMENSIONS IN p34fm8_range FOR METRIC item_count
+----
+p34fm8_period_notes	kind	VARCHAR	false	[]	(empty)
+p34fm8_periods	label	VARCHAR	false	[]	(empty)
+p34fm8_timed_items	qty	INTEGER	false	[]	(empty)
+
+statement ok
+DROP SEMANTIC VIEW p34fm8_range
+
+statement ok
+DROP SEMANTIC VIEW p34fm8_unique
+
+statement ok
+DROP SEMANTIC VIEW p34fm8_sv
+
+statement ok
+DROP TABLE p34fm8_period_notes
+
+statement ok
+DROP TABLE p34fm8_timed_items
+
+statement ok
+DROP TABLE p34fm8_periods
+
+statement ok
+DROP TABLE p34fm8_notes
+
+statement ok
+DROP TABLE p34fm8_items
+
+statement ok
+DROP TABLE p34fm8_orders
+
+statement ok
+DROP TABLE p34fm8_regions
 
 # ============================================================
 # Cleanup
