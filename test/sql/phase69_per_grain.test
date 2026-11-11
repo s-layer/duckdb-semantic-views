@@ -242,10 +242,12 @@ SELECT * FROM SEMANTIC_VIEW(p69_siblings DIMENSIONS status METRICS item_qty, shi
 closed	1	15
 open	5	50
 
-# A metric on one child grouped by a dimension on its SIBLING is a fan trap:
-# each line item is multiplied by its order's shipments before aggregation.
-# Neither sibling is an ancestor of the other, so the fence's parent-chain walk
-# used to find no path between them and let this through silently.
+# A metric on one child grouped by a dimension on its SIBLING fans out: each
+# line item is multiplied by its order's shipments before aggregation. Neither
+# sibling is an ancestor of the other, so the fence's parent-chain walk used to
+# find no path between them and let this through silently. Since Phase 7 PR 4c
+# such a fan-out counts each row once per group, but only for a metric table
+# with a PRIMARY KEY (Snowflake's 010933); `li` has none, so it stays refused.
 statement error
 SELECT * FROM SEMANTIC_VIEW(p69_siblings DIMENSIONS carrier METRICS item_qty);
 ----
@@ -258,22 +260,26 @@ statement ok
 DROP TABLE p69_shipments;
 
 # ============================================================
-# GRAIN-07: what per-grain does NOT make answerable.
-#
-# A dimension BELOW a metric's own grain still raises a fan trap: each order
-# genuinely fans across its items' SKUs, and each customer across their orders'
-# statuses. Per-grain aggregation cannot define those queries either.
+# GRAIN-07: a dimension BELOW a metric's own grain. Each order fans across its
+# items' SKUs, and each customer across their orders' statuses; since Phase 7
+# PR 4c each is counted once per group, as Snowflake counts it (fixture 7, N1).
+# Order 12 has no items and customer 3 no orders: the NULL groups.
 # ============================================================
 
-statement error
+query TI rowsort
 SELECT * FROM SEMANTIC_VIEW(p69_sales DIMENSIONS sku METRICS order_count);
 ----
-fan trap detected
+NULL	1
+a	1
+b	1
+c	1
 
-statement error
+query TI rowsort
 SELECT * FROM SEMANTIC_VIEW(p69_sales DIMENSIONS status METRICS total_balance);
 ----
-fan trap detected
+NULL	300
+closed	100
+open	300
 
 # ============================================================
 # GRAIN-06: a single-grain query is untouched — same base-anchored SQL as

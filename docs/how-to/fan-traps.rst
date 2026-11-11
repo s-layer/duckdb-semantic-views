@@ -1,5 +1,5 @@
 .. meta::
-   :description: Diagnose the fan trap error, fix the query or the view, and know which multi-grain queries the extension answers
+   :description: How a metric grouped by a dimension below its grain is counted, when the fan trap error is raised, and how to fix it
 
 .. _howto-fan-traps:
 
@@ -7,7 +7,7 @@
 How to Diagnose and Fix Fan Traps
 =====================================
 
-This guide shows how to recognize the fan trap error, fix the query or the view that triggers it, and tell which queries across several tables the extension answers rather than rejects.
+This guide shows how the extension counts a metric grouped or filtered by a dimension on the "many" side of a relationship, which of those queries still raise the fan trap error, and how to fix the query or the view that raises it.
 
 **Prerequisites:**
 
@@ -20,37 +20,50 @@ This guide shows how to recognize the fan trap error, fix the query or the view 
 What Is a Fan Trap?
 ===================
 
-A fan trap occurs when a query aggregates a metric from one table while grouping by a dimension from another table that is on the "many" side of a relationship. The join produces duplicate rows, inflating the aggregate result.
+A fan trap occurs when a query aggregates a metric from one table while grouping by a dimension from another table that is on the "many" side of a relationship. A plain join produces duplicate rows, inflating the aggregate result.
 
 For example, consider orders and line items:
 
 - Each order has many line items (one-to-many from orders to line items).
 - ``COUNT(*)`` on orders counts one row per order.
 - If you join orders to line items to get a line-item dimension, each order row is duplicated per line item.
-- ``COUNT(*)`` on orders now returns the number of line items, not the number of orders.
+- ``COUNT(*)`` on orders over that join returns the number of line items, not the number of orders.
 
-The extension detects this pattern and raises an error instead of returning incorrect results. For why a metric's grain belongs to its table, see :ref:`explanation-metric-grain`.
+The extension never aggregates over such a join. As in Snowflake, it counts **each row of the metric's table once in every group it reaches**: an order with a shipped and a pending line item counts once under ``shipped`` and once under ``pending``, and an order with no line items counts in the ``NULL`` group. Where it cannot count that way, it raises the fan trap error instead of returning an inflated result. For why a metric's grain belongs to its table, see :ref:`explanation-metric-grain`.
 
 
 .. _howto-fan-detect:
 
-When the Extension Raises a Fan Trap Error
-==========================================
+How a Fan-Out Is Counted
+========================
+
+.. versionchanged:: 0.19.0
+
+   A metric grouped or filtered by a dimension below its own grain is answered
+   once per group, as in Snowflake. It used to be refused with ``fan trap
+   detected``.
 
 The extension infers cardinality from the ``PRIMARY KEY`` and ``UNIQUE`` declarations in the ``TABLES`` clause:
 
 - If the FK columns on the "from" side of a relationship match a PK or UNIQUE constraint on that same table, the relationship is **one-to-one**.
 - Otherwise, the relationship is **many-to-one** (the default).
 
-A fan trap error is raised when a metric's source table must traverse a relationship in the reverse direction (one-to-many) to reach a queried **dimension**. Traversing many-to-one is always safe, because each row on the "many" side maps to at most one row on the "one" side.
+Following a relationship many-to-one never duplicates rows, because each row on the "many" side maps to at most one row on the "one" side. Following one in reverse (one-to-many) is a **fan-out**. When a metric reaches a queried dimension, or a member the query's ``WHERE`` names, through a fan-out, the extension finds the distinct pairs of a metric-table row and a group, and aggregates the metric over those. Every one-to-many path is counted this way:
 
-Metrics that merely sit at *different grains from each other* are not an error: since v0.12.0 they are computed one grain at a time and joined -- see :ref:`howto-fan-per-grain`.
+- straight down, such as orders by a line-item status, or customers by the status of their orders' line items;
+- to a sibling after a hop up, such as line items by the mode of their order's shipments, when line items and shipments both reference orders;
+- through several fan-outs, such as line items by the tag of their order's notes;
+- across a many-to-many bridge (see :ref:`Many-to-many relationships through a bridge <ref-create-bridge-relationships>`).
+
+A filter on such a dimension keeps a metric-table row when any row it reaches matches, and counts it once.
+
+The pairs are told apart by the metric table's ``PRIMARY KEY``, so the metric's table needs one. Without it the fan-out is refused, as Snowflake refuses it.
 
 
 .. _howto-fan-example:
 
-Example: Fan Trap Detection in Action
-======================================
+Example: A Metric Grouped Below Its Grain
+=========================================
 
 .. code-block:: sql
 
@@ -83,9 +96,7 @@ Example: Fan Trap Detection in Action
        o.order_count  AS COUNT(*)
    );
 
-**Safe query,** ``li.revenue`` grouped by ``o.region``:
-
-The relationship ``li_to_order`` is many-to-one from ``li`` to ``o``. Traversing this direction is safe because each line item maps to one order.
+``li.revenue`` grouped by ``o.region`` follows ``li_to_order`` many-to-one, so nothing fans out:
 
 .. code-block:: sql
 
@@ -103,27 +114,56 @@ The relationship ``li_to_order`` is many-to-one from ``li`` to ``o``. Traversing
    │ West   │   150.0 │
    └────────┴─────────┘
 
-**Blocked query,** ``o.order_count`` grouped by ``li.status``:
-
-To reach ``li.status``, the extension must traverse from ``o`` to ``li``, the reverse of many-to-one, which is one-to-many. This would duplicate order rows, inflating the count.
+``o.order_count`` grouped by ``li.status`` follows it in reverse. Order 1 has a shipped and a pending line item and counts once in each group; order 2 has one shipped line item:
 
 .. code-block:: sql
 
-   -- This query is blocked with a fan trap error:
    SELECT * FROM SEMANTIC_VIEW(sales
        DIMENSIONS status
        METRICS order_count
-   );
-
-The error message identifies the metric, dimension, and relationship involved:
+   ) ORDER BY status;
 
 .. code-block:: text
 
-   semantic view 'sales': fan trap detected -- metric 'order_count' (table 'o')
-   would be duplicated when joined to dimension 'status' (table 'li') via
-   relationship 'li_to_order' (many-to-one cardinality, inferred: FK is not
+   ┌─────────┬─────────────┐
+   │ status  │ order_count │
+   ├─────────┼─────────────┤
+   │ pending │           1 │
+   │ shipped │           2 │
+   └─────────┴─────────────┘
+
+The groups overlap: the counts add up to 3, but there are only two orders. Summing a fanned-out metric across its groups counts a row once for every group it is in. Query the metric without the dimension (``METRICS order_count`` alone gives 2) when you need the total.
+
+
+.. _howto-fan-errors:
+
+When the Extension Raises a Fan Trap Error
+==========================================
+
+The fan-out is refused with ``fan trap detected``, rather than counted once per group, when:
+
+- the metric's table has no ``PRIMARY KEY``;
+- the metric is a window metric;
+- the metric is semi-additive and its ``NON ADDITIVE BY`` dimension is not in the query;
+- the fan-out crosses an ``ASOF`` or range relationship in reverse;
+- the path to the dimension runs through a role-played table, or the query has a dimension or filter whose expression names no table.
+
+For example, in a view where ``line_items`` (``li``, declared without a ``PRIMARY KEY``) and ``shipments`` (``sh``) both reference ``orders``, ``revenue`` grouped by the shipments' ``mode`` raises:
+
+.. code-block:: text
+
+   semantic view 'sales': fan trap detected -- metric 'revenue' (table 'li')
+   would be duplicated when joined to dimension 'mode' (table 'sh') via
+   relationship 'sh_to_order' (many-to-one cardinality, inferred: FK is not
    PK/UNIQUE). This would inflate aggregation results. Remove the dimension,
-   use a metric from the same table, or restructure the relationship.
+   use a metric from the same table, or restructure the relationship. A
+   fan-out like this one is counted once per group only for ordinary metrics
+   on a table with a PRIMARY KEY: not for a window metric, a semi-additive
+   metric whose NON ADDITIVE BY dimension is not queried, a role-played table,
+   a query with a dimension or filter that names no table, or a metric table
+   with no PRIMARY KEY.
+
+Metrics that merely sit at *different grains from each other* are not an error either: they are computed one grain at a time and joined, see :ref:`howto-fan-per-grain`.
 
 
 .. _howto-fan-fix:
@@ -131,11 +171,15 @@ The error message identifies the metric, dimension, and relationship involved:
 How to Fix Fan Trap Errors
 ==========================
 
-There are three approaches:
+There are four approaches:
 
-**1. Remove the problematic dimension**
+**1. Declare the metric table's primary key**
 
-Query ``order_count`` with a dimension from the same table (``o``) or from a table reachable in the safe direction:
+If the error comes from a metric table with no ``PRIMARY KEY``, declare one in ``TABLES`` (``li AS line_items PRIMARY KEY (id)``). The fan-out is then counted once per group.
+
+**2. Remove the problematic dimension**
+
+Query the metric with a dimension from the same table, or from a table it reaches many-to-one:
 
 .. code-block:: sql
 
@@ -144,7 +188,7 @@ Query ``order_count`` with a dimension from the same table (``o``) or from a tab
        METRICS order_count
    );
 
-**2. Use a metric from the same table as the dimension**
+**3. Use a metric from the same table as the dimension**
 
 Instead of ``o.order_count`` with ``li.status``, use ``li.revenue`` with ``li.status``:
 
@@ -155,9 +199,9 @@ Instead of ``o.order_count`` with ``li.status``, use ``li.revenue`` with ``li.st
        METRICS revenue
    );
 
-**3. Restructure the view**
+**4. Restructure the view**
 
-If you need the order count broken down by ``status``, decide what an order with lines in several statuses should count as, then model that answer. For example, add an order-level status column to ``orders`` and declare the dimension there, or pre-aggregate the line items to one row per order and declare that table instead of ``line_items``.
+If you want each order counted in exactly one group, decide which group an order with lines in several statuses belongs to, then model that answer. For example, add an order-level status column to ``orders`` and declare the dimension there, or pre-aggregate the line items to one row per order and declare that table instead of ``line_items``.
 
 
 .. _howto-fan-per-grain:
@@ -229,48 +273,38 @@ refused.
 
 .. _howto-fan-other-shapes:
 
-Other Shapes That Raise the Fan Trap Error
-==========================================
+Shapes That Were Silently Inflated Before v0.11.0
+=================================================
 
 .. versionchanged:: 0.11.0
 
    Query shapes that inflate the same way as the classic fan trap previously
    slipped past the fan trap check and returned silently wrong numbers. They
-   now raise the same ``fan trap detected`` error.
+   were refused from v0.11.0, and since v0.19.0 they are counted once per
+   group like any other fan-out (see :ref:`howto-fan-detect`).
 
-**A dimension below a metric's own grain.**
-   The classic case above (``order_count`` by ``li.status``), and its
-   longer-range forms: ``SUM(customers.balance)`` grouped by an order-grain or
-   line-item-grain dimension. Per-grain aggregation does not make these
-   answerable -- each customer genuinely fans across their orders' statuses, so
-   there is no single correct value per group. Snowflake rejects the same shape:
-   its rule is that `the logical table for the dimension must be related to the
-   logical table for the metric
-   <https://docs.snowflake.com/en/user-guide/views-semantic/querying>`_ and must
-   have "an equal or lower level of granularity than the logical table for the
-   metric". Fix: use the fixes listed above.
+**A dimension below a metric's own grain, several levels down.**
+   ``SUM(customers.balance)`` grouped by an order-grain or line-item-grain
+   dimension: each customer counts once in every group its orders or line
+   items reach.
 
 **A dimension on a sibling table.**
-   .. versionchanged:: 0.12.0
-
    When two tables both reference a third -- ``line_items`` and ``shipments``
    both referencing ``orders`` -- a metric on one grouped by a dimension on the
-   other is a fan trap: joining both children multiplies each one's rows by the
-   other's (an order with 2 line items and 2 shipments produces 4 rows). Neither
-   sibling is an ancestor of the other, so this pair used to be skipped by the
-   check and the query returned inflated numbers. It is now rejected. Fix: query
-   the two sides separately -- their *metrics* together are fine, and are
-   computed per grain.
+   other used to be aggregated over the join of both children, multiplying each
+   one's rows by the other's (an order with 2 line items and 2 shipments
+   produced 4 rows). Each line item now counts once per shipment mode its order
+   has.
 
 **An active semi-additive metric queried alongside a fanning child dimension.**
    A ``NON ADDITIVE BY`` metric queried together with a dimension on a fanning
    child table ran its snapshot (``RANK``) query over the already-multiplied
    join, where ties across the fanned duplicates of one source row are
-   indistinguishable from ties across distinct rows -- so it could
-   double-count. Such metrics previously skipped the fan trap check on the
-   assumption that the snapshot neutralized the fan; they now get the same
-   check. Fix: snapshot only on safe, root-ward dimensions, or query the
-   semi-additive metric without the fanning child dimension.
+   indistinguishable from ties across distinct rows, so it could
+   double-count. With its ``NON ADDITIVE BY`` dimension in the query it is an
+   ordinary metric and is counted once per group; without it, it is still
+   refused. Fix: snapshot only on dimensions the metric reaches many-to-one, or
+   query the semi-additive metric without the fanning child dimension.
 
 .. note::
 
@@ -309,7 +343,7 @@ If the FK columns match a PK or UNIQUE constraint on the "from" side, the extens
        od.shipping   AS SUM(od.shipping_cost)
    );
 
-Because ``order_id`` is the PK of ``order_details``, the relationship is one-to-one. Metrics from either table can be grouped by dimensions from the other without triggering a fan trap. Here ``order_count`` (on ``orders``) is grouped by ``gift_wrap`` (on ``order_details``):
+Because ``order_id`` is the PK of ``order_details``, the relationship is one-to-one. Metrics from either table can be grouped by dimensions from the other without any fan-out. Here ``order_count`` (on ``orders``) is grouped by ``gift_wrap`` (on ``order_details``):
 
 .. code-block:: sql
 
@@ -329,7 +363,7 @@ Because ``order_id`` is the PK of ``order_details``, the relationship is one-to-
 
 .. tip::
 
-   Before writing a query, you can ask the extension which dimensions are safe to combine with a specific metric. :ref:`SHOW SEMANTIC DIMENSIONS … FOR METRIC <ref-show-dims-for-metric>` applies the same reachability rules at inspection time and returns only the dimensions that will not trigger a fan trap:
+   Before writing a query, you can ask the extension which dimensions a specific metric reaches without a fan-out. :ref:`SHOW SEMANTIC DIMENSIONS … FOR METRIC <ref-show-dims-for-metric>` lists them; a dimension it leaves out is one the metric is counted once per group by, or refused for:
 
    .. code-block:: sql
 
@@ -342,9 +376,15 @@ Troubleshooting
 ===============
 
 **fan trap detected -- metric '...' would be duplicated when joined to dimension '...'**
-   The dimension sits below the metric's grain. Apply one of the fixes in
+   The dimension sits below the metric's grain, and the query is one of those
+   listed in :ref:`howto-fan-errors`. Apply one of the fixes in
    :ref:`howto-fan-fix`, or run ``SHOW SEMANTIC DIMENSIONS IN <view> FOR METRIC
-   <metric>`` to list the dimensions that combine with it safely.
+   <metric>`` to list the dimensions the metric reaches without a fan-out.
+
+**A metric's groups add up to more than its total**
+   The query groups the metric by a dimension below its grain, so a row that
+   reaches several groups counts in each (see :ref:`howto-fan-example`). Query
+   the metric without that dimension for the total.
 
 **The error says "inferred: FK is not PK/UNIQUE", but each row really has one match**
    The extension infers a relationship as one-to-one only when the foreign-key

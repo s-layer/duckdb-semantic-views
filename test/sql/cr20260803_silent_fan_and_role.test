@@ -77,13 +77,15 @@ SELECT * FROM SEMANTIC_VIEW(cr803_na DIMENSIONS region METRICS balance_at);
 fan trap detected
 
 # EXP-9 case 2 (control, and the asymmetry that made the bug unmistakable):
-# QUERYING the same dimension makes the metric regular, and the fence has
-# always rejected the identical join. The un-queried case must not be the
-# permissive one.
-statement error
+# QUERYING the same dimension makes the metric regular. Since Phase 7 PR 4c a
+# regular metric across a fan-out counts each order once per group (Snowflake
+# parity, fixture 7's N1), so the one order's balance is 100.00, not the 200.00
+# the duplicated join would give. Case 1 stays refused: the un-queried NA
+# dimension needs the snapshot path, which has no deduplicated form.
+query TR
 SELECT * FROM SEMANTIC_VIEW(cr803_na DIMENSIONS ship_ts METRICS balance_at);
 ----
-fan trap detected
+2024-01-01 00:00:00	100.00
 
 # EXP-9 case 3 (control): an NA dimension on a table reached the OTHER way --
 # many-to-one, one row per base row -- does not fan, and must still compute.

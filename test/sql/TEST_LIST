@@ -157,6 +157,7 @@ test/sql/inline_query_tables.test
 test/sql/semantic_view_reads_itself.test
 test/sql/phase7_asof_relationships.test
 test/sql/phase7_bridge_relationships.test
+test/sql/phase7_fan_out_once_per_group.test
 test/sql/phase7_diamond_paths.test
 test/sql/phase7_range_relationships.test
 test/sql/phase7_window_partition.test

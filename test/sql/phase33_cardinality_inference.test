@@ -142,11 +142,13 @@ SELECT * FROM SEMANTIC_VIEW(p33_infer_many DIMENSIONS region METRICS revenue);
 East	150.0
 West	200.0
 
-# Fan trap: o->li reverse ManyToOne = fan-out
-statement error
+# Fan-out: o->li reverse ManyToOne. Each order counts once per status, as
+# Snowflake counts it (Phase 7 PR 4c, fixture 7's N1).
+query TI rowsort
 SELECT * FROM SEMANTIC_VIEW(p33_infer_many DIMENSIONS status METRICS order_count);
 ----
-fan trap detected
+pending	1
+shipped	3
 
 statement ok
 DROP SEMANTIC VIEW p33_infer_many;
@@ -364,11 +366,14 @@ SELECT * FROM SEMANTIC_VIEW(p33_chain DIMENSIONS name METRICS revenue);
 Alice	150.0
 Bob	200.0
 
-# Fan trap: c->o->li requires reverse traversal of ManyToOne edges
-statement error
+# Fan-out: c->o->li reverses two ManyToOne edges. Each customer counts once
+# per status (Phase 7 PR 4c, Snowflake parity): Alice's items are shipped and
+# pending, Bob's shipped.
+query TI rowsort
 SELECT * FROM SEMANTIC_VIEW(p33_chain DIMENSIONS status METRICS cust_count);
 ----
-fan trap detected
+pending	1
+shipped	2
 
 statement ok
 DROP SEMANTIC VIEW p33_chain;

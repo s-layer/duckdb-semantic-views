@@ -17,12 +17,16 @@
 //!
 //! Two invariants are checked per case:
 //!
-//! 1. **Dimension below a metric's grain ⇒ rejected.** `SUM(u.uw)` grouped by
-//!    `t.d`, or `SUM(w.ww)` grouped by `u.ucat` / `t.d`, asks for an ancestor's
-//!    aggregate at a grain below it: those rows genuinely fan across the
-//!    descendant's values, at one hop or two. `expand` MUST reject it with a
-//!    fan-trap-family error — neither the root-anchored path (which silently
-//!    inflated it, EXP-1) nor per-grain aggregation can define it.
+//! 1. **Dimension below a metric's grain ⇒ once per group, or refused across
+//!    a temporal hop.** `SUM(u.uw)` grouped by `t.d`, or `SUM(w.ww)` grouped by
+//!    `u.ucat` / `t.d`, asks for an ancestor's aggregate at a grain below it:
+//!    those rows fan across the descendant's values, at one hop or two. Since
+//!    Phase 7 PR 4c each ancestor row counts once in every group it reaches,
+//!    as Snowflake counts it (fixture 7, N1-N7), and the oracle states that as
+//!    the DISTINCT (ancestor row, group) pairs ([`fanned_grain_sql`]). A
+//!    fan-out that walks the ASOF or range hop backwards stays refused with a
+//!    fan-trap-family error, as Snowflake refuses the ASOF one (fixture 1, A5);
+//!    the root-anchored path once silently inflated all of these (EXP-1).
 //! 2. **Accepted query ⇒ numerically correct.** For every query `expand`
 //!    accepts, the result must equal an independently hand-written oracle,
 //!    compared as a multiset inside DuckDB via a symmetric `EXCEPT ALL`
@@ -776,6 +780,9 @@ fn grain_key(metric: &str) -> &'static str {
 /// `u` itself, never over `t LEFT JOIN u` (where each parent row appears once
 /// per child row and childless parents vanish).
 fn grain_sql(case: &Case, anchor: &str) -> String {
+    if fans_below(case, anchor) {
+        return fanned_grain_sql(case, anchor);
+    }
     let dim_items: Vec<String> = case
         .sel_dims
         .iter()
@@ -847,8 +854,7 @@ fn grain_sql(case: &Case, anchor: &str) -> String {
     // PBT-6: the predicate is evaluated inside EVERY grain's CTE, filtering the
     // rows that feed that grain's aggregate. Predicate members at or above the
     // anchor are reachable along the up-chain already joined above; members
-    // BELOW it would fan the anchor, and those queries are rejected before
-    // reaching the oracle (see the fence branch in the property).
+    // BELOW it fan the anchor, and `fanned_grain_sql` answers that grain.
     let where_sql = case
         .where_pred
         .as_ref()
@@ -861,6 +867,79 @@ fn grain_sql(case: &Case, anchor: &str) -> String {
             .collect::<Vec<_>>()
             .join(", ");
         format!("SELECT {select_items} {from}{where_sql} GROUP BY {group_by}")
+    }
+}
+
+/// One fanned-out grain's half of the oracle (Phase 7 PR 4c): `anchor` is `u`
+/// or `w`, and a queried dimension or `where_clause` member sits below it.
+/// Snowflake counts each anchor row once in every group it reaches (fixture 7,
+/// N1-N7), so the anchor's rows are joined DOWN to their descendants (an
+/// anchor row with none kept once, NULL-extended), filtered by the predicate,
+/// and cut to the DISTINCT (anchor row, group) pairs before the sum. The
+/// expansion keys its deduplicating subquery on the anchor's PRIMARY KEY and
+/// joins it back; this states the same answer as one flat DISTINCT. A fan-out
+/// to `t` gets here only over the plain hop: across the temporal one it is
+/// refused first. `w` fanned out to `u` alone needs no `t` at all.
+fn fanned_grain_sql(case: &Case, anchor: &str) -> String {
+    // `t` is joined only when a member is on it, and then the hop is plain.
+    let to_t = if member_tables(case).contains(&"t") {
+        assert_eq!(
+            case.inst.hop,
+            Hop::Plain,
+            "a temporal fan-out is refused before the oracle"
+        );
+        " LEFT JOIN t ON t.fk_u = u.id"
+    } else {
+        ""
+    };
+    let (input, from, metric) = match anchor {
+        "u" => (
+            "u.uw AS uw",
+            format!("FROM u LEFT JOIN w ON u.fk_w = w.id{to_t}"),
+            "sum(f.uw) AS su",
+        ),
+        "w" => (
+            "w.ww AS ww",
+            format!("FROM w LEFT JOIN u ON u.fk_w = w.id{to_t}"),
+            "sum(f.ww) AS sw",
+        ),
+        other => unreachable!("{other} has nothing above it to fan out from"),
+    };
+    let dims: Vec<&str> = case.sel_dims.iter().map(|&i| DIMS[i]).collect();
+    let dim_cols: String = dims
+        .iter()
+        .map(|d| match *d {
+            "td" => ", t.d AS td",
+            "ucat" => ", u.ucat AS ucat",
+            "wcat" => ", w.wcat AS wcat",
+            other => unreachable!("unexpected dim {other}"),
+        })
+        .collect();
+    let where_sql = case
+        .where_pred
+        .as_ref()
+        .map_or_else(String::new, |p| format!(" WHERE {}", p.to_raw_sql()));
+    let pairs = format!("SELECT DISTINCT {anchor}.id AS rid, {input}{dim_cols} {from}{where_sql}");
+    let has_metric = case
+        .sel_metrics
+        .iter()
+        .any(|&i| grain_key(METS[i]) == anchor);
+    let items: Vec<String> = dims
+        .iter()
+        .map(|d| format!("f.{d} AS {d}"))
+        .chain(has_metric.then(|| metric.to_string()))
+        .collect();
+    if dims.is_empty() {
+        format!("SELECT {} FROM ({pairs}) f", items.join(", "))
+    } else {
+        let group_by = (1..=dims.len())
+            .map(|n| n.to_string())
+            .collect::<Vec<_>>()
+            .join(", ");
+        format!(
+            "SELECT {} FROM ({pairs}) f GROUP BY {group_by}",
+            items.join(", ")
+        )
     }
 }
 
@@ -994,14 +1073,6 @@ fn check_case(case: &Case) -> Result<(), TestCaseError> {
         facts: vec![],
     };
 
-    // A dimension BELOW some selected metric's grain is the one shape that
-    // must stay rejected: those parent rows genuinely fan across the
-    // descendant's values, at one hop or two.
-    let dimension_below_a_metric_grain = case.sel_metrics.iter().any(|&m| {
-        case.sel_dims
-            .iter()
-            .any(|&d| level(dim_table(DIMS[d])) < level(metric_table(METS[m])))
-    });
     let result = expand("multihop", &def, &req);
 
     // Phase 7: with the second path, a query that reads `t`'s rows and names
@@ -1024,54 +1095,23 @@ fn check_case(case: &Case) -> Result<(), TestCaseError> {
         return Ok(());
     }
 
-    if dimension_below_a_metric_grain {
+    // Phase 7 PR 4c: a dimension or `where_clause` member BELOW some selected
+    // metric's grain fans that metric out. It is answered once per group
+    // (`fanned_grain_sql`), except across the ASOF or range hop walked
+    // backwards: a metric on `u` or `w` reaching `t` when that hop is
+    // temporal. That stays refused as a fan trap.
+    if fans_across_a_temporal_hop(case) {
         match result {
             Err(e) => {
                 let msg = e.to_string();
                 prop_assert!(
                     msg.contains("fan trap"),
-                    "dimension below a metric's grain rejected, but not as a fan trap: {msg}"
+                    "a fan-out across the temporal hop was rejected, but not as a fan trap: {msg}"
                 );
             }
             Ok(sql) => prop_assert!(
                 false,
-                "a dimension below a metric's grain must be rejected, got SQL:\n{sql}"
-            ),
-        }
-        return Ok(());
-    }
-
-    // PBT-6: a `where_clause` member BELOW some selected metric's grain is
-    // the same hazard through a different door. Filtering on `t` while
-    // aggregating `sum(u.uw)` means joining `t` into the u-grain CTE, and
-    // that join fans `u` — one copy per matching child row — so the sum
-    // would be inflated. There is no correct number to return, so the
-    // fence must reject it exactly as it rejects a dimension below the
-    // grain. Checked after the dimension rule, which takes precedence.
-    let mut pred_tables: Vec<&'static str> = Vec::new();
-    if let Some(p) = case.where_pred.as_ref() {
-        p.tables(&mut pred_tables);
-    }
-    let where_member_below_a_metric_grain = case.sel_metrics.iter().any(|&m| {
-        pred_tables
-            .iter()
-            .any(|&pt| level(pt) < level(metric_table(METS[m])))
-    });
-
-    if where_member_below_a_metric_grain {
-        match result {
-            Err(e) => {
-                let msg = e.to_string();
-                prop_assert!(
-                    msg.contains("fan trap"),
-                    "where_clause member below a metric's grain rejected, but not \
-                     as a fan trap: {msg}"
-                );
-            }
-            Ok(sql) => prop_assert!(
-                false,
-                "a where_clause member below a metric's grain must be rejected \
-                 -- joining it in fans that metric. Got SQL:\n{sql}"
+                "a fan-out across the temporal hop must be refused, got SQL:\n{sql}"
             ),
         }
         return Ok(());
@@ -1162,6 +1202,36 @@ fn reaches_w_two_ways(case: &Case) -> bool {
     case.sel_metrics
         .iter()
         .any(|&m| matches!(METS[m], "sv" | "ct"))
+}
+
+/// The tables the query's dimensions and `where_clause` members live on.
+fn member_tables(case: &Case) -> Vec<&'static str> {
+    let mut members: Vec<&'static str> =
+        case.sel_dims.iter().map(|&d| dim_table(DIMS[d])).collect();
+    if let Some(p) = &case.where_pred {
+        p.tables(&mut members);
+    }
+    members
+}
+
+/// Whether some member sits below `anchor`'s grain, so the anchor's metrics
+/// fan out to reach it.
+fn fans_below(case: &Case, anchor: &str) -> bool {
+    matches!(anchor, "u" | "w")
+        && member_tables(case)
+            .iter()
+            .any(|&t| level(t) < level(anchor))
+}
+
+/// Whether a metric on `u` or `w` reaches `t` across the ASOF or range hop
+/// walked backwards: the fan-out Snowflake refuses (fixture 1, A5).
+fn fans_across_a_temporal_hop(case: &Case) -> bool {
+    case.inst.hop != Hop::Plain
+        && member_tables(case).contains(&"t")
+        && case
+            .sel_metrics
+            .iter()
+            .any(|&m| matches!(metric_table(METS[m]), "u" | "w"))
 }
 
 /// Phase 7 guard: the diamond cases reach both outcomes, a refusal and an
@@ -1264,6 +1334,9 @@ fn generator_reaches_both_where_clause_branches() {
     let mut pred_below_grain = 0usize;
     let mut pred_at_or_above_grain = 0usize;
     let mut multi_grain_with_pred = 0usize;
+    // Phase 7 PR 4c: fan-outs answered once per group (the plain hop), and
+    // refused across the temporal one.
+    let (mut fanned_answered, mut fanned_refused) = (0usize, 0usize);
     let mut distinct: HashSet<String> = HashSet::new();
 
     for _ in 0..400 {
@@ -1271,6 +1344,18 @@ fn generator_reaches_both_where_clause_branches() {
             .new_tree(&mut runner)
             .expect("strategy must produce a value")
             .current();
+        if !reaches_w_two_ways(&case) {
+            if fans_across_a_temporal_hop(&case) {
+                fanned_refused += 1;
+            } else if ["u", "w"].iter().any(|a| {
+                case.sel_metrics
+                    .iter()
+                    .any(|&m| metric_table(METS[m]) == *a)
+                    && fans_below(&case, a)
+            }) {
+                fanned_answered += 1;
+            }
+        }
         // The dimension rule takes precedence in the property, so only count
         // cases that actually reach the where-clause branch.
         let dim_below = case.sel_metrics.iter().any(|&m| {
@@ -1340,7 +1425,12 @@ fn generator_reaches_both_where_clause_branches() {
     assert!(
         pred_below_grain > 0,
         "no case put a where_clause member below a selected metric's grain; the \
-         fan-trap assertion for that branch is unreachable and therefore vacuous"
+         once-per-group oracle for that branch is unreachable and therefore vacuous"
+    );
+    assert!(
+        fanned_answered >= 40 && fanned_refused >= 20,
+        "fan-outs answered {fanned_answered}, refused across the temporal hop \
+         {fanned_refused}: one branch is barely reached"
     );
     assert!(
         pred_at_or_above_grain > 0,

@@ -40,6 +40,9 @@ fn db() -> duckdb::Connection {
                                          (11, 3, 'co'), (12, 3, 'lead');
          INSERT INTO countries VALUES ('FR', 'Europe'), ('UK', 'Europe'), ('DE', 'Europe');
          INSERT INTO reviews VALUES (1, 10, 5), (2, 10, 3), (3, 11, 4);
+         CREATE TABLE editions (edition_id INT, book_id INT, format VARCHAR);
+         INSERT INTO editions VALUES (1, 10, 'hard'), (2, 10, 'soft'), (3, 11, 'hard'),
+                                     (4, 12, 'soft');
          CREATE TABLE customers (cust_id INT, cust_name VARCHAR);
          CREATE TABLE products (product_id INT, category VARCHAR);
          CREATE TABLE sales (sale_id INT, cust_id INT, product_id INT, amount INT);
@@ -130,6 +133,27 @@ fn bridge_def(first: &str) -> SemanticViewDefinition {
         ],
         ..Default::default()
     }
+}
+
+/// [`bridge_def`] with `editions`, a second plain child of books beside
+/// `reviews`: Duo has a hardback and a paperback, Mixed a hardback, Solo a
+/// paperback, Orphan none.
+fn sibling_def(first: &str) -> SemanticViewDefinition {
+    let mut def = bridge_def("b");
+    def.tables.push(table("e", "editions", &["edition_id"]));
+    let at = def
+        .tables
+        .iter()
+        .position(|t| t.alias == first)
+        .expect("alias");
+    let base = def.tables.remove(at);
+    def.tables.insert(0, base);
+    def.dimensions.push(dim("format", "e.format", "e"));
+    def.metrics
+        .push(metric("edition_count", "COUNT(e.edition_id)", Some("e")));
+    def.joins
+        .push(rel("e_book", "e", "b", "book_id", "book_id"));
+    def
 }
 
 /// The fixture's `p7_fact_bridge`: customers and products through sales.
@@ -470,28 +494,41 @@ fn bridge_without_a_primary_key_is_refused() {
     ba.definition = Some("SELECT x.*, 'i' || x.book_id AS isbn FROM book_authors AS x".to_string());
     let e = refusal(&def, &["title", "country"], &["total_pages"]);
     assert!(
-        matches!(&e, ExpandError::FanTrap { detail } if detail.across_bridge),
+        matches!(&e, ExpandError::FanTrap { detail } if detail.counts_once),
         "{e}"
     );
     assert!(e.to_string().contains("PRIMARY KEY"), "{e}");
 }
 
 /// A dimension on a plain child, a table whose only relationship is to the
-/// metric's, is below the metric's grain and still refused (fixture A5).
+/// metric's, fans the metric's rows out: each book counts once per review
+/// rating, as Snowflake counts each order once per note kind (fixture 7, N1).
+/// Duo has reviews of 5 and 3 stars, Mixed one of 4; Solo and Orphan none.
 #[test]
-fn dimension_on_a_plain_child_is_still_refused() {
-    let e = refusal(&bridge_def("b"), &["stars"], &["total_pages"]);
-    assert!(
-        matches!(&e, ExpandError::FanTrap { detail } if !detail.across_bridge),
-        "{e}"
-    );
+fn dimension_on_a_plain_child_counts_once_per_group() {
+    for first in ["b", "a", "ba", "r"] {
+        assert_eq!(
+            run(&bridge_def(first), &["stars"], &["total_pages"], None),
+            table_of(&[
+                &["3", "100"],
+                &["4", "200"],
+                &["5", "100"],
+                &["NULL", "350"]
+            ]),
+            "base table {first}"
+        );
+    }
 }
 
-/// Two fan-outs on one path (authors -> bridge -> books -> reviews) are refused.
+/// Two fan-outs on one path (authors -> bridge -> books -> reviews) count each
+/// author once per rating (fixture 7, N4): Ana wrote Duo (5, 3) and Mixed (4),
+/// Ben Duo, Cleo Mixed and Solo (no review), Dan nothing.
 #[test]
-fn two_fan_outs_are_refused() {
-    let e = refusal(&bridge_def("b"), &["stars"], &["author_count"]);
-    assert!(matches!(e, ExpandError::FanTrap { .. }), "{e}");
+fn two_fan_outs_count_once_per_group() {
+    assert_eq!(
+        run(&bridge_def("a"), &["stars"], &["author_count"], None),
+        table_of(&[&["3", "2"], &["4", "2"], &["5", "2"], &["NULL", "2"]])
+    );
 }
 
 /// A fan-out after a hop up (reviews -> books <- bridge -> authors) counts each
@@ -520,7 +557,84 @@ fn fan_out_after_a_hop_up_without_a_primary_key_is_refused() {
         .push(metric("total_stars", "SUM(r.stars)", Some("r")));
     let e = refusal(&def, &["country"], &["total_stars"]);
     assert!(
-        matches!(&e, ExpandError::FanTrap { detail } if detail.across_bridge),
+        matches!(&e, ExpandError::FanTrap { detail } if detail.counts_once),
+        "{e}"
+    );
+    assert!(e.to_string().contains("PRIMARY KEY"), "{e}");
+}
+
+/// After a hop up, a fan-out into a plain sibling child counts each row once
+/// per group too (Snowflake's fixture 6, K19: items by a note on their order).
+/// Reviews 1 and 2 are of Duo (hardback and paperback), review 3 of Mixed
+/// (hardback).
+#[test]
+fn reviews_by_a_sibling_child_after_a_hop_up_count_once_per_group() {
+    for first in ["b", "a", "ba", "r", "e"] {
+        assert_eq!(
+            run(&sibling_def(first), &["format"], &["review_count"], None),
+            table_of(&[&["hard", "3"], &["soft", "2"]]),
+            "base table {first}"
+        );
+    }
+}
+
+/// Filtered on a sibling child after a hop up: the reviews of a book with a
+/// paperback, each once.
+#[test]
+fn filter_on_a_sibling_child_after_a_hop_up_counts_each_row_once() {
+    assert_eq!(
+        run(
+            &sibling_def("b"),
+            &[],
+            &["review_count"],
+            Some("format = 'soft'")
+        ),
+        table_of(&[&["2"]])
+    );
+}
+
+/// The other direction, editions by a review column: Duo's two editions under
+/// stars 5 and 3, Mixed's under 4, and Solo's (no review) in the NULL group.
+#[test]
+fn editions_by_a_review_column_count_once_per_group() {
+    assert_eq!(
+        run(&sibling_def("e"), &["stars"], &["edition_count"], None),
+        table_of(&[&["3", "2"], &["4", "1"], &["5", "2"], &["NULL", "1"]])
+    );
+}
+
+/// A sibling child and a table across the bridge in one query: each review
+/// once per (format, country).
+#[test]
+fn sibling_child_beside_the_bridge_after_a_hop_up() {
+    assert_eq!(
+        run(
+            &sibling_def("r"),
+            &["format", "country"],
+            &["review_count"],
+            None
+        ),
+        table_of(&[
+            &["hard", "FR", "3"],
+            &["hard", "UK", "1"],
+            &["soft", "FR", "2"]
+        ])
+    );
+}
+
+/// With no PRIMARY KEY on the metric's table there is nothing to deduplicate
+/// by, and the query is refused, asking for the key (Snowflake's 010933 in
+/// fixture 6, K14).
+#[test]
+fn sibling_child_after_a_hop_up_without_a_primary_key_is_refused() {
+    let mut def = sibling_def("b");
+    let reviews = def.tables.iter_mut().find(|t| t.alias == "r").expect("r");
+    reviews.pk_columns.clear();
+    def.metrics
+        .push(metric("total_stars", "SUM(r.stars)", Some("r")));
+    let e = refusal(&def, &["format"], &["total_stars"]);
+    assert!(
+        matches!(&e, ExpandError::FanTrap { detail } if detail.counts_once),
         "{e}"
     );
     assert!(e.to_string().contains("PRIMARY KEY"), "{e}");
@@ -539,10 +653,10 @@ fn semi_additive_metric_across_the_bridge_is_refused() {
     def.metrics.push(last);
     let e = refusal(&def, &["country"], &["last_pages"]);
     assert!(
-        matches!(&e, ExpandError::FanTrap { detail } if detail.across_bridge),
+        matches!(&e, ExpandError::FanTrap { detail } if detail.counts_once),
         "{e}"
     );
-    assert!(e.to_string().contains("many-to-many bridge"), "{e}");
+    assert!(e.to_string().contains("counted once per group only"), "{e}");
 }
 
 /// A window metric across the bridge is refused, and the message says a bridge
@@ -567,10 +681,10 @@ fn window_metric_across_the_bridge_is_refused() {
     });
     let e = refusal(&def, &["country"], &["avg_pages"]);
     assert!(
-        matches!(&e, ExpandError::FanTrap { detail } if detail.across_bridge),
+        matches!(&e, ExpandError::FanTrap { detail } if detail.counts_once),
         "{e}"
     );
-    assert!(e.to_string().contains("many-to-many bridge"), "{e}");
+    assert!(e.to_string().contains("counted once per group only"), "{e}");
 }
 
 /// A window metric and a semi-additive one across the bridge after a hop up are
@@ -605,26 +719,33 @@ fn window_and_semi_additive_across_the_bridge_after_a_hop_up_are_refused() {
     for met in ["avg_reviews", "last_stars"] {
         let e = refusal(&def, &["country"], &[met]);
         assert!(
-            matches!(&e, ExpandError::FanTrap { detail } if detail.across_bridge),
+            matches!(&e, ExpandError::FanTrap { detail } if detail.counts_once),
             "{met}: {e}"
         );
     }
 }
 
-/// When a query is refused for a plain fan-out and also crosses a bridge, the
-/// error names the plain fan-out: that is what blocks it (code review on PR
-/// #339). Here `stars` is on a plain child of books and `country` is across
-/// the bridge.
+/// A plain child and a table across the bridge in one query: each book once
+/// per (country, rating). Solo (UK) has no review, Orphan neither an author
+/// nor a review.
 #[test]
-fn plain_fan_out_is_reported_before_a_bridge() {
-    let e = refusal(&bridge_def("b"), &["country", "stars"], &["total_pages"]);
-    match &e {
-        ExpandError::FanTrap { detail } => {
-            assert_eq!(detail.dimension_name, "stars", "{e}");
-            assert!(!detail.across_bridge, "{e}");
-        }
-        other => panic!("expected a fan trap, got {other}"),
-    }
+fn plain_child_beside_the_bridge_counts_once_per_group() {
+    assert_eq!(
+        run(
+            &bridge_def("r"),
+            &["country", "stars"],
+            &["total_pages"],
+            None
+        ),
+        table_of(&[
+            &["FR", "3", "100"],
+            &["FR", "4", "200"],
+            &["FR", "5", "100"],
+            &["UK", "4", "200"],
+            &["UK", "NULL", "300"],
+            &["NULL", "NULL", "50"],
+        ])
+    );
 }
 
 /// A dimension's output cast is applied before the bridge's dedup, so two

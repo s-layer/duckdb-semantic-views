@@ -9,6 +9,9 @@
 # table, and `check_referenced_fact_fan_traps` is handed the QUERIED dimensions
 # and metrics -- a `where_clause` member is neither.
 #
+# (Phase 7 PR 4c: the fan-out cases below are now answered with each order
+# counted once, rather than refused; the 200 stays impossible.)
+#
 # Numerically confirmed in the review and reproduced at the unit layer: with one
 # order and two line items, `rev = SUM(o.amount)` returned 200 instead of 100
 # because the emitted SQL was `FROM o LEFT JOIN li WHERE ((li.qty) * 2) > 0`.
@@ -68,27 +71,31 @@ SELECT rev FROM SEMANTIC_VIEW(cr0808_fan METRICS rev);
 100
 
 # The fact branch. `o_fact` is declared on `o` but its expression lives entirely on
-# `li`, so resolving it joins the child and doubles SUM(o.amount) to 200.
-statement error
+# `li`, so resolving it joins the child; a plain join doubles SUM(o.amount) to
+# 200. Since Phase 7 PR 4c a fan-out counts each row of the metric's table once
+# per group (Snowflake parity, fixture 7), so the order passes the filter once
+# and the answer is 100. Without a PRIMARY KEY on `o` it is still refused
+# (`expand::tests_fan_trap::exp27_fact_chain_without_a_primary_key_is_fenced`).
+query I
 SELECT rev FROM SEMANTIC_VIEW(cr0808_fan
     DIMENSIONS region
     METRICS rev
     WHERE o_fact > 0
 );
 ----
-fan trap detected
+100
 
 # The DIMENSION branch: same child-table fact, reached from a dimension's
 # expression instead of a fact's (TECH-DEBT #54 made dimension expressions
-# fact-inlined, so this hits the identical join).
-statement error
+# fact-inlined, so this hits the identical join). Counted once, as above.
+query I
 SELECT rev FROM SEMANTIC_VIEW(cr0808_fan
     DIMENSIONS region
     METRICS rev
     WHERE band = 1
 );
 ----
-fan trap detected
+100
 
 # Anchored at the METRIC's grain, not the member's table: a metric already at
 # the child grain is not multiplied by joining the child, so the same predicate

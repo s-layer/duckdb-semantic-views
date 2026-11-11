@@ -576,7 +576,7 @@ fn mark_bridged_groups(
                 .fanning_relationship(&group.anchor, dim_table)
                 .is_some()
             {
-                if !graph.is_bridge(&group.anchor, dim_table) {
+                if !graph.fan_out_counts_once(&group.anchor, dim_table) {
                     return None;
                 }
                 bridged = true;
@@ -585,7 +585,7 @@ fn mark_bridged_groups(
         bridged |= where_tables.iter().any(|t| {
             let t = t.to_ascii_lowercase();
             graph.fanning_relationship(&group.anchor, &t).is_some()
-                && graph.is_bridge(&group.anchor, &t)
+                && graph.fan_out_counts_once(&group.anchor, &t)
         });
         if bridged {
             group.bridge_key = Some(anchor_key(def, &group.anchor)?);

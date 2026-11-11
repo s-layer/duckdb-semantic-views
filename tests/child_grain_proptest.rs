@@ -85,11 +85,20 @@
 //! grain's group keys, and each metric is read back from its own grain by a
 //! correlated lookup on the key — NULL when that grain has no such group.
 //!
-//! Shapes the engine rejects BY DESIGN are not generated, and
-//! `excluded_shapes_are_rejected_by_the_fan_trap_fence` pins that each one IS
-//! that rejection: a dimension below a metric's grain (`lamt` beside an `o_*`
-//! metric, `ldamt` beside an `li` or `o` metric — `FanTrap`), and a child-side
-//! `where_clause` member beside an `o_*` metric (`WhereClauseFanTrap`).
+//! # Below a metric's grain: fan-outs (Phase 7 PR 4c)
+//!
+//! A dimension or `where_clause` member BELOW a metric's grain (`lamt` beside
+//! an `o_*` metric, `ldamt` beside an `li` or `o` metric, a child-side
+//! predicate beside an `o_*` metric) fans the metric out. These used to be
+//! refused; Snowflake answers them by counting each row of the metric's table
+//! once in every group it reaches (Phase 7 fixture 7, N1-N7), and so do we
+//! now. The oracle answers a fanned grain over [`fanned_rows_sql`]: the
+//! DISTINCT (home row, descendant columns) pairs, enumerated by correlated
+//! `LATERAL` subqueries, with a home row that has no descendants kept once
+//! under NULLs. The shapes still refused BY DESIGN (a window metric or an
+//! active semi-additive one across the fan, a metric table with no PRIMARY
+//! KEY) are not generated, and `fan_outs_are_answered_or_refused_by_design`
+//! pins each refusal, and that the drawn shapes take the deduplicating path.
 
 use proptest::prelude::*;
 use semantic_views::expand::{
@@ -338,15 +347,27 @@ impl WMember {
 
     /// The same expression evaluated with only `o` in scope (the base rows of
     /// the metrics oracle). A child-side member never reaches here: beside a
-    /// base-grain metric it is a `WhereClauseFanTrap`, which `arb_case` does
-    /// not generate.
+    /// base-grain metric it fans the metric out, and the oracle answers that
+    /// over [`fanned_rows_sql`]'s rows with [`WMember::raw_from_fanned`].
     fn raw_from_base(self) -> &'static str {
         match self {
             WMember::Region => "o.region",
             WMember::Fregion => "(o.region = 0 OR o.region = 2)",
             WMember::Camt | WMember::Famt => {
-                unreachable!("a child-side member was generated beside a base-grain metric")
+                unreachable!("a child-side predicate beside a base metric is a fanned grain")
             }
+        }
+    }
+
+    /// The same expression over the columns of [`fanned_rows_sql`]'s rows, one
+    /// per (home row, descendant) pair, where `region` and `lamt` are already
+    /// plain columns.
+    fn raw_from_fanned(self) -> &'static str {
+        match self {
+            WMember::Region => "w.region",
+            WMember::Fregion => "(w.region = 0 OR w.region = 2)",
+            WMember::Camt => "(w.lamt > 0)",
+            WMember::Famt => "(w.lamt > 0 OR w.lamt < -1)",
         }
     }
 
@@ -543,19 +564,12 @@ fn arb_case() -> impl Strategy<Value = Case> {
                         where_pred,
                     };
                 }
-                // Dimensions BELOW a metric's grain fan it, and the fence
-                // rejects that by design (`FanTrap`): `ldamt` only beside
-                // grandchild metrics alone, `lamt` never beside a base metric.
-                if grains != Grains::LID_ONLY {
-                    sel_dims.retain(|&i| i != D_LDAMT);
-                }
-                if grains.o {
-                    sel_dims.retain(|&i| i != D_LAMT);
-                }
-                // Likewise a child-side `where_clause` member beside a base
-                // metric (`WhereClauseFanTrap`).
-                let where_pred = where_pred.filter(|p| !(grains.o && p.touches_child()));
-
+                // Dimensions and `where_clause` members BELOW a metric's grain
+                // fan it out; since Phase 7 PR 4c each row of the metric's
+                // table counts once per group (Snowflake parity, fixture 7),
+                // and `fanned_rows_sql` is that half of the oracle. So `lamt`
+                // and `ldamt` are drawn beside every grain, and a child-side
+                // predicate beside a base metric too.
                 let mut sel_metrics: Vec<usize> = met_mask
                     .iter()
                     .enumerate()
@@ -567,6 +581,13 @@ fn arb_case() -> impl Strategy<Value = Case> {
                     sel_metrics = vec![M_WINDOW];
                 } else if grains == Grains::LI_ONLY && want_snap {
                     sel_metrics = vec![M_SNAP];
+                }
+                // A window metric, and a semi-additive one whose NON ADDITIVE
+                // BY dimension is not queried, stay refused across a fan-out
+                // (`fan_outs_are_answered_or_refused_by_design` pins it): the
+                // only fan for these child metrics is the grandchild's `ldamt`.
+                if sel_metrics == [M_WINDOW] || sel_metrics == [M_SNAP] {
+                    sel_dims.retain(|&i| i != D_LDAMT);
                 }
                 // Every drawn grain gets a metric. A request with no metrics
                 // and no facts is a different code path (dims-only DISTINCT);
@@ -942,16 +963,107 @@ fn grain_oracle_sql(case: &Case, grain: Grain, sel_metrics: &[usize]) -> String 
         .cloned()
         .collect::<Vec<_>>()
         .join(", ");
-    let render: fn(WMember) -> &'static str = match grain {
-        Grain::O => WMember::raw_from_base,
-        Grain::Li => WMember::raw_from_child,
-        Grain::Lid => WMember::raw_from_grandchild,
+    let rows = if fans_out(case, grain) {
+        fanned_rows_sql(case, grain)
+    } else {
+        let render: fn(WMember) -> &'static str = match grain {
+            Grain::O => WMember::raw_from_base,
+            Grain::Li => WMember::raw_from_child,
+            Grain::Lid => WMember::raw_from_grandchild,
+        };
+        let where_sql = case
+            .where_pred
+            .as_ref()
+            .map_or_else(String::new, |p| format!(" WHERE {}", p.to_raw_sql(render)));
+        unfanned_rows_sql(case, grain, &where_sql)
     };
-    let where_sql = case
-        .where_pred
-        .as_ref()
-        .map_or_else(String::new, |p| format!(" WHERE {}", p.to_raw_sql(render)));
-    let rows = match grain {
+    if case.sel_dims.is_empty() {
+        format!("SELECT {select_items} FROM ({rows}) x")
+    } else {
+        let group: Vec<String> = (1..=case.sel_dims.len()).map(|n| n.to_string()).collect();
+        format!(
+            "SELECT {select_items} FROM ({rows}) x GROUP BY {}",
+            group.join(", ")
+        )
+    }
+}
+
+/// Whether the request reaches BELOW `grain`: a queried dimension or a
+/// `where_clause` member on a table that `grain`'s rows have many of. The child
+/// is below the base, the grandchild below both.
+fn fans_out(case: &Case, grain: Grain) -> bool {
+    let child_pred = case.where_pred.as_ref().is_some_and(Pred::touches_child);
+    match grain {
+        Grain::O => {
+            case.sel_dims.contains(&D_LAMT) || case.sel_dims.contains(&D_LDAMT) || child_pred
+        }
+        Grain::Li => case.sel_dims.contains(&D_LDAMT),
+        Grain::Lid => false,
+    }
+}
+
+/// The rows a fanned-out grain is aggregated over, in Snowflake's semantics
+/// (Phase 7 fixture 7, N1-N7): each home row counts ONCE in every group it
+/// reaches. Formulated as one row per (home row, descendant) pair — a home row
+/// with no descendants keeps one row with NULL descendant columns, so it lands
+/// in a NULL group, as N1's order without notes does — filtered by the
+/// predicate, then cut down to the DISTINCT (home row, queried descendant
+/// columns) pairs, so a home row reached through several descendants in one
+/// group is one row there. The descendants are enumerated by correlated
+/// `LATERAL` subqueries with an explicit `NOT EXISTS` row for "none", not the
+/// expansion's `LEFT JOIN` chain and keyed `SELECT DISTINCT`.
+fn fanned_rows_sql(case: &Case, grain: Grain) -> String {
+    // A grandchild row per `li` row `c`, or one NULL row when it has none.
+    let grandchildren = |c: &str| {
+        format!(
+            "LATERAL (SELECT gd.amount AS ldamt FROM lid gd WHERE gd.li_id = {c}.id \
+                      UNION ALL SELECT NULL WHERE NOT EXISTS \
+                        (SELECT 1 FROM lid gd WHERE gd.li_id = {c}.id)) g"
+        )
+    };
+    let (wide, home_cols, below) = match grain {
+        Grain::O => (
+            format!(
+                "SELECT o.id AS rid, o.region AS region, o.rate AS p_rate, \
+                        d.lamt AS lamt, d.ldamt AS ldamt \
+                 FROM o, LATERAL ( \
+                   SELECT c.amount AS lamt, g.ldamt AS ldamt FROM li c, {} \
+                   WHERE c.order_id = o.id \
+                   UNION ALL SELECT NULL, NULL WHERE NOT EXISTS \
+                     (SELECT 1 FROM li c WHERE c.order_id = o.id)) d",
+                grandchildren("c")
+            ),
+            "w.rid, w.region, w.p_rate",
+            &[D_LAMT, D_LDAMT][..],
+        ),
+        Grain::Li => (
+            format!(
+                "SELECT li.id AS rid, li.amount AS amount, li.amount AS lamt, \
+                        (SELECT op.region FROM o op WHERE op.id = li.order_id) AS region, \
+                        (SELECT op.rate FROM o op WHERE op.id = li.order_id) AS p_rate, \
+                        g.ldamt AS ldamt \
+                 FROM li, {}",
+                grandchildren("li")
+            ),
+            "w.rid, w.amount, w.lamt, w.region, w.p_rate",
+            &[D_LDAMT][..],
+        ),
+        Grain::Lid => unreachable!("nothing is below the grandchild"),
+    };
+    let queried_below: String = below
+        .iter()
+        .filter(|i| case.sel_dims.contains(i))
+        .map(|&i| format!(", w.{}", DIMS[i]))
+        .collect();
+    let where_sql = case.where_pred.as_ref().map_or_else(String::new, |p| {
+        format!(" WHERE {}", p.to_raw_sql(WMember::raw_from_fanned))
+    });
+    format!("SELECT DISTINCT {home_cols}{queried_below} FROM ({wide}) w{where_sql}")
+}
+
+/// The rows of a grain that does not fan out: one per home-table row.
+fn unfanned_rows_sql(case: &Case, grain: Grain, where_sql: &str) -> String {
+    match grain {
         Grain::O => format!("SELECT o.region AS region, o.rate AS p_rate FROM o{where_sql}"),
         Grain::Li => {
             let rows = format!(
@@ -986,15 +1098,6 @@ fn grain_oracle_sql(case: &Case, grain: Grain, sel_metrics: &[usize]) -> String 
                        (SELECT lp.order_id FROM li lp WHERE lp.id = lid.li_id)) AS p_rate \
              FROM lid{where_sql}"
         ),
-    };
-    if case.sel_dims.is_empty() {
-        format!("SELECT {select_items} FROM ({rows}) x")
-    } else {
-        let group: Vec<String> = (1..=case.sel_dims.len()).map(|n| n.to_string()).collect();
-        format!(
-            "SELECT {select_items} FROM ({rows}) x GROUP BY {}",
-            group.join(", ")
-        )
     }
 }
 
@@ -1511,23 +1614,37 @@ fn generator_draws_grandchild_metrics_in_every_mix() {
         "only {lid_by_region}/256 grandchild requests grouped by region"
     );
 
-    // The exclusions are what `arb_case` says they are (each is pinned as a
-    // by-design rejection in `excluded_shapes_are_rejected_by_the_fan_trap_fence`).
+    // Phase 7 PR 4c: every fan-out shape is drawn, the one exclusion being
+    // what `arb_case` says it is (pinned as a refusal in
+    // `fan_outs_are_answered_or_refused_by_design`).
+    let count = |f: &dyn Fn(&Case) -> bool| cases.iter().filter(|c| f(c)).count();
+    let o_by_lamt = count(&|c| has_grain(c, Grain::O) && c.sel_dims.contains(&D_LAMT));
+    let o_by_ldamt = count(&|c| has_grain(c, Grain::O) && c.sel_dims.contains(&D_LDAMT));
+    let li_by_ldamt = count(&|c| has_grain(c, Grain::Li) && c.sel_dims.contains(&D_LDAMT));
+    let o_child_pred = count(&|c| {
+        has_grain(c, Grain::O) && c.where_pred.as_ref().is_some_and(Pred::touches_child)
+    });
+    assert!(
+        o_by_lamt >= 8,
+        "only {o_by_lamt}/256 base requests fanned by lamt"
+    );
+    assert!(
+        o_by_ldamt >= 8,
+        "only {o_by_ldamt}/256 base requests fanned by ldamt"
+    );
+    assert!(
+        li_by_ldamt >= 16,
+        "only {li_by_ldamt}/256 child requests fanned by ldamt"
+    );
+    assert!(
+        o_child_pred >= 8,
+        "only {o_child_pred}/256 base requests fanned by a child-side predicate"
+    );
     for c in &cases {
-        if c.sel_dims.contains(&D_LDAMT) {
+        if matches!(&c.ask, Ask::Metrics(m) if m == &[M_WINDOW] || m == &[M_SNAP]) {
             assert!(
-                metrics_of(c).iter().all(|&i| met_grain(i) == Grain::Lid),
-                "ldamt selected beside a non-grandchild metric: {c:?}"
-            );
-        }
-        if has_grain(c, Grain::O) {
-            assert!(
-                !c.sel_dims.contains(&D_LAMT),
-                "lamt beside a base metric: {c:?}"
-            );
-            assert!(
-                !c.where_pred.as_ref().is_some_and(Pred::touches_child),
-                "child-side predicate beside a base metric: {c:?}"
+                !c.sel_dims.contains(&D_LDAMT),
+                "a window or semi-additive metric fanned by ldamt: {c:?}"
             );
         }
     }
@@ -1622,37 +1739,53 @@ fn grandchild_requests_are_accepted_as_per_grain_plans() {
     );
 }
 
-/// The shapes `arb_case` leaves out are left out because the engine rejects
-/// them BY DESIGN, not because they would fail the oracle. Pinned here, so an
-/// exclusion cannot quietly outlive the rejection it stands for.
+/// Phase 7 PR 4c, asked of the ENGINE: the fan-out shapes `arb_case` draws
+/// are answered on the deduplicating path (each row of the metric's table
+/// once per group, keyed on its PRIMARY KEY), not on a plain join that happens
+/// to agree with the oracle on small data. The shapes it still leaves out are
+/// left out because the engine refuses them BY DESIGN, not because they would
+/// fail the oracle — a window metric across a fan-out (TECH-DEBT #109, PR 5),
+/// a semi-additive metric whose NON ADDITIVE BY dimension is not queried, and
+/// any fan-out of a metric table with no PRIMARY KEY (Snowflake's 010933).
+/// Pinned here, so an exclusion cannot quietly outlive the refusal it stands
+/// for.
 #[test]
-fn excluded_shapes_are_rejected_by_the_fan_trap_fence() {
+fn fan_outs_are_answered_or_refused_by_design() {
     let def = build_def();
     let req = |dims: &[&str], mets: &[&str], where_clause: Option<&str>| QueryRequest {
         where_clause: where_clause.map(str::to_string),
         dimensions: dims.iter().map(|d| DimensionName::new(*d)).collect(),
         metrics: mets.iter().map(|m| MetricName::new(*m)).collect(),
-        // PIN: fixed rejection examples for the excluded metric/dimension shapes, not a generator; the FACTS path is generated by arb_case. TECH-DEBT #66
+        // PIN: fixed fan-out examples (dedup path, refusals), not a generator; the FACTS path is generated by arb_case. TECH-DEBT #66
         facts: vec![],
     };
-    // A dimension below the metric's grain.
-    for (dims, mets) in [
-        (&["ldamt"][..], &["n_star"][..]),
-        (&["ldamt"][..], &["o_n"][..]),
-        (&["ldamt"][..], &["d_star", "s_amt"][..]),
-        (&["lamt"][..], &["o_rate"][..]),
-        (&["lamt"][..], &["o_n", "d_star"][..]),
-    ] {
-        match expand("child", &def, &req(dims, mets, None)) {
+    let fanned = [
+        (&["ldamt"][..], &["n_star"][..], None),
+        (&["ldamt"][..], &["o_n"][..], None),
+        (&["ldamt"][..], &["d_star", "s_amt"][..], None),
+        (&["lamt"][..], &["o_rate"][..], None),
+        (&["lamt"][..], &["o_n", "d_star"][..], None),
+        (&["region"][..], &["o_n"][..], Some("camt")),
+        (&["region"][..], &["o_rate", "n_star"][..], Some("famt")),
+    ];
+    for (dims, mets, pred) in fanned {
+        let sql = expand("child", &def, &req(dims, mets, pred))
+            .unwrap_or_else(|e| panic!("{dims:?} x {mets:?} WHERE {pred:?}: refused: {e}"));
+        assert!(
+            sql.contains("SELECT DISTINCT") && sql.contains("__sv_bridge"),
+            "{dims:?} x {mets:?} WHERE {pred:?}: not on the deduplicating path:\n{sql}"
+        );
+    }
+    for mets in [&["w_parent"][..], &["snap_parent"][..]] {
+        match expand("child", &def, &req(&["ldamt"], mets, None)) {
             Err(ExpandError::FanTrap { .. }) => {}
-            other => panic!("{dims:?} x {mets:?}: expected FanTrap, got {other:?}"),
+            other => panic!("ldamt x {mets:?}: expected FanTrap, got {other:?}"),
         }
     }
-    // A child-side `where_clause` member beside a base metric.
-    for (mets, pred) in [(&["o_n"][..], "camt"), (&["o_rate", "n_star"][..], "famt")] {
-        match expand("child", &def, &req(&["region"], mets, Some(pred))) {
-            Err(ExpandError::WhereClauseFanTrap { .. }) => {}
-            other => panic!("{mets:?} WHERE {pred}: expected WhereClauseFanTrap, got {other:?}"),
-        }
+    let mut no_pk = build_def();
+    no_pk.tables[0].pk_columns.clear();
+    match expand("child", &no_pk, &req(&["lamt"], &["o_rate"], None)) {
+        Err(ExpandError::FanTrap { .. }) => {}
+        other => panic!("lamt x o_rate with no key on o: expected FanTrap, got {other:?}"),
     }
 }

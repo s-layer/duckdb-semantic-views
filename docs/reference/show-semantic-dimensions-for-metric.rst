@@ -1,5 +1,5 @@
 .. meta::
-   :description: Syntax reference for SHOW SEMANTIC DIMENSIONS IN ... FOR METRIC, which returns only the dimensions that can be safely combined with a given metric
+   :description: Syntax reference for SHOW SEMANTIC DIMENSIONS IN ... FOR METRIC, which returns the dimensions a given metric reaches without a fan-out
 
 .. _ref-show-dims-for-metric:
 
@@ -7,7 +7,7 @@
 SHOW SEMANTIC DIMENSIONS FOR METRIC
 =========================================
 
-Returns only the dimensions that can be safely combined with a specific metric, filtering out dimensions that would cause a fan trap. In single-table views, all dimensions are returned. In multi-table views, the extension analyzes the relationship graph and excludes dimensions whose join path to the metric's source table would traverse a one-to-many edge, which would duplicate rows and inflate aggregation results.
+Returns the dimensions a specific metric reaches without a fan-out. In single-table views, all dimensions are returned. In multi-table views, the extension analyzes the relationship graph and excludes dimensions whose join path to the metric's source table would traverse a one-to-many edge. A query that groups the metric by one of those is answered by counting each row of the metric's table once per group, or refused with a fan trap error (see :ref:`howto-fan-detect`).
 
 For window function metrics, the ``required`` column indicates which dimensions must be included in the query because they appear in the metric's ``PARTITION BY EXCLUDING``, ``PARTITION BY``, or ``ORDER BY`` clauses.
 
@@ -122,7 +122,7 @@ The filtering logic determines whether a dimension is reachable from a metric's 
 
 - **Same table:** If the dimension and metric share the same source table, the dimension is always included.
 - **Many-to-one (forward):** Traversing from a table with a foreign key to the referenced table is always safe. Each row on the FK side maps to at most one row on the referenced side.
-- **One-to-many (reverse):** Traversing from the referenced table back to the FK table is fan-out. This direction duplicates rows, inflating aggregates. Dimensions reachable only through such an edge are excluded.
+- **One-to-many (reverse):** Traversing from the referenced table back to the FK table is fan-out. Dimensions reachable only through such an edge are excluded. A query by one of them is still answered when the metric's table has a ``PRIMARY KEY``, counting each of its rows once per group (see :ref:`howto-fan-detect`); this command lists only the dimensions the metric reaches without a fan-out.
 - **One-to-one:** If the FK columns match a ``PRIMARY KEY`` or ``UNIQUE`` constraint on the FK table, the relationship is one-to-one. Both directions are safe.
 - **Derived metrics:** For derived metrics (those without a table alias), the extension resolves all base metrics they depend on and uses the union of their source tables. A dimension is included if it is reachable from at least one of those source tables without fan-out.
 - **Window metrics:** A window metric is checked like any other metric on its table: dimensions reachable from that table only through a fan-out edge are excluded. Dimensions referenced in the ``PARTITION BY EXCLUDING``, ``PARTITION BY``, or ``ORDER BY`` clauses are marked ``required = TRUE``.

@@ -258,7 +258,7 @@ Features in DuckDB Semantic Views Not in Databricks
    * - ``RELATIONSHIPS``
      - FK/PK edges declared once between tables, with cardinality inferred from ``PRIMARY KEY`` and ``UNIQUE`` declarations and the join path chosen per query. Databricks joins are a tree rooted at ``source``, with each edge's condition written out and its cardinality asserted by hand.
    * - Fan-trap detection
-     - Automatic detection of one-to-many traversals that would inflate an aggregate. The extension computes each metric at its own grain where it can, and raises a fan trap error where it cannot, rather than returning an inflated number. Databricks does not validate ``rely.at_most_one_match``, and picks the first matching row when a many-to-one join turns out to be many-to-many.
+     - Automatic handling of one-to-many traversals that would inflate an aggregate. The extension computes each metric at its own grain, counts a row of the metric's table once in every group it fans out to, and raises a fan trap error where it can do neither, rather than returning an inflated number. Databricks does not validate ``rely.at_most_one_match``, and picks the first matching row when a many-to-one join turns out to be many-to-many.
    * - Role-playing dimensions
      - ``USING`` clause on a metric to choose between multiple join paths to the same table at query time. In Databricks each role is a separate named join entry, fixed at definition time.
    * - :ref:`explain_semantic_view() <ref-explain-semantic-view>`

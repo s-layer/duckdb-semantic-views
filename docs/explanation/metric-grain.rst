@@ -367,25 +367,48 @@ that still fall back to the base table, such as the one-to-one window pair
 described under :ref:`explanation-grain-refused`, need the key.
 
 
+.. _explanation-grain-below:
+
+A Dimension Below a Metric's Grain Counts Each Row Once per Group
+=================================================================
+
+.. versionchanged:: 0.19.0
+
+   These queries used to be refused with a fan trap error.
+
+Grouping ``c.total_balance`` by an order-grain or line-item-grain dimension asks
+for something a single number per customer cannot give: a customer with orders
+in three statuses fans across all three. The extension answers it the way
+Snowflake does. Each customer counts **once in every group it reaches**, so its
+balance appears under each of its orders' statuses, and a customer with no
+orders appears under ``NULL``. Internally the metric is aggregated over the
+distinct pairs of a customer and a group, told apart by the customer table's
+``PRIMARY KEY``, never over the join that repeats a customer once per order.
+
+The groups overlap, so they do not add up to the total: summing the balance
+across statuses counts a customer once for every status it has. Query the metric
+without the dimension when you need the total.
+
+Snowflake's documentation states a stricter rule -- `the logical table for the
+dimension must be related to the logical table for the metric
+<https://docs.snowflake.com/en/user-guide/views-semantic/querying>`_ and must
+have "an equal or lower level of granularity" -- but Snowflake answers these
+queries, once per group, whenever the metric's table has a primary key. The
+extension follows what Snowflake does. Without a primary key on the metric's
+table both refuse the query.
+
+
 .. _explanation-grain-refused:
 
 What Is Still Refused, and Why
 ==============================
 
 Per-grain assembly widens what a semantic view can answer; it does not remove the
-guard rails. Five shapes still raise an error, and the reason behind each one is
-useful to keep in mind while you model.
-
-**A dimension below a metric's grain.**
-   Grouping ``c.total_balance`` by an order-grain or line-item-grain dimension is
-   rejected, and no amount of per-grain machinery makes it answerable: a customer
-   with orders in three statuses genuinely fans across those statuses, so there is
-   no single correct balance to report per group. Snowflake refuses the same
-   shape by the same rule -- `the logical table for the dimension must be related
-   to the logical table for the metric
-   <https://docs.snowflake.com/en/user-guide/views-semantic/querying>`_ and must
-   have "an equal or lower level of granularity". Group by a dimension at or above
-   the metric's grain instead, or split the query in two.
+guard rails. Four shapes still raise an error, and the reason behind each one is
+useful to keep in mind while you model. A dimension below a metric's grain is
+also refused for a window metric, an active semi-additive metric, a metric table
+with no ``PRIMARY KEY``, and a fan-out across an ``ASOF`` or range relationship
+(see :ref:`howto-fan-errors`).
 
 **Window metrics whose inner aggregates sit at different grains.**
    A window metric wraps an inner aggregate, and the window function runs over the
@@ -448,9 +471,9 @@ Three habits keep a model on the right side of these rules:
   one-to-one relationship look many-to-one, so traversing it in reverse is treated
   as a fan-out, and that narrows what the view can answer.
 - **Check before you query.**
-  :ref:`SHOW SEMANTIC DIMENSIONS … FOR METRIC <ref-show-dims-for-metric>` applies
-  the same grain rules at inspection time and lists only the dimensions that can
-  legitimately be combined with a given metric.
+  :ref:`SHOW SEMANTIC DIMENSIONS … FOR METRIC <ref-show-dims-for-metric>` lists
+  the dimensions a given metric reaches without a fan-out. One it leaves out is
+  counted once per group, or refused for the shapes above.
 
 .. tip::
 

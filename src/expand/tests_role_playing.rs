@@ -375,7 +375,7 @@ fn base_table_dimension_works_unchanged() {
 }
 
 #[test]
-fn fan_trap_detection_works_with_using_paths() {
+fn fan_out_with_using_paths_counts_once_per_group() {
     let def = SemanticViewDefinition {
         variables: Vec::new(),
         tables: vec![
@@ -432,11 +432,19 @@ fn fan_trap_detection_works_with_using_paths() {
         dimensions: vec![DimensionName::new("carrier")],
         metrics: vec![MetricName::new("airport_count")],
     };
-    let result = expand("test", &def, &req);
-    assert!(result.is_err(), "Fan trap must still be detected");
-    match result.unwrap_err() {
-        ExpandError::FanTrap { .. } => {}
-        other => panic!("Expected FanTrap, got: {other}"),
+    // Airports by the carrier of their departing flights: each airport counts
+    // once per carrier (Phase 7 PR 4c). With no key on the airports it is
+    // refused (COUNT(*) needs the key too).
+    let sql = expand("test", &def, &req).expect("counted once per carrier");
+    assert!(
+        sql.contains("SELECT DISTINCT") && sql.contains("__sv_bridge"),
+        "{sql}"
+    );
+    let mut no_key = def.clone();
+    no_key.tables[1].pk_columns.clear();
+    match expand("test", &no_key, &req) {
+        Err(ExpandError::FanTrap { .. } | ExpandError::CountStarRequiresPrimaryKey { .. }) => {}
+        other => panic!("Expected a refusal, got: {other:?}"),
     }
 }
 

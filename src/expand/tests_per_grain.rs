@@ -253,31 +253,46 @@ fn child_grain_metric_alone_keeps_flat_sql() {
 // GRAIN-07: what per-grain does NOT make answerable
 // ---------------------------------------------------------------------------
 
-/// GRAIN-07: a dimension BELOW a metric's own grain still errors. Per-grain
-/// aggregation cannot define this: the metric's rows genuinely fan across the
-/// dimension's values (one order spans many line-item statuses). Snowflake
-/// requires dimensions to be reachable through many-to-one relationships too.
+/// A dimension BELOW a metric's own grain fans the metric's rows across the
+/// dimension's values (one order spans many line-item SKUs). Snowflake counts
+/// each order once per SKU (fixture 7, N1), and so does the plan: the orders
+/// are joined to the distinct (order key, SKU) pairs they reach. (GRAIN-07
+/// refused this until Phase 7 PR 4c.)
 #[test]
-fn dimension_below_metric_grain_still_errors() {
+fn dimension_below_metric_grain_counts_once_per_group() {
     let def = orders_with_child_line_items().with_dimension("item_sku", "li.sku", Some("li"));
-    let err = expand("sales", &def, &req(&["item_sku"], &["order_total"]))
-        .expect_err("a dimension below the metric's grain must stay rejected");
+    let sql = expand("sales", &def, &req(&["item_sku"], &["order_total"]))
+        .expect("a dimension below the metric's grain is counted once per group");
     assert!(
-        matches!(err, ExpandError::FanTrap { .. }),
+        sql.contains("SELECT DISTINCT") && sql.contains(r#"FROM "orders" AS "o""#),
+        "the orders are deduplicated per SKU, got:\n{sql}"
+    );
+}
+
+/// The same with no PRIMARY KEY on the metric's table: nothing to count its
+/// rows once by, so it is refused (Snowflake's 010933, fixture 7's N9).
+#[test]
+fn dimension_below_metric_grain_without_a_primary_key_is_refused() {
+    let mut def = orders_with_child_line_items().with_dimension("item_sku", "li.sku", Some("li"));
+    def.tables[0].pk_columns.clear();
+    let err = expand("sales", &def, &req(&["item_sku"], &["order_total"]))
+        .expect_err("no key to count the orders once by");
+    assert!(
+        matches!(&err, ExpandError::FanTrap { detail } if detail.counts_once),
         "expected FanTrap, got: {err}"
     );
 }
 
-/// GRAIN-07: the same rule applied to the parent-grain metric — grouping a
-/// customer-grain metric by an order-grain dimension fans the customer rows.
+/// The same rule applied to the parent-grain metric: a customer-grain metric
+/// grouped by an order-grain dimension counts each customer once per status.
 #[test]
-fn parent_grain_metric_with_base_dimension_still_errors() {
+fn parent_grain_metric_with_base_dimension_counts_once_per_group() {
     let def = orders_with_parent_customers();
-    let err = expand("sales", &def, &req(&["order_status"], &["total_balance"]))
-        .expect_err("customer-grain metric grouped by an order-grain dimension must be rejected");
+    let sql = expand("sales", &def, &req(&["order_status"], &["total_balance"]))
+        .expect("a customer-grain metric by an order dimension is counted once per group");
     assert!(
-        matches!(err, ExpandError::FanTrap { .. }),
-        "expected FanTrap, got: {err}"
+        sql.contains("SELECT DISTINCT") && sql.contains(r#"FROM "customers" AS "c""#),
+        "the customers are deduplicated per status, got:\n{sql}"
     );
 }
 
@@ -494,20 +509,20 @@ fn sibling_grain_metrics_with_parent_dimension() {
     );
 }
 
-/// A metric on one child table grouped by a dimension on its SIBLING is a fan
-/// trap — line-item rows are multiplied by the order's shipments before
-/// aggregation — and must be rejected. The path between two siblings runs
-/// through their shared parent, which the fence's parent-chain walk could not
-/// express: neither sibling is an ancestor of the other, so the walk found no
-/// path and the check silently passed.
+/// A metric on one child table grouped by a dimension on its SIBLING: joining
+/// the shipments would multiply the line items, so each line item is counted
+/// once per carrier instead (Snowflake's fixture 6, K19). The path between two
+/// siblings runs through their shared parent, which the fence's parent-chain
+/// walk once could not express: neither sibling is an ancestor of the other,
+/// so the walk found no path and the check silently passed.
 #[test]
-fn metric_grouped_by_sibling_dimension_errors() {
+fn metric_grouped_by_sibling_dimension_counts_once_per_group() {
     let def = orders_with_two_children();
-    let err = expand("sales", &def, &req(&["carrier"], &["item_qty"]))
-        .expect_err("a dimension on a sibling child table fans the metric");
+    let sql = expand("sales", &def, &req(&["carrier"], &["item_qty"]))
+        .expect("a dimension on a sibling child table is counted once per group");
     assert!(
-        matches!(err, ExpandError::FanTrap { .. }),
-        "expected FanTrap, got: {err}"
+        sql.contains("SELECT DISTINCT") && sql.contains(r#"FROM "line_items" AS "li""#),
+        "the line items are deduplicated per carrier, got:\n{sql}"
     );
 }
 
