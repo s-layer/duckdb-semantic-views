@@ -36,8 +36,10 @@
 //!   their paths meet at, if it has a metric (Phase 7 PR 4d, fixture 7's D4
 //!   and N8; every table here has one): each pair of members joined by one
 //!   path over relationships in either direction, and a table on those paths
-//!   from which every member is reached by stepping back along relationships
-//!   and then following them, the lowest such table if a member is above it.
+//!   that shares with every member a table under both (one that reaches each
+//!   by a chain, or is it), the lowest such table if a member is above it.
+//!   This is restated from chains, not from the hop-by-hop walk the
+//!   extension makes.
 //!   The answer is the distinct member values over that table's rows
 //!   inner-joined along those paths, each table once. With no such table, or
 //!   a path across the doubled relationship, the query is refused as not
@@ -631,42 +633,42 @@ fn expect(case: &Case) -> Expect {
 /// The table a query with no metrics, whose members no table reaches by
 /// chains, is answered from (see the module docs), or `None` when it is
 /// refused as not related.
+///
+/// Restated from chains of foreign keys rather than by walking the paths
+/// hop by hop as `sql_gen::meeting_table` does: a table meets a member when
+/// some table is under both (reaches each by a chain, or is it), so the
+/// member is reached by fanning out to that table and climbing from it.
 fn meeting_table(case: &Case, members: &[usize]) -> Option<usize> {
     let doubled = |w: &[usize]| case.pair().is_some_and(|(a, b)| w == [a, b] || w == [b, a]);
-    let only_path = |a: usize, b: usize| -> Option<Vec<usize>> {
-        let mut paths = undirected_paths(case, a, b);
-        (paths.len() == 1 && !paths[0].windows(2).any(doubled)).then(|| paths.remove(0))
-    };
     let mut between: Vec<usize> = Vec::new();
     for (i, &a) in members.iter().enumerate() {
         for &b in &members[i + 1..] {
-            for t in only_path(a, b)? {
+            let paths = undirected_paths(case, a, b);
+            let [path] = paths.as_slice() else {
+                return None;
+            };
+            if path.windows(2).any(doubled) {
+                return None;
+            }
+            for &t in path {
                 if !between.contains(&t) {
                     between.push(t);
                 }
             }
         }
     }
-    // `true` for a step that follows a relationship (to the referenced table).
-    let steps = |from: usize, to: usize| -> Option<Vec<bool>> {
-        let path = only_path(from, to)?;
-        Some(
-            path.windows(2)
-                .map(|w| case.edges.contains(&(w[0], w[1])))
-                .collect(),
-        )
-    };
+    // `x` is `t`, or reaches it by a chain of foreign keys.
+    let under = |x: usize, t: usize| !case.chains(x, t).is_empty();
     let meets = |t: usize| {
         members
             .iter()
-            .all(|&d| steps(t, d).is_some_and(|s| s.iter().skip_while(|up| !**up).all(|up| *up)))
+            .all(|&d| (0..case.n).any(|x| under(x, t) && under(x, d)))
     };
     let meeting: Vec<usize> = between.iter().copied().filter(|&t| meets(t)).collect();
-    let below = |t: usize, o: usize| t != o && steps(t, o).is_some_and(|s| s.iter().all(|up| !*up));
     let lowest: Vec<usize> = meeting
         .iter()
         .copied()
-        .filter(|&t| !meeting.iter().any(|&o| below(t, o)))
+        .filter(|&t| !meeting.iter().any(|&o| o != t && under(o, t)))
         .collect();
     match lowest.as_slice() {
         [one] => Some(*one),

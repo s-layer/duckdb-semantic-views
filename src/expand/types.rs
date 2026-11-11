@@ -1035,7 +1035,8 @@ impl fmt::Display for ExpandError {
                     f,
                     "semantic view '{view_name}': tables '{table_a}' and '{table_b}' are not \
                      related -- no table reaches both by following relationships many-to-one, and \
-                     no table with a metric is where their paths meet, so no rows hold their \
+                     their paths do not meet at a table with a metric along one path of plain \
+                     relationships (none ASOF, range or a second role), so no rows hold their \
                      members together. Query them separately"
                 )
             }

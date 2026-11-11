@@ -1012,7 +1012,8 @@ fn members_whose_paths_meet_twice_are_unrelated() {
 }
 
 /// A fan-out across an ASOF relationship walked backwards is not answered with
-/// metrics (fixture 1's A5), so it does not meet the members either.
+/// metrics (fixture 1's A5), so it does not meet the members either. Snowflake
+/// has not been asked this dims-only shape (TECH-DEBT #112).
 #[test]
 fn members_meeting_across_an_asof_relationship_are_unrelated() {
     let mut def = notes_with_every_metric("o");
@@ -1024,6 +1025,40 @@ fn members_meeting_across_an_asof_relationship_are_unrelated() {
     n_order.fk_columns.push("noted_at".to_string());
     n_order.ref_columns.push("placed_at".to_string());
     n_order.asof = Some(1);
+    match expand("v", &def, &dims_req(&["qty", "kind"], None)) {
+        Err(e) if is_unrelated(&e) => {}
+        other => panic!("expected not related, got {other:?}"),
+    }
+}
+
+/// A range relationship is kept out the same way: a fan-out across one walked
+/// backwards is refused with metrics too. Unprobed in Snowflake (TECH-DEBT
+/// #112).
+#[test]
+fn members_meeting_across_a_range_relationship_are_unrelated() {
+    let mut def = notes_with_every_metric("o");
+    let n_order = def
+        .joins
+        .iter_mut()
+        .find(|j| j.name.as_deref() == Some("n_order"))
+        .expect("n_order");
+    n_order.fk_columns = vec!["noted_at".to_string()];
+    n_order.ref_columns = vec!["opened_at".to_string()];
+    n_order.range_end = Some("closed_at".to_string());
+    match expand("v", &def, &dims_req(&["qty", "kind"], None)) {
+        Err(e) if is_unrelated(&e) => {}
+        other => panic!("expected not related, got {other:?}"),
+    }
+}
+
+/// Notes that reference orders twice (a second role) give the hop two
+/// relationships and no one path to follow, so the members do not meet.
+/// Unprobed in Snowflake (TECH-DEBT #112).
+#[test]
+fn members_meeting_across_a_role_played_hop_are_unrelated() {
+    let mut def = notes_with_every_metric("o");
+    def.joins
+        .push(rel("n_order_again", "n", "o", "order_id2", "order_id"));
     match expand("v", &def, &dims_req(&["qty", "kind"], None)) {
         Err(e) if is_unrelated(&e) => {}
         other => panic!("expected not related, got {other:?}"),
