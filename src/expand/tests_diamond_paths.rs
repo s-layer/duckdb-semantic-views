@@ -18,7 +18,8 @@ use super::*;
 use crate::model::{Cardinality, Dimension, Fact, Join, Metric, SemanticViewDefinition, TableRef};
 
 /// o1: Ana (EU) at store S-US, 10; o2: Bo (US) at S-US, 20; o3: Ana at S-EU,
-/// 40. By customer region: EU 50, US 20. By store region: EU 40, US 30.
+/// 40. By customer region: EU 50, US 20. By store region: EU 40, US 30. Line
+/// items: o1 has SKUs a and b, o3 SKU a, o2 none.
 fn db() -> duckdb::Connection {
     let con = duckdb::Connection::open_in_memory().expect("in-memory DuckDB");
     con.execute_batch(
@@ -29,7 +30,9 @@ fn db() -> duckdb::Connection {
          INSERT INTO regions VALUES (1, 'EU'), (2, 'US');
          INSERT INTO customers VALUES (1, 'Ana', 1), (2, 'Bo', 2);
          INSERT INTO stores VALUES (1, 'S-US', 2), (2, 'S-EU', 1);
-         INSERT INTO orders VALUES (1, 1, 1, 10), (2, 2, 1, 20), (3, 1, 2, 40);",
+         INSERT INTO orders VALUES (1, 1, 1, 10), (2, 2, 1, 20), (3, 1, 2, 40);
+         CREATE TABLE line_items (line_id INT, order_id INT, sku VARCHAR);
+         INSERT INTO line_items VALUES (1, 1, 'a'), (2, 1, 'b'), (3, 3, 'a');",
     )
     .expect("fixture data");
     con
@@ -452,27 +455,37 @@ fn filter_on_no_table_beside_a_pinned_path_is_refused() {
     ));
 }
 
-/// A dimension below the metric's grain is a fan trap whichever path the
-/// metric follows, and the refusal says so rather than blaming the path.
+/// A dimension below the metric's grain beside a pinned path: each order counts
+/// once per (store region, SKU), whichever TABLES order (Phase 7 PR 4c), and
+/// filtered on a SKU each matching order once.
 #[test]
-fn fan_trap_beside_a_pinned_path_is_reported_as_one() {
+fn fan_out_beside_a_pinned_path_counts_once_per_group() {
     for order in ORDERS {
         let mut def = diamond(order);
         def.tables.push(table("li", "line_items", "line_id"));
         def.joins
             .push(rel("li_order", "li", "o", "order_id", "order_id"));
         def.dimensions.push(dim("sku", "li.sku", "li"));
-        for (dims, filter) in [
-            (&["region_name", "sku"][..], None),
-            (&["region_name"][..], Some("sku = 'a'")),
-        ] {
-            let err = expand("dv", &def, &req(dims, &["rev_by_store"], filter))
-                .expect_err("line items fan orders");
-            assert!(
-                err.to_string().contains("fan trap"),
-                "TABLES order {order}, filter {filter:?}: got {err}"
-            );
-        }
+        let run = |dims: &[&str], filter: Option<&str>| {
+            let sql = expand("dv", &def, &req(dims, &["rev_by_store"], filter))
+                .unwrap_or_else(|e| panic!("TABLES order {order}: {e}"));
+            rows(&sql)
+        };
+        assert_eq!(
+            run(&["region_name", "sku"], None),
+            table_of(&[
+                &["EU", "a", "40"],
+                &["US", "a", "10"],
+                &["US", "b", "10"],
+                &["US", "NULL", "20"],
+            ]),
+            "TABLES order {order}"
+        );
+        assert_eq!(
+            run(&["region_name"], Some("sku = 'a'")),
+            table_of(&[&["EU", "40"], &["US", "10"]]),
+            "TABLES order {order}"
+        );
     }
 }
 

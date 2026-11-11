@@ -8,26 +8,29 @@
 //!
 //! Every relationship is many-to-one, and the data holds NULL and dangling
 //! foreign keys, NULL dimension values and values, duplicate bridge rows,
-//! `h` and `x` rows with no bridge row, and bridge rows that reach nothing.
+//! `h` and `x` rows with no bridge row, and bridge rows that reach nothing. A
+//! second plain child `s.hid -> h.id` is a sibling of `c` (Phase 7 PR 4c).
 //!
 //! Two invariants are checked per case:
 //!
-//! 1. **Accepted exactly when Snowflake would answer.** A metric on `h` may be
-//!    grouped or filtered by a member on `z` (its parent), on `bt`, `x` or `y`
-//!    (across the bridge), but not on `c`, a plain child below its grain. A
-//!    metric on `x` likewise reaches `y` directly and `bt`, `h` and `z` across
-//!    the bridge, and a metric on `bt` reaches every table but `c` many-to-one.
-//!    A metric on `c` hops up to `h` and `z`, then reaches `bt`, `x` and `y`
-//!    across the bridge after the hop up (Snowflake's fixture 3, H1-H4).
-//!    Anything with two fan-outs is refused. The rule is restated here from
-//!    the topology, not read from the expander.
+//! 1. **Accepted exactly when Snowflake would answer.** Snowflake answers any
+//!    fan-out along a single path, counting each row of the metric's table once
+//!    per group, as long as that table has a PRIMARY KEY (fixtures 3, 6 and 7:
+//!    H1-H4, K19, N1-N9). So a metric on `h` reaches every table: `z` up, `bt`,
+//!    `x` and `y` across the bridge, and the plain children `c` and `s` straight
+//!    down. A metric on `x` reaches them all too, `c` and `s` after the bridge's
+//!    fan-out (two fan-outs on one path). A metric on `c` hops up to `h`, then
+//!    fans out across the bridge and to its sibling `s`. The bridge `bt` has no
+//!    PRIMARY KEY, so a metric on it reaches the tables above it but not `c` or
+//!    `s` (Snowflake's 010933). The rule is restated here from the topology,
+//!    not read from the expander.
 //! 2. **Accepted query ⇒ numerically correct.** The oracle is computed in
 //!    Rust, never in SQL: for each row of a metric's home table it enumerates
-//!    the rows it reaches through the bridge (one row with NULLs if none),
-//!    keeps those the predicate is TRUE on, and takes the distinct groups. Each
-//!    (home row, group) pair then contributes once. The metrics are merged on
-//!    the groups, a group one metric lacks reading NULL for it, as Snowflake
-//!    merges per-metric results.
+//!    the rows it reaches through the bridge and the plain children (one row
+//!    with NULLs for each step that reaches none), keeps those the predicate is
+//!    TRUE on, and takes the distinct groups. Each (home row, group) pair then
+//!    contributes once. The metrics are merged on the groups, a group one
+//!    metric lacks reading NULL for it, as Snowflake merges per-metric results.
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -54,18 +57,21 @@ struct Instance {
     bt: Vec<(Cell, Cell, Cell, Cell)>,
     /// `(hid, ccat, cv)`.
     c: Vec<(Cell, Cell, Cell)>,
+    /// `(hid, scat)`: a sibling of `c`, with no metric.
+    s: Vec<(Cell, Cell)>,
 }
 
 /// The tables, and which one each dimension and metric lives on.
-const TABLES: [&str; 6] = ["h", "x", "bt", "z", "y", "c"];
+const TABLES: [&str; 7] = ["h", "x", "bt", "z", "y", "c", "s"];
 /// `(dimension name, table, column)`.
-const DIMS: [(&str, &str, &str); 6] = [
+const DIMS: [(&str, &str, &str); 7] = [
     ("hcat", "h", "hcat"),
     ("xcat", "x", "xcat"),
     ("rcat", "bt", "rcat"),
     ("zcat", "z", "zcat"),
     ("ycat", "y", "ycat"),
     ("ccat", "c", "ccat"),
+    ("scat", "s", "scat"),
 ];
 /// `(metric name, table, aggregate, value column)`; `None` is `COUNT(*)`.
 const METS: [(&str, &str, Option<&str>); 7] = [
@@ -79,16 +85,14 @@ const METS: [(&str, &str, Option<&str>); 7] = [
 ];
 
 /// How a metric's home table reaches a member's table, restated from the
-/// topology: `true` when the query is answerable (the same table, a
-/// many-to-one path, or many-to-one hops, one fan-out into the bridge, and
-/// many-to-one hops again), `false` when it fans otherwise.
+/// topology: `true` when the query is answerable. Every path here is single,
+/// so a fan-out is answered whenever the home table has a PRIMARY KEY, which
+/// every table but the bridge does. The bridge reaches `h`, `x`, `z` and `y`
+/// many-to-one, but `c` and `s` only by fanning out below `h`.
 fn reachable(home: &str, table: &str) -> bool {
     match home {
-        "h" => table != "c",
-        "x" => table != "c",
-        "bt" => table != "c",
-        // `c -> h <- bt -> x -> y`: the bridge after a hop up.
-        "c" => true,
+        "h" | "x" | "c" => true,
+        "bt" => !matches!(table, "c" | "s"),
         _ => unreachable!("no metric on {home}"),
     }
 }
@@ -154,6 +158,7 @@ struct Wide<'a> {
     y: Option<usize>,
     bt: Option<usize>,
     c: Option<usize>,
+    s: Option<usize>,
 }
 
 impl Wide<'_> {
@@ -166,6 +171,7 @@ impl Wide<'_> {
             "zcat" => self.z.and_then(|i| inst.z[i]),
             "ycat" => self.y.and_then(|i| inst.y[i]),
             "ccat" => self.c.and_then(|i| inst.c[i].1),
+            "scat" => self.s.and_then(|i| inst.s[i].1),
             other => unreachable!("{other} is never oracled"),
         }
     }
@@ -190,49 +196,85 @@ fn reach<'a>(inst: &'a Instance, home: &str) -> Vec<Vec<Wide<'a>>> {
         w.x = i;
         w.y = i.and_then(|i| lookup(inst.x[i].0, inst.y.len()));
     };
+    // The rows of a child table (`hid` read by `hid_of`, `n` rows) under the
+    // `h` row `h`, or `[None]` when there are none: a step that reaches no row
+    // keeps the joined row once, with NULLs for that table.
+    let children = |h: Option<usize>, n: usize, hid_of: &dyn Fn(usize) -> Cell| {
+        let rows: Vec<Option<usize>> = (0..n)
+            .filter(|i| h.is_some() && lookup(hid_of(*i), inst.h.len()) == h)
+            .map(Some)
+            .collect();
+        if rows.is_empty() {
+            vec![None]
+        } else {
+            rows
+        }
+    };
+    // Each joined row fanned out to the plain children of its `h` row, `c`
+    // (unless it is the home table) and its sibling `s`.
+    let below_h = |rows: Vec<Wide<'a>>, with_c: bool| -> Vec<Wide<'a>> {
+        let mut out = Vec::new();
+        for w in rows {
+            let cs = if with_c {
+                children(w.h, inst.c.len(), &|i| inst.c[i].0)
+            } else {
+                vec![w.c]
+            };
+            for c in cs {
+                for s in children(w.h, inst.s.len(), &|i| inst.s[i].0) {
+                    out.push(Wide { c, s, ..w.clone() });
+                }
+            }
+        }
+        out
+    };
+    // The bridge rows whose foreign key read by `key_of` names `row`, or none.
+    let links = |row: Option<usize>, n: usize, key_of: &dyn Fn(usize) -> Cell| -> Vec<usize> {
+        (0..inst.bt.len())
+            .filter(|b| row.is_some() && lookup(key_of(*b), n) == row)
+            .collect()
+    };
+    // Across the bridge from `w`'s `h` row, or from its `x` row.
+    let across = |w: Wide<'a>, from_h: bool| -> Vec<Wide<'a>> {
+        let found = if from_h {
+            links(w.h, inst.h.len(), &|b| inst.bt[b].0)
+        } else {
+            links(w.x, inst.x.len(), &|b| inst.bt[b].1)
+        };
+        if found.is_empty() {
+            return vec![w];
+        }
+        found
+            .into_iter()
+            .map(|b| {
+                let mut w = w.clone();
+                w.bt = Some(b);
+                if from_h {
+                    with_x(&mut w, lookup(inst.bt[b].1, inst.x.len()));
+                } else {
+                    with_h(&mut w, lookup(inst.bt[b].0, inst.h.len()));
+                }
+                w
+            })
+            .collect()
+    };
     match home {
         "h" => (0..inst.h.len())
             .map(|i| {
                 let mut w = base.clone();
                 with_h(&mut w, Some(i));
-                let links: Vec<usize> = (0..inst.bt.len())
-                    .filter(|b| lookup(inst.bt[*b].0, inst.h.len()) == Some(i))
-                    .collect();
-                if links.is_empty() {
-                    return vec![w];
-                }
-                links
-                    .into_iter()
-                    .map(|b| {
-                        let mut w = w.clone();
-                        w.bt = Some(b);
-                        with_x(&mut w, lookup(inst.bt[b].1, inst.x.len()));
-                        w
-                    })
-                    .collect()
+                below_h(across(w, true), true)
             })
             .collect(),
+        // Across the bridge to `h`, then down to its children: two fan-outs.
         "x" => (0..inst.x.len())
             .map(|i| {
                 let mut w = base.clone();
                 with_x(&mut w, Some(i));
-                let links: Vec<usize> = (0..inst.bt.len())
-                    .filter(|b| lookup(inst.bt[*b].1, inst.x.len()) == Some(i))
-                    .collect();
-                if links.is_empty() {
-                    return vec![w];
-                }
-                links
-                    .into_iter()
-                    .map(|b| {
-                        let mut w = w.clone();
-                        w.bt = Some(b);
-                        with_h(&mut w, lookup(inst.bt[b].0, inst.h.len()));
-                        w
-                    })
-                    .collect()
+                below_h(across(w, false), true)
             })
             .collect(),
+        // Every table a bridge metric is answered for sits above it.
         "bt" => (0..inst.bt.len())
             .map(|b| {
                 let mut w = base.clone();
@@ -242,35 +284,20 @@ fn reach<'a>(inst: &'a Instance, home: &str) -> Vec<Vec<Wide<'a>>> {
                 vec![w]
             })
             .collect(),
-        // Up to `h` (and `z`), then across the bridge from that `h` row.
+        // Up to `h` (and `z`), then across the bridge and down to the sibling
+        // `s` from that `h` row.
         "c" => (0..inst.c.len())
             .map(|i| {
                 let mut w = base.clone();
                 w.c = Some(i);
-                let h = lookup(inst.c[i].0, inst.h.len());
-                with_h(&mut w, h);
-                let links: Vec<usize> = (0..inst.bt.len())
-                    .filter(|b| h.is_some() && lookup(inst.bt[*b].0, inst.h.len()) == h)
-                    .collect();
-                if links.is_empty() {
-                    return vec![w];
-                }
-                links
-                    .into_iter()
-                    .map(|b| {
-                        let mut w = w.clone();
-                        w.bt = Some(b);
-                        with_x(&mut w, lookup(inst.bt[b].1, inst.x.len()));
-                        w
-                    })
-                    .collect()
+                with_h(&mut w, lookup(inst.c[i].0, inst.h.len()));
+                below_h(across(w, true), false)
             })
             .collect(),
         _ => unreachable!(),
     }
 }
 
-/// The value metric `m` aggregates for its `i`th home row (`None` for COUNT).
 fn metric_value(inst: &Instance, m: usize, i: usize) -> Cell {
     match METS[m].0 {
         "sum_hv" => inst.h[i].2,
@@ -381,8 +408,17 @@ fn arb_instance() -> impl Strategy<Value = Instance> {
             prop::collection::vec(cell(3), ny),
             prop::collection::vec((fk(nh), fk(nx), cell(3), cell(20)), 0..9),
             prop::collection::vec((fk(nh), cell(3), cell(20)), 0..4),
+            prop::collection::vec((fk(nh), cell(3)), 0..4),
         )
-            .prop_map(|(h, x, z, y, bt, c)| Instance { h, x, z, y, bt, c })
+            .prop_map(|(h, x, z, y, bt, c, s)| Instance {
+                h,
+                x,
+                z,
+                y,
+                bt,
+                c,
+                s,
+            })
     })
 }
 
@@ -465,6 +501,7 @@ fn build_def(case: &Case) -> SemanticViewDefinition {
         rel("h_z", "h", "z", "fk_z"),
         rel("x_y", "x", "y", "fk_y"),
         rel("c_h", "c", "h", "hid"),
+        rel("s_h", "s", "h", "hid"),
     ];
     let dimensions = DIMS
         .iter()
@@ -505,7 +542,8 @@ fn make_db(inst: &Instance) -> duckdb::Connection {
          CREATE TABLE z_tbl (id BIGINT, zcat BIGINT);
          CREATE TABLE y_tbl (id BIGINT, ycat BIGINT);
          CREATE TABLE bt_tbl (hid BIGINT, xid BIGINT, rcat BIGINT, bv BIGINT);
-         CREATE TABLE c_tbl (id BIGINT, hid BIGINT, ccat BIGINT, cv BIGINT);",
+         CREATE TABLE c_tbl (id BIGINT, hid BIGINT, ccat BIGINT, cv BIGINT);
+         CREATE TABLE s_tbl (id BIGINT, hid BIGINT, scat BIGINT);",
     )
     .expect("schema");
     let mut sql = String::new();
@@ -546,6 +584,13 @@ fn make_db(inst: &Instance) -> duckdb::Connection {
             sql_cell(*hid),
             sql_cell(*cat),
             sql_cell(*v)
+        );
+    }
+    for (i, (hid, cat)) in inst.s.iter().enumerate() {
+        sql += &format!(
+            "INSERT INTO s_tbl VALUES ({i}, {}, {});",
+            sql_cell(*hid),
+            sql_cell(*cat)
         );
     }
     con.execute_batch(&sql).expect("data");
@@ -634,6 +679,7 @@ fn up(table: &str) -> &'static [&'static str] {
         "z" => &["z"],
         "y" => &["y"],
         "c" => &["c", "h", "z"],
+        "s" => &["s", "h", "z"],
         other => unreachable!("unexpected table {other}"),
     }
 }
@@ -701,6 +747,13 @@ fn anchor_rows<'a>(inst: &'a Instance, anchor: &str) -> Vec<Wide<'a>> {
                 h_up(w, lookup(inst.c[i].0, inst.h.len()));
             },
             inst.c.len(),
+        ),
+        "s" => one(
+            &|w, i| {
+                w.s = Some(i);
+                h_up(w, lookup(inst.s[i].0, inst.h.len()));
+            },
+            inst.s.len(),
         ),
         other => unreachable!("unexpected anchor {other}"),
     }
@@ -794,7 +847,8 @@ fn dims_only_generator_reaches_every_anchor() {
     let mut off_base = 0;
     let mut filtered = 0;
     let mut unrelated = 0;
-    for _ in 0..2000 {
+    // 3000 draws: with `s` beside `c` more member sets reach no single table.
+    for _ in 0..3000 {
         let case = arb_dims_only_case()
             .new_tree(&mut runner)
             .unwrap()
@@ -843,6 +897,7 @@ fn pinned_once_per_group() {
             (Some(1), Some(2), Some(1), None),
         ],
         c: vec![],
+        s: vec![],
     };
     let case = Case {
         inst,
@@ -871,10 +926,25 @@ fn generator_reaches_bridged_refused_and_filtered_cases() {
     let mut runner = TestRunner::deterministic();
     let (mut bridged, mut refused, mut filtered) = (false, false, false);
     let (mut hop_up, mut hop_up_filtered) = (0, 0);
+    // Phase 7 PR 4c: a plain child straight down, two fan-outs on one path (the
+    // bridge, then a child of `h`), a sibling child after a hop up, and the
+    // keyless bridge's refusal.
+    let (mut straight_down, mut two_fans, mut sibling, mut no_key) = (0, 0, 0, 0);
     let mut firsts: BTreeSet<&str> = BTreeSet::new();
     for _ in 0..2000 {
         let case = arb_case().new_tree(&mut runner).unwrap().current();
         firsts.insert(case.first);
+        let by = |home: &str, tables: &[&str]| {
+            case.mets.iter().any(|m| METS[*m].1 == home)
+                && case.dims.iter().any(|d| tables.contains(&DIMS[*d].1))
+        };
+        if case.answerable() {
+            straight_down += usize::from(by("h", &["c", "s"]));
+            two_fans += usize::from(by("x", &["c", "s"]));
+            sibling += usize::from(by("c", &["s"]));
+        } else {
+            no_key += usize::from(by("bt", &["c", "s"]));
+        }
         let crosses = |m: usize, d: usize| {
             matches!(
                 (METS[m].1, DIMS[d].1),
@@ -927,6 +997,10 @@ fn generator_reaches_bridged_refused_and_filtered_cases() {
     assert!(
         hop_up >= 100 && hop_up_filtered >= 30,
         "{hop_up} {hop_up_filtered}"
+    );
+    assert!(
+        straight_down >= 50 && two_fans >= 50 && sibling >= 30 && no_key >= 30,
+        "{straight_down} {two_fans} {sibling} {no_key}"
     );
     assert_eq!(firsts.len(), 4, "{firsts:?}");
 }

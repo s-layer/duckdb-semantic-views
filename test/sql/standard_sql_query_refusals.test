@@ -257,13 +257,15 @@ SELECT nosuch, AGG(revenue) FROM ssr GROUP BY nosuch;
 ----
 unknown dimension 'nosuch'
 
-# The construct's fences hold: an ad-hoc metric on customers, grouped by a
-# dimension on orders, would count each customer once per order.
+# The construct's fan-out handling holds for an ad-hoc metric too: one on
+# customers, grouped by a dimension on orders, counts each customer once per
+# channel (Phase 7 PR 4c, Snowflake parity), not once per order.
 
-statement error
+query TI rowsort
 SELECT channel, COUNT(DISTINCT region) FROM ssr GROUP BY channel;
 ----
-fan trap detected
+retail	1
+web	1
 
 statement error
 SELECT 1 FROM ssr;

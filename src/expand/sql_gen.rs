@@ -1372,8 +1372,9 @@ fn expand_unhoisted(
     // replaces that topology in exactly the same way, so it uses the same mode;
     // the retained metric × dimension check is what still reports a dimension
     // below the metric's own grain.
-    // Phase 7.3: only a per-grain plan that deduplicates its bridged groups
-    // may let a dimension or filter across a many-to-many bridge through.
+    // Phase 7.3, PR 4c: only a per-grain plan that deduplicates its bridged
+    // groups may let a dimension or filter that fans a metric's rows out
+    // through (`Plan::crosses_bridge`).
     let bridges = grain_plan
         .as_ref()
         .is_some_and(super::per_grain::Plan::crosses_bridge);

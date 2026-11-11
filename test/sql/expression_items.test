@@ -117,14 +117,17 @@ SELECT * FROM SEMANTIC_VIEW(exi METRICS count(DISTINCT c.region) AS regions, rev
 ----
 3	220.00
 
-# The fan-trap check sees an expression item as it sees a declared member: a
-# customer-level aggregate grouped by an order-level expression is refused, and
-# the error names the items as written.
+# An expression item fans out as a declared member does: a customer-level
+# aggregate grouped by an order-level expression counts each customer once per
+# year (Phase 7 PR 4c). Customer 1 ordered in 2023 and 2024, customer 2 in
+# 2024, customer 3 never.
 
-statement error
+query II rowsort
 SELECT * FROM SEMANTIC_VIEW(exi DIMENSIONS DATE_PART('year', o.order_date) AS y METRICS count(c.region) AS n);
 ----
-fan trap detected -- metric 'count(c.region)' (table 'c') would be duplicated when joined to dimension 'DATE_PART('year', o.order_date)' (table 'o')
+2023	1
+2024	2
+NULL	1
 
 # A fact expression.
 

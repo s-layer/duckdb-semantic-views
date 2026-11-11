@@ -1,0 +1,201 @@
+# Phase 7 PR 4c: a fan-out counts each row of the metric's table once per group.
+#
+# Snowflake answers any query whose metric reaches a dimension or filter along
+# one path, however many one-to-many hops the path takes and in whichever
+# direction: each row of the metric's table is counted once in every group it
+# reaches. It refuses only when the metric's table has no PRIMARY KEY (010933),
+# since the key is what tells its rows apart. Every expected value below is
+# Snowflake's answer to the same view and data (Phase 7 fixture 7, N1-N9; N2 is
+# also fixture 6's K19 shape: a plain sibling child after a hop up).
+#
+#   line_items -> orders <- shipments -> carriers
+#                 orders <- notes <- note_tags
+#
+#   order 1 (EU): items 1 (qty 5), 2 (qty 1); shipped air + sea; notes gift, rush
+#   order 2 (EU): item 3 (qty 2); shipped air; note gift
+#   order 3 (US): item 4 (qty 7); not shipped; no notes
+#   tags: note 1 (gift) red, blue; note 2 (rush) red; note 3 (gift) none
+
+require semantic_views
+
+statement ok
+CREATE TABLE p7f_orders (order_id INT, region VARCHAR);
+
+statement ok
+CREATE TABLE p7f_line_items (item_id INT, order_id INT, qty INT);
+
+statement ok
+CREATE TABLE p7f_carriers (carrier_id INT, carrier_name VARCHAR);
+
+statement ok
+CREATE TABLE p7f_shipments (shipment_id INT, order_id INT, carrier_id INT, mode VARCHAR);
+
+statement ok
+CREATE TABLE p7f_notes (note_id INT, order_id INT, kind VARCHAR);
+
+statement ok
+CREATE TABLE p7f_note_tags (tag_id INT, note_id INT, tag VARCHAR);
+
+statement ok
+INSERT INTO p7f_orders VALUES (1, 'EU'), (2, 'EU'), (3, 'US');
+
+statement ok
+INSERT INTO p7f_line_items VALUES (1, 1, 5), (2, 1, 1), (3, 2, 2), (4, 3, 7);
+
+statement ok
+INSERT INTO p7f_carriers VALUES (10, 'Fast'), (20, 'Slow');
+
+statement ok
+INSERT INTO p7f_shipments VALUES (1, 1, 10, 'air'), (2, 1, 20, 'sea'), (3, 2, 10, 'air');
+
+statement ok
+INSERT INTO p7f_notes VALUES (1, 1, 'gift'), (2, 1, 'rush'), (3, 2, 'gift');
+
+statement ok
+INSERT INTO p7f_note_tags VALUES (1, 1, 'red'), (2, 1, 'blue'), (3, 2, 'red');
+
+statement ok
+CREATE SEMANTIC VIEW p7f_nv AS
+  TABLES (
+    o  AS p7f_orders     PRIMARY KEY (order_id),
+    li AS p7f_line_items PRIMARY KEY (item_id),
+    c  AS p7f_carriers   PRIMARY KEY (carrier_id),
+    sh AS p7f_shipments  PRIMARY KEY (shipment_id),
+    n  AS p7f_notes      PRIMARY KEY (note_id),
+    t  AS p7f_note_tags  PRIMARY KEY (tag_id)
+  )
+  RELATIONSHIPS (
+    li_order   AS li(order_id)   REFERENCES o,
+    sh_order   AS sh(order_id)   REFERENCES o,
+    sh_carrier AS sh(carrier_id) REFERENCES c,
+    n_order    AS n(order_id)    REFERENCES o,
+    t_note     AS t(note_id)     REFERENCES n
+  )
+  DIMENSIONS (
+    o.region       AS region,
+    li.qty         AS qty,
+    c.carrier_name AS carrier_name,
+    sh.mode        AS mode,
+    n.kind         AS kind,
+    t.tag          AS tag
+  )
+  METRICS (
+    o.order_count AS COUNT(order_id),
+    li.item_count AS COUNT(item_id),
+    li.total_qty  AS SUM(qty),
+    n.note_count  AS COUNT(note_id)
+  );
+
+# N1: an orders metric by a child's column, straight down. Order 1 has a gift
+# and a rush note, order 2 a gift note, order 3 none (the NULL group).
+query TI rowsort
+SELECT * FROM SEMANTIC_VIEW(p7f_nv DIMENSIONS kind METRICS order_count);
+----
+NULL	1
+gift	2
+rush	1
+
+# K19 (fixture 6): items by a plain sibling child after a hop up
+# (li -> o <- n). Items 1 and 2 are counted under both of order 1's notes.
+query TI rowsort
+SELECT * FROM SEMANTIC_VIEW(p7f_nv DIMENSIONS kind METRICS item_count);
+----
+NULL	1
+gift	3
+rush	2
+
+# N2: items by two sibling children at once.
+query TTI rowsort
+SELECT * FROM SEMANTIC_VIEW(p7f_nv DIMENSIONS kind, mode METRICS item_count);
+----
+NULL	NULL	1
+gift	air	3
+gift	sea	2
+rush	air	2
+rush	sea	2
+
+# N3: items filtered on a sibling child: items 1, 2 and 3, each once.
+query II
+SELECT * FROM SEMANTIC_VIEW(p7f_nv METRICS item_count, total_qty WHERE kind = 'gift');
+----
+3	8
+
+# N4: two fan-outs on one path (li -> o <- n <- t).
+query TI rowsort
+SELECT * FROM SEMANTIC_VIEW(p7f_nv DIMENSIONS tag METRICS item_count);
+----
+NULL	2
+blue	2
+red	2
+
+# N5: the other direction (n -> o <- li). A metric's groups come from its own
+# rows, so item 4 (qty 7, an order with no notes) has no row.
+query II rowsort
+SELECT * FROM SEMANTIC_VIEW(p7f_nv DIMENSIONS qty METRICS note_count);
+----
+1	2
+2	1
+5	2
+
+# N6: two grains, each counted once per group.
+query TII rowsort
+SELECT * FROM SEMANTIC_VIEW(p7f_nv DIMENSIONS kind METRICS item_count, order_count);
+----
+NULL	1	1
+gift	3	2
+rush	2	1
+
+# N7: the hopped-to table's own column beside the fanning one.
+query TTI rowsort
+SELECT * FROM SEMANTIC_VIEW(p7f_nv DIMENSIONS region, kind METRICS item_count);
+----
+EU	gift	3
+EU	rush	2
+US	NULL	1
+
+# A fan-out reached through a third table's dimension (sh -> c): carriers by
+# note kind, every item once per (kind, carrier).
+query TTI rowsort
+SELECT * FROM SEMANTIC_VIEW(p7f_nv DIMENSIONS kind, carrier_name METRICS item_count);
+----
+NULL	NULL	1
+gift	Fast	3
+gift	Slow	2
+rush	Fast	2
+rush	Slow	2
+
+# N9: the metric's table has no PRIMARY KEY, so its rows cannot be told apart.
+# Snowflake refuses (010933 "does not have a primary or unique key").
+statement ok
+CREATE TABLE p7f_line_items_nopk AS SELECT * FROM p7f_line_items;
+
+statement ok
+CREATE SEMANTIC VIEW p7f_nv_nopk AS
+  TABLES (
+    o  AS p7f_orders PRIMARY KEY (order_id),
+    li AS p7f_line_items_nopk,
+    n  AS p7f_notes  PRIMARY KEY (note_id)
+  )
+  RELATIONSHIPS (
+    li_order AS li(order_id) REFERENCES o,
+    n_order  AS n(order_id)  REFERENCES o
+  )
+  DIMENSIONS (n.kind AS kind)
+  METRICS (li.total_qty AS SUM(qty));
+
+statement error
+SELECT * FROM SEMANTIC_VIEW(p7f_nv_nopk DIMENSIONS kind METRICS total_qty);
+----
+a metric table with no PRIMARY KEY
+
+# Without the fan-out the same view answers.
+query I
+SELECT * FROM SEMANTIC_VIEW(p7f_nv_nopk METRICS total_qty);
+----
+15
+
+statement ok
+DROP SEMANTIC VIEW p7f_nv_nopk;
+
+statement ok
+DROP SEMANTIC VIEW p7f_nv;

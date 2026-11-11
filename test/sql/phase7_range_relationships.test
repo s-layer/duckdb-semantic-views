@@ -89,7 +89,9 @@ early_feb	1
 jan	1
 
 # The period table is the "one" side, so its metric can't be grouped by an
-# event dimension.
+# event dimension. Snowflake refuses this across an ASOF relationship (fixture
+# 1, A5); the range case is unprobed and refused the same way until a fixture
+# checks it (TECH-DEBT #112).
 statement error
 SELECT * FROM SEMANTIC_VIEW(p7_range DIMENSIONS e.event_id METRICS p.period_count);
 ----

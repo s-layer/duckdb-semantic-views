@@ -1059,21 +1059,28 @@ def run_harness() -> int:
         failures += 1
         print(f"FAIL multi-grain: by-region mismatch got={got} want={want}")
 
-    # The boundary: a dimension BELOW a metric's grain is still rejected —
-    # per-grain aggregation cannot define it either.
-    try:
+    # A dimension BELOW a metric's grain (Phase 7 PR 4c): each order counts
+    # once in every group it reaches, as Snowflake counts it, and an order with
+    # no line items in the NULL group. The reference states it as the DISTINCT
+    # (order, line id) pairs, so a plain join that repeated an order would not
+    # match it on another dimension; here each line id names one order.
+    got = normalize(
         conn.execute(
             "SELECT * FROM semantic_view('diff_mg', "
             "dimensions := ['line_id'], metrics := ['revenue'])"
         ).fetchall()
+    )
+    want = normalize(
+        conn.execute(
+            "SELECT line_id, SUM(amount) FROM (SELECT DISTINCT o.id, o.amount, li.id AS line_id "
+            "FROM orders o LEFT JOIN line_items li ON li.order_id = o.id) p GROUP BY 1"
+        ).fetchall()
+    )
+    if rows_equal(got, want):
+        print("  PASS: dimension below a metric's grain counts each order once per group")
+    else:
         failures += 1
-        print("FAIL multi-grain: dimension below the metric grain was accepted")
-    except Exception as exc:  # noqa: BLE001
-        if "fan trap detected" in str(exc):
-            print("  PASS: dimension below a metric's grain still raises fan-trap")
-        else:
-            failures += 1
-            print(f"FAIL multi-grain: wrong error: {exc}")
+        print(f"FAIL multi-grain: below-grain mismatch got={got[:5]} want={want[:5]}")
     # Base-grain metric alone must still prune the child join and match.
     got = normalize(
         conn.execute(

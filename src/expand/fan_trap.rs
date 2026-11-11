@@ -12,6 +12,11 @@ use super::where_clause::WhereMember;
 /// name of a relationship carrying that cardinality).
 type CardMap = HashMap<(String, String), (Cardinality, String)>;
 
+/// The `(from_lower, to_lower)` pairs joined by an ASOF or range relationship
+/// (Phase 7.1, 7.2). A fan-out across one is not counted once per group: see
+/// [`fan_out_counts_once`].
+type TemporalEdges = HashSet<(String, String)>;
+
 /// Check for fan traps: an aggregation whose input rows are multiplied by a
 /// one-to-many join boundary.
 ///
@@ -20,8 +25,10 @@ type CardMap = HashMap<(String, String), (Cardinality, String)>;
 /// 1. **metric × dimension**: walks the join path between each
 ///    (metric source, dimension source) pair and errors when any edge is
 ///    traversed in the fan-out direction (`ExpandError::FanTrap`). This one is
-///    about the *dimension* being below the metric's own grain — per-grain
-///    aggregation cannot define such a query either, so it runs unconditionally.
+///    about the *dimension* being below the metric's own grain. It runs on
+///    both paths, but skips a path [`fan_out_counts_once`] accepts when the
+///    per-grain plan deduplicates every fanning group (`bridges`), since each
+///    metric row is then counted once per group, as in Snowflake.
 /// 2. **metric grain × root** (EXP-1) and 3. **metric × metric** (SG-1): both
 ///    exist only because the base-anchored `FROM <root>` topology computes every
 ///    metric over one joined row set. When the caller has routed the query to
@@ -51,6 +58,7 @@ pub(super) fn check_fan_traps(
 
     let graph = build_relationship_graph(view_name, def)?;
     let card_map = build_card_map(def);
+    let temporal = temporal_edges(def);
 
     // Undirected adjacency over the relationship edges — the path derivation
     // ALL three checks share. It is deliberately not the rooted parent tree:
@@ -72,9 +80,11 @@ pub(super) fn check_fan_traps(
     // dedupe them (silent double-count). Window metrics were never skipped
     // (their inner aggregate is computed over the fanned join before the window
     // function runs); semi-additive metrics are now treated the same way.
-    // Phase 7.3: a refused path across a bridge is reported only when no plain
-    // fan-out is refused too, since a plain fan-out is what blocks the query
-    // then, and the bridge note would name the wrong reason.
+    // Phase 7 PR 4c: a refused fan-out that would count once per group (it
+    // was refused because the plan declined, e.g. no PRIMARY KEY) is reported
+    // only when no fan-out that is never counted once (across an ASOF or range
+    // hop walked backwards) is refused too. That one blocks the query whatever
+    // the plan does, and the counts-once note would name the wrong fix.
     let mut bridge_trap: Option<ExpandError> = None;
     for met in resolved_mets {
         // EXP-8: a base metric with no source table and no base-metric
@@ -100,15 +110,18 @@ pub(super) fn check_fan_traps(
                 let Some(path) = find_path(met_table, &dim_table, &adjacency, &card_map) else {
                     continue; // Not connected (legacy joins carrying no FK metadata)
                 };
-                // Phase 7.3: a dimension across a many-to-many bridge is
-                // answered once per group by the per-grain plan, which passes
-                // `bridges` only when every group it emits deduplicates its
-                // anchor rows that way. Every other fanning path is refused.
-                if bridges && is_bridge_path(&path, &card_map) {
+                // Phase 7 PR 4c: a dimension the metric's rows fan out to is
+                // answered once per group by the per-grain plan. It passes
+                // `bridges` when any group it emits deduplicates its anchor
+                // rows that way, and `mark_bridged_groups` either bridges every
+                // group that fans out or declines the whole plan, so `bridges`
+                // means every fanning group is deduplicated. Every other
+                // fanning path is refused.
+                let counts_once = fan_out_counts_once(&path, &card_map, &temporal);
+                if bridges && counts_once {
                     continue;
                 }
                 if let Some(rel_name) = fanning_edge_on_path(&path, &card_map) {
-                    let across_bridge = is_bridge_path(&path, &card_map);
                     let trap = ExpandError::FanTrap {
                         detail: Box::new(FanTrapError {
                             view_name: view_name.to_string(),
@@ -120,10 +133,10 @@ pub(super) fn check_fan_traps(
                             dimension_name: dim.name.clone(),
                             dimension_table: dim_table_raw.clone(),
                             relationship_name: rel_name,
-                            across_bridge,
+                            counts_once,
                         }),
                     };
-                    if !across_bridge {
+                    if !counts_once {
                         return Err(trap);
                     }
                     bridge_trap.get_or_insert(trap);
@@ -183,7 +196,7 @@ pub(super) fn check_fan_traps(
                         dimension_name: na.dim_name,
                         dimension_table: na.source_table_raw,
                         relationship_name: rel_name,
-                        across_bridge: is_bridge_path(&path, &card_map),
+                        counts_once: fan_out_counts_once(&path, &card_map, &temporal),
                     }),
                 });
             }
@@ -429,6 +442,7 @@ pub(super) struct GrainGraph {
     root: String,
     adjacency: HashMap<String, Vec<String>>,
     card_map: CardMap,
+    temporal: TemporalEdges,
 }
 
 impl GrainGraph {
@@ -443,6 +457,7 @@ impl GrainGraph {
             root: graph.root.clone(),
             adjacency: build_adjacency(def),
             card_map: build_card_map(def),
+            temporal: temporal_edges(def),
         })
     }
 
@@ -464,53 +479,57 @@ impl GrainGraph {
         fanning_edge_on_path(&path, &self.card_map)
     }
 
-    /// Whether the `from` → `to` path crosses a many-to-many bridge (Phase
-    /// 7.3), the one fanning shape a grain CTE can still answer: see
-    /// [`is_bridge_path`].
-    pub(super) fn is_bridge(&self, from: &str, to: &str) -> bool {
+    /// Whether the `from` → `to` path fans out in a way a grain CTE can still
+    /// answer once per group: see [`fan_out_counts_once`].
+    pub(super) fn fan_out_counts_once(&self, from: &str, to: &str) -> bool {
         self.path(from, to)
-            .is_some_and(|path| is_bridge_path(&path, &self.card_map))
+            .is_some_and(|path| fan_out_counts_once(&path, &self.card_map, &self.temporal))
     }
 }
 
-/// Whether `path` (`[anchor, …, bridge, …, target]`) reaches its target
-/// through a many-to-many **bridge** table (Phase 7.3, and after a hop up
-/// since Phase 7 PR 4).
+/// Whether `path` (`[anchor, …, target]`) fans out in a way the per-grain
+/// plan answers once per group (Phase 7.3 for many-to-many bridges, Phase 7
+/// PR 4c for every other shape).
 ///
-/// Snowflake treats a table holding many-to-one relationships to two tables as
-/// a bridge between them: a metric on one side can be grouped by a dimension
-/// on the other side, or on the bridge itself, and each of its rows counts once
-/// per group (the 7.0 fixture's B1-B10). A path qualifies when:
-///
-/// - up to its first fanning hop, every hop follows a foreign key (or a
-///   one-to-one edge), so each anchor row reaches at most one row of each
-///   table before the bridge: `reviews -> books` (fixture 3's H1-H4) or none;
-/// - its first fanning hop enters the bridge: the bridge references the table
-///   before it, so one row there meets many bridge rows;
-/// - no later hop fans: from the bridge on, every hop follows a foreign key
-///   (or a one-to-one edge), so each bridge row reaches at most one row of
-///   every table after it;
-/// - the bridge references some table other than the one before it. A table
-///   whose only relationship is the one it was entered by is a plain child,
-///   and a dimension on it is below the metric's grain, refused as Snowflake
-///   refuses it (fixture A5).
-///
+/// Snowflake counts each row of the metric's table once per group whenever a
+/// dimension or filter fans its rows out along a single path, whatever the
+/// shape: across a many-to-many bridge (the 7.0 fixture's B1-B10), after a hop
+/// up (fixture 3's H1-H4), into a plain child of the metric's table or of a
+/// table it references, or through several fanning hops (fixture 7's N1-N7).
 /// The emitter deduplicates by the anchor's PRIMARY KEY (`per_grain`'s
-/// `anchor_key`). A bridge entered from the anchor itself guarantees the
-/// anchor a key, since the bridge references it; after a hop up the anchor
-/// may declare none, and then the plan declines and the fence refuses it.
-fn is_bridge_path(path: &[String], card_map: &CardMap) -> bool {
-    let Some(entry) = (0..path.len().saturating_sub(1))
-        .find(|&i| fanning_edge_on_path(&path[i..i + 2], card_map).is_some())
-    else {
-        return false;
-    };
-    let (before, bridge) = (&path[entry], &path[entry + 1]);
-    let rest_safe = fanning_edge_on_path(&path[entry + 1..], card_map).is_none();
-    let bridges_elsewhere = card_map
-        .keys()
-        .any(|(from, to)| from == bridge && to != before);
-    rest_safe && bridges_elsewhere
+/// `anchor_key`); with no key the plan declines and the fence refuses, as
+/// Snowflake does (010933, fixture 6's K14 and fixture 7's N9).
+///
+/// The exception is a fanning hop across an ASOF or range relationship:
+/// Snowflake refuses a metric on the referenced table grouped by a column of
+/// the referencing one (010956, "higher level of granularity", the 7.0
+/// fixture's A5), so such a path is not counted. The range case is unprobed
+/// and refused like ASOF until a fixture checks it (TECH-DEBT #112).
+fn fan_out_counts_once(path: &[String], card_map: &CardMap, temporal: &TemporalEdges) -> bool {
+    let fanning_hops: Vec<(&String, &String)> = path
+        .windows(2)
+        .filter(|w| fanning_edge_on_path(w, card_map).is_some())
+        .map(|w| (&w[0], &w[1]))
+        .collect();
+    !fanning_hops.is_empty()
+        && fanning_hops
+            .iter()
+            .all(|(from, to)| !temporal.contains(&((*to).clone(), (*from).clone())))
+}
+
+/// The pairs [`TemporalEdges`] holds, keyed like [`CardMap`] (referencing
+/// table first).
+fn temporal_edges(def: &SemanticViewDefinition) -> TemporalEdges {
+    def.joins
+        .iter()
+        .filter(|j| j.asof.is_some() || j.range_end.is_some())
+        .map(|j| {
+            (
+                j.from_alias.to_ascii_lowercase(),
+                j.table.to_ascii_lowercase(),
+            )
+        })
+        .collect()
 }
 
 /// Source tables (lowercased, sorted, deduped) whose rows feed `met`'s
@@ -657,8 +676,8 @@ const PARTIAL_PATH_CAP: usize = 4096;
 ///    over forward steps alone, however many other paths there are;
 /// 2. one with no edge traversed in the fan-out direction (a step back along a
 ///    one-to-one relationship is allowed);
-/// 3. one shaped like a many-to-many bridge ([`is_bridge_path`]);
-/// 4. any other, for the error that refuses it.
+/// 3. any other, for the answer that counts once per group or the error that
+///    refuses it.
 ///
 /// Within each, the shortest, then the first by alias order. Whether a member
 /// is reached by more than one admissible path (a diamond, two bridges) is
@@ -688,9 +707,7 @@ fn find_path(
     }
     paths.sort_by(|a, b| a.len().cmp(&b.len()).then_with(|| a.cmp(b)));
     let pick = |pred: &dyn Fn(&[String]) -> bool| paths.iter().position(|p| pred(p));
-    let at = pick(&|p| fanning_edge_on_path(p, card_map).is_none())
-        .or_else(|| pick(&|p| is_bridge_path(p, card_map)))
-        .unwrap_or(0);
+    let at = pick(&|p| fanning_edge_on_path(p, card_map).is_none()).unwrap_or(0);
     Some(paths.swap_remove(at))
 }
 
@@ -854,6 +871,7 @@ pub(super) fn check_where_clause_fan_traps(
     }
     let graph = build_relationship_graph(view_name, def)?;
     let card_map = build_card_map(def);
+    let temporal = temporal_edges(def);
     let adjacency = build_adjacency(def);
     let root = graph.root.clone();
 
@@ -876,10 +894,12 @@ pub(super) fn check_where_clause_fan_traps(
                     else {
                         continue; // Not connected (legacy joins carrying no FK metadata).
                     };
-                    // Phase 7.3: as for a dimension, a member across a bridge
-                    // filters the deduplicated anchor rows (the plan's inner
-                    // `SELECT DISTINCT` carries the predicate).
-                    if bridges && is_bridge_path(&path, &card_map) {
+                    // Phase 7.3 and PR 4c: as for a dimension, a member the
+                    // metric's rows fan out to filters the deduplicated anchor
+                    // rows (the plan's inner `SELECT DISTINCT` carries the
+                    // predicate), so each row counts once if any of its fanned
+                    // rows matches.
+                    if bridges && fan_out_counts_once(&path, &card_map, &temporal) {
                         continue;
                     }
                     if let Some(rel_name) = fanning_edge_on_path(&path, &card_map) {

@@ -100,8 +100,16 @@ fn fan_trap_three_table_def() -> SemanticViewDefinition {
     }
 }
 
+/// Whether `sql` counts the metric's rows once per group: joined to the
+/// distinct (key, group) pairs they reach (Phase 7.3, PR 4c).
+fn counts_once_per_group(sql: &str) -> bool {
+    sql.contains("SELECT DISTINCT") && sql.contains("__sv_bridge")
+}
+
+/// An orders metric by a line-item dimension fans the orders out: each order
+/// is counted once per status, as Snowflake does (fixture 7, N1).
 #[test]
-fn fan_trap_one_to_many_blocked() {
+fn fan_out_one_to_many_counts_once_per_group() {
     let def = fan_trap_three_table_def();
     let req = QueryRequest {
         where_clause: None,
@@ -109,15 +117,30 @@ fn fan_trap_one_to_many_blocked() {
         dimensions: vec![DimensionName::new("status")],
         metrics: vec![MetricName::new("order_count")],
     };
-    let result = expand("sales", &def, &req);
-    assert!(result.is_err(), "Fan trap must block the query");
-    match result.unwrap_err() {
-        ExpandError::FanTrap { detail } => {
+    let sql = expand("sales", &def, &req).expect("counted once per group");
+    assert!(counts_once_per_group(&sql), "{sql}");
+}
+
+/// With no PRIMARY KEY on the metric's table the same query is refused, and
+/// the error names the metric, the dimension and why (Snowflake's 010933).
+#[test]
+fn fan_out_one_to_many_without_a_primary_key_is_refused() {
+    let mut def = fan_trap_three_table_def();
+    def.tables[0].pk_columns.clear();
+    let req = QueryRequest {
+        where_clause: None,
+        facts: vec![],
+        dimensions: vec![DimensionName::new("status")],
+        metrics: vec![MetricName::new("order_count")],
+    };
+    match expand("sales", &def, &req) {
+        Err(ExpandError::FanTrap { detail }) => {
             assert_eq!(detail.view_name, "sales");
             assert_eq!(detail.metric_name, "order_count");
             assert_eq!(detail.dimension_name, "status");
+            assert!(detail.counts_once);
         }
-        other => panic!("Expected FanTrap, got: {other}"),
+        other => panic!("Expected FanTrap, got: {other:?}"),
     }
 }
 
@@ -235,7 +258,7 @@ fn fan_trap_no_joins_safe() {
 }
 
 #[test]
-fn fan_trap_transitive_chain() {
+fn fan_out_through_a_transitive_chain_counts_once_per_group() {
     let mut def = fan_trap_three_table_def();
     def.metrics.push(Metric {
         name: "customer_count".to_string(),
@@ -249,22 +272,12 @@ fn fan_trap_transitive_chain() {
         dimensions: vec![DimensionName::new("status")],
         metrics: vec![MetricName::new("customer_count")],
     };
-    let result = expand("sales", &def, &req);
-    assert!(
-        result.is_err(),
-        "Transitive chain fan trap must be detected"
-    );
-    match result.unwrap_err() {
-        ExpandError::FanTrap { detail } => {
-            assert_eq!(detail.metric_name, "customer_count");
-            assert_eq!(detail.dimension_name, "status");
-        }
-        other => panic!("Expected FanTrap, got: {other}"),
-    }
+    let sql = expand("sales", &def, &req).expect("two fanning hops are counted once per group");
+    assert!(counts_once_per_group(&sql), "{sql}");
 }
 
 #[test]
-fn fan_trap_derived_metric_blocked() {
+fn fan_out_of_a_derived_metric_counts_once_per_group() {
     let mut def = fan_trap_three_table_def();
     def.metrics.push(Metric {
         name: "avg_order".to_string(),
@@ -277,15 +290,8 @@ fn fan_trap_derived_metric_blocked() {
         dimensions: vec![DimensionName::new("status")],
         metrics: vec![MetricName::new("avg_order")],
     };
-    let result = expand("sales", &def, &req);
-    assert!(result.is_err(), "Derived metric fan trap must be detected");
-    match result.unwrap_err() {
-        ExpandError::FanTrap { detail } => {
-            assert_eq!(detail.metric_name, "avg_order");
-            assert_eq!(detail.dimension_name, "status");
-        }
-        other => panic!("Expected FanTrap, got: {other}"),
-    }
+    let sql = expand("sales", &def, &req).expect("a derived metric is counted once per group");
+    assert!(counts_once_per_group(&sql), "{sql}");
 }
 
 #[test]
@@ -298,7 +304,7 @@ fn fan_trap_error_message_format() {
             dimension_name: "status".to_string(),
             dimension_table: "li".to_string(),
             relationship_name: "li_to_order".to_string(),
-            across_bridge: false,
+            counts_once: false,
         }),
     };
     let msg = format!("{err}");
@@ -521,10 +527,11 @@ fn semi_additive_na_dim_on_fanning_table_blocked() {
 }
 
 /// The asymmetry that makes EXP-9 unmistakable: *querying* the same dimension
-/// makes the metric regular and the fence already rejects the identical join.
-/// The un-queried case must not be the permissive one.
+/// makes the metric regular, and a regular metric across the fan-out is
+/// counted once per group (Phase 7 PR 4c), while the un-queried case above,
+/// which takes the snapshot path, stays refused.
 #[test]
-fn semi_additive_na_dim_queried_is_already_blocked() {
+fn semi_additive_na_dim_queried_counts_once_per_group() {
     let def = semi_additive_na_dim_fans_def();
     let req = QueryRequest {
         where_clause: None,
@@ -532,18 +539,8 @@ fn semi_additive_na_dim_queried_is_already_blocked() {
         dimensions: vec![DimensionName::new("ship_ts")],
         metrics: vec![MetricName::new("balance_at")],
     };
-    let result = expand("sales", &def, &req);
-    match result {
-        Err(ExpandError::FanTrap { detail }) => {
-            assert_eq!(detail.metric_name, "balance_at");
-            assert_eq!(detail.dimension_name, "ship_ts");
-        }
-        Err(other) => panic!(
-            "control: the queried dimension on the fanning child must still be a \
-             FanTrap, got: {other}"
-        ),
-        Ok(sql) => panic!("control: this has always been a FanTrap; got SQL:\n{sql}"),
-    }
+    let sql = expand("sales", &def, &req).expect("a regular metric is counted once per group");
+    assert!(counts_once_per_group(&sql), "{sql}");
 }
 
 /// Control: an NA dimension on a table that does NOT fan the metric's grain
@@ -800,6 +797,10 @@ fn window_quoted_inner_metric_contributes_its_grain_to_the_fence() {
 //
 // Pre-#207 both shapes below were a loud binder error (`li` was never joined),
 // so this is a loud -> silent-wrong regression, not a pre-existing gap.
+//
+// Phase 7 PR 4c: the plan now counts the metric's rows once per group across
+// any fan-out, so these are answered that way; with no PRIMARY KEY the fence
+// still refuses them.
 // ---------------------------------------------------------------------------
 
 /// base `o`, child `li` (`li.order_id REFERENCES o.id`, so `o -> li` fans).
@@ -825,11 +826,70 @@ fn exp27_req(where_clause: &str) -> QueryRequest {
 }
 
 /// The FACT branch: the predicate names a fact on the base whose expression
-/// reaches a fact on the child table.
+/// reaches a fact on the child table. Since Phase 7 PR 4c the child is joined
+/// inside the plan's deduplicated pairs, so each order counts once if any of
+/// its line items matches, as for a filter on a line-item dimension.
 #[test]
-fn exp27_where_member_fact_chain_to_a_fanning_table_is_fenced() {
-    let def = exp27_def();
-    match expand("v", &def, &exp27_req("of > 0")) {
+fn exp27_where_member_fact_chain_to_a_fanning_table_counts_once() {
+    let sql = expand("v", &exp27_def(), &exp27_req("of > 0")).expect("counted once per order");
+    assert!(counts_once_per_group(&sql), "{sql}");
+}
+
+/// The DIMENSION branch: the predicate names a *dimension* on the base whose
+/// expression reaches the same child-table fact. TECH-DEBT #54 made dimension
+/// expressions fact-inlined, so this reaches the identical join.
+#[test]
+fn exp27_where_member_dimension_reaching_a_fanning_fact_counts_once() {
+    let def = exp27_def().with_dimension(
+        "band",
+        "CASE WHEN li.liq > 0 THEN 'hi' ELSE 'lo' END",
+        Some("o"),
+    );
+    let sql = expand("v", &def, &exp27_req("band = 'hi'")).expect("counted once per order");
+    assert!(counts_once_per_group(&sql), "{sql}");
+}
+
+/// Transitivity: `member_fact_tables` walks the chain, so a two-hop chain that
+/// only reaches the fanning table at its far end is deduplicated too. A plan
+/// that looked at the directly-named fact alone would join it unfenced.
+#[test]
+fn exp27_transitive_fact_chain_to_a_fanning_table_counts_once() {
+    let def = exp27_def().with_fact("of2", "of + 1", "o");
+    let sql = expand("v", &def, &exp27_req("of2 > 0")).expect("counted once per order");
+    assert!(counts_once_per_group(&sql), "{sql}");
+}
+
+/// With no PRIMARY KEY on the orders there is nothing to count them once by,
+/// so the fence refuses the fact chain, naming the member and the table it
+/// joins on the member's behalf.
+#[test]
+fn exp27_fact_chain_without_a_primary_key_is_fenced() {
+    assert_exp27_keyless_fenced(exp27_def(), "of > 0", "of");
+}
+
+/// The DIMENSION branch's keyless twin.
+#[test]
+fn exp27_dimension_reaching_a_fanning_fact_without_a_primary_key_is_fenced() {
+    let def = exp27_def().with_dimension(
+        "band",
+        "CASE WHEN li.liq > 0 THEN 'hi' ELSE 'lo' END",
+        Some("o"),
+    );
+    assert_exp27_keyless_fenced(def, "band = 'hi'", "band");
+}
+
+/// The transitive chain's keyless twin.
+#[test]
+fn exp27_transitive_fact_chain_without_a_primary_key_is_fenced() {
+    let def = exp27_def().with_fact("of2", "of + 1", "o");
+    assert_exp27_keyless_fenced(def, "of2 > 0", "of2");
+}
+
+/// `def` with the orders' PRIMARY KEY dropped refuses `where_clause`, naming
+/// `member` and the line items joined on its behalf.
+fn assert_exp27_keyless_fenced(mut def: SemanticViewDefinition, where_clause: &str, member: &str) {
+    def.tables[0].pk_columns.clear();
+    match expand("v", &def, &exp27_req(where_clause)) {
         Err(ExpandError::WhereClauseFanTrap {
             metric_name,
             member_name,
@@ -838,7 +898,7 @@ fn exp27_where_member_fact_chain_to_a_fanning_table_is_fenced() {
             ..
         }) => {
             assert_eq!(metric_name, "rev");
-            assert_eq!(member_name, "of");
+            assert_eq!(member_name, member);
             assert_eq!(
                 member_table, "li",
                 "the table joined on the member's behalf"
@@ -846,60 +906,64 @@ fn exp27_where_member_fact_chain_to_a_fanning_table_is_fenced() {
             assert_eq!(relationship_name, "li_to_o");
         }
         Err(other) => panic!("expected WhereClauseFanTrap, got: {other}"),
-        Ok(sql) => panic!(
-            "EXP-27: the fanning child table was joined for a where_clause fact \
-             chain with no fence -- SUM(o.amount) is aggregated over multiplied \
-             rows.\nemitted SQL:\n{sql}"
-        ),
+        Ok(sql) => panic!("SUM(o.amount) over multiplied rows:\n{sql}"),
     }
 }
 
-/// The DIMENSION branch: the predicate names a *dimension* on the base whose
-/// expression reaches the same child-table fact. TECH-DEBT #54 made dimension
-/// expressions fact-inlined, so this reaches the identical join with an
-/// identical absence of fencing.
+/// Two refused fan-outs in one query: one that would count once per group but
+/// has no PRIMARY KEY to count by, and one across an ASOF relationship walked
+/// backwards, which is never counted once. The error names the ASOF one, since
+/// declaring a key would not answer the query, even though the keyless metric
+/// comes first in the request.
 #[test]
-fn exp27_where_member_dimension_reaching_a_fanning_fact_is_fenced() {
-    let def = exp27_def().with_dimension(
-        "band",
-        "CASE WHEN li.liq > 0 THEN 'hi' ELSE 'lo' END",
-        Some("o"),
-    );
-    match expand("v", &def, &exp27_req("band = 'hi'")) {
-        Err(ExpandError::WhereClauseFanTrap {
-            metric_name,
-            member_name,
-            member_table,
-            ..
-        }) => {
-            assert_eq!(metric_name, "rev");
-            assert_eq!(member_name, "band");
-            assert_eq!(member_table, "li");
+fn a_temporal_fan_out_is_reported_before_a_keyless_one() {
+    let mut def = SemanticViewDefinition::default()
+        .with_table("o", "p_orders", &[])
+        .with_table("li", "p_items", &["id"])
+        .with_table("a", "p_addresses", &["cust", "start_date"])
+        .with_dimension("status", "li.status", Some("li"))
+        .with_metric("order_count", "COUNT(*)", Some("o"))
+        .with_metric("address_count", "COUNT(*)", Some("a"))
+        .with_pkfk_join("li_to_o", "li", "o", &["order_id"], &["id"]);
+    def.joins.push(Join {
+        from_alias: "o".to_string(),
+        table: "a".to_string(),
+        fk_columns: vec!["cust".to_string(), "order_date".to_string()],
+        ref_columns: vec!["cust".to_string(), "start_date".to_string()],
+        name: Some("order_address".to_string()),
+        asof: Some(1),
+        ..Default::default()
+    });
+    let req = QueryRequest {
+        where_clause: None,
+        facts: vec![],
+        dimensions: vec![DimensionName::new("status")],
+        metrics: vec![
+            MetricName::new("order_count"),
+            MetricName::new("address_count"),
+        ],
+    };
+    // Each fan-out alone is refused, the keyless one with the note that says
+    // when a fan-out is counted once.
+    for (met, counts_once) in [("order_count", true), ("address_count", false)] {
+        let solo = QueryRequest {
+            metrics: vec![MetricName::new(met)],
+            ..req.clone()
+        };
+        match expand("v", &def, &solo) {
+            Err(ExpandError::FanTrap { detail }) => {
+                assert_eq!(detail.counts_once, counts_once, "{met}");
+            }
+            other => panic!("{met}: expected FanTrap, got: {other:?}"),
         }
-        Err(other) => panic!("expected WhereClauseFanTrap, got: {other}"),
-        Ok(sql) => panic!(
-            "EXP-27 (dimension branch): a where_clause DIMENSION whose expression \
-             reaches a child-table fact joined the fanning table \
-             unfenced.\nemitted SQL:\n{sql}"
-        ),
     }
-}
-
-/// Transitivity: `member_fact_tables` walks the chain, so a two-hop chain that
-/// only reaches the fanning table at its far end must be fenced too. A fence
-/// that looked at the directly-named fact alone would miss this.
-#[test]
-fn exp27_transitive_fact_chain_to_a_fanning_table_is_fenced() {
-    let def = exp27_def().with_fact("of2", "of + 1", "o");
-    match expand("v", &def, &exp27_req("of2 > 0")) {
-        Err(ExpandError::WhereClauseFanTrap { member_name, .. }) => {
-            assert_eq!(member_name, "of2");
+    match expand("v", &def, &req) {
+        Err(ExpandError::FanTrap { detail }) => {
+            assert_eq!(detail.metric_name, "address_count");
+            assert_eq!(detail.dimension_name, "status");
+            assert!(!detail.counts_once);
         }
-        Err(other) => panic!("expected WhereClauseFanTrap, got: {other}"),
-        Ok(sql) => panic!(
-            "EXP-27 (transitive): `of2 -> of -> liq@li` reached the fanning table \
-             through two hops unfenced.\nemitted SQL:\n{sql}"
-        ),
+        other => panic!("expected FanTrap, got: {other:?}"),
     }
 }
 

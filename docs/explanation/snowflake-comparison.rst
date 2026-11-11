@@ -422,14 +422,20 @@ these queries were rejected with a fan trap error rather than silently inflated.
 Four boundaries apply:
 
 - A **dimension below a metric's grain** (``SUM(customers.balance)`` grouped by
-  an order-grain dimension) is rejected in both systems. Snowflake's rule is
-  that `the logical table for the dimension must be related to the logical
-  table for the metric
+  an order-grain dimension) is answered in both systems by counting each row of
+  the metric's table once in every group it reaches, along any one-to-many path:
+  straight down, to a sibling after a hop up, or through several fan-outs.
+  Snowflake's documentation states that `the logical table for the dimension
+  must be related to the logical table for the metric
   <https://docs.snowflake.com/en/user-guide/views-semantic/querying>`_ and must
   have "an equal or lower level of granularity than the logical table for the
-  metric"; the extension's ``fan trap detected`` error enforces the same condition. Per-grain
-  aggregation does not make these answerable -- the metric's rows genuinely fan
-  across the dimension's values, so there is no single correct value per group.
+  metric", but probed directly it answers these queries this way; it refuses
+  them only when the metric's table has no primary key, and so does the
+  extension (``fan trap detected``). Until v0.19.0 the extension refused them
+  all. A window metric, an active semi-additive metric, and a fan-out across an
+  ``ASOF`` relationship are still refused in both. Snowflake's handling of a
+  fan-out across a range relationship has not been probed, and the extension
+  refuses it. See :ref:`explanation-grain-below`.
 - A **window metric** whose inner aggregate lives on a non-base table is computed
   at its own grain -- the inner aggregation is anchored at that table (a parent
   or a child of the base table), so it is neither inflated nor thinned by a
@@ -648,7 +654,7 @@ Snowflake ``CREATE SEMANTIC VIEW`` features that are commonly asked about, and w
    * - Range relationships -- ``e(event_ts) REFERENCES p(BETWEEN start_ts AND end_ts EXCLUSIVE)``, with ``CONSTRAINT period_range DISTINCT RANGE BETWEEN start_ts AND end_ts EXCLUSIVE`` on the target
      - **Supported**, written the same way, with the answers Snowflake gives: a row takes the period that includes its value at the start and excludes it at the end, a ``NULL`` bound leaves its side open, a row with no period or a ``NULL`` value keeps its ``NULL``-extended row, and the target is the "one" side for fan traps. The target must declare the matching ``DISTINCT RANGE`` constraint, and, as in Snowflake, overlapping periods are not checked: a row in two periods counts under each. Only ``EXCLUSIVE`` ranges, as in Snowflake. ``DESCRIBE`` writes Snowflake's ``REF_KEY`` object and ``CONSTRAINT`` rows; ``GET_DDL`` writes the keywords in upper case. See :ref:`Range relationships <ref-create-range-relationships>`.
    * - Many-to-many relationships through a bridge table -- ``ba(author_id) REFERENCES a`` and ``ba(book_id) REFERENCES b``, with a metric on ``b`` grouped by a dimension on ``a``
-     - **Supported**, with the answers Snowflake gives: each row of the metric's table counts once per group, a row with no bridge row counts in the ``NULL`` group, and the total with no dimension is not inflated. A dimension on the bridge itself, or past the far table, and a filter across the bridge work too, and a fact table that references both sides is a bridge as well. As in Snowflake, a dimension on a plain child of the metric's table is refused, and ``USING`` cannot pick between two bridges: both systems create a view with two bridges between the same pair of tables, and refuse a query that crosses from one side to the other (Snowflake's 000002 ``Multi-path in many-to-many relationship``). Both refuse the same way any member a metric reaches by no chain of relationships and by a second path, such as a customer count by store when customers and stores also share regions. A metric whose table reaches the bridge by a hop up (a review count by author country, with reviews referencing books) counts each review once per group, as in Snowflake. Window metrics and active semi-additive metrics can't be grouped across a bridge. A query with only dimensions on the two sides lists the pairs the bridge holds, as in Snowflake. See :ref:`Many-to-many relationships through a bridge <ref-create-bridge-relationships>`.
+     - **Supported**, with the answers Snowflake gives: each row of the metric's table counts once per group, a row with no bridge row counts in the ``NULL`` group, and the total with no dimension is not inflated. A dimension on the bridge itself, or past the far table, and a filter across the bridge work too, and a fact table that references both sides is a bridge as well. A dimension on a plain child of the metric's table counts the same way, once per group, as in Snowflake. ``USING`` cannot pick between two bridges: both systems create a view with two bridges between the same pair of tables, and refuse a query that crosses from one side to the other (Snowflake's 000002 ``Multi-path in many-to-many relationship``). Both refuse the same way any member a metric reaches by no chain of relationships and by a second path, such as a customer count by store when customers and stores also share regions. A metric whose table reaches the bridge by a hop up (a review count by author country, with reviews referencing books) counts each review once per group, as in Snowflake. Window metrics and active semi-additive metrics can't be grouped across a bridge. A query with only dimensions on the two sides lists the pairs the bridge holds, as in Snowflake. See :ref:`Many-to-many relationships through a bridge <ref-create-bridge-relationships>`.
    * - Dimensions-only queries over several tables -- ``SEMANTIC_VIEW( v DIMENSIONS customers.name, orders.status )``
      - **Supported**, with the rows Snowflake lists: the query reads the one table every queried dimension and filtered member is reached from, and joins up from it, whatever the order of ``TABLES``. A parent and a child dimension list the child's rows, a dimension alone lists its table's own values, and the two sides of a bridge list the pairs it holds. A role-played table queried on its own, or from a table above it, lists its own rows. When no single table reaches every member, such as dimensions on two children of one parent, the query is refused as in Snowflake. A ``FACTS`` query reads the same table and lists every row of it. See :ref:`Dimensions only <ref-sv-modes>`.
    * - Column-level security

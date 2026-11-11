@@ -1236,14 +1236,16 @@ SELECT * FROM dcs_ddl('rel_explicit') WHERE line LIKE '%REFERENCES%';
 ----
     r AS o(email) REFERENCES c(email)
 
-# S-382: rewrite.rs::phase33_inference_tests::infers_many_to_one_when_fk_is_bare — an FK that is not the source's PK/UNIQUE is many-to-one: a metric on the target fans out under a source dimension
+# S-382: rewrite.rs::phase33_inference_tests::infers_many_to_one_when_fk_is_bare — an FK that is not the source's PK/UNIQUE is many-to-one: a metric on the target fans out under a source dimension. Since Phase 7 PR 4c that fan-out counts each customer once per region (Snowflake parity), and the many-to-one reading shows in the groups: customer 3 has no order, so it lands in a NULL region, which the one-to-one join below never produces
 statement ok
 CREATE SEMANTIC VIEW card_m2o AS TABLES (o AS dcs_orders PRIMARY KEY (id), c AS dcs_customers PRIMARY KEY (cust_id)) RELATIONSHIPS (r AS o(customer_id) REFERENCES c) DIMENSIONS (o.region AS o.region) METRICS (c.cnt AS COUNT(*))
 
-statement error
+query TI rowsort
 SELECT * FROM semantic_view('card_m2o', dimensions := ['region'], metrics := ['cnt'])
 ----
-many-to-one cardinality, inferred: FK is not PK/UNIQUE
+NULL	1
+east	2
+west	1
 
 # S-383: rewrite.rs::phase33_inference_tests::infers_one_to_one_from_pk_match — an FK equal to the source's PRIMARY KEY is one-to-one: the same query is allowed
 statement ok

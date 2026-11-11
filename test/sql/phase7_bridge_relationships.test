@@ -237,8 +237,9 @@ book	2	70
 toy	1	30
 NULL	1	NULL
 
-# Refused: a dimension on a plain child (a table whose only relationship is to
-# the metric's) is below the metric's grain, as Snowflake refuses it.
+# A dimension on a plain child (a table whose only relationship is to the
+# metric's) fans the metric's rows out too: each book counts once per rating,
+# as Snowflake counts each order once per note kind (fixture 7, N1).
 statement ok
 CREATE TABLE reviews (review_id INTEGER, book_id INTEGER, stars INTEGER);
 
@@ -265,10 +266,13 @@ CREATE SEMANTIC VIEW p7_bridge_reviews
     b.last_pages NON ADDITIVE BY (title) AS SUM(pages)
   );
 
-statement error
+query II rowsort
 SELECT * FROM SEMANTIC_VIEW(p7_bridge_reviews DIMENSIONS r.stars METRICS b.total_pages);
 ----
-fan trap
+3	100
+4	200
+5	100
+NULL	350
 
 # A fan-out after a hop up (fixture 3, H1, H3): reviews hop up to books, then
 # cross the bridge, and each review counts once per country it reaches.
@@ -289,7 +293,7 @@ SELECT * FROM SEMANTIC_VIEW(p7_bridge_reviews METRICS r.review_count WHERE a.cou
 statement error
 SELECT * FROM SEMANTIC_VIEW(p7_bridge_reviews DIMENSIONS a.country METRICS b.last_pages);
 ----
-many-to-many bridge
+counted once per group only
 
 # Two bridges between the same two tables (fixture 3, Q). Snowflake creates
 # the view in any TABLES order and refuses a query that crosses from books to

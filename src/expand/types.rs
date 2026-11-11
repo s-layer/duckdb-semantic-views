@@ -317,11 +317,13 @@ pub struct FanTrapError {
     pub dimension_name: String,
     pub dimension_table: String,
     pub relationship_name: String,
-    /// Phase 7.3: the path is a many-to-many bridge, which the per-grain plan
-    /// answers once per group but could not for this query (a semi-additive
-    /// or window metric, or a member that names no table). The message then
-    /// says so, instead of only suggesting the dimension be removed.
-    pub across_bridge: bool,
+    /// Phase 7.3 and PR 4c: the fan-out is one the per-grain plan answers once
+    /// per group, but could not for this query (a window metric, an active
+    /// semi-additive metric, a member that names no table, or a metric table
+    /// with no PRIMARY KEY). The message then says so, instead of only
+    /// suggesting the dimension be removed. `false` for a fan-out across an
+    /// ASOF or range relationship, which is never counted that way.
+    pub counts_once: bool,
 }
 
 /// Detail payload for [`ExpandError::ReferencedFactFanTrap`], boxed for the
@@ -783,7 +785,7 @@ impl fmt::Display for ExpandError {
                     dimension_name,
                     dimension_table,
                     relationship_name,
-                    across_bridge,
+                    counts_once,
                 } = &**detail;
                 write!(
                     f,
@@ -795,14 +797,14 @@ impl fmt::Display for ExpandError {
                      Remove the dimension, use a metric from the same table, or restructure the \
                      relationship."
                 )?;
-                if *across_bridge {
+                if *counts_once {
                     write!(
                         f,
-                        " The path crosses a many-to-many bridge, which is grouped once per row \
-                         only for ordinary metrics on a table with a PRIMARY KEY: not for a \
-                         window metric, a semi-additive metric whose NON ADDITIVE BY dimension \
-                         is not queried, a role-played table, a query with a dimension or filter \
-                         that names no table, or a metric table with no PRIMARY KEY."
+                        " A fan-out like this one is counted once per group only for ordinary \
+                         metrics on a table with a PRIMARY KEY: not for a window metric, a \
+                         semi-additive metric whose NON ADDITIVE BY dimension is not queried, a \
+                         role-played table, a query with a dimension or filter that names no \
+                         table, or a metric table with no PRIMARY KEY."
                     )?;
                 }
                 Ok(())

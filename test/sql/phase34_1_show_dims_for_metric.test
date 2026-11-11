@@ -83,6 +83,9 @@ CREATE SEMANTIC VIEW star_sv AS
 # - customer_name (source: c): path o->c, ManyToOne forward = safe. INCLUDED.
 # - customer_country (source: c): same path. INCLUDED.
 # - item_qty (source: li): path o->li, reverse of li->o ManyToOne = fan-out. EXCLUDED.
+#   A query answers order_total by item_qty, counting each order once per group
+#   (Phase 7 PR 4c), but the listing still leaves fan-outs out until Snowflake's
+#   listing is probed (TECH-DEBT #112).
 # ============================================================
 
 query TTTTTT rowsort

@@ -2134,7 +2134,7 @@ mod tests {
             .with_table("c", "customers", &["id"])
             .with_table("a", "accounts", &["id"])
             .with_dimension("acct_name", "a.name", Some("a"))
-            .with_metric("total_balance", "SUM(a.balance)", Some("c"))
+            .with_metric("total_balance", "SUM(c.credit)", Some("c"))
             .with_non_additive_by(
                 "total_balance",
                 &[("acct_name", SortOrder::Desc, NullsOrder::First)],
@@ -2148,12 +2148,25 @@ mod tests {
             metrics: vec![MetricName::new("total_balance")],
         };
 
-        // Effectively-regular semi-additive metrics get the standard check.
-        let result = expand("test_view", &def, &req);
+        // Effectively-regular semi-additive metrics get the standard check:
+        // with the fan-out counted once per group (Phase 7 PR 4c) they are
+        // answered that way, and with no key on the metric's table refused.
+        let sql = expand("test_view", &def, &req).expect("counted once per group");
+        assert!(
+            sql.contains("SELECT DISTINCT") && sql.contains("__sv_bridge"),
+            "the customers are deduplicated per account: {sql}"
+        );
+        let mut no_key = def.clone();
+        no_key
+            .tables
+            .iter_mut()
+            .filter(|t| t.alias == "c")
+            .for_each(|t| t.pk_columns.clear());
+        let result = expand("test_view", &no_key, &req);
         assert!(
             matches!(result, Err(ExpandError::FanTrap { .. })),
-            "Effectively-regular semi-additive metric over a fanning join \
-             must be a fan trap error, got: {result:?}"
+            "Effectively-regular semi-additive metric over a fanning join with no \
+             key to count once by must be a fan trap error, got: {result:?}"
         );
     }
 

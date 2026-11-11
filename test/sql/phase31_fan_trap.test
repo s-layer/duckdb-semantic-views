@@ -1,6 +1,7 @@
-# Phase 31/33: End-to-end integration test for fan trap detection
-# Tests that queries crossing fan-out boundaries (reverse ManyToOne) are blocked
-# with descriptive errors, while safe queries succeed normally.
+# Phase 31/33: End-to-end integration test for fan-out handling
+# Queries crossing fan-out boundaries (reverse ManyToOne) count each row of the
+# metric's table once per group (Phase 7 PR 4c; they were refused as fan traps
+# before), while safe queries succeed normally.
 # Phase 33: Cardinality keywords removed; cardinality inferred from PK/UNIQUE.
 
 require semantic_views
@@ -70,15 +71,18 @@ East	300.0
 West	150.0
 
 # ============================================================
-# Test 3: Fan trap -- metric from o, dimension from li (blocked)
+# Test 3: Fan-out -- metric from o, dimension from li
 # o.order_count (from o) + li.status (from li):
-# o->li is reverse of li->o ManyToOne = fan-out
+# o->li is reverse of li->o ManyToOne = fan-out. Each order counts once per
+# status, as Snowflake counts it (Phase 7 PR 4c, fixture 7's N1): shipped has
+# orders 1 and 2, pending order 1.
 # ============================================================
 
-statement error
+query TI rowsort
 SELECT * FROM SEMANTIC_VIEW(p31_sales DIMENSIONS status METRICS order_count);
 ----
-fan trap detected
+pending	1
+shipped	2
 
 # ============================================================
 # Test 3b (SG-1, code review 2026-07-02; per-grain since v0.12.0): metrics at
@@ -176,7 +180,8 @@ CREATE SEMANTIC VIEW p31_default AS
     o.order_count AS COUNT(*)
   );
 
-# Inferred ManyToOne: li->o is safe, o->li is fan-out
+# Inferred ManyToOne: li->o is safe, o->li is fan-out (each order counted once
+# per status).
 
 query TR rowsort
 SELECT * FROM SEMANTIC_VIEW(p31_default DIMENSIONS region METRICS revenue);
@@ -184,10 +189,11 @@ SELECT * FROM SEMANTIC_VIEW(p31_default DIMENSIONS region METRICS revenue);
 East	300.0
 West	150.0
 
-statement error
+query TI rowsort
 SELECT * FROM SEMANTIC_VIEW(p31_default DIMENSIONS status METRICS order_count);
 ----
-fan trap detected
+pending	1
+shipped	2
 
 # ============================================================
 # Test 7: Fan trap with derived metric
@@ -216,12 +222,16 @@ CREATE SEMANTIC VIEW p31_derived AS
   );
 
 # Derived metric avg_revenue depends on order_count (from o).
-# Querying with li.status means traversal o->li which is fan-out.
+# Querying with li.status means traversal o->li which is fan-out: each
+# component is computed at its own grain, order_count once per order and
+# status, and divided afterwards. Shipped: 250 over 2 orders; pending: 200
+# over 1.
 
-statement error
+query TR rowsort
 SELECT * FROM SEMANTIC_VIEW(p31_derived DIMENSIONS status METRICS avg_revenue);
 ----
-fan trap detected
+pending	200.0
+shipped	125.0
 
 # With a safe DIMENSION (o.region needs no fan-out traversal), the derived
 # metric's two components are computed at their own grains and divided
