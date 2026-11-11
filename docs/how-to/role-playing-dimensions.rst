@@ -206,7 +206,9 @@ airport, so two metrics with different paths each get their own terminal.
 A filter on ``airports``, or on a table reached through it, follows the
 metrics' path when every metric names the same one: ``arrival_count`` with
 ``where_clause := 'city = ''London'''`` counts the flights arriving in London.
-Beside metrics naming two different paths, or none, the filter is refused.
+Beside metrics naming two different paths, or none, the filter is refused,
+and so is one beside a window metric or a semi-additive metric whose
+``NON ADDITIVE BY`` dimension is not queried.
 
 .. versionchanged:: 0.19.0
 

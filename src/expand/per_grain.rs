@@ -793,10 +793,12 @@ fn rebuild_expr(
 /// this asks the definition directly: the relationship whose target is the
 /// dimension's table and whose scoped alias matches.
 ///
-/// Only a queried DIMENSION's table is resolved. A role-played table reached
-/// only as a metric's grain, or named only by a `where_clause` member, has no
-/// dimension for `USING` to scope and stays ineligible — see
-/// [`role_playing_affects_query`].
+/// Only a dimension's table is resolved. A `where_clause` table read on the
+/// one role every metric names reaches it as a stand-in dimension
+/// ([`super::role_playing::where_role_dims`], TECH-DEBT #111); a role-played
+/// table reached only as a metric's grain, or named by a `where_clause` member
+/// beside metrics naming no single role, has no dimension for `USING` to scope
+/// and stays ineligible — see [`role_playing_affects_query`].
 fn dimension_role(
     def: &SemanticViewDefinition,
     dim: &Dimension,
@@ -931,8 +933,12 @@ fn role_playing_affects_query(
     // diagnostic.
     let starts = super::role_playing::query_starts(def, resolved_mets);
     // The table itself when it is role-played, or the role-played table it
-    // is reached through or back across.
+    // is reached through or back across. None for the table every metric
+    // reads its own rows from (TECH-DEBT #86): no role picks those.
     let ambiguity = |table: &String| {
+        if super::role_playing::reads_own_rows(def, resolved_mets, table) {
+            return None;
+        }
         let found = super::role_playing::role_above("", def, &starts, table).and_then(|rp| {
             rp.map_or_else(
                 || super::role_playing::role_playing_on_path("", def, &starts, table),
@@ -2210,11 +2216,6 @@ pub(super) fn anchor_joins<'a>(
     joins
 }
 
-/// A queried dimension's expression as the grain CTEs must emit it: qualified by
-/// its role's scoped alias when `USING` named one, and unchanged otherwise.
-///
-/// Mirrors what the base-anchored path does with [`ResolvedDim::scoped_alias`],
-/// so both paths emit `a__dep.city` for the same query.
 /// The predicate as a group's CTE evaluates it: each `where_clause` table the
 /// group reads on a role (TECH-DEBT #111, [`super::role_playing::where_role_dims`])
 /// named by that role's scoped alias, as [`dim_expr`] names a dimension's.
@@ -2233,6 +2234,11 @@ fn group_predicate(w: &ResolvedWhere, roles: &HashMap<String, String>) -> String
     sql
 }
 
+/// A queried dimension's expression as the grain CTEs must emit it: qualified by
+/// its role's scoped alias when `USING` named one, and unchanged otherwise.
+///
+/// Mirrors what the base-anchored path does with [`ResolvedDim::scoped_alias`],
+/// so both paths emit `a__dep.city` for the same query.
 fn dim_expr(
     dim: &Dimension,
     roles: &HashMap<String, String>,

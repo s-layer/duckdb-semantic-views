@@ -505,7 +505,8 @@ is read for the airport the metric's ``USING`` names, so ``arrivals`` by
 terminal gives the arriving airport's terminal and ``departures`` the
 departing one's. A ``WHERE`` on the airports or their details follows the
 same role when every metric names it; beside metrics naming two roles, or
-none, it is refused here. A metric on the airports themselves reads each
+none, it is refused here, and so is one beside a window metric or a
+semi-additive metric whose ``NON ADDITIVE BY`` dimension is not queried. A metric on the airports themselves reads each
 airport once, by its own dimensions or its details'.
 
 .. versionchanged:: 0.19.0

@@ -15,7 +15,7 @@
 require semantic_views
 
 statement ok
-CREATE TABLE rbx_airports (code VARCHAR, city VARCHAR);
+CREATE TABLE rbx_airports (code VARCHAR, city VARCHAR, elev INTEGER);
 
 statement ok
 CREATE TABLE rbx_flights (flight_id INTEGER, dep VARCHAR, arr VARCHAR);
@@ -24,7 +24,7 @@ statement ok
 CREATE TABLE rbx_details (airport_code VARCHAR, terminal VARCHAR);
 
 statement ok
-INSERT INTO rbx_airports VALUES ('CDG', 'Paris'), ('LHR', 'London'), ('JFK', 'New York');
+INSERT INTO rbx_airports VALUES ('CDG', 'Paris', 100), ('LHR', 'London', 80), ('JFK', 'New York', 10);
 
 statement ok
 INSERT INTO rbx_flights VALUES (1, 'CDG', 'LHR'), (2, 'LHR', 'CDG'), (3, 'CDG', 'JFK');
@@ -52,7 +52,9 @@ CREATE SEMANTIC VIEW rbx_air
     f.flight_count AS COUNT(f.flight_id),
     f.arrivals USING (arr_airport) AS COUNT(f.flight_id),
     f.departures USING (dep_airport) AS COUNT(f.flight_id),
-    ap.airport_count AS COUNT(ap.code)
+    ap.airport_count AS COUNT(ap.code),
+    ap.elev_at_last_city NON ADDITIVE BY (city) AS SUM(ap.elev),
+    ap.elev_at_last_city_q NON ADDITIVE BY (ap.city) AS SUM(ap.elev)
   );
 
 # The same view with the details declared first and the flights last.
@@ -209,3 +211,16 @@ query I
 SELECT * FROM SEMANTIC_VIEW(rbx_air METRICS airport_count WHERE city = 'Paris');
 ----
 1
+
+# ... and a semi-additive airport metric snapshots by its own city, in both
+# spellings: the last city, Paris, holds CDG (100 of the 190). It was refused
+# as ambiguous, like the grouped query (TECH-DEBT #86).
+query I
+SELECT * FROM SEMANTIC_VIEW(rbx_air METRICS elev_at_last_city);
+----
+100
+
+query I
+SELECT * FROM SEMANTIC_VIEW(rbx_air METRICS elev_at_last_city_q);
+----
+100

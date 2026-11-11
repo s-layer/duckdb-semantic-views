@@ -101,6 +101,11 @@ fn air(order: &[usize]) -> SemanticViewDefinition {
             metric("arrivals", "f", "COUNT(f.flight_id)", &["arr_airport"]),
             metric("departures", "f", "COUNT(f.flight_id)", &["dep_airport"]),
             metric("airport_count", "ap", "COUNT(ap.code)", &[]),
+            Metric {
+                name: "airports_plus_one".to_string(),
+                expr: "airport_count + 1".to_string(),
+                ..Default::default()
+            },
         ],
         ..Default::default()
     }
@@ -248,6 +253,23 @@ fn an_airport_metric_by_its_own_city() {
     );
 }
 
+/// A derived metric built only from the airports' own metrics reads their
+/// rows too, by their city and filtered on it (review of #347).
+#[test]
+fn a_derived_airport_metric_by_its_own_city() {
+    case(
+        &["city"],
+        &["airports_plus_one"],
+        None,
+        &["London/2", "New York/2", "Paris/2"],
+    );
+}
+
+#[test]
+fn a_derived_airport_metric_filtered_on_its_own_city() {
+    case(&[], &["airports_plus_one"], Some("city = 'Paris'"), &["2"]);
+}
+
 /// The same by the one-to-one details' terminal.
 #[test]
 fn an_airport_metric_by_its_details_terminal() {
@@ -279,7 +301,8 @@ fn a_city_filtered_on_the_terminal_follows_the_metrics_role() {
 }
 
 /// Two metrics naming two roles share one predicate, which neither role is
-/// read for: refused, as before (fixture 9's W3 and W4 ask Snowflake).
+/// read for: refused, as before (fixture 9's W3 and W4 ask Snowflake;
+/// TECH-DEBT #111).
 #[test]
 fn a_filter_beside_two_roles_is_refused() {
     for order in ORDERS {
@@ -297,7 +320,8 @@ fn a_filter_beside_two_roles_is_refused() {
     }
 }
 
-/// With no `USING` the filter names no role (fixture 9's W6 asks Snowflake).
+/// With no `USING` the filter names no role (fixture 9's W6 asks Snowflake;
+/// TECH-DEBT #111).
 #[test]
 fn a_filter_beside_no_role_is_refused() {
     for order in ORDERS {
@@ -364,6 +388,34 @@ fn a_filter_beside_a_child_metric_names_its_role_in_any_order() {
                 role_playing_table, ..
             }) => assert_eq!(role_playing_table, "ap"),
             other => panic!("{order:?}: expected the role refusal, got {other:?}"),
+        }
+    }
+}
+
+/// Beside a semi-additive metric whose `NON ADDITIVE BY` dimension is not
+/// queried, the snapshot takes no role scope for the predicate, so a filter on
+/// the city is refused even though the metric names its role (TECH-DEBT #111).
+#[test]
+fn a_filter_beside_a_semi_additive_metric_is_refused() {
+    for order in ORDERS {
+        let mut def = air(&order);
+        def.dimensions.push(dim("flight", "f.flight_id", "f"));
+        def.metrics.push(Metric {
+            non_additive_by: vec![crate::model::NonAdditiveDim {
+                dimension: "flight".to_string(),
+                ..Default::default()
+            }],
+            ..metric("arrivals_semi", "f", "COUNT(f.flight_id)", &["arr_airport"])
+        });
+        match expand(
+            "air",
+            &def,
+            &req(&[], &["arrivals_semi"], Some("city = 'Paris'")),
+        ) {
+            Err(ExpandError::AmbiguousWhereClausePath {
+                role_playing_table, ..
+            }) => assert_eq!(role_playing_table, "ap"),
+            other => panic!("{order:?}: expected a refusal, got {other:?}"),
         }
     }
 }
@@ -461,25 +513,31 @@ fn an_order_metric_across_a_plain_fan_out() {
 }
 
 /// Across one of the orders' roles (the notes) it is refused: which order a
-/// note names is the role, and the metric names none.
+/// note names is the role, and the metric names none. Fixture 9's O3 asks
+/// Snowflake (TECH-DEBT #111).
 #[test]
 fn an_order_metric_across_a_role_is_refused() {
     for order in ORDERS {
-        assert!(
-            t_roles_run(&order, &["kind"], &["order_count"]).is_err(),
-            "{order:?}: order_count by kind crosses a role"
-        );
+        match t_roles_run(&order, &["kind"], &["order_count"]) {
+            Err(ExpandError::FanTrap { detail }) => {
+                assert_eq!(detail.dimension_table, "n", "{order:?}");
+            }
+            other => panic!("{order:?}: expected a fan trap across the role, got {other:?}"),
+        }
     }
 }
 
 /// A note metric across its role and then a fan-out to the items is refused,
-/// as Snowflake refuses it (fixture 8, T3b: 000002, multi-path in many-to-many).
+/// as Snowflake refuses it (fixture 8, T3b: 000002, multi-path in many-to-many;
+/// fixture 9's G1-G3 and O4 ask about more such shapes, TECH-DEBT #111).
 #[test]
 fn a_role_then_a_fan_out_is_refused() {
     for order in ORDERS {
-        assert!(
-            t_roles_run(&order, &["qty"], &["notes_by_first"]).is_err(),
-            "{order:?}: notes_by_first by qty"
-        );
+        match t_roles_run(&order, &["qty"], &["notes_by_first"]) {
+            Err(ExpandError::AmbiguousDescendantPath {
+                role_playing_table, ..
+            }) => assert_eq!(role_playing_table, "o", "{order:?}"),
+            other => panic!("{order:?}: expected the role refusal, got {other:?}"),
+        }
     }
 }

@@ -73,8 +73,9 @@ pub(super) fn is_role_playing_target(def: &SemanticViewDefinition, target_alias:
 /// there are two paths and no chain, which `multi_path` refuses). A start on
 /// the role-played table itself reads its rows and names no role here.
 ///
-/// Following the role a metric's `USING` names down to `g` is TECH-DEBT #111;
-/// until then such a member is refused, with or without one.
+/// [`role_above`] reports the table this finds: when every metric's `USING`
+/// names one of its roles, [`role_path`] follows that role down to `g`
+/// (TECH-DEBT #111, Snowflake fixture 6), and otherwise the member is refused.
 fn role_crossed_backwards(
     def: &SemanticViewDefinition,
     from: &[String],
@@ -406,7 +407,7 @@ pub(super) fn check_where_clause_role_playing_path(
             if scopes
                 .iter()
                 .any(|(t, _)| t.eq_ignore_ascii_case(member_table))
-                || reads_own_rows(resolved_mets, member_table)
+                || reads_own_rows(def, resolved_mets, member_table)
             {
                 continue;
             }
@@ -623,30 +624,7 @@ fn undirected_reaches(
     to: &str,
     skip: &dyn Fn(&crate::model::Join) -> bool,
 ) -> bool {
-    let mut seen: HashSet<String> = HashSet::from([from.to_string()]);
-    let mut stack = vec![from.to_string()];
-    while let Some(current) = stack.pop() {
-        if current == to {
-            return true;
-        }
-        for j in def
-            .joins
-            .iter()
-            .filter(|j| !j.fk_columns.is_empty() && !skip(j))
-        {
-            let next = if j.from_alias.eq_ignore_ascii_case(&current) {
-                j.table.to_ascii_lowercase()
-            } else if j.table.eq_ignore_ascii_case(&current) {
-                j.from_alias.to_ascii_lowercase()
-            } else {
-                continue;
-            };
-            if seen.insert(next.clone()) {
-                stack.push(next);
-            }
-        }
-    }
-    false
+    super::multi_path::undirected_path_over(def, from, to, None, &|j| !skip(j)).is_some()
 }
 
 /// The tables of a query's members as a metric on its own table sees them:
@@ -925,7 +903,7 @@ pub(super) fn find_using_context(
     // Multiple relationships -> role-playing table. A query whose every
     // metric is on the table reads the dimension from the metrics' own rows,
     // which no role picks (TECH-DEBT #111: an airport count by city).
-    if reads_own_rows(resolved_mets, &dim_table_lower) {
+    if reads_own_rows(def, resolved_mets, &dim_table_lower) {
         return Ok(None);
     }
     // Otherwise look for USING context.
@@ -1039,11 +1017,18 @@ fn using_edges_to<'a>(
     using_rels_for_table
 }
 
-/// Whether every one of `mets`, and there is one, is declared on `table`: a
-/// member there is read from the metrics' own rows, which no role picks
-/// (TECH-DEBT #86, #111).
-fn reads_own_rows(mets: &[&crate::model::Metric], table: &str) -> bool {
-    !mets.is_empty() && mets.iter().all(|met| met_is_on(met, table))
+/// Whether every one of `mets`, and there is one, reads its rows from
+/// `table`: declared there, or (a derived metric) built only from metrics
+/// declared there ([`query_starts`]). A member there is read from the
+/// metrics' own rows, which no role picks (TECH-DEBT #86, #111).
+pub(super) fn reads_own_rows(
+    def: &SemanticViewDefinition,
+    mets: &[&crate::model::Metric],
+    table: &str,
+) -> bool {
+    let table = table.to_ascii_lowercase();
+    let homes = query_starts(def, mets);
+    !mets.is_empty() && !homes.is_empty() && homes.iter().all(|home| *home == table)
 }
 
 /// Whether `met` is declared on `table` itself.
@@ -1160,76 +1145,47 @@ pub(super) fn role_path<'a>(
 /// tables that it relates twice (a role) left out, when each step back is
 /// along a one-to-one relationship that is not ASOF or range.
 ///
-/// There is a second path exactly when some step of the shortest one can be
-/// avoided (`multi_path::two_undirected_paths`), so each step is tried once:
-/// a few walks of the graph, however many paths it has.
+/// The walks are `multi_path`'s, with the roles left out, so this "one path"
+/// and the multi-path refusal read the graph the same way.
 fn path_back_one_to_one<'a>(
     def: &'a SemanticViewDefinition,
     rp: &str,
     table: &str,
 ) -> Option<Vec<RoleStep<'a>>> {
     let roles = role_playing_pairs(def);
-    let edges: Vec<&crate::model::Join> = def
-        .joins
-        .iter()
-        .filter(|j| {
-            let pair = (
-                j.from_alias.to_ascii_lowercase(),
-                j.table.to_ascii_lowercase(),
-            );
-            !j.fk_columns.is_empty() && !roles.contains(&pair)
-        })
-        .collect();
-    let shortest = |skip: Option<&crate::model::Join>| -> Option<Vec<RoleStep<'a>>> {
-        let mut parent: std::collections::HashMap<String, RoleStep<'a>> =
-            std::collections::HashMap::new();
-        let mut seen: HashSet<String> = HashSet::from([rp.to_string()]);
-        let mut queue = std::collections::VecDeque::from([rp.to_string()]);
-        while let Some(current) = queue.pop_front() {
-            if current == table {
-                let mut path: Vec<RoleStep<'a>> = Vec::new();
-                let mut at = current;
-                while let Some(step) = parent.get(&at) {
-                    path.push(*step);
-                    at = if step.reverse {
-                        step.edge.table.to_ascii_lowercase()
-                    } else {
-                        step.edge.from_alias.to_ascii_lowercase()
-                    };
-                }
-                path.reverse();
-                return Some(path);
-            }
-            for edge in &edges {
-                if skip.is_some_and(|s| std::ptr::eq(s, *edge)) {
-                    continue;
-                }
-                let step = if edge.from_alias.eq_ignore_ascii_case(&current) {
-                    RoleStep {
-                        edge,
-                        reverse: false,
-                    }
-                } else if edge.table.eq_ignore_ascii_case(&current) {
-                    RoleStep {
-                        edge,
-                        reverse: true,
-                    }
-                } else {
-                    continue;
-                };
-                let next = step.joined();
-                if seen.insert(next.clone()) {
-                    parent.insert(next.clone(), step);
-                    queue.push_back(next);
-                }
-            }
-        }
-        None
+    let pair = |j: &crate::model::Join| {
+        (
+            j.from_alias.to_ascii_lowercase(),
+            j.table.to_ascii_lowercase(),
+        )
     };
-    let path = shortest(None)?;
-    if path.iter().any(|step| shortest(Some(step.edge)).is_some()) {
+    let keep = |j: &crate::model::Join| !roles.contains(&pair(j));
+    if super::multi_path::two_undirected_paths_over(def, rp, table, &keep).is_some() {
         return None;
     }
+    let tables = super::multi_path::undirected_path_over(def, rp, table, None, &keep)?;
+    // With the roles left out no two relationships relate the same pair of
+    // tables (`CREATE` names each of a pair's relationships, and two named
+    // ones are a role), so each step is one relationship.
+    let path: Vec<RoleStep<'a>> = tables
+        .windows(2)
+        .map(|step| {
+            def.joins
+                .iter()
+                .filter(|j| !j.fk_columns.is_empty() && keep(j))
+                .find_map(|edge| match pair(edge) {
+                    (from, to) if from == step[0] && to == step[1] => Some(RoleStep {
+                        edge,
+                        reverse: false,
+                    }),
+                    (from, to) if from == step[1] && to == step[0] => Some(RoleStep {
+                        edge,
+                        reverse: true,
+                    }),
+                    _ => None,
+                })
+        })
+        .collect::<Option<_>>()?;
     path.iter()
         .all(|step| {
             !step.reverse
