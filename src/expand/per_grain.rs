@@ -787,7 +787,7 @@ fn dimension_role(
     // `role_playing_on_path` finds no role-played table above the view's root,
     // which can itself be role-played (reached back from two child tables).
     let starts = super::role_playing::query_starts(def, mets);
-    let rp = super::role_playing::role_playing_on_path("", def, &starts, &table)
+    let rp = super::role_playing::role_above("", def, &starts, &table)
         .map_err(|_| ())?
         .unwrap_or_else(|| table.clone());
     let rel = def.joins.iter().find_map(|j| {
@@ -799,12 +799,8 @@ fn dimension_role(
     let rel = rel.ok_or(())?;
     let mut roles = vec![(rp.clone(), rel.clone())];
     if rp != table {
-        let chain = super::role_playing::descendant_chain(def, &rp, &table).ok_or(())?;
-        roles.extend(
-            chain
-                .iter()
-                .map(|edge| (edge.table.to_ascii_lowercase(), rel.clone())),
-        );
+        let path = super::role_playing::role_path(def, &rp, &table).ok_or(())?;
+        roles.extend(path.iter().map(|step| (step.joined(), rel.clone())));
     }
     Ok(roles)
 }
@@ -905,11 +901,17 @@ fn role_playing_affects_query(
     // per-grain, and the base-anchored path it falls back to reports the real
     // diagnostic.
     let starts = super::role_playing::query_starts(def, resolved_mets);
-    let ambiguity =
-        |table: &String| match super::role_playing::role_playing_on_path("", def, &starts, table) {
-            Ok(v) => v,
-            Err(_) => Some(table.clone()), // Unwalkable: treat as ambiguous, decline.
-        };
+    // The table itself when it is role-played, or the role-played table it
+    // is reached through or back across.
+    let ambiguity = |table: &String| {
+        let found = super::role_playing::role_above("", def, &starts, table).and_then(|rp| {
+            rp.map_or_else(
+                || super::role_playing::role_playing_on_path("", def, &starts, table),
+                |rp| Ok(Some(rp)),
+            )
+        });
+        found.unwrap_or_else(|_| Some(table.clone())) // Unwalkable: treat as ambiguous, decline.
+    };
 
     // Tables that CANNOT be rescued by `USING`, so any role-playing on their
     // path declines outright. Deduplicated: several metrics commonly share a
@@ -963,7 +965,7 @@ fn role_playing_affects_query(
     // A queried dimension's table may be rescued when the ambiguous table is
     // the dimension's OWN table and every metric's `USING` named its role.
     // Phase 6.3b: so may a table reached only THROUGH the role-played one by a
-    // single chain (`descendant_chain`); `find_using_context` scopes it to the
+    // single path (`role_path`); `find_using_context` scopes it to the
     // same role and `dimension_role` scopes every chain table with it.
     //
     // Phase 6.3: the role is resolved per metric, not across the query, so
@@ -983,7 +985,7 @@ fn role_playing_affects_query(
         Some(ambiguous) => {
             !(rescued
                 && (ambiguous == *table
-                    || super::role_playing::descendant_chain(def, &ambiguous, table).is_some()))
+                    || super::role_playing::role_path(def, &ambiguous, table).is_some()))
         }
     })
 }

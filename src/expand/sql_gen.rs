@@ -836,7 +836,7 @@ fn expand_facts(
     // spliced as the member's own expression, never rewritten to a scoped
     // alias. Same reasoning as 3b/3c.
     if let Some(rw) = resolved_where.as_ref().filter(|_| anchored.is_none()) {
-        check_where_clause_role_playing_path(view_name, def, &rw.members, &[])?;
+        check_where_clause_role_playing_path(view_name, def, &rw.members, &[], &[])?;
     }
 
     // 4. Resolve fact expressions via DAG inlining (fact-to-fact dependencies).
@@ -1534,6 +1534,20 @@ fn expand_unhoisted(
         &resolved_mets,
         &where_tables,
     )?;
+    // TECH-DEBT #111: a predicate on a role-played table, or on one reached
+    // through or back across it, is read on the role every metric names
+    // (Snowflake fixture 6, R5). Only the base-anchored emission below
+    // rewrites the predicate and joins those instances: the per-grain plan
+    // declines a role-played predicate table (`role_playing_affects_query`),
+    // and the snapshot and window paths do not take the scopes, so for them
+    // the predicate stays refused.
+    let has_window = resolved_mets.iter().any(|m| m.is_window());
+    let where_scopes: Vec<(String, String)> = match &resolved_where {
+        Some(rw) if grain_plan.is_none() && !has_active_semi_additive && !has_window => {
+            super::role_playing::where_role_scopes(def, &rw.members, &resolved_mets)
+        }
+        _ => Vec::new(),
+    };
     if let Some(rw) = &resolved_where {
         super::fan_trap::check_where_clause_fan_traps(
             view_name,
@@ -1546,7 +1560,13 @@ fn expand_unhoisted(
         // reaching the member's table is unambiguous only if no role-playing
         // table sits on the path. Runs on every emission path because it is
         // decided here, above the per-grain / anchored / base-anchored split.
-        check_where_clause_role_playing_path(view_name, def, &rw.members, &resolved_mets)?;
+        check_where_clause_role_playing_path(
+            view_name,
+            def,
+            &rw.members,
+            &resolved_mets,
+            &where_scopes,
+        )?;
     }
 
     if let Some(plan) = grain_plan {
@@ -1591,8 +1611,7 @@ fn expand_unhoisted(
         );
     }
 
-    // Phase 48: Check if any resolved metric is a window function metric.
-    let has_window = resolved_mets.iter().any(|m| m.is_window());
+    // Phase 48: a query with a window function metric.
     if has_window {
         // Window metrics cannot be mixed with aggregate metrics.
         let window_names: Vec<String> = resolved_mets
@@ -1667,11 +1686,35 @@ fn expand_unhoisted(
     //    scoped joins (e.g. "a__dep_airport") follow the bare joins.
     // Tables named only by the predicate must still be joined, or the filter
     // would reference an alias absent from the FROM.
+    // A predicate table read on a role (`where_scopes`) is joined as a
+    // dimension on it would be, under the role's scoped alias, and the
+    // predicate is rewritten to name that alias.
     let where_tables: Vec<String> = resolved_where
         .as_ref()
         .map(|rw| rw.source_tables.clone())
-        .unwrap_or_default();
-    let joins = resolve_joins_pkfk(def, &resolved_dims, &resolved_mets, &where_tables);
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|t| !where_scopes.iter().any(|(s, _)| s == t))
+        .collect();
+    let scoped_where_dims: Vec<Dimension> = where_scopes
+        .iter()
+        .map(|(table, _)| Dimension {
+            source_table: Some(table.clone()),
+            ..Default::default()
+        })
+        .collect();
+    let join_dims: Vec<&Dimension> = resolved_dims
+        .iter()
+        .copied()
+        .chain(scoped_where_dims.iter())
+        .collect();
+    let joins = resolve_joins_pkfk(def, &join_dims, &resolved_mets, &where_tables);
+    let resolved_where = resolved_where.map(|mut rw| {
+        for (table, scoped) in &where_scopes {
+            rw.sql = super::join_resolver::rewrite_to_scoped_alias(&rw.sql, table, scoped);
+        }
+        rw
+    });
 
     // 7. GROUP BY (only when both dimensions and metrics are present).
     //    Ordinal positions avoid ambiguity when an expression matches its alias

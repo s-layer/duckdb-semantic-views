@@ -365,33 +365,28 @@ fn push_scoped_na_joins<'a>(
         if !scoped.iter().any(|j| std::ptr::eq(*j, edge)) {
             scoped.push(edge);
         }
-        for hop in chain {
-            let emit = super::join_resolver::scoped_join_alias(&hop.table, rel);
-            if chains.iter().any(|rj| rj.emit_alias == emit) {
+        for step in chain {
+            let rj = super::join_resolver::ResolvedJoin::role_step(step, rel);
+            if chains.iter().any(|r| r.emit_alias == rj.emit_alias) {
                 continue;
             }
-            chains.push(super::join_resolver::ResolvedJoin {
-                emit_alias: emit,
-                bare_alias: hop.table.to_ascii_lowercase(),
-                join: hop,
-                scoped: true,
-                from_emit: Some(super::join_resolver::scoped_join_alias(
-                    &hop.from_alias,
-                    rel,
-                )),
-            });
+            chains.push(rj);
         }
     }
     chains
 }
 
-/// The relationship a scoped NA-dim alias names, its name, and the chain of
-/// edges from its target down to the dim's table (empty when the dim is on the
+/// The relationship a scoped NA-dim alias names, its name, and the steps
+/// from its target to the dim's table ([`super::role_playing::role_path`]) (empty when the dim is on the
 /// role-played table itself).
 fn scoped_na_path<'a>(
     def: &'a SemanticViewDefinition,
     alias: &str,
-) -> Option<(&'a crate::model::Join, &'a str, Vec<&'a crate::model::Join>)> {
+) -> Option<(
+    &'a crate::model::Join,
+    &'a str,
+    Vec<super::role_playing::RoleStep<'a>>,
+)> {
     for edge in &def.joins {
         let Some(rel) = edge.name.as_deref() else {
             continue;
@@ -401,9 +396,7 @@ fn scoped_na_path<'a>(
         }
         for t in &def.tables {
             if super::join_resolver::scoped_join_alias(&t.alias, rel) == alias {
-                if let Some(chain) =
-                    super::role_playing::descendant_chain(def, &edge.table, &t.alias)
-                {
+                if let Some(chain) = super::role_playing::role_path(def, &edge.table, &t.alias) {
                     return Some((edge, rel, chain));
                 }
             }
