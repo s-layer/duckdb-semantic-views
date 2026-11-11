@@ -1224,7 +1224,8 @@ fn fans_below(case: &Case, anchor: &str) -> bool {
 }
 
 /// Whether a metric on `u` or `w` reaches `t` across the ASOF or range hop
-/// walked backwards: the fan-out Snowflake refuses (fixture 1, A5).
+/// walked backwards: the fan-out Snowflake refuses (fixture 1, A5). The range
+/// case is unprobed and refused like ASOF (TECH-DEBT #112).
 fn fans_across_a_temporal_hop(case: &Case) -> bool {
     case.inst.hop != Hop::Plain
         && member_tables(case).contains(&"t")

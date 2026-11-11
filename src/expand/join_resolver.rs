@@ -398,11 +398,15 @@ pub(super) fn push_join_clauses(
 /// the FK side of the root (SG-10).
 ///
 /// A table referenced by several tables can be reached by more than one path,
-/// so the tree prefers the paths `fan_trap::find_path` prefers, in four
-/// rounds: first chains of foreign keys (to a referenced table); then steps
-/// back along a one-to-one relationship, which do not fan out either; then one
-/// step to a table that references the root, followed by such steps (across a
-/// bridge); then any step. With a chain `o -> c -> r` beside a one-to-one
+/// so the tree is built in four rounds: first chains of foreign keys (to a
+/// referenced table); then steps back along a one-to-one relationship, which
+/// do not fan out either; then one step to a table that references the root,
+/// followed by such steps (across a bridge); then any step. The first two are
+/// the paths `fan_trap::find_path` prefers. The third dates from Phase 7.3,
+/// when `find_path` preferred a bridge too; since Phase 7 PR 4c it prefers no
+/// fanning shape over another. The two can differ only for a table reached by
+/// more than one fanning path, which `multi_path` refuses for a queried
+/// member, so the round only decides which tree is built. With a chain `o -> c -> r` beside a one-to-one
 /// `s -> o` and `s -> r`, walking both kinds of step at once could join `r`
 /// through `s`, off the one chain the multi-path check counted. With
 /// `t3 -> t2 -> t1` beside `t3 -> t0 <- t1`, a plain walk could reach `t1`

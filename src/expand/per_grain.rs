@@ -272,9 +272,12 @@ struct Group {
     /// expression, and storing names rather than `&Metric` keeps [`Plan`] free
     /// of a lifetime.
     metric_names: Vec<String>,
-    /// Phase 7.3: the anchor's key columns when a queried dimension or a
-    /// `where_clause` member is reached across a many-to-many bridge, `None`
-    /// otherwise. A bridged group counts each anchor row once per group by
+    /// Phase 7.3 and PR 4c: the anchor's key columns when a queried dimension
+    /// or a `where_clause` member fans the anchor's rows out (across a
+    /// many-to-many bridge or any other single path that
+    /// [`super::fan_trap`]'s `fan_out_counts_once` accepts), `None` otherwise.
+    /// The name is from 7.3, when only a bridge did. A bridged group counts
+    /// each anchor row once per group by
     /// joining it to the `SELECT DISTINCT` of its (key, dimensions) pairs; see
     /// [`render_bridged_group`].
     bridge_key: Option<Vec<String>>,
@@ -306,8 +309,10 @@ impl Plan {
         self.groups.len() == 1
     }
 
-    /// Whether some group reaches a dimension or filter across a many-to-many
-    /// bridge, which tells the fan-trap fence to let those paths through.
+    /// Whether some group reaches a dimension or filter by fanning its anchor
+    /// out. [`mark_bridged_groups`] bridges every such group or declines the
+    /// plan, so this means every fanning group deduplicates, which tells the
+    /// fan-trap fence to let those paths through.
     pub(super) fn crosses_bridge(&self) -> bool {
         self.groups.iter().any(|g| g.bridge_key.is_some())
     }
@@ -470,8 +475,8 @@ pub(super) fn plan(
     }
 
     // Per-grain only helps when every queried dimension is reachable from every
-    // anchor without fanning it, or (Phase 7.3) across a many-to-many bridge,
-    // which the group then deduplicates. Where neither holds, the fence's
+    // anchor without fanning it, or (Phase 7.3, PR 4c) by a fan-out the group
+    // then deduplicates. Where neither holds, the fence's
     // metric × dimension error is the right answer — decline and let it speak.
     mark_bridged_groups(
         def,
@@ -497,7 +502,7 @@ pub(super) fn plan(
     // Phase 6.3: an all-root query still needs this path when its metrics reach
     // a role-played dimension table through different relationships — the
     // base-anchored FROM can group the dimension through only one of them.
-    // Phase 7.3: and when it crosses a bridge, which only a grain CTE dedups.
+    // Phase 7.3, PR 4c: and when it fans out, which only a grain CTE dedups.
     let one_role_set = partition
         .groups
         .iter()
@@ -540,7 +545,7 @@ pub(super) fn plan(
     // Phase 7.3: the snapshot CTE ranks the rows it is given before
     // aggregating, and a bridged group's rows are only deduplicated by the
     // key join this renderer adds, so an active semi-additive metric across a
-    // bridge is declined, and the fence refuses it as a fan trap.
+    // fan-out is declined, and the fence refuses it as a fan trap.
     if partition
         .groups
         .iter()
@@ -556,11 +561,11 @@ pub(super) fn plan(
 }
 
 /// Set each group's [`Group::bridge_key`] when a queried dimension or a
-/// `where_clause` member is reached from its anchor across a many-to-many
-/// bridge. `None` declines the plan: a dimension the anchor cannot reach, or
-/// reaches only by fanning it some other way, or a bridged anchor with no key.
-/// A `where_clause` member on any other fanning path is left to the
-/// `where_clause` fence, which refuses it.
+/// `where_clause` member fans its anchor out on a path that counts once per
+/// group (`fan_out_counts_once`). `None` declines the plan: a dimension the
+/// anchor cannot reach, or reaches only across an ASOF or range hop walked
+/// backwards, or a bridged anchor with no key. A `where_clause` member on
+/// such a temporal path is left to the `where_clause` fence, which refuses it.
 fn mark_bridged_groups(
     def: &SemanticViewDefinition,
     graph: &GrainGraph,
@@ -1699,12 +1704,14 @@ fn anchor_key(def: &SemanticViewDefinition, anchor: &str) -> Option<Vec<String>>
     (!table.pk_columns.is_empty()).then(|| table.pk_columns.clone())
 }
 
-/// Render a grain whose dimensions or `where_clause` members are reached across
-/// a many-to-many bridge (Phase 7.3).
+/// Render a grain whose dimensions or `where_clause` members fan its anchor's
+/// rows out: across a many-to-many bridge (Phase 7.3), or along any other
+/// single path that counts once per group (Phase 7 PR 4c). The example below
+/// is a bridge; a plain child or a sibling after a hop up renders the same way.
 ///
-/// Joining the bridge into the aggregation would count an anchor row once per
-/// bridge row. Snowflake counts it once per GROUP instead (the 7.0 fixture's
-/// B1-B10), which is what this emits:
+/// Joining the fanning tables into the aggregation would count an anchor row
+/// once per fanned row. Snowflake counts it once per GROUP instead (the 7.0
+/// fixture's B1-B10, fixture 7's N1-N7), which is what this emits:
 ///
 /// ```sql
 /// SELECT "__sv_bridge"."__sv_d0" AS "country", SUM(pages) AS "total_pages"
@@ -1791,7 +1798,7 @@ fn render_bridged_group(
         .collect();
     sql.push_str(" ON ");
     sql.push_str(&on.join(" AND "));
-    // The metrics' own fact tables: never across the bridge, which the
+    // The metrics' own fact tables: never across a fan-out, which the
     // referenced-fact fence refuses, so these joins do not fan the anchor.
     let met_needs = anchor_needs(def, &group_metrics(def, group), &[], &[]);
     push_join_clauses(
@@ -2004,9 +2011,11 @@ fn coalesced_key(groups: usize, d: usize) -> String {
 ///
 /// Each hop on the tree path from the anchor to a dimension's table is emitted
 /// once, in path order, so every ON clause references only the table it
-/// introduces and one already in scope. The planner has already established
-/// that none of these paths fans the anchor, so the anchor's row count — and
-/// therefore its aggregate — is unaffected by them.
+/// introduces and one already in scope. In a group that is not bridged the
+/// planner has already established that none of these paths fans the anchor,
+/// so the anchor's row count, and therefore its aggregate, is unaffected by
+/// them. A bridged group's paths may fan it, but they are joined only inside
+/// [`render_bridged_group`]'s `SELECT DISTINCT` of (key, dimensions) pairs.
 #[allow(clippy::too_many_lines)]
 pub(super) fn anchor_joins<'a>(
     def: &'a SemanticViewDefinition,

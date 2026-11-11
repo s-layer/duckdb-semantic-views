@@ -864,9 +864,32 @@ fn exp27_transitive_fact_chain_to_a_fanning_table_counts_once() {
 /// joins on the member's behalf.
 #[test]
 fn exp27_fact_chain_without_a_primary_key_is_fenced() {
-    let mut def = exp27_def();
+    assert_exp27_keyless_fenced(exp27_def(), "of > 0", "of");
+}
+
+/// The DIMENSION branch's keyless twin.
+#[test]
+fn exp27_dimension_reaching_a_fanning_fact_without_a_primary_key_is_fenced() {
+    let def = exp27_def().with_dimension(
+        "band",
+        "CASE WHEN li.liq > 0 THEN 'hi' ELSE 'lo' END",
+        Some("o"),
+    );
+    assert_exp27_keyless_fenced(def, "band = 'hi'", "band");
+}
+
+/// The transitive chain's keyless twin.
+#[test]
+fn exp27_transitive_fact_chain_without_a_primary_key_is_fenced() {
+    let def = exp27_def().with_fact("of2", "of + 1", "o");
+    assert_exp27_keyless_fenced(def, "of2 > 0", "of2");
+}
+
+/// `def` with the orders' PRIMARY KEY dropped refuses `where_clause`, naming
+/// `member` and the line items joined on its behalf.
+fn assert_exp27_keyless_fenced(mut def: SemanticViewDefinition, where_clause: &str, member: &str) {
     def.tables[0].pk_columns.clear();
-    match expand("v", &def, &exp27_req("of > 0")) {
+    match expand("v", &def, &exp27_req(where_clause)) {
         Err(ExpandError::WhereClauseFanTrap {
             metric_name,
             member_name,
@@ -875,7 +898,7 @@ fn exp27_fact_chain_without_a_primary_key_is_fenced() {
             ..
         }) => {
             assert_eq!(metric_name, "rev");
-            assert_eq!(member_name, "of");
+            assert_eq!(member_name, member);
             assert_eq!(
                 member_table, "li",
                 "the table joined on the member's behalf"
@@ -884,6 +907,63 @@ fn exp27_fact_chain_without_a_primary_key_is_fenced() {
         }
         Err(other) => panic!("expected WhereClauseFanTrap, got: {other}"),
         Ok(sql) => panic!("SUM(o.amount) over multiplied rows:\n{sql}"),
+    }
+}
+
+/// Two refused fan-outs in one query: one that would count once per group but
+/// has no PRIMARY KEY to count by, and one across an ASOF relationship walked
+/// backwards, which is never counted once. The error names the ASOF one, since
+/// declaring a key would not answer the query, even though the keyless metric
+/// comes first in the request.
+#[test]
+fn a_temporal_fan_out_is_reported_before_a_keyless_one() {
+    let mut def = SemanticViewDefinition::default()
+        .with_table("o", "p_orders", &[])
+        .with_table("li", "p_items", &["id"])
+        .with_table("a", "p_addresses", &["cust", "start_date"])
+        .with_dimension("status", "li.status", Some("li"))
+        .with_metric("order_count", "COUNT(*)", Some("o"))
+        .with_metric("address_count", "COUNT(*)", Some("a"))
+        .with_pkfk_join("li_to_o", "li", "o", &["order_id"], &["id"]);
+    def.joins.push(Join {
+        from_alias: "o".to_string(),
+        table: "a".to_string(),
+        fk_columns: vec!["cust".to_string(), "order_date".to_string()],
+        ref_columns: vec!["cust".to_string(), "start_date".to_string()],
+        name: Some("order_address".to_string()),
+        asof: Some(1),
+        ..Default::default()
+    });
+    let req = QueryRequest {
+        where_clause: None,
+        facts: vec![],
+        dimensions: vec![DimensionName::new("status")],
+        metrics: vec![
+            MetricName::new("order_count"),
+            MetricName::new("address_count"),
+        ],
+    };
+    // Each fan-out alone is refused, the keyless one with the note that says
+    // when a fan-out is counted once.
+    for (met, counts_once) in [("order_count", true), ("address_count", false)] {
+        let solo = QueryRequest {
+            metrics: vec![MetricName::new(met)],
+            ..req.clone()
+        };
+        match expand("v", &def, &solo) {
+            Err(ExpandError::FanTrap { detail }) => {
+                assert_eq!(detail.counts_once, counts_once, "{met}");
+            }
+            other => panic!("{met}: expected FanTrap, got: {other:?}"),
+        }
+    }
+    match expand("v", &def, &req) {
+        Err(ExpandError::FanTrap { detail }) => {
+            assert_eq!(detail.metric_name, "address_count");
+            assert_eq!(detail.dimension_name, "status");
+            assert!(!detail.counts_once);
+        }
+        other => panic!("expected FanTrap, got: {other:?}"),
     }
 }
 

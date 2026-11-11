@@ -583,11 +583,20 @@ fn arb_case() -> impl Strategy<Value = Case> {
                     sel_metrics = vec![M_SNAP];
                 }
                 // A window metric, and a semi-additive one whose NON ADDITIVE
-                // BY dimension is not queried, stay refused across a fan-out
-                // (`fan_outs_are_answered_or_refused_by_design` pins it): the
-                // only fan for these child metrics is the grandchild's `ldamt`.
-                if sel_metrics == [M_WINDOW] || sel_metrics == [M_SNAP] {
+                // BY dimension (`lamt`) is not queried, stay refused across a
+                // fan-out (`fan_outs_are_answered_or_refused_by_design` pins
+                // it): the only fan for these child metrics is the
+                // grandchild's `ldamt`. With `lamt` queried the semi-additive
+                // metric is a plain sum, and is counted once per group, so a
+                // drawn `ldamt` brings `lamt` with it there.
+                if sel_metrics == [M_WINDOW] {
                     sel_dims.retain(|&i| i != D_LDAMT);
+                } else if sel_metrics == [M_SNAP]
+                    && sel_dims.contains(&D_LDAMT)
+                    && !sel_dims.contains(&D_LAMT)
+                {
+                    sel_dims.push(D_LAMT);
+                    sel_dims.sort_unstable();
                 }
                 // Every drawn grain gets a metric. A request with no metrics
                 // and no facts is a different code path (dims-only DISTINCT);
@@ -1640,14 +1649,27 @@ fn generator_draws_grandchild_metrics_in_every_mix() {
         o_child_pred >= 8,
         "only {o_child_pred}/256 base requests fanned by a child-side predicate"
     );
+    let mut snap_fanned = 0;
     for c in &cases {
-        if matches!(&c.ask, Ask::Metrics(m) if m == &[M_WINDOW] || m == &[M_SNAP]) {
+        let refused = match &c.ask {
+            Ask::Metrics(m) if m == &[M_WINDOW] => true,
+            Ask::Metrics(m) if m == &[M_SNAP] => !c.sel_dims.contains(&D_LAMT),
+            _ => false,
+        };
+        if refused {
             assert!(
                 !c.sel_dims.contains(&D_LDAMT),
-                "a window or semi-additive metric fanned by ldamt: {c:?}"
+                "a window or active semi-additive metric fanned by ldamt: {c:?}"
             );
         }
+        if matches!(&c.ask, Ask::Metrics(m) if m == &[M_SNAP]) && c.sel_dims.contains(&D_LDAMT) {
+            snap_fanned += 1;
+        }
     }
+    assert!(
+        snap_fanned >= 4,
+        "only {snap_fanned}/256 semi-additive requests fanned by ldamt with lamt queried"
+    );
 }
 
 /// TC2 anti-vacuity: on the requests that carry a grandchild metric, the data
@@ -1782,6 +1804,18 @@ fn fan_outs_are_answered_or_refused_by_design() {
             other => panic!("ldamt x {mets:?}: expected FanTrap, got {other:?}"),
         }
     }
+    // With its NON ADDITIVE BY dimension queried, the semi-additive metric is
+    // a plain sum, and is counted once per group.
+    let sql = expand(
+        "child",
+        &def,
+        &req(&["lamt", "ldamt"], &["snap_parent"], None),
+    )
+    .unwrap_or_else(|e| panic!("lamt, ldamt x snap_parent: refused: {e}"));
+    assert!(
+        sql.contains("SELECT DISTINCT") && sql.contains("__sv_bridge"),
+        "lamt, ldamt x snap_parent: not on the deduplicating path:\n{sql}"
+    );
     let mut no_pk = build_def();
     no_pk.tables[0].pk_columns.clear();
     match expand("child", &no_pk, &req(&["lamt"], &["o_rate"], None)) {

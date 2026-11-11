@@ -25,8 +25,10 @@ type TemporalEdges = HashSet<(String, String)>;
 /// 1. **metric × dimension**: walks the join path between each
 ///    (metric source, dimension source) pair and errors when any edge is
 ///    traversed in the fan-out direction (`ExpandError::FanTrap`). This one is
-///    about the *dimension* being below the metric's own grain — per-grain
-///    aggregation cannot define such a query either, so it runs unconditionally.
+///    about the *dimension* being below the metric's own grain. It runs on
+///    both paths, but skips a path [`fan_out_counts_once`] accepts when the
+///    per-grain plan deduplicates every fanning group (`bridges`), since each
+///    metric row is then counted once per group, as in Snowflake.
 /// 2. **metric grain × root** (EXP-1) and 3. **metric × metric** (SG-1): both
 ///    exist only because the base-anchored `FROM <root>` topology computes every
 ///    metric over one joined row set. When the caller has routed the query to
@@ -78,9 +80,11 @@ pub(super) fn check_fan_traps(
     // dedupe them (silent double-count). Window metrics were never skipped
     // (their inner aggregate is computed over the fanned join before the window
     // function runs); semi-additive metrics are now treated the same way.
-    // Phase 7.3: a refused path across a bridge is reported only when no plain
-    // fan-out is refused too, since a plain fan-out is what blocks the query
-    // then, and the bridge note would name the wrong reason.
+    // Phase 7 PR 4c: a refused fan-out that would count once per group (it
+    // was refused because the plan declined, e.g. no PRIMARY KEY) is reported
+    // only when no fan-out that is never counted once (across an ASOF or range
+    // hop walked backwards) is refused too. That one blocks the query whatever
+    // the plan does, and the counts-once note would name the wrong fix.
     let mut bridge_trap: Option<ExpandError> = None;
     for met in resolved_mets {
         // EXP-8: a base metric with no source table and no base-metric
@@ -107,9 +111,12 @@ pub(super) fn check_fan_traps(
                     continue; // Not connected (legacy joins carrying no FK metadata)
                 };
                 // Phase 7 PR 4c: a dimension the metric's rows fan out to is
-                // answered once per group by the per-grain plan, which passes
-                // `bridges` only when every group it emits deduplicates its
-                // anchor rows that way. Every other fanning path is refused.
+                // answered once per group by the per-grain plan. It passes
+                // `bridges` when any group it emits deduplicates its anchor
+                // rows that way, and `mark_bridged_groups` either bridges every
+                // group that fans out or declines the whole plan, so `bridges`
+                // means every fanning group is deduplicated. Every other
+                // fanning path is refused.
                 let counts_once = fan_out_counts_once(&path, &card_map, &temporal);
                 if bridges && counts_once {
                     continue;
@@ -496,7 +503,8 @@ impl GrainGraph {
 /// The exception is a fanning hop across an ASOF or range relationship:
 /// Snowflake refuses a metric on the referenced table grouped by a column of
 /// the referencing one (010956, "higher level of granularity", the 7.0
-/// fixture's A5), so such a path is not counted.
+/// fixture's A5), so such a path is not counted. The range case is unprobed
+/// and refused like ASOF until a fixture checks it (TECH-DEBT #112).
 fn fan_out_counts_once(path: &[String], card_map: &CardMap, temporal: &TemporalEdges) -> bool {
     let fanning_hops: Vec<(&String, &String)> = path
         .windows(2)

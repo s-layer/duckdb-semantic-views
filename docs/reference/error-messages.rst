@@ -1355,9 +1355,16 @@ Fan trap detected
    This would inflate aggregation results. Remove the dimension, use a metric from
    the same table, or restructure the relationship.
 
-**Cause:** The query would traverse a one-to-many join boundary, inflating aggregate results.
+**Cause:** A dimension or filter sits below the metric's grain: reaching it from the metric's table crosses a one-to-many join boundary. Such a query is normally answered, each row of the metric's table counted once in every group it reaches, as in Snowflake (see :ref:`howto-fan-detect`). It is refused, as a fan trap, when that can't be done:
 
-**Fix:** See :ref:`howto-fan-traps` for detailed solutions: remove the problematic dimension, use a metric from the same table as the dimension, or restructure the view.
+- the metric's table has no ``PRIMARY KEY`` to count its rows by;
+- the metric is a window metric, or a semi-additive metric whose ``NON ADDITIVE BY`` dimension is not queried;
+- a role-played table is on the path, or a dimension or filter in the query is declared on no table;
+- the one-to-many hop walks an ASOF or range relationship backwards, from the referenced table to the referencing one, which Snowflake refuses for ASOF too.
+
+In the first three cases the message ends with a sentence listing them.
+
+**Fix:** Declare a ``PRIMARY KEY`` on the metric's table when that is the cause. Otherwise see :ref:`howto-fan-traps`: remove the problematic dimension, use a metric from the same table as the dimension, or restructure the view.
 
 
 Fact reached across a fan-out
@@ -1665,7 +1672,7 @@ Table reached by more than one path
    active semi-additive metric, or a member declared on no table). Query the
    metric with fewer members
 
-**Cause:** Only part of the query planner follows a path a ``USING`` picks through a diamond. A window metric, a semi-additive metric whose ``NON ADDITIVE BY`` dimension is not queried, or a dimension or filter member declared on no table sends the query elsewhere, where it would follow the path declared first. A dimension or filter below the metric's grain is reported as a fan trap instead, since no path answers it.
+**Cause:** Only part of the query planner follows a path a ``USING`` picks through a diamond. A window metric, a semi-additive metric whose ``NON ADDITIVE BY`` dimension is not queried, or a dimension or filter member declared on no table sends the query elsewhere, where it would follow the path declared first. When the query also has a dimension or filter below the metric's grain, it is reported as a fan trap instead, since the plan that would count each row once per group declined the query too.
 
 **Fix:** Query the ``USING`` metric without the members the message names.
 
