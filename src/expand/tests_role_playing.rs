@@ -631,13 +631,18 @@ fn scoped_join_on_clause_uses_correct_fk_pk() {
 // dimension loop) never consults `role_playing_bare_aliases`, so the bare alias
 // joins via `tree_parent` — the first-declared edge.
 //
-// Only a queried dimension's *expression* is rewritten to a scoped alias, so a
-// where-member has no way to name its role; per EXP-4/EXP-5 the correct posture
-// is to fail loudly rather than pick an edge by declaration order.
+// A where-member had no way to name its role, so per EXP-4/EXP-5 it was
+// refused rather than bound by declaration order. Since Phase 7 PR 4b it is
+// read on the role every metric names (Snowflake fixture 6, R5): the
+// predicate is rewritten to that role's scoped alias, and the table joined
+// under it. With no single role it is still refused.
 // ---------------------------------------------------------------------------
 
 #[test]
-fn where_clause_on_role_playing_table_is_rejected() {
+fn where_clause_on_role_playing_table_follows_the_metrics_role() {
+    // Phase 7 PR 4b (Snowflake fixture 6, R5): with every metric naming one
+    // role, the predicate is read on that role's instance, as Snowflake reads
+    // it, and never on the bare, first-declared one.
     let def = flights_airports_def();
     let req = QueryRequest {
         where_clause: Some("city = 'NYC'".to_string()),
@@ -645,10 +650,51 @@ fn where_clause_on_role_playing_table_is_rejected() {
         dimensions: vec![],
         metrics: vec![MetricName::new("departure_count")],
     };
-    let result = expand("flights_sv", &def, &req);
+    let sql = expand("flights_sv", &def, &req).unwrap_or_else(|e| panic!("{e}"));
+    assert!(
+        sql.contains("WHERE (a__dep_airport.city) = 'NYC'")
+            && sql.contains(r#"AS "a__dep_airport" ON"#)
+            && !sql.contains(r#"AS "a" ON"#),
+        "the departure airport's city: {sql}"
+    );
+}
+
+/// The wrong-number shape the old rejection existed to prevent: the metric's
+/// `USING (arr_airport)` scopes its join to `a__arr_airport`, while the
+/// predicate's `a` was joined via the first-declared `dep_airport`. Filtering
+/// on departure city while counting arrivals is a silently wrong answer. The
+/// predicate now names the arriving airport's instance.
+#[test]
+fn where_clause_role_playing_does_not_filter_through_the_other_role() {
+    let def = flights_airports_def();
+    let req = QueryRequest {
+        where_clause: Some("city = 'NYC'".to_string()),
+        facts: vec![],
+        dimensions: vec![],
+        metrics: vec![MetricName::new("arrival_count")],
+    };
+    let sql = expand("flights_sv", &def, &req).unwrap_or_else(|e| panic!("{e}"));
+    assert!(
+        sql.contains("WHERE (a__arr_airport.city) = 'NYC'") && !sql.contains("dep_airport"),
+        "the arriving airport's city: {sql}"
+    );
+}
+
+/// With no `USING` the predicate names no role, and is refused: the error
+/// names both roles, which is what tells the user how to resolve it.
+#[test]
+fn where_clause_on_role_playing_table_without_a_role_is_rejected() {
+    let mut def = flights_airports_def();
+    def.metrics.push(metric_on("f", "flights", "COUNT(*)"));
+    let req = QueryRequest {
+        where_clause: Some("city = 'NYC'".to_string()),
+        facts: vec![],
+        dimensions: vec![],
+        metrics: vec![MetricName::new("flights")],
+    };
     // The specific variant, not merely "an error": a bare `is_err()` would go
     // green on any unrelated failure and stop guarding EXP-10.
-    match result {
+    match expand("flights_sv", &def, &req) {
         Err(ExpandError::AmbiguousWhereClausePath {
             view_name,
             member_name,
@@ -660,8 +706,6 @@ fn where_clause_on_role_playing_table_is_rejected() {
             assert_eq!(member_name, "city");
             assert_eq!(member_table, "a");
             assert_eq!(role_playing_table, "a");
-            // The error must name BOTH roles -- that list is what tells the
-            // user how to resolve the ambiguity.
             assert!(
                 available_relationships.contains(&"dep_airport".to_string())
                     && available_relationships.contains(&"arr_airport".to_string()),
@@ -672,42 +716,6 @@ fn where_clause_on_role_playing_table_is_rejected() {
         Ok(sql) => panic!(
             "a where_clause member on a role-playing table must not bind to the \
              first-declared relationship silently. Emitted SQL:\n{sql}"
-        ),
-    }
-}
-
-/// The wrong-number shape the rejection exists to prevent: the metric's
-/// `USING (arr_airport)` scopes its join to `a__arr_airport`, while the
-/// predicate's `a` is joined via the first-declared `dep_airport`. Filtering
-/// on departure city while counting arrivals is a silently wrong answer, not a
-/// different-but-defensible one.
-#[test]
-fn where_clause_role_playing_does_not_filter_through_the_other_role() {
-    let def = flights_airports_def();
-    let req = QueryRequest {
-        where_clause: Some("city = 'NYC'".to_string()),
-        facts: vec![],
-        dimensions: vec![],
-        metrics: vec![MetricName::new("arrival_count")],
-    };
-    let result = expand("flights_sv", &def, &req);
-    match result {
-        Err(ExpandError::AmbiguousWhereClausePath {
-            member_name,
-            role_playing_table,
-            ..
-        }) => {
-            assert_eq!(member_name, "city");
-            assert_eq!(role_playing_table, "a");
-        }
-        Err(other) => panic!(
-            "expected AmbiguousWhereClausePath -- a different error means this \
-             case is no longer guarding the wrong-role filter: {other}"
-        ),
-        Ok(sql) => panic!(
-            "expected a role-playing ambiguity error; emitted SQL instead (the \
-             predicate binds to the dep_airport instance while the metric uses \
-             arr_airport):\n{sql}"
         ),
     }
 }
@@ -1546,24 +1554,47 @@ fn flights_airports_details_def() -> SemanticViewDefinition {
 }
 
 /// A flight metric by a dimension on `airport_details`, which references the
-/// airports: the way from flights crosses one of the two relationships to the
-/// airports and steps back to the details. Without a role that is ambiguous,
-/// and with one (`arrival_count USING (arr_airport)`) the details were still
-/// joined to the bare airports instance over the first-declared relationship,
-/// so the arrival count was grouped by the departure airport's terminal. Both
-/// are refused, in either TABLES order (found by `dag_proptest`'s doubled
-/// relationship); following the role `USING` names is TECH-DEBT #111.
+/// airports one-to-one: the way from flights crosses one of the two
+/// relationships to the airports and steps back to the details. Without a role
+/// that is ambiguous, and refused (Snowflake fixture 6, R3), in either TABLES
+/// order (found by `dag_proptest`'s doubled relationship).
 #[test]
-fn a_table_reached_back_across_a_role_played_table_is_refused() {
+fn a_table_reached_back_across_a_role_played_table_needs_a_role() {
     let mut def = flights_airports_details_def();
-    for metric in ["flights", "arrival_count", "departure_count"] {
+    for _ in 0..2 {
+        match expand("v", &def, &metrics_req(&["terminal"], &["flights"])) {
+            Err(ExpandError::AmbiguousDescendantPath {
+                role_playing_table, ..
+            }) => assert_eq!(role_playing_table, "a"),
+            other => panic!("flights by terminal must name no role silently: {other:?}"),
+        }
+        def.tables.reverse();
+    }
+}
+
+/// With a role (`arrival_count USING (arr_airport)`), the details are joined
+/// off that role's airport under its scoped alias (`d__arr_airport` on
+/// `a__arr_airport`), as Snowflake reads them (fixture 6, R1 and R2; TECH-DEBT
+/// #111). They were joined to the bare airports instance over the
+/// first-declared relationship before #342 (the departure airport's terminal,
+/// silently), and refused after it.
+#[test]
+fn a_table_reached_back_across_a_role_played_table_follows_the_role() {
+    let mut def = flights_airports_details_def();
+    for (metric, rel) in [
+        ("arrival_count", "arr_airport"),
+        ("departure_count", "dep_airport"),
+    ] {
         for _ in 0..2 {
-            match expand("v", &def, &metrics_req(&["terminal"], &[metric])) {
-                Err(ExpandError::AmbiguousDescendantPath {
-                    role_playing_table, ..
-                }) => assert_eq!(role_playing_table, "a"),
-                other => panic!("{metric} by terminal must name no role silently: {other:?}"),
-            }
+            let sql = expand("v", &def, &metrics_req(&["terminal"], &[metric]))
+                .unwrap_or_else(|e| panic!("{metric} by terminal: {e}"));
+            let on = format!(
+                r#"AS "d__{rel}" ON "d__{rel}"."airport_code" = "a__{rel}"."airport_code""#
+            );
+            assert!(
+                sql.contains(&on) && sql.contains(&format!("d__{rel}.terminal")),
+                "{metric}: the details off the role's airport:\n{sql}"
+            );
             def.tables.reverse();
         }
     }
@@ -1571,21 +1602,24 @@ fn a_table_reached_back_across_a_role_played_table_is_refused() {
 
 /// The same beside a dimension on the airports themselves, which `USING`
 /// scopes to `a__arr_airport`: the details were joined to a bare `a` that no
-/// longer appeared in the FROM, and the query failed to bind.
+/// longer appeared in the FROM, and the query failed to bind; then it was
+/// refused. Both now read the arriving airport (fixture 6, R6).
 #[test]
-fn a_table_reached_back_across_a_scoped_role_played_table_is_refused() {
+fn a_table_reached_back_across_a_scoped_role_played_table_follows_the_role() {
     let mut def = flights_airports_details_def();
     for _ in 0..2 {
-        match expand(
+        let sql = expand(
             "v",
             &def,
             &metrics_req(&["terminal", "city"], &["arrival_count"]),
-        ) {
-            Err(ExpandError::AmbiguousDescendantPath {
-                role_playing_table, ..
-            }) => assert_eq!(role_playing_table, "a"),
-            other => panic!("arrival_count by terminal and city: {other:?}"),
-        }
+        )
+        .expect("arrival_count by terminal and city");
+        assert!(
+            sql.contains("a__arr_airport.city")
+                && sql.contains("d__arr_airport.terminal")
+                && !sql.contains("dep_airport"),
+            "both off the arriving airport:\n{sql}"
+        );
         def.tables.reverse();
     }
 }
@@ -1860,15 +1894,13 @@ fn base_table_exemption_resolves_a_metrics_dimension_in_any_spelling() {
     }
 }
 
-/// KNOWN GAP (TECH-DEBT #86): the same base-table dimension with only a
-/// metric on the base table needs no join and so has no role to pick (the
-/// answer is each airport's own city), but the dimension check still reports
-/// it as ambiguous. Pinned so the fix flips it on purpose: it should then
-/// return one row per city with `n_airports` = 1. With no metric it is
-/// answered already (the airports' own cities, Snowflake's R1 in the
-/// 2026-11-09 second dims-only fixture).
+/// TECH-DEBT #86 (resolved by Phase 7 PR 4b): the same base-table dimension
+/// with only a metric on the base table needs no join and so has no role to
+/// pick, and is answered from the airports' own rows (each airport's own
+/// city). With no metric it was answered already (Snowflake's R1 in the
+/// 2026-11-09 second dims-only fixture). It was reported as ambiguous.
 #[test]
-fn known_gap_base_table_dimension_without_a_joined_metric_is_rejected() {
+fn base_table_dimension_with_only_its_own_metric_reads_its_own_rows() {
     let mut def = role_played_fact_def();
     def.tables.reverse();
     let sql = expand("v", &def, &metrics_req(&["city"], &[])).unwrap_or_else(|e| panic!("{e}"));
@@ -1878,24 +1910,23 @@ fn known_gap_base_table_dimension_without_a_joined_metric_is_rejected() {
         "the airports alone need no join: {sql}"
     );
     def.metrics.push(metric_on("a", "n_airports", "COUNT(*)"));
-    match expand("v", &def, &metrics_req(&["city"], &["n_airports"])) {
-        Err(ExpandError::AmbiguousPath {
-            dimension_table, ..
-        }) => assert_eq!(dimension_table, "a"),
-        other => panic!("TECH-DEBT #86 changed; update the entry: {other:?}"),
-    }
-    // The same fence rejects a semi-additive base-table metric whose snapshot
-    // dimension is on the base table, though nothing is joined: when #86 is
-    // fixed, this should expand to 100 (`Dep City`, the last city) in every
-    // spelling.
+    let sql = expand("v", &def, &metrics_req(&["city"], &["n_airports"]))
+        .unwrap_or_else(|e| panic!("n_airports by city: {e}"));
+    assert!(
+        sql.contains("a.city") && !sql.contains("JOIN"),
+        "each airport's own city: {sql}"
+    );
+    // A semi-additive base-table metric whose snapshot dimension is on the
+    // base table joins nothing either, in every spelling: the airports' rows
+    // at the last city.
     for spelling in ["city", "a.city"] {
         def.metrics.push(base_semi_additive(spelling));
-        match expand("v", &def, &metrics_req(&[], &["last_elev"])) {
-            Err(ExpandError::AmbiguousPath {
-                dimension_table, ..
-            }) => assert_eq!(dimension_table, "a"),
-            other => panic!("TECH-DEBT #86 changed ({spelling}); update the entry: {other:?}"),
-        }
+        let sql = expand("v", &def, &metrics_req(&[], &["last_elev"]))
+            .unwrap_or_else(|e| panic!("last_elev ({spelling}): {e}"));
+        assert!(
+            sql.contains("ORDER BY a.city DESC") && !sql.contains("JOIN"),
+            "({spelling}) the airports' own snapshot: {sql}"
+        );
         def.metrics.pop();
     }
 }

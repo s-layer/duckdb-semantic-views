@@ -1405,7 +1405,8 @@ Ambiguous dimension path
    path of a co-queried metric that had one.
 
 A dimension on a table reached only *through* the role-playing table, such as
-``regions`` referenced by ``airports``, reports the same problem in this form:
+``regions`` referenced by ``airports``, or ``airport_details`` that references
+``airports`` one-to-one, reports the same problem in this form:
 
 .. code-block:: text
 
@@ -1419,12 +1420,19 @@ It has the same causes and fixes. The dimension takes its path from the
 metrics, so a query with no metrics, or with a metric declared on the
 role-playing table (whose ``USING`` cannot start there), has no path to give
 it. When every metric names a path, the region follows it: ``departures`` by
-region groups by the departure airport's region.
+region groups by the departure airport's region, and ``departures`` by
+terminal reads the departure airport's details.
 
 .. versionchanged:: 0.18.0
 
    A dimension past the role-playing table used to be refused even when every
    metric named a path to it.
+
+.. versionchanged:: 0.19.0
+
+   A dimension on a table that references the role-playing one, such as
+   ``airport_details``, follows the metric's path too. It used to be refused
+   even when every metric named one.
 
 
 Ambiguous fact or metric on a role-playing table
@@ -1450,7 +1458,7 @@ Ambiguous fact or metric on a role-playing table
    it on the referencing table with USING instead, e.g.
    <table>.<metric> USING (<relationship>) AS SUM(<fact>).
 
-**Cause:** The first form: a metric, dimension, or fact reaches a fact on a role-playing table (or on a table reached only through one), and nothing says which relationship to read it through. The second form: a metric is declared on the role-playing table itself (or on a table reached only through it), where ``USING`` cannot be attached, and the query groups or filters it by a dimension on another table, or its ``NON ADDITIVE BY`` or window names one: those would be joined to the metric's rows through one of the relationships without saying which. A metric on the role-playing table queried with no dimension, alone or beside metrics on other tables, is computed over its own table's rows and needs no role. Grouping it by a dimension on its own table is rejected too, with the ``dimension ... is ambiguous`` error (a known limitation).
+**Cause:** The first form: a metric, dimension, or fact reaches a fact on a role-playing table (or on a table reached only through one), and nothing says which relationship to read it through. The second form: a metric is declared on the role-playing table itself (or on a table reached only through it), where ``USING`` cannot be attached, and the query groups or filters it by a dimension on a table reached only across those relationships (a flight's carrier, beside an airport count), or its ``NON ADDITIVE BY`` or window names one: those would be joined to the metric's rows through one of the relationships without saying which. A metric on the role-playing table queried with no dimension, alone or beside metrics on other tables, is computed over its own table's rows and needs no role, and so is one grouped or filtered by its own table's dimensions, or by a dimension it reaches without crossing those relationships (the airports' one-to-one details).
 
 **Fix:** Declare the metric on the referencing table and give it a ``USING`` that names one relationship, for example ``f.dep_elev USING (dep_airport) AS SUM(a.elev)``. See :ref:`howto-rp-facts`.
 

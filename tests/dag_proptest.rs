@@ -157,13 +157,45 @@ impl Case {
     }
 
     /// The one chain the oracle follows from `from` to `to`: across the role
-    /// the metric's `USING` names, when it names one.
+    /// the metric's `USING` names, when it names one. With no chain, the way
+    /// [`Self::back_across_role`] finds.
     fn chosen_chain(&self, from: usize, to: usize) -> (Vec<usize>, Option<bool>) {
         let role = self.role();
         self.role_chains(from, to)
             .into_iter()
             .find(|(_, r)| r.is_none() || *r == role)
+            .or_else(|| Some((self.back_across_role(from, to)?, role)))
             .expect("an answered member has a chain")
+    }
+
+    /// The way from `from`, the metric's table, to `to` when no chain leads
+    /// there but the one path over relationships in either direction starts
+    /// across the doubled relationship, in the role the metric's `USING`
+    /// names, and then steps forward or back along one-to-one relationships
+    /// (Phase 7 PR 4b, Snowflake fixture 6: the details of the arriving
+    /// airport). `None` otherwise.
+    fn back_across_role(&self, from: usize, to: usize) -> Option<Vec<usize>> {
+        let (a, b) = self.pair()?;
+        self.role()?;
+        if from != a || !self.chains(from, to).is_empty() {
+            return None;
+        }
+        let [path] = undirected_paths(self, from, to).try_into().ok()?;
+        if path.get(1) != Some(&b) {
+            return None;
+        }
+        path[1..]
+            .windows(2)
+            .all(|w| self.edges.contains(&(w[0], w[1])) || self.one_to_one_edge(w[1], w[0]))
+            .then_some(path)
+    }
+
+    /// Whether `t{from}` references `t{to}` one-to-one.
+    fn one_to_one_edge(&self, from: usize, to: usize) -> bool {
+        self.edges
+            .iter()
+            .zip(&self.one_to_one)
+            .any(|(&e, &one)| one && e == (from, to))
     }
 
     fn members(&self) -> Vec<usize> {
@@ -239,6 +271,7 @@ fn arb_case() -> impl Strategy<Value = Case> {
                     doubled,
                     using,
                     prop::bool::weighted(0.5),
+                    prop::bool::weighted(0.5),
                 ),
             )
         })
@@ -249,7 +282,7 @@ fn arb_case() -> impl Strategy<Value = Case> {
         .prop_map(
             |(
                 (n, edges, one_to_one, rows, o1, o2),
-                (metric, dims, filter, doubled, using, aim),
+                (metric, dims, filter, doubled, using, aim, aim_back),
             )| {
                 let mut case = Case {
                     n,
@@ -267,9 +300,25 @@ fn arb_case() -> impl Strategy<Value = Case> {
                 // by the role-played table's dimension, which random draws
                 // reach too rarely.
                 if let (true, Some((from, to))) = (aim, case.pair()) {
-                    case.metric = Some(from);
+                    // With no role drawn, the role-played table's own metric
+                    // instead (Phase 7 PR 4b, TECH-DEBT #86).
+                    case.metric = Some(if case.using.is_none() { to } else { from });
                     if !case.dims.contains(&to) {
                         case.dims.push(to);
+                    }
+                    // And half of those by a table that references the
+                    // role-played one too, reached back across it (Phase 7
+                    // PR 4b), in place of the role-played table's own.
+                    // Its relationship is made one-to-one, so the step back
+                    // does not fan out.
+                    let back = case.edges.iter().position(|&(f, t)| t == to && f != from);
+                    if let (true, Some(i)) = (aim_back, back) {
+                        let c = case.edges[i].0;
+                        case.one_to_one[i] = true;
+                        case.dims.retain(|&d| d != to);
+                        if !case.dims.contains(&c) {
+                            case.dims.push(c);
+                        }
                     }
                 }
                 case
@@ -432,11 +481,21 @@ fn joined_from(
         for (step, pair) in chain.windows(2).enumerate() {
             let alias = format!("c{ci}_{step}");
             let second = *role == Some(true) && case.pair() == Some((pair[0], pair[1]));
-            sql.push_str(&format!(
-                " LEFT JOIN t{to} AS {alias} ON {prev}.f{to}{b} = {alias}.id",
-                to = pair[1],
-                b = if second { "b" } else { "" }
-            ));
+            if case.edges.contains(&(pair[0], pair[1])) {
+                sql.push_str(&format!(
+                    " LEFT JOIN t{to} AS {alias} ON {prev}.f{to}{b} = {alias}.id",
+                    to = pair[1],
+                    b = if second { "b" } else { "" }
+                ));
+            } else {
+                // A step back along a one-to-one relationship
+                // ([`Case::back_across_role`]).
+                sql.push_str(&format!(
+                    " LEFT JOIN t{to} AS {alias} ON {alias}.f{from} = {prev}.id",
+                    to = pair[1],
+                    from = pair[0]
+                ));
+            }
             prev = alias;
         }
         at.push((*member, prev));
@@ -511,6 +570,12 @@ enum Expect {
     Either,
 }
 
+/// Whether `path` steps across the doubled relationship.
+fn crosses_roles_on(case: &Case, path: &[usize]) -> bool {
+    case.pair()
+        .is_some_and(|(a, b)| path.windows(2).any(|w| w == [a, b] || w == [b, a]))
+}
+
 /// The paths from `from` to `to` over relationships in either direction, each
 /// table at most once, found by brute force (a graph has at most five
 /// tables). The doubled relationship is one step here.
@@ -537,25 +602,39 @@ fn undirected_paths(case: &Case, from: usize, to: usize) -> Vec<Vec<usize>> {
 fn expect(case: &Case) -> Expect {
     let members = case.members();
     if let Some(m) = case.metric {
-        if case.past_roles(m) && members.iter().any(|&d| d != m) {
-            return Expect::Either;
-        }
-        // A filter carries no `USING`, so one past the role-played table is
-        // refused whatever role the metric names: a fence of its own.
-        if case.role().is_some() && case.filter.is_some_and(|(k, _)| case.past_roles(k)) {
-            return Expect::Either;
-        }
         let crosses_roles = |path: &[usize]| {
             case.pair()
                 .is_some_and(|(a, b)| path.windows(2).any(|w| w == [a, b] || w == [b, a]))
         };
+        // A metric on the role-played table reads its own rows, and a member
+        // its rows reach without crossing a role is restated below like any
+        // other (Phase 7 PR 4b: TECH-DEBT #86 and #111). One reached only
+        // across a role is joined through one, which the metric cannot name.
+        // A metric past the role-played table with other members is not
+        // restated.
+        let on_roles = case.pair().is_some_and(|(_, b)| b == m);
+        let across_own_roles = on_roles
+            && members.iter().any(|&d| {
+                d != m
+                    && undirected_paths(case, m, d)
+                        .iter()
+                        .all(|p| crosses_roles(p))
+            });
+        if !on_roles && case.past_roles(m) && members.iter().any(|&d| d != m) {
+            return Expect::Either;
+        }
         let mut refusals: Vec<&'static str> = Vec::new();
+        if across_own_roles {
+            // Or as a fan trap, across a role to the table that plays them.
+            // Another member's own refusal may be reported first.
+            refusals.extend(["ambiguous", "fan trap"]);
+        }
         let mut restated = true;
         for &d in &members {
             let chains = case.role_chains(m, d);
             let across = chains.iter().filter(|(_, r)| r.is_some()).count();
             let beside = chains.len() - across;
-            if across == 0 && case.past_roles(d) {
+            if across == 0 && case.past_roles(d) && !on_roles {
                 // A chain that does not cross to a role-played table: the
                 // role-playing check refuses its dimension without a USING.
                 restated = false;
@@ -570,9 +649,15 @@ fn expect(case: &Case) -> Expect {
                 None => chains.len(),
             };
             match count {
+                0 if case.back_across_role(m, d).is_some() => {}
                 0 => {
                     let paths = undirected_paths(case, m, d);
                     if paths.iter().any(|p| crosses_roles(p)) {
+                        // Refused already as across the metric's own roles,
+                        // or first as no chain and two ways.
+                        if across_own_roles && paths.len() > 1 {
+                            refusals.push("many-to-many");
+                        }
                         restated = false;
                     } else if paths.len() > 1 {
                         refusals.push("many-to-many");
@@ -587,6 +672,9 @@ fn expect(case: &Case) -> Expect {
             return Expect::Refused(refusals);
         }
         let one_each = members.iter().all(|&d| {
+            if case.back_across_role(m, d).is_some() {
+                return true;
+            }
             let chains = case.role_chains(m, d);
             match case.role() {
                 Some(r) => {
@@ -849,10 +937,15 @@ enum Listing {
     /// relationship), so a query needs `USING` to pick one.
     ListedTwoWays,
     /// Listed and refused, with the metric's or the dimension's table the
-    /// role-played one or past it. The query refuses some of these that
-    /// Snowflake answers, a metric on the role-played table by its own
-    /// dimension among them (TECH-DEBT #111, Phase 7 PR 4b), so the listing
-    /// is not held to the query there.
+    /// role-played one or past it, and a path between them that crosses no
+    /// role: lounges by their airport's city (a metric with no `USING` on a
+    /// table that references the role-played one once), or regions by a
+    /// gate's (a fan-out through the role-played table). The query refuses
+    /// them as naming no role, or as a fan trap through a role-played table;
+    /// Snowflake fixture 9's L and P cases ask whether Snowflake answers them.
+    /// A metric on the role-played table by its own or its one-to-one
+    /// neighbour's dimension, or across a plain fan-out, is answered since
+    /// Phase 7 PR 4b and held to the listing.
     ListedNearRoles,
 }
 
@@ -914,7 +1007,13 @@ fn check_listing(case: &Case) -> Result<Vec<(Listing, bool)>, TestCaseError> {
                 (Ok(_), true) => Listing::Answered,
                 (Err(_), false) => Listing::Refused,
                 (Err(_), true) if two_ways => Listing::ListedTwoWays,
-                (Err(_), true) if case.past_roles(m) || case.past_roles(d) => {
+                (Err(_), true)
+                    if (case.past_roles(m) || case.past_roles(d))
+                        && case.pair().is_some_and(|(_, b)| b != m)
+                        && !undirected_paths(case, m, d)
+                            .iter()
+                            .all(|p| crosses_roles_on(case, p)) =>
+                {
                     Listing::ListedNearRoles
                 }
                 (Ok(_), false) => {
@@ -1011,6 +1110,29 @@ fn generator_reaches_every_outcome() {
                 .iter()
                 .any(|&d| case.role_chains(m, d).iter().any(|(_, r)| r.is_some()))
         });
+        let m = case.metric;
+        let back = m.is_some_and(|m| {
+            case.members()
+                .iter()
+                .any(|&d| case.back_across_role(m, d).is_some())
+        });
+        let on_roles = m.is_some_and(|m| case.pair().is_some_and(|(_, b)| b == m));
+        let filtered =
+            case.role().is_some() && case.filter.is_some_and(|(k, _)| case.past_roles(k));
+        let role_key = match expect(&case) {
+            Expect::Rows(_) if back => Some("role back across answered"),
+            Expect::Rows(_) if filtered => Some("role filter answered"),
+            Expect::Rows(_) if on_roles && !case.members().is_empty() => {
+                Some("metric on the role-played table answered")
+            }
+            Expect::Refused(t) if on_roles && t.starts_with(&["ambiguous", "fan trap"]) => {
+                Some("metric on the role-played table refused")
+            }
+            _ => None,
+        };
+        if let Some(key) = role_key {
+            *seen.entry(key).or_default() += 1;
+        }
         if across {
             let key = match (case.role(), expect(&case)) {
                 (None, Expect::Refused(_)) => "role refused",
@@ -1044,6 +1166,10 @@ fn generator_reaches_every_outcome() {
     for key in [
         "role refused",
         "role answered",
+        "role back across answered",
+        "role filter answered",
+        "metric on the role-played table answered",
+        "metric on the role-played table refused",
         "no shared table",
         "metric alone",
         "metric answered",

@@ -281,9 +281,17 @@ fn render(paths: &[Vec<String>]) -> Vec<String> {
 
 /// The tables `table` shares a relationship with, in either direction, each
 /// once, sorted: so a walk over them does not depend on declaration order.
-fn neighbours(def: &SemanticViewDefinition, table: &str) -> Vec<String> {
+fn neighbours(
+    def: &SemanticViewDefinition,
+    table: &str,
+    keep: &dyn Fn(&crate::model::Join) -> bool,
+) -> Vec<String> {
     let mut out: Vec<String> = Vec::new();
-    for j in def.joins.iter().filter(|j| !j.fk_columns.is_empty()) {
+    for j in def
+        .joins
+        .iter()
+        .filter(|j| !j.fk_columns.is_empty() && keep(j))
+    {
         let other = if j.from_alias.eq_ignore_ascii_case(table) {
             &j.table
         } else if j.table.eq_ignore_ascii_case(table) {
@@ -309,6 +317,17 @@ pub(super) fn undirected_path(
     to: &str,
     skip: Option<(&str, &str)>,
 ) -> Option<Vec<String>> {
+    undirected_path_over(def, from, to, skip, &|_| true)
+}
+
+/// [`undirected_path`] over only the relationships `keep` accepts.
+pub(super) fn undirected_path_over(
+    def: &SemanticViewDefinition,
+    from: &str,
+    to: &str,
+    skip: Option<(&str, &str)>,
+    keep: &dyn Fn(&crate::model::Join) -> bool,
+) -> Option<Vec<String>> {
     let mut parent: HashMap<String, String> = HashMap::new();
     let mut queue = std::collections::VecDeque::from([from.to_string()]);
     let mut seen: HashSet<String> = HashSet::from([from.to_string()]);
@@ -321,7 +340,7 @@ pub(super) fn undirected_path(
             path.reverse();
             return Some(path);
         }
-        for next in neighbours(def, &current) {
+        for next in neighbours(def, &current, keep) {
             let skipped = skip
                 .is_some_and(|(a, b)| (current == a && next == b) || (current == b && next == a));
             if !skipped && seen.insert(next.clone()) {
@@ -346,9 +365,19 @@ pub(super) fn two_undirected_paths(
     from: &str,
     to: &str,
 ) -> Option<[Vec<String>; 2]> {
-    let first = undirected_path(def, from, to, None)?;
+    two_undirected_paths_over(def, from, to, &|_| true)
+}
+
+/// [`two_undirected_paths`] over only the relationships `keep` accepts.
+pub(super) fn two_undirected_paths_over(
+    def: &SemanticViewDefinition,
+    from: &str,
+    to: &str,
+    keep: &dyn Fn(&crate::model::Join) -> bool,
+) -> Option<[Vec<String>; 2]> {
+    let first = undirected_path_over(def, from, to, None, keep)?;
     first.windows(2).find_map(|step| {
-        let second = undirected_path(def, from, to, Some((&step[0], &step[1])))?;
+        let second = undirected_path_over(def, from, to, Some((&step[0], &step[1])), keep)?;
         Some([first.clone(), second])
     })
 }

@@ -296,10 +296,42 @@ pub(super) struct ResolvedJoin<'a> {
     /// Whether `emit_alias` is a role-playing scoped alias. Scoped joins put
     /// the scoped alias on the PK side of the synthesized ON clause.
     pub scoped: bool,
-    /// The scoped alias of the referencing side, when the edge leaves a
+    /// The scoped alias of the side already joined, when the edge leaves a
     /// role-played instance: `a__dep` for `regions` reached through the
-    /// departure airport (Phase 6.3b). `None` uses the declared `from_alias`.
+    /// departure airport (Phase 6.3b), the referencing side; or, for an edge
+    /// walked back to the table that references it (`bare_alias` is the
+    /// edge's `from_alias`), the referenced side, `a__dep` for the airport's
+    /// one-to-one details (TECH-DEBT #111). `None` uses the declared
+    /// `from_alias`.
     pub from_emit: Option<String>,
+}
+
+impl<'a> ResolvedJoin<'a> {
+    /// The join of one step of a role's path ([`super::role_playing::role_path`])
+    /// under the role `rel`'s scoped aliases, off the role's instance of the
+    /// table before it.
+    pub(super) fn role_step(step: super::role_playing::RoleStep<'a>, rel: &str) -> Self {
+        let joined = step.joined();
+        let off = if step.reverse {
+            &step.edge.table
+        } else {
+            &step.edge.from_alias
+        };
+        ResolvedJoin {
+            emit_alias: scoped_join_alias(&joined, rel),
+            bare_alias: joined,
+            join: step.edge,
+            scoped: true,
+            from_emit: Some(scoped_join_alias(off, rel)),
+        }
+    }
+
+    /// Whether the edge is walked back, from the table it references to the
+    /// one that references it, which this join brings in.
+    fn walks_back(&self) -> bool {
+        self.join.from_alias.eq_ignore_ascii_case(&self.bare_alias)
+            && !self.join.table.eq_ignore_ascii_case(&self.bare_alias)
+    }
 }
 
 /// Render `LEFT JOIN` clauses for resolver-selected edges onto `sql`.
@@ -369,7 +401,18 @@ pub(super) fn push_join_clauses(
             quote_stored_ident(&rj.emit_alias)
         });
         sql.push_str(" ON ");
-        if rj.scoped {
+        if rj.scoped && rj.walks_back() {
+            // A role's instance of a table that references the role-played
+            // one (`d__arr` off `a__arr`): the referencing side is this join.
+            let off = rj.from_emit.as_deref().unwrap_or(&rj.join.table);
+            sql.push_str(&on_clause(
+                rj.join,
+                &def.tables,
+                Some(&rj.emit_alias),
+                &quote_ident(off),
+                AsofSide::Forward,
+            ));
+        } else if rj.scoped {
             sql.push_str(&synthesize_on_clause_scoped(
                 rj.join,
                 &def.tables,
@@ -710,10 +753,10 @@ pub(super) fn resolve_joins_pkfk<'a>(
     for dim in resolved_dims {
         if let Some(ref st) = dim.source_table {
             let alias = st.to_ascii_lowercase();
-            if let Some(rp) = super::role_playing::role_playing_on_path("", def, &starts, &alias)
+            if let Some(rp) = super::role_playing::role_above("", def, &starts, &alias)
                 .ok()
                 .flatten()
-                .filter(|rp| *rp != alias && role_playing_bare_aliases.contains(rp))
+                .filter(|rp| role_playing_bare_aliases.contains(rp))
             {
                 if !descendant_tables.iter().any(|(_, d)| *d == alias) {
                     descendant_tables.push((rp, alias));
@@ -924,18 +967,12 @@ pub(super) fn resolve_joins_pkfk<'a>(
             if *rp != target {
                 continue;
             }
-            for edge in super::role_playing::descendant_chain(def, rp, table).unwrap_or_default() {
-                let emit_alias = scoped_join_alias(&edge.table, rel);
-                if result.iter().any(|rj| rj.emit_alias == emit_alias) {
+            for step in super::role_playing::role_path(def, rp, table).unwrap_or_default() {
+                let rj = ResolvedJoin::role_step(step, rel);
+                if result.iter().any(|r| r.emit_alias == rj.emit_alias) {
                     continue;
                 }
-                result.push(ResolvedJoin {
-                    bare_alias: edge.table.to_ascii_lowercase(),
-                    emit_alias,
-                    join: edge,
-                    scoped: true,
-                    from_emit: Some(scoped_join_alias(&edge.from_alias, rel)),
-                });
+                result.push(rj);
             }
         }
     }
