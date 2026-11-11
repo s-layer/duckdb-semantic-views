@@ -2,11 +2,9 @@
 //!
 //! Shape: a bridge table `bt` references both `h` (`bt.hid -> h.id`) and `x`
 //! (`bt.xid -> x.id`). Each side has its own many-to-one parent: `h.fk_z ->
-//! z.id` and `x.fk_y -> y.id`. When the base table is `h`, a plain child
-//! `c.hid -> h.id` hangs under `h` too. CREATE has accepted that child with
-//! any base table since 0.19.0; the harness declares it only where its oracle
-//! models it. The base table is drawn from `h`, `x`,
-//! `bt` and `z`, because a bridge must not depend on which table comes first.
+//! z.id` and `x.fk_y -> y.id`, and a plain child `c.hid -> h.id` hangs under
+//! `h`. The base table is drawn from `h`, `x`, `bt` and `z`, because a bridge
+//! must not depend on which table comes first.
 //!
 //! Every relationship is many-to-one, and the data holds NULL and dangling
 //! foreign keys, NULL dimension values and values, duplicate bridge rows,
@@ -19,8 +17,10 @@
 //!    (across the bridge), but not on `c`, a plain child below its grain. A
 //!    metric on `x` likewise reaches `y` directly and `bt`, `h` and `z` across
 //!    the bridge, and a metric on `bt` reaches every table but `c` many-to-one.
-//!    Anything with two fan-outs or a fan-out after a hop up is refused. The
-//!    rule is restated here from the topology, not read from the expander.
+//!    A metric on `c` hops up to `h` and `z`, then reaches `bt`, `x` and `y`
+//!    across the bridge after the hop up (Snowflake's fixture 3, H1-H4).
+//!    Anything with two fan-outs is refused. The rule is restated here from
+//!    the topology, not read from the expander.
 //! 2. **Accepted query ⇒ numerically correct.** The oracle is computed in
 //!    Rust, never in SQL: for each row of a metric's home table it enumerates
 //!    the rows it reaches through the bridge (one row with NULLs if none),
@@ -52,8 +52,8 @@ struct Instance {
     y: Vec<Cell>,
     /// `(hid, xid, rcat, bv)`.
     bt: Vec<(Cell, Cell, Cell, Cell)>,
-    /// `(hid, ccat)`.
-    c: Vec<(Cell, Cell)>,
+    /// `(hid, ccat, cv)`.
+    c: Vec<(Cell, Cell, Cell)>,
 }
 
 /// The tables, and which one each dimension and metric lives on.
@@ -68,23 +68,27 @@ const DIMS: [(&str, &str, &str); 6] = [
     ("ccat", "c", "ccat"),
 ];
 /// `(metric name, table, aggregate, value column)`; `None` is `COUNT(*)`.
-const METS: [(&str, &str, Option<&str>); 5] = [
+const METS: [(&str, &str, Option<&str>); 7] = [
     ("sum_hv", "h", Some("hv")),
     ("cnt_h", "h", None),
     ("sum_xv", "x", Some("xv")),
     ("cnt_bt", "bt", None),
     ("sum_bv", "bt", Some("bv")),
+    ("sum_cv", "c", Some("cv")),
+    ("cnt_c", "c", None),
 ];
 
 /// How a metric's home table reaches a member's table, restated from the
 /// topology: `true` when the query is answerable (the same table, a
-/// many-to-one path, or one fan-out straight into the bridge followed by
-/// many-to-one hops), `false` when it fans otherwise.
+/// many-to-one path, or many-to-one hops, one fan-out into the bridge, and
+/// many-to-one hops again), `false` when it fans otherwise.
 fn reachable(home: &str, table: &str) -> bool {
     match home {
         "h" => table != "c",
         "x" => table != "c",
         "bt" => table != "c",
+        // `c -> h <- bt -> x -> y`: the bridge after a hop up.
+        "c" => true,
         _ => unreachable!("no metric on {home}"),
     }
 }
@@ -238,6 +242,30 @@ fn reach<'a>(inst: &'a Instance, home: &str) -> Vec<Vec<Wide<'a>>> {
                 vec![w]
             })
             .collect(),
+        // Up to `h` (and `z`), then across the bridge from that `h` row.
+        "c" => (0..inst.c.len())
+            .map(|i| {
+                let mut w = base.clone();
+                w.c = Some(i);
+                let h = lookup(inst.c[i].0, inst.h.len());
+                with_h(&mut w, h);
+                let links: Vec<usize> = (0..inst.bt.len())
+                    .filter(|b| h.is_some() && lookup(inst.bt[*b].0, inst.h.len()) == h)
+                    .collect();
+                if links.is_empty() {
+                    return vec![w];
+                }
+                links
+                    .into_iter()
+                    .map(|b| {
+                        let mut w = w.clone();
+                        w.bt = Some(b);
+                        with_x(&mut w, lookup(inst.bt[b].1, inst.x.len()));
+                        w
+                    })
+                    .collect()
+            })
+            .collect(),
         _ => unreachable!(),
     }
 }
@@ -248,6 +276,7 @@ fn metric_value(inst: &Instance, m: usize, i: usize) -> Cell {
         "sum_hv" => inst.h[i].2,
         "sum_xv" => inst.x[i].2,
         "sum_bv" => inst.bt[i].3,
+        "sum_cv" => inst.c[i].2,
         _ => None,
     }
 }
@@ -321,10 +350,6 @@ struct Case {
 }
 
 impl Case {
-    fn has_child(&self) -> bool {
-        self.first == "h"
-    }
-
     /// Whether the oracle says the query is answerable.
     fn answerable(&self) -> bool {
         let mut members = self.dims.clone();
@@ -355,7 +380,7 @@ fn arb_instance() -> impl Strategy<Value = Instance> {
             prop::collection::vec(cell(3), nz),
             prop::collection::vec(cell(3), ny),
             prop::collection::vec((fk(nh), fk(nx), cell(3), cell(20)), 0..9),
-            prop::collection::vec((fk(nh), cell(3)), 0..4),
+            prop::collection::vec((fk(nh), cell(3), cell(20)), 0..4),
         )
             .prop_map(|(h, x, z, y, bt, c)| Instance { h, x, z, y, bt, c })
     })
@@ -379,11 +404,11 @@ fn arb_case() -> impl Strategy<Value = Case> {
     (
         arb_instance(),
         prop::sample::select(vec!["h", "x", "bt", "z"]),
-        prop::sample::subsequence((0..5).collect::<Vec<usize>>(), 1..=3),
+        prop::sample::subsequence((0..METS.len()).collect::<Vec<usize>>(), 1..=3),
         any::<u8>(),
     )
         .prop_flat_map(|(inst, first, mets, salt)| {
-            let n_dims = if first == "h" { 6 } else { 5 };
+            let n_dims = DIMS.len();
             (
                 Just(inst),
                 Just(first),
@@ -426,7 +451,6 @@ fn rel(name: &str, from: &str, to: &str, fk_col: &str) -> Join {
 fn build_def(case: &Case) -> SemanticViewDefinition {
     let mut tables: Vec<TableRef> = TABLES
         .iter()
-        .filter(|t| **t != "c" || case.has_child())
         .map(|t| table_ref(t, if *t == "bt" { &[] } else { &["id"] }))
         .collect();
     let at = tables
@@ -440,13 +464,10 @@ fn build_def(case: &Case) -> SemanticViewDefinition {
         rel("bt_x", "bt", "x", "xid"),
         rel("h_z", "h", "z", "fk_z"),
         rel("x_y", "x", "y", "fk_y"),
+        rel("c_h", "c", "h", "hid"),
     ];
-    if case.has_child() {
-        joins.push(rel("c_h", "c", "h", "hid"));
-    }
     let dimensions = DIMS
         .iter()
-        .filter(|(_, t, _)| *t != "c" || case.has_child())
         .map(|(name, t, col)| Dimension {
             name: (*name).to_string(),
             expr: format!("{t}.{col}"),
@@ -484,7 +505,7 @@ fn make_db(inst: &Instance) -> duckdb::Connection {
          CREATE TABLE z_tbl (id BIGINT, zcat BIGINT);
          CREATE TABLE y_tbl (id BIGINT, ycat BIGINT);
          CREATE TABLE bt_tbl (hid BIGINT, xid BIGINT, rcat BIGINT, bv BIGINT);
-         CREATE TABLE c_tbl (id BIGINT, hid BIGINT, ccat BIGINT);",
+         CREATE TABLE c_tbl (id BIGINT, hid BIGINT, ccat BIGINT, cv BIGINT);",
     )
     .expect("schema");
     let mut sql = String::new();
@@ -519,11 +540,12 @@ fn make_db(inst: &Instance) -> duckdb::Connection {
             sql_cell(*v)
         );
     }
-    for (i, (hid, cat)) in inst.c.iter().enumerate() {
+    for (i, (hid, cat, v)) in inst.c.iter().enumerate() {
         sql += &format!(
-            "INSERT INTO c_tbl VALUES ({i}, {}, {});",
+            "INSERT INTO c_tbl VALUES ({i}, {}, {}, {});",
             sql_cell(*hid),
-            sql_cell(*cat)
+            sql_cell(*cat),
+            sql_cell(*v)
         );
     }
     con.execute_batch(&sql).expect("data");
@@ -705,7 +727,7 @@ fn arb_dims_only_case() -> impl Strategy<Value = Case> {
         prop::sample::select(vec!["h", "x", "bt", "z"]),
     )
         .prop_flat_map(|(inst, first)| {
-            let n_dims = if first == "h" { 6 } else { 5 };
+            let n_dims = DIMS.len();
             (
                 Just(inst),
                 Just(first),
@@ -848,6 +870,7 @@ fn generator_reaches_bridged_refused_and_filtered_cases() {
     use proptest::test_runner::TestRunner;
     let mut runner = TestRunner::deterministic();
     let (mut bridged, mut refused, mut filtered) = (false, false, false);
+    let (mut hop_up, mut hop_up_filtered) = (0, 0);
     let mut firsts: BTreeSet<&str> = BTreeSet::new();
     for _ in 0..2000 {
         let case = arb_case().new_tree(&mut runner).unwrap().current();
@@ -855,9 +878,19 @@ fn generator_reaches_bridged_refused_and_filtered_cases() {
         let crosses = |m: usize, d: usize| {
             matches!(
                 (METS[m].1, DIMS[d].1),
-                ("h", "x" | "bt" | "y") | ("x", "h" | "bt" | "z")
+                ("h" | "c", "x" | "bt" | "y") | ("x", "h" | "bt" | "z")
             )
         };
+        let after_hop_up =
+            |m: usize, d: usize| METS[m].1 == "c" && matches!(DIMS[d].1, "x" | "bt" | "y");
+        if case.answerable()
+            && case
+                .mets
+                .iter()
+                .any(|m| case.dims.iter().any(|d| after_hop_up(*m, *d)))
+        {
+            hop_up += 1;
+        }
         if case.answerable()
             && case
                 .mets
@@ -875,11 +908,25 @@ fn generator_reaches_bridged_refused_and_filtered_cases() {
             if case.answerable() && case.mets.iter().any(|m| ds.iter().any(|d| crosses(*m, *d))) {
                 filtered = true;
             }
+            if case.answerable()
+                && case
+                    .mets
+                    .iter()
+                    .any(|m| ds.iter().any(|d| after_hop_up(*m, *d)))
+            {
+                hop_up_filtered += 1;
+            }
         }
     }
     assert!(
         bridged && refused && filtered,
         "{bridged} {refused} {filtered}"
+    );
+    // A metric on `c` grouped, and filtered, across the bridge after its hop up,
+    // in queries that are answered and so compared with the oracle.
+    assert!(
+        hop_up >= 100 && hop_up_filtered >= 30,
+        "{hop_up} {hop_up_filtered}"
     );
     assert_eq!(firsts.len(), 4, "{firsts:?}");
 }

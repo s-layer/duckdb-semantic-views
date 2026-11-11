@@ -494,12 +494,36 @@ fn two_fan_outs_are_refused() {
     assert!(matches!(e, ExpandError::FanTrap { .. }), "{e}");
 }
 
-/// A fan-out after a hop up (reviews -> books <- bridge -> authors) would need
-/// the reviews' own key to dedup by, and is refused.
+/// A fan-out after a hop up (reviews -> books <- bridge -> authors) counts each
+/// review once per country, as Snowflake does (fixture 3's H1): reviews 1 and
+/// 2 are of Duo (two French authors), review 3 of Mixed (French and British).
 #[test]
-fn fan_out_after_a_hop_up_is_refused() {
-    let e = refusal(&bridge_def("b"), &["country"], &["review_count"]);
-    assert!(matches!(e, ExpandError::FanTrap { .. }), "{e}");
+fn fan_out_after_a_hop_up_counts_once_per_group() {
+    for first in ["b", "a", "ba", "r"] {
+        assert_eq!(
+            run(&bridge_def(first), &["country"], &["review_count"], None),
+            table_of(&[&["FR", "3"], &["UK", "1"]]),
+            "base table {first}"
+        );
+    }
+}
+
+/// After a hop up the anchor may declare no PRIMARY KEY to deduplicate its
+/// rows by; the query is then refused, and the message says a bridge is the
+/// reason and asks for the key.
+#[test]
+fn fan_out_after_a_hop_up_without_a_primary_key_is_refused() {
+    let mut def = bridge_def("b");
+    let reviews = def.tables.iter_mut().find(|t| t.alias == "r").expect("r");
+    reviews.pk_columns.clear();
+    def.metrics
+        .push(metric("total_stars", "SUM(r.stars)", Some("r")));
+    let e = refusal(&def, &["country"], &["total_stars"]);
+    assert!(
+        matches!(&e, ExpandError::FanTrap { detail } if detail.across_bridge),
+        "{e}"
+    );
+    assert!(e.to_string().contains("PRIMARY KEY"), "{e}");
 }
 
 /// A semi-additive metric across the bridge is refused, and the message says a
@@ -547,6 +571,44 @@ fn window_metric_across_the_bridge_is_refused() {
         "{e}"
     );
     assert!(e.to_string().contains("many-to-many bridge"), "{e}");
+}
+
+/// A window metric and a semi-additive one across the bridge after a hop up are
+/// refused as across a bridge reached directly: neither path deduplicates the
+/// reviews per group. Snowflake refuses the semi-additive one too (fixture 3,
+/// S7); it answers window metrics across a bridge (fixture 4), which is the
+/// parity plan's PR 5.
+#[test]
+fn window_and_semi_additive_across_the_bridge_after_a_hop_up_are_refused() {
+    let mut def = bridge_def("b");
+    def.metrics.push(Metric {
+        name: "avg_reviews".to_string(),
+        expr: "AVG(review_count)".to_string(),
+        source_table: Some("r".to_string()),
+        window_spec: Some(crate::model::WindowSpec {
+            window_function: "AVG".to_string(),
+            inner_metric: "review_count".to_string(),
+            extra_args: vec![],
+            excluding_dims: vec![],
+            partition_dims: vec!["country".to_string()],
+            order_by: vec![],
+            frame_clause: None,
+        }),
+        ..Default::default()
+    });
+    let mut last = metric("last_stars", "SUM(r.stars)", Some("r"));
+    last.non_additive_by = vec![NonAdditiveDim {
+        dimension: "stars".to_string(),
+        ..Default::default()
+    }];
+    def.metrics.push(last);
+    for met in ["avg_reviews", "last_stars"] {
+        let e = refusal(&def, &["country"], &[met]);
+        assert!(
+            matches!(&e, ExpandError::FanTrap { detail } if detail.across_bridge),
+            "{met}: {e}"
+        );
+    }
 }
 
 /// When a query is refused for a plain fan-out and also crosses a bridge, the

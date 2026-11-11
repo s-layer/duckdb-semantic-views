@@ -245,6 +245,7 @@ fn hv() -> SemanticViewDefinition {
             dim("country", "a.country", "a"),
             dim("title", "b.title", "b"),
             dim("stars", "rv.stars", "rv"),
+            dim("review_id", "rv.review_id", "rv"),
         ],
         metrics: vec![
             metric("review_count", "COUNT(rv.review_id)", "rv"),
@@ -580,23 +581,78 @@ fn h5_review_metric_by_book_dimension_is_answered() {
 }
 
 /// H2: review metrics with no dimension.
-/// H1, H3, H6: a fan-out after a hop up. Snowflake counts each review once
-/// per author country it reaches across the bridge; we still refuse, in every
-/// order, as a fan trap (TECH-DEBT #111, Phase 7 PR 4).
+/// H1: review metrics by author country. Reviews hop up to books, then cross
+/// the `book_authors` bridge, and Snowflake counts each review once per
+/// country it reaches: FR 2 / 8 (Duo's two French authors count review 1 and
+/// review 2 once each), UK 1 / 4, and the review of the authorless Orphan with
+/// the review of no book in the NULL group, 2 / 3.
 #[test]
-fn h1_h3_h6_a_fan_out_after_a_hop_up_is_still_refused() {
-    let requests = [
-        req(&["country"], &["review_count", "total_stars"], None),
-        req(&[], &["review_count"], Some("a.country = 'FR'")),
-        req(&["stars", "country"], &[], None),
-    ];
+fn h1_review_metrics_by_a_dimension_across_the_bridge_after_a_hop_up_are_answered() {
+    assert_answer(
+        &hv(),
+        &req(&["country"], &["review_count", "total_stars"], None),
+        &[&["FR", "2", "8"], &["UK", "1", "4"], &["NULL", "2", "3"]],
+    );
+}
+
+/// H3: filtered across the bridge after a hop up: a review is kept when any
+/// author of its book is French, and counted once (2 / 8).
+#[test]
+fn h3_review_metrics_filtered_across_the_bridge_after_a_hop_up_are_answered() {
+    assert_answer(
+        &hv(),
+        &req(
+            &[],
+            &["review_count", "total_stars"],
+            Some("a.country = 'FR'"),
+        ),
+        &[&["2", "8"]],
+    );
+}
+
+/// H4: a review metric (across the bridge after a hop up) beside a book metric
+/// (across the bridge directly), each counted once per country: FR 2 / 300,
+/// UK 1 / 500, NULL 2 / 50.
+#[test]
+fn h4_two_grains_across_one_bridge_are_answered() {
+    assert_answer(
+        &hv(),
+        &req(&["country"], &["review_count", "total_pages"], None),
+        &[
+            &["FR", "2", "300"],
+            &["UK", "1", "500"],
+            &["NULL", "2", "50"],
+        ],
+    );
+}
+
+/// H13 (fixture 5): by country and the review's own id, one row per review
+/// and country it reaches.
+#[test]
+fn h13_review_count_by_country_and_review_id_is_answered() {
+    assert_answer(
+        &hv(),
+        &req(&["country", "review_id"], &["review_count"], None),
+        &[
+            &["FR", "1", "1"],
+            &["FR", "2", "1"],
+            &["UK", "3", "1"],
+            &["NULL", "4", "1"],
+            &["NULL", "5", "1"],
+        ],
+    );
+}
+
+/// H6 / H12: reviews and authors with no metric. Fixture 3 gave rows, but
+/// fixture 5 refused the same query (010959, "not related"), as it refused
+/// H7, H8, H10 and H11; we refuse it in every order.
+#[test]
+fn h6_reviews_and_authors_with_no_metric_are_refused() {
     for (order, def) in every_order(&hv()) {
-        for request in &requests {
-            assert!(
-                expand("v", &def, request).is_err(),
-                "TABLES ({order}): TECH-DEBT #111 until PR 4"
-            );
-        }
+        assert!(
+            expand("v", &def, &req(&["stars", "country"], &[], None)).is_err(),
+            "TABLES ({order})"
+        );
     }
 }
 
