@@ -59,9 +59,11 @@
 //! VARCHAR inside DuckDB.
 
 use proptest::prelude::*;
-use semantic_views::expand::{expand, DimensionName, MetricName, QueryRequest};
+use semantic_views::expand::{
+    dimensions_for_metric, expand, DimensionName, MetricName, QueryRequest,
+};
 use semantic_views::model::{
-    Cardinality, Dimension, Join, Metric, SemanticViewDefinition, TableRef,
+    Cardinality, Dimension, Join, Metric, NonAdditiveDim, SemanticViewDefinition, TableRef,
 };
 
 /// One table's rows: `(g, v, fks)`, `fks` aligned with [`Graph::out_edges`].
@@ -832,6 +834,162 @@ proptest! {
     }
 }
 
+/// How `SHOW SEMANTIC DIMENSIONS ... FOR METRIC` and the query agree on one
+/// metric and one dimension of `case`'s graph.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+enum Listing {
+    /// Listed, and a query of the metric grouped by it alone is answered.
+    Answered,
+    /// Answered, and the dimension's table is reached from the metric's by
+    /// no chain of foreign keys: a fan-out (Phase 7 PR 4e, fixture 8 S1-S3).
+    AnsweredFanned,
+    /// Not listed, and refused.
+    Refused,
+    /// Listed and refused, reached two ways (two paths, or across the doubled
+    /// relationship), so a query needs `USING` to pick one.
+    ListedTwoWays,
+    /// Listed and refused, with the metric's or the dimension's table the
+    /// role-played one or past it. The query refuses some of these that
+    /// Snowflake answers, a metric on the role-played table by its own
+    /// dimension among them (TECH-DEBT #111, Phase 7 PR 4b), so the listing
+    /// is not held to the query there.
+    ListedNearRoles,
+}
+
+/// Checks every metric against every dimension in `case`'s graph (the first
+/// TABLES order): each dimension a query of the metric grouped by it alone
+/// answers is listed, and a listed one the query refuses is reached two ways
+/// (or is near the role-played table, [`Listing::ListedNearRoles`]).
+/// So the listing follows the query, which the other properties check
+/// against Snowflake's rules.
+fn check_listing(case: &Case) -> Result<Vec<(Listing, bool)>, TestCaseError> {
+    let mut def = build_def(case, &case.orders[0], false);
+    // Beside each sum, a semi-additive one by the next table's dimension: a
+    // query by that dimension answers it like any sum, and one by another
+    // dimension takes the snapshot path, which refuses every fan-out and is
+    // refused itself when its NON ADDITIVE BY dimension is reached only across
+    // one. So the listing must follow the dimension queried. Not drawn beside
+    // a doubled relationship: a snapshot joined through the role-played table
+    // needs a role a metric with no USING lacks (`semi_additive_proptest`
+    // covers that). Only this property sees these metrics.
+    let semi = if case.doubled.is_some() { 0 } else { case.n };
+    def.metrics.extend((0..semi).map(|k| {
+        let na = (k + 1) % case.n;
+        Metric {
+            name: format!("s{k}_na"),
+            expr: format!("SUM(t{k}.v)"),
+            source_table: Some(format!("t{k}")),
+            non_additive_by: vec![NonAdditiveDim {
+                dimension: format!("g{na}"),
+                ..Default::default()
+            }],
+            ..Default::default()
+        }
+    }));
+    let mut out = Vec::new();
+    for met in &def.metrics {
+        let listed: Vec<&str> = dimensions_for_metric(&def, met)
+            .iter()
+            .map(|d| d.name.as_str())
+            .collect();
+        let m: usize = met.source_table.as_deref().expect("a base metric")[1..]
+            .parse()
+            .expect("t{k}");
+        for d in 0..case.n {
+            let req = QueryRequest {
+                dimensions: vec![DimensionName::new(format!("g{d}"))],
+                metrics: vec![MetricName::new(met.name.clone())],
+                ..Default::default()
+            };
+            let answered = expand("dag", &def, &req);
+            let is_listed = listed.contains(&format!("g{d}").as_str());
+            let crosses_roles = case.pair().is_some_and(|(a, b)| {
+                undirected_paths(case, m, d)
+                    .iter()
+                    .any(|p| p.windows(2).any(|w| w == [a, b] || w == [b, a]))
+            });
+            let two_ways = undirected_paths(case, m, d).len() > 1 || crosses_roles;
+            let outcome = match (&answered, is_listed) {
+                (Ok(_), true) if case.chains(m, d).is_empty() => Listing::AnsweredFanned,
+                (Ok(_), true) => Listing::Answered,
+                (Err(_), false) => Listing::Refused,
+                (Err(_), true) if two_ways => Listing::ListedTwoWays,
+                (Err(_), true) if case.past_roles(m) || case.past_roles(d) => {
+                    Listing::ListedNearRoles
+                }
+                (Ok(_), false) => {
+                    return Err(TestCaseError::fail(format!(
+                        "{} by g{d} is answered but not listed: {listed:?}\n{case:?}",
+                        met.name
+                    )))
+                }
+                (Err(e), true) => {
+                    return Err(TestCaseError::fail(format!(
+                        "{} by g{d} is listed, reached one way, and refused: {e}\n{case:?}",
+                        met.name
+                    )))
+                }
+            };
+            out.push((outcome, !met.non_additive_by.is_empty()));
+        }
+    }
+    Ok(out)
+}
+
+proptest! {
+    #![proptest_config(ProptestConfig { cases: 256, ..ProptestConfig::default() })]
+
+    #[test]
+    fn show_lists_the_dimensions_a_query_of_the_metric_answers(case in arb_case()) {
+        check_listing(&case)?;
+    }
+}
+
+/// The listing property sees every kind of outcome, fanned answers and
+/// two-way listings included, so none of its branches is vacuous.
+#[test]
+fn listing_reaches_every_outcome() {
+    use proptest::strategy::ValueTree;
+    use proptest::test_runner::TestRunner;
+
+    let mut runner = TestRunner::deterministic();
+    let mut seen: std::collections::HashMap<Listing, usize> = std::collections::HashMap::new();
+    let mut semi: std::collections::HashMap<Listing, usize> = std::collections::HashMap::new();
+    for _ in 0..300 {
+        let case = arb_case()
+            .new_tree(&mut runner)
+            .expect("strategy must produce a value")
+            .current();
+        for (outcome, semi_additive) in check_listing(&case).expect("the listing property holds") {
+            *seen.entry(outcome).or_default() += 1;
+            if semi_additive {
+                *semi.entry(outcome).or_default() += 1;
+            }
+        }
+    }
+    for outcome in [
+        Listing::Answered,
+        Listing::AnsweredFanned,
+        Listing::Refused,
+        Listing::ListedTwoWays,
+    ] {
+        assert!(
+            seen.get(&outcome).copied().unwrap_or(0) >= 20,
+            "{outcome:?} reached {} times: {seen:?}",
+            seen.get(&outcome).copied().unwrap_or(0)
+        );
+    }
+    // A semi-additive metric answered across a fan-out (by its NON ADDITIVE
+    // BY dimension) and refused across one (by another).
+    for outcome in [Listing::AnsweredFanned, Listing::Refused] {
+        assert!(
+            semi.get(&outcome).copied().unwrap_or(0) >= 20,
+            "semi-additive {outcome:?} reached {} times: {semi:?}",
+            semi.get(&outcome).copied().unwrap_or(0)
+        );
+    }
+}
+
 /// The generator reaches every outcome the oracle restates, with a shared
 /// table (one referenced by two tables) in the graph, so no branch is vacuous.
 #[test]
@@ -931,4 +1089,5 @@ fn a_chain_is_followed_beside_a_shorter_path_that_fans_out() {
         using: None,
     };
     check_case(&case).unwrap();
+    check_listing(&case).unwrap();
 }

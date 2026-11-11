@@ -433,9 +433,11 @@ Four boundaries apply:
   them only when the metric's table has no primary key, and so does the
   extension (``fan trap detected``). Until v0.19.0 the extension refused them
   all. A window metric, an active semi-additive metric, and a fan-out across an
-  ``ASOF`` relationship are still refused in both. Snowflake's handling of a
-  fan-out across a range relationship has not been probed, and the extension
-  refuses it. See :ref:`explanation-grain-below`.
+  ``ASOF`` or range relationship are still refused in both.
+  :ref:`SHOW SEMANTIC DIMENSIONS ... FOR METRIC <ref-show-dims-for-metric>`
+  lists the dimensions a metric can be grouped by, those below its grain
+  included, in both.
+  See :ref:`explanation-grain-below`.
 - A **window metric** whose inner aggregate lives on a non-base table is computed
   at its own grain -- the inner aggregation is anchored at that table (a parent
   or a child of the base table), so it is neither inflated nor thinned by a
@@ -656,7 +658,7 @@ Snowflake ``CREATE SEMANTIC VIEW`` features that are commonly asked about, and w
    * - Many-to-many relationships through a bridge table -- ``ba(author_id) REFERENCES a`` and ``ba(book_id) REFERENCES b``, with a metric on ``b`` grouped by a dimension on ``a``
      - **Supported**, with the answers Snowflake gives: each row of the metric's table counts once per group, a row with no bridge row counts in the ``NULL`` group, and the total with no dimension is not inflated. A dimension on the bridge itself, or past the far table, and a filter across the bridge work too, and a fact table that references both sides is a bridge as well. A dimension on a plain child of the metric's table counts the same way, once per group, as in Snowflake. ``USING`` cannot pick between two bridges: both systems create a view with two bridges between the same pair of tables, and refuse a query that crosses from one side to the other (Snowflake's 000002 ``Multi-path in many-to-many relationship``). Both refuse the same way any member a metric reaches by no chain of relationships and by a second path, such as a customer count by store when customers and stores also share regions. A metric whose table reaches the bridge by a hop up (a review count by author country, with reviews referencing books) counts each review once per group, as in Snowflake. Window metrics and active semi-additive metrics can't be grouped across a bridge. A query with only dimensions on the two sides lists the pairs the bridge holds, as in Snowflake. See :ref:`Many-to-many relationships through a bridge <ref-create-bridge-relationships>`.
    * - Dimensions-only queries over several tables -- ``SEMANTIC_VIEW( v DIMENSIONS customers.name, orders.status )``
-     - **Supported**, with the rows Snowflake lists: the query reads the one table every queried dimension and filtered member is reached from, and joins up from it, whatever the order of ``TABLES``. A parent and a child dimension list the child's rows, a dimension alone lists its table's own values, and the two sides of a bridge list the pairs it holds. A role-played table queried on its own, or from a table above it, lists its own rows. When no single table reaches every member, such as dimensions on two children of one parent, the query is answered when the table where their paths meet has a metric, with the distinct member tuples that table reaches, and refused otherwise, as in Snowflake. A ``FACTS`` query reads the same table and lists every row of it. See :ref:`Dimensions only <ref-sv-modes>`.
+     - **Supported**, with the rows Snowflake lists: the query reads the one table every queried dimension and filtered member is reached from, and joins up from it, whatever the order of ``TABLES``. A parent and a child dimension list the child's rows, a dimension alone lists its table's own values, and the two sides of a bridge list the pairs it holds. A role-played table queried on its own, or from a table above it, lists its own rows. When no single table reaches every member, such as dimensions on two children of one parent, the query is answered when the table where their paths meet, or a table above it that reaches every member through it, has a metric, with the distinct member tuples the meeting table reaches, and refused otherwise, as in Snowflake. A ``FACTS`` query reads the same table and lists every row of it. See :ref:`Dimensions only <ref-sv-modes>`.
    * - Column-level security
      - Out of scope; DuckDB handles access control
 

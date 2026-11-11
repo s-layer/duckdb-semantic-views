@@ -472,8 +472,8 @@ Three habits keep a model on the right side of these rules:
   as a fan-out, and that narrows what the view can answer.
 - **Check before you query.**
   :ref:`SHOW SEMANTIC DIMENSIONS … FOR METRIC <ref-show-dims-for-metric>` lists
-  the dimensions a given metric reaches without a fan-out. One it leaves out is
-  counted once per group, or refused for the shapes above.
+  the dimensions a given metric can be grouped by, those it is counted once
+  per group by included. One it leaves out is refused for the shapes above.
 
 .. tip::
 

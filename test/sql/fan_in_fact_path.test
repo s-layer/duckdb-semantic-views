@@ -80,19 +80,30 @@ CREATE SEMANTIC VIEW fi_sv AS
 # ============================================================
 # Test 1: SHOW ... FOR METRIC across the fan-in
 # A metric on `s` reaches `c` via s -> o -> c (many-to-one throughout), so
-# customer_country is listed. `item_qty` is NOT: reaching `li` from `s` walks
-# o -> li backwards, which fans out.
+# customer_country is listed. `item_qty` is listed too: reaching `li` from `s`
+# walks o -> li backwards, a fan-out, and a query answers it by counting each
+# shipment once per item_qty group (Snowflake fixture 8 S1-S3, Phase 7 PR 4e).
 # ============================================================
 
 query TTTTTT rowsort
 SHOW SEMANTIC DIMENSIONS IN fi_sv FOR METRIC total_ship_cost
 ----
 fi_customers	customer_country	VARCHAR	false	[]	(empty)
+fi_line_items	item_qty	INTEGER	false	[]	(empty)
 fi_shipments	carrier	VARCHAR	false	[]	(empty)
+
+# The listed fanned dimension is answered: shipment 1000 (order 10, 4.50) is
+# counted once under each of order 10's quantities, 1 and 2.
+query IR rowsort
+SELECT * FROM SEMANTIC_VIEW(fi_sv DIMENSIONS item_qty METRICS total_ship_cost);
+----
+1	4.50
+2	4.50
+3	6.25
 
 # ============================================================
 # Test 2: the mirror case -- a metric on the sibling branch reaches `c` too,
-# and does not reach `s`.
+# and `s` across the same fan-out.
 # ============================================================
 
 query TTTTTT rowsort
@@ -100,6 +111,7 @@ SHOW SEMANTIC DIMENSIONS IN fi_sv FOR METRIC line_total
 ----
 fi_customers	customer_country	VARCHAR	false	[]	(empty)
 fi_line_items	item_qty	INTEGER	false	[]	(empty)
+fi_shipments	carrier	VARCHAR	false	[]	(empty)
 
 # ============================================================
 # Test 3: a fact on the base table with a dimension across the fan-in

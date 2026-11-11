@@ -920,8 +920,15 @@ fn notes_with_every_metric(base: &str) -> SemanticViewDefinition {
     notes_def(base, &["o", "li", "n", "r"])
 }
 
+/// Metrics on the members' own tables only: neither is a table both are
+/// reached from.
 fn notes_without_orders_metric(base: &str) -> SemanticViewDefinition {
-    notes_def(base, &["li", "n", "r"])
+    notes_def(base, &["li", "n"])
+}
+
+/// A metric on regions only, above where the paths meet (fixture 8's M2).
+fn notes_with_only_a_regions_metric(base: &str) -> SemanticViewDefinition {
+    notes_def(base, &["r"])
 }
 
 const NOTE_TABLES: [&str; 4] = ["r", "o", "li", "n"];
@@ -938,8 +945,9 @@ fn n8_items_and_notes_meet_at_orders_with_a_metric() {
     );
 }
 
-/// With no metric on orders the same query is refused, though items and notes
-/// have metrics: they are not where the paths meet (fixture 2's W1).
+/// With no metric on orders or above it the same query is refused, though
+/// items and notes have metrics: neither reaches the other's table by fanning
+/// out and then climbing (fixture 2's W1).
 #[test]
 fn n8_items_and_notes_with_no_orders_metric_are_unrelated() {
     refused_in_every_order(
@@ -951,8 +959,7 @@ fn n8_items_and_notes_with_no_orders_metric_are_unrelated() {
 }
 
 /// A member above the meeting table is joined like the rest: order 2 has no
-/// region, so its `2/gift` is not listed. Snowflake has not been asked about
-/// this shape (TECH-DEBT #112).
+/// region, so its `2/gift` is not listed (fixture 8's M1).
 #[test]
 fn member_above_the_meeting_table_is_inner_joined() {
     case_in_every_order(
@@ -963,16 +970,50 @@ fn member_above_the_meeting_table_is_inner_joined() {
     );
 }
 
-/// The meeting table is the lowest one: regions also reach every member by
-/// fanning out, but the paths meet at orders, and with no metric there the
-/// query is refused (TECH-DEBT #112).
+/// A metric on a table above the meeting table answers the query too:
+/// regions reach every member by fanning out (fixture 8's M2). The rows are
+/// still the meeting table's (orders), so order 2's `2/gift` is not listed
+/// beside a region it does not have.
 #[test]
-fn meeting_table_is_the_lowest_one() {
-    refused_in_every_order(
-        notes_without_orders_metric,
+fn a_metric_above_the_meeting_table_answers_it() {
+    case_in_every_order(
+        notes_with_only_a_regions_metric,
         &NOTE_TABLES,
         &dims_req(&["qty", "kind", "region"], None),
-        is_unrelated,
+        &["1/gift/EU", "1/rush/EU", "5/gift/EU", "5/rush/EU"],
+    );
+}
+
+/// The same with no member on regions (fixture 8's M2b): regions are not on
+/// the members' paths and are not joined, so order 2, which has no region,
+/// lists its `2/gift`.
+#[test]
+fn a_metric_off_the_members_paths_answers_from_the_meeting_table() {
+    case_in_every_order(
+        notes_with_only_a_regions_metric,
+        &NOTE_TABLES,
+        &dims_req(&["qty", "kind"], None),
+        &["1/gift", "1/rush", "2/gift", "5/gift", "5/rush"],
+    );
+}
+
+/// A metric's table written in another case than the relationships name it
+/// is the same table: identifiers match case-insensitively.
+fn with_metric_tables_upper(mut def: SemanticViewDefinition) -> SemanticViewDefinition {
+    for m in &mut def.metrics {
+        m.source_table = m.source_table.as_deref().map(str::to_ascii_uppercase);
+    }
+    def
+}
+
+/// N8 with the orders metric's table written `O`.
+#[test]
+fn a_meeting_table_metric_matches_its_table_in_any_case() {
+    case_in_every_order(
+        |base| with_metric_tables_upper(notes_def(base, &["o"])),
+        &NOTE_TABLES,
+        &dims_req(&["qty", "kind"], None),
+        &["1/gift", "1/rush", "2/gift", "5/gift", "5/rush"],
     );
 }
 
@@ -1012,8 +1053,8 @@ fn members_whose_paths_meet_twice_are_unrelated() {
 }
 
 /// A fan-out across an ASOF relationship walked backwards is not answered with
-/// metrics (fixture 1's A5), so it does not meet the members either. Snowflake
-/// has not been asked this dims-only shape (TECH-DEBT #112).
+/// metrics (fixture 1's A5), so it does not meet the members either, as
+/// Snowflake refuses it (fixture 8's T1 and T1c: 010959, not related).
 #[test]
 fn members_meeting_across_an_asof_relationship_are_unrelated() {
     let mut def = notes_with_every_metric("o");
@@ -1032,8 +1073,8 @@ fn members_meeting_across_an_asof_relationship_are_unrelated() {
 }
 
 /// A range relationship is kept out the same way: a fan-out across one walked
-/// backwards is refused with metrics too. Unprobed in Snowflake (TECH-DEBT
-/// #112).
+/// backwards is refused with metrics too (fixture 8's F1), and Snowflake
+/// refuses the members as not related (T2).
 #[test]
 fn members_meeting_across_a_range_relationship_are_unrelated() {
     let mut def = notes_with_every_metric("o");
@@ -1053,7 +1094,8 @@ fn members_meeting_across_a_range_relationship_are_unrelated() {
 
 /// Notes that reference orders twice (a second role) give the hop two
 /// relationships and no one path to follow, so the members do not meet.
-/// Unprobed in Snowflake (TECH-DEBT #112).
+/// Snowflake refuses them too (fixture 8's T3), as multi-path rather than not
+/// related.
 #[test]
 fn members_meeting_across_a_role_played_hop_are_unrelated() {
     let mut def = notes_with_every_metric("o");

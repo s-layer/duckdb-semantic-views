@@ -10,14 +10,13 @@
 
 #![cfg(feature = "extension")]
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
 
 use crate::catalog::CatalogReader;
 use crate::ddl::describe::format_json_array;
 use crate::ddl::read_ffi::{read_str_arg, run_dispatcher, serialize_varchar_bool_rows};
-use crate::expand::collect_derived_metric_source_tables;
 use crate::graph::RelationshipGraph;
-use crate::model::{Cardinality, Dimension, SemanticViewDefinition};
+use crate::model::SemanticViewDefinition;
 use crate::util::suggest_closest;
 
 /// # Safety
@@ -59,7 +58,7 @@ pub unsafe extern "C" fn sv_show_semantic_dimensions_for_metric_bind_rust(
 
 /// Body for [`sv_show_semantic_dimensions_for_metric_bind_rust`]: resolve the
 /// view + metric, then emit each dimension with a `required` flag, filtered to
-/// those reachable from the metric's source table(s) without a fan trap.
+/// those a query of the metric grouped by it alone answers.
 ///
 /// # Safety
 ///
@@ -131,15 +130,6 @@ unsafe fn show_dims_for_metric(
         .map(|n| crate::ident::normalize_ident_part(n))
         .collect();
 
-    let met_tables: Vec<String> = if let Some(ref st) = met.source_table {
-        vec![st.to_ascii_lowercase()]
-    } else {
-        collect_derived_metric_source_tables(met, &def.metrics)
-            .into_iter()
-            .map(|s| s.to_ascii_lowercase())
-            .collect()
-    };
-
     let alias_map = def.alias_to_table_map();
     // TECH-DEBT #51: probe the dimensions' types in the caller's context.
     let types = crate::ddl::read_ffi::member_types_for_bind(
@@ -147,134 +137,30 @@ unsafe fn show_dims_for_metric(
         &def,
         crate::query::member_types::Wanted::DIMENSIONS,
     )?;
-    let mut rows: Vec<(Vec<String>, bool)> = if def.joins.is_empty() {
-        def.dimensions
-            .iter()
-            .map(|d| {
-                let table_name = d
-                    .source_table
-                    .as_ref()
-                    .and_then(|a| alias_map.get(a).cloned())
-                    .unwrap_or_default();
-                (
-                    vec![
-                        table_name,
-                        d.name.clone(),
-                        types.dimension(&d.name, d.output_type.as_ref()),
-                        format_json_array(&d.synonyms),
-                        d.comment.clone().unwrap_or_default(),
-                    ],
-                    required_dim_names.contains(&crate::ident::normalize_ident_part(&d.name)),
-                )
-            })
-            .collect()
-    } else {
+    if !def.joins.is_empty() {
         // Built only to surface a malformed graph as an error, as before.
         RelationshipGraph::from_definition(&def).map_err(|e| format!("graph error: {e}"))?;
-        let card_map: HashMap<(String, String), Cardinality> = def
-            .joins
-            .iter()
-            .filter(|j| !j.fk_columns.is_empty())
-            .map(|j| {
-                (
-                    (
-                        j.from_alias.to_ascii_lowercase(),
-                        j.table.to_ascii_lowercase(),
-                    ),
-                    j.cardinality,
-                )
-            })
-            .collect();
-        def.dimensions
-            .iter()
-            .filter(|d| is_dimension_reachable_for_metric(&def, d, &met_tables, &card_map))
-            .map(|d| {
-                let table_name = d
-                    .source_table
-                    .as_ref()
-                    .and_then(|a| alias_map.get(a).cloned())
-                    .unwrap_or_default();
-                (
-                    vec![
-                        table_name,
-                        d.name.clone(),
-                        types.dimension(&d.name, d.output_type.as_ref()),
-                        format_json_array(&d.synonyms),
-                        d.comment.clone().unwrap_or_default(),
-                    ],
-                    required_dim_names.contains(&crate::ident::normalize_ident_part(&d.name)),
-                )
-            })
-            .collect()
-    };
+    }
+    let mut rows: Vec<(Vec<String>, bool)> = crate::expand::dimensions_for_metric(&def, met)
+        .into_iter()
+        .map(|d| {
+            let table_name = d
+                .source_table
+                .as_ref()
+                .and_then(|a| alias_map.get(a).cloned())
+                .unwrap_or_default();
+            (
+                vec![
+                    table_name,
+                    d.name.clone(),
+                    types.dimension(&d.name, d.output_type.as_ref()),
+                    format_json_array(&d.synonyms),
+                    d.comment.clone().unwrap_or_default(),
+                ],
+                required_dim_names.contains(&crate::ident::normalize_ident_part(&d.name)),
+            )
+        })
+        .collect();
     rows.sort_by(|a, b| a.0[1].cmp(&b.0[1]));
     serialize_varchar_bool_rows(&rows)
-}
-
-/// Check if a dimension is reachable from a given set of metric source tables
-/// without causing a fan trap.
-///
-/// A dimension is reachable if, for at least one metric source table, some
-/// path from the metric table to the dimension table never steps in the
-/// fan-out direction (from the "one" side to the "many" side).
-///
-/// Fan-out direction: for edge `(from_alias, to_alias)` with `ManyToOne`,
-/// from->to is safe (forward), to->from is fan-out (reverse). A `OneToOne`
-/// edge is safe both ways.
-///
-/// Every path counts, not only the one through a spanning tree: in a diamond
-/// (orders reach regions through customers and through stores) the tree walked
-/// from the first table could route orders to stores through regions, which
-/// fans out, and hide a dimension the metric reaches directly. A table reached
-/// by several safe paths is still listed; a query that needs one path picks it
-/// with `USING`, and one that needs none is refused by the query's own checks.
-///
-/// A table reached by no chain and two ways is left out, as the query refuses
-/// it (`expand::refused_as_many_to_many`): a step back along a one-to-one
-/// relationship does not fan out, but it is not a chain either.
-fn is_dimension_reachable_for_metric(
-    def: &SemanticViewDefinition,
-    dim: &Dimension,
-    met_tables: &[String],
-    card_map: &HashMap<(String, String), Cardinality>,
-) -> bool {
-    // Base table dimension (no source_table): always reachable
-    let Some(ref dim_table_raw) = dim.source_table else {
-        return true;
-    };
-    let dim_table = dim_table_raw.to_ascii_lowercase();
-
-    // Safe steps: forward along any FK, and backward along a one-to-one one.
-    let mut safe_steps: HashMap<&str, Vec<&str>> = HashMap::new();
-    for ((from, to), card) in card_map {
-        safe_steps
-            .entry(from.as_str())
-            .or_default()
-            .push(to.as_str());
-        if *card == Cardinality::OneToOne {
-            safe_steps
-                .entry(to.as_str())
-                .or_default()
-                .push(from.as_str());
-        }
-    }
-
-    met_tables.iter().any(|met_table| {
-        if crate::expand::refused_as_many_to_many(def, met_table, &dim_table) {
-            return false;
-        }
-        let mut seen: HashSet<&str> = HashSet::from([met_table.as_str()]);
-        let mut stack = vec![met_table.as_str()];
-        while let Some(current) = stack.pop() {
-            if current == dim_table {
-                return true;
-            }
-            for next in safe_steps.get(current).into_iter().flatten() {
-                if seen.insert(next) {
-                    stack.push(next);
-                }
-            }
-        }
-        false
-    })
 }

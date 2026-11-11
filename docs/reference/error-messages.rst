@@ -1617,13 +1617,13 @@ Unrelated tables
 
    semantic view '<view>': tables '<table_a>' and '<table_b>' are not related
    -- no table reaches both by following relationships many-to-one, and their
-   paths do not meet at a table with a metric along one path of plain
-   relationships (none ASOF, range or a second role), so no rows hold their
-   members together. Query them separately
+   paths do not meet at a table that a table with a metric reaches them
+   through, along one path of plain relationships (none ASOF, range or a
+   second role), so no rows hold their members together. Query them separately
 
-**Cause:** A query with dimensions and no metrics reads the one table that every queried dimension, and every member its ``WHERE`` names, can be reached from by following relationships toward the referenced table. When no table reaches two of them, the query is still answered if the table where their paths meet has a metric (see :ref:`Dimensions only <ref-sv-modes>`). The error means neither holds. The usual shape is dimensions on two children of one parent, such as ``orders`` and ``tickets`` that both reference ``customers``, when ``customers`` has no metric. Adding a dimension on the parent does not relate them. Snowflake refuses the same query: ``The entities ... are not related``. The same error is raised when the table where the paths meet has a metric but the paths cannot be followed to it: two members are joined by more than one path, the paths meet more than once, or a hop on the way is an ``ASOF`` or range relationship or a table's second role.
+**Cause:** A query with dimensions and no metrics reads the one table that every queried dimension, and every member its ``WHERE`` names, can be reached from by following relationships toward the referenced table. When no table reaches two of them, the query is still answered if the table where their paths meet has a metric, or a table every member is reached from through it does, such as a parent of that table (see :ref:`Dimensions only <ref-sv-modes>`). The error means neither holds. The usual shape is dimensions on two children of one parent, such as ``orders`` and ``tickets`` that both reference ``customers``, when ``customers`` and the tables above it have no metric. A metric on one of the children does not count: the other child is not reached from it. Adding a dimension on the parent does not relate them. Snowflake refuses the same query: ``The entities ... are not related``. The same error is raised when the table where the paths meet has a metric but the paths cannot be followed to it: two members are joined by more than one path, the paths meet more than once, or a hop on the way is an ``ASOF`` or range relationship or a table's second role.
 
-**Fix:** Query each child's dimensions separately, each with the parent's if you need them. If the meeting table has no metric and one belongs in the view, declaring it makes the query answerable, as in Snowflake. A metric does not help when the paths cannot be followed; query the members one path reaches instead.
+**Fix:** Query each child's dimensions separately, each with the parent's if you need them. If no metric sits on the meeting table or above it and one belongs in the view, declaring it makes the query answerable, as in Snowflake. A metric does not help when the paths cannot be followed; query the members one path reaches instead.
 
 
 .. _err-multi-path:

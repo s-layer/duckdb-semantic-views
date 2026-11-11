@@ -378,6 +378,11 @@ struct Case {
     /// where the paths of members no table reaches by foreign keys meet, and
     /// Snowflake answers those only when it has a metric (fixture 7, D1-D10).
     h_metrics: bool,
+    /// Whether `z`, above `h`, has a metric (`cnt_z`). Only a dims-only case
+    /// sets it: every member `h` meets is reached from `z` by fanning out and
+    /// then climbing too, so Snowflake answers from `h` with a metric on `z`
+    /// alone (fixture 8's M2b, Phase 7 PR 4e).
+    z_metric: bool,
 }
 
 impl Case {
@@ -465,6 +470,7 @@ fn arb_case() -> impl Strategy<Value = Case> {
             mets,
             pred,
             h_metrics: true,
+            z_metric: false,
         })
 }
 
@@ -517,13 +523,16 @@ fn build_def(case: &Case) -> SemanticViewDefinition {
             ..Default::default()
         })
         .collect();
+    let z_metric = case.z_metric.then_some(("cnt_z", "z", None));
     let metrics = METS
         .iter()
+        .copied()
         .filter(|(_, t, _)| case.h_metrics || *t != "h")
-        .map(|(name, t, col)| Metric {
-            name: (*name).to_string(),
+        .chain(z_metric)
+        .map(|(name, t, col): (&str, &str, Option<&str>)| Metric {
+            name: name.to_string(),
             expr: col.map_or_else(|| "COUNT(*)".to_string(), |c| format!("SUM({t}.{c})")),
-            source_table: Some((*t).to_string()),
+            source_table: Some(t.to_string()),
             ..Default::default()
         })
         .collect();
@@ -852,15 +861,17 @@ fn arb_dims_only_case() -> impl Strategy<Value = Case> {
                 prop::sample::subsequence((0..n_dims).collect::<Vec<usize>>(), 1..=3),
                 prop::option::weighted(0.4, arb_pred(n_dims)),
                 prop::bool::weighted(0.7),
+                prop::bool::weighted(0.4),
             )
         })
-        .prop_map(|(inst, first, dims, pred, h_metrics)| Case {
+        .prop_map(|(inst, first, dims, pred, h_metrics, z_metric)| Case {
             inst,
             first,
             dims,
             mets: vec![],
             pred,
             h_metrics,
+            z_metric,
         })
 }
 
@@ -881,14 +892,15 @@ proptest! {
     /// table's own values, a child's rows beside its parent, the bridge's rows
     /// across it. Dangling and NULL foreign keys give NULL parent columns.
     /// Members no single table is under meet at `h`: they are listed from
-    /// there when `h` has a metric (`meet_rows`), and refused otherwise.
+    /// there when `h` or `z` above it has a metric (`meet_rows`; `z` is not
+    /// joined unless a member is on it), and refused otherwise.
     #[test]
     fn dims_only_lists_the_rows_of_the_table_under_its_members(case in arb_dims_only_case()) {
         let members = dims_only_members(&case);
         let def = build_def(&case);
         // A member on `c` beside one across the bridge has no table under both.
         let Some(anchor) = dims_only_anchor(&members) else {
-            if case.h_metrics {
+            if case.h_metrics || case.z_metric {
                 let sql = expand("v", &def, &request(&case))
                     .map_err(|e| TestCaseError::fail(format!("refused at the meeting table: {e}")))?;
                 let got = run(&make_db(&case.inst), &sql);
@@ -898,7 +910,7 @@ proptest! {
             }
             let err = expand("v", &def, &request(&case))
                 .err()
-                .ok_or_else(|| TestCaseError::fail("no metric where the paths meet, yet answered"))?;
+                .ok_or_else(|| TestCaseError::fail("no metric on h or z, yet answered"))?;
             prop_assert!(err.to_string().contains("are not related"), "{}", err);
             return Ok(());
         };
@@ -923,6 +935,7 @@ fn dims_only_generator_reaches_every_anchor() {
     let mut filtered = 0;
     let mut unrelated = 0;
     let mut met = 0;
+    let mut met_above = 0;
     // 3000 draws: with `s` beside `c` more member sets reach no single table.
     for _ in 0..3000 {
         let case = arb_dims_only_case()
@@ -930,10 +943,10 @@ fn dims_only_generator_reaches_every_anchor() {
             .unwrap()
             .current();
         let Some(anchor) = dims_only_anchor(&dims_only_members(&case)) else {
-            if case.h_metrics {
-                met += 1;
-            } else {
-                unrelated += 1;
+            match (case.h_metrics, case.z_metric) {
+                (true, _) => met += 1,
+                (false, true) => met_above += 1,
+                (false, false) => unrelated += 1,
             }
             continue;
         };
@@ -947,8 +960,8 @@ fn dims_only_generator_reaches_every_anchor() {
     }
     assert_eq!(anchors.len(), TABLES.len(), "{anchors:?}");
     assert!(
-        off_base > 500 && filtered > 300 && unrelated > 50 && met > 100,
-        "{off_base} {filtered} {unrelated} {met}"
+        off_base > 500 && filtered > 300 && unrelated > 30 && met > 100 && met_above > 20,
+        "{off_base} {filtered} {unrelated} {met} {met_above}"
     );
 }
 
@@ -986,6 +999,7 @@ fn pinned_once_per_group() {
         mets: vec![0, 1],
         pred: None,
         h_metrics: true,
+        z_metric: false,
     };
     assert_eq!(
         oracle(&case.inst, &case),

@@ -1,3 +1,4 @@
+mod dims_for_metric;
 mod facts;
 mod fan_trap;
 mod join_resolver;
@@ -103,6 +104,7 @@ mod tests_variables;
 
 // Public API (the pre-split expand.rs surface, plus the boxed fan-trap detail
 // structs re-exported for R-9).
+pub use dims_for_metric::dimensions_for_metric;
 pub use resolution::{
     body_qualifier, qualify_and_quote_table_ref, quote_ident, quote_ident_if_needed,
     quote_stored_ident, quote_table_ref, table_source, temp_table_candidates, temp_table_name,
@@ -115,10 +117,7 @@ pub use types::{
 
 // Crate-internal API (used by ddl/show_dims_for_metric.rs under extension feature)
 #[cfg(feature = "extension")]
-pub(crate) use facts::collect_derived_metric_source_tables;
-#[cfg(feature = "extension")]
 pub(crate) use materialization::find_routing_materialization_name;
-#[cfg_attr(not(feature = "extension"), allow(unused_imports))]
 pub(crate) use multi_path::refused_as_many_to_many;
 // The shim's isolated bind of `semantic_view()` (`query::table_function`).
 #[cfg(feature = "extension")]
