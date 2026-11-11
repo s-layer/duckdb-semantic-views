@@ -326,8 +326,10 @@ pub(super) fn push_join_clauses(
             .asof
             .filter(|_| !rj.scoped && !rj.join.table.eq_ignore_ascii_case(&rj.bare_alias));
         let reverse_source = reverse_asof.and_then(|i| reverse_asof_source(rj.join, def, i));
-        // Every caller passes a `LEFT JOIN ` prefix, and every reverse hop is
-        // a bare one whose two tables the view has. Anything else would render
+        // Every caller that can reach an ASOF relationship passes a
+        // `LEFT JOIN ` prefix (the dims-only meeting-table query, which joins
+        // with `JOIN `, never crosses one: `sql_gen::meeting_table`), and
+        // every reverse hop is a bare one whose two tables the view has. Anything else would render
         // the ASOF pair as a plain inequality join, a silent wrong number, so
         // it is a bug to catch in tests rather than SQL to emit.
         debug_assert!(

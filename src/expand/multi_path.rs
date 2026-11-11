@@ -341,7 +341,7 @@ pub(super) fn undirected_path(
 /// path made only of steps that disconnect the graph is the only one. So a
 /// shortest path is taken, and for its first step that can be avoided, a
 /// shortest path that avoids it.
-fn two_undirected_paths(
+pub(super) fn two_undirected_paths(
     def: &SemanticViewDefinition,
     from: &str,
     to: &str,

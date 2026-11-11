@@ -31,8 +31,19 @@
 //! - **No metric.** Snowflake lists the rows of the one table every member is
 //!   reached from, the one nearest them, and joins up. With one such table and
 //!   one chain to each member the answer is the distinct member values over its
-//!   rows; with two chains to a member, two nearest tables (two bridges), or
-//!   none (unrelated tables), the query is refused.
+//!   rows; with two chains to a member or two nearest tables (two bridges), the
+//!   query is refused. With none, the members are answered from the table
+//!   their paths meet at, if it has a metric (Phase 7 PR 4d, fixture 7's D4
+//!   and N8; every table here has one): each pair of members joined by one
+//!   path over relationships in either direction, and a table on those paths
+//!   that shares with every member a table under both (one that reaches each
+//!   by a chain, or is it), the lowest such table if a member is above it.
+//!   This is restated from chains, not from the hop-by-hop walk the
+//!   extension makes.
+//!   The answer is the distinct member values over that table's rows
+//!   inner-joined along those paths, each table once. With no such table, or
+//!   a path across the doubled relationship, the query is refused as not
+//!   related.
 //! - **A doubled relationship.** A chain across it counts once per role, so a
 //!   member reached across it is refused (no role picked) unless the metric is
 //!   on `t{a}` and its `USING` names a role, which then is the one chain
@@ -487,6 +498,9 @@ fn oracle_sql(case: &Case, from: usize) -> String {
 enum Expect {
     /// Answered, read from this table.
     Rows(usize),
+    /// Answered with no metric from the table the members' paths meet at
+    /// ([`meeting_table`]), inner-joined along those paths ([`meet_sql`]).
+    Meet(usize),
     /// Refused, with a message holding one of these texts (the first member
     /// the expansion checks decides which).
     Refused(Vec<&'static str>),
@@ -604,13 +618,95 @@ fn expect(case: &Case) -> Expect {
         })
         .collect();
     match nearest.as_slice() {
-        [] => Expect::Refused(vec!["not related"]),
+        [] => match meeting_table(case, &members) {
+            Some(meet) => Expect::Meet(meet),
+            None => Expect::Refused(vec!["not related"]),
+        },
         [anchor] if members.iter().all(|&d| case.chains(*anchor, d).len() == 1) => {
             Expect::Rows(*anchor)
         }
         [_] => Expect::Refused(vec!["more than one path"]),
         _ => Expect::Refused(vec!["many-to-many"]),
     }
+}
+
+/// The table a query with no metrics, whose members no table reaches by
+/// chains, is answered from (see the module docs), or `None` when it is
+/// refused as not related.
+///
+/// Restated from chains of foreign keys rather than by walking the paths
+/// hop by hop as `sql_gen::meeting_table` does: a table meets a member when
+/// some table is under both (reaches each by a chain, or is it), so the
+/// member is reached by fanning out to that table and climbing from it.
+fn meeting_table(case: &Case, members: &[usize]) -> Option<usize> {
+    let doubled = |w: &[usize]| case.pair().is_some_and(|(a, b)| w == [a, b] || w == [b, a]);
+    let mut between: Vec<usize> = Vec::new();
+    for (i, &a) in members.iter().enumerate() {
+        for &b in &members[i + 1..] {
+            let paths = undirected_paths(case, a, b);
+            let [path] = paths.as_slice() else {
+                return None;
+            };
+            if path.windows(2).any(doubled) {
+                return None;
+            }
+            for &t in path {
+                if !between.contains(&t) {
+                    between.push(t);
+                }
+            }
+        }
+    }
+    // `x` is `t`, or reaches it by a chain of foreign keys.
+    let under = |x: usize, t: usize| !case.chains(x, t).is_empty();
+    let meets = |t: usize| {
+        members
+            .iter()
+            .all(|&d| (0..case.n).any(|x| under(x, t) && under(x, d)))
+    };
+    let meeting: Vec<usize> = between.iter().copied().filter(|&t| meets(t)).collect();
+    let lowest: Vec<usize> = meeting
+        .iter()
+        .copied()
+        .filter(|&t| !meeting.iter().any(|&o| o != t && under(o, t)))
+        .collect();
+    match lowest.as_slice() {
+        [one] => Some(*one),
+        _ => None,
+    }
+}
+
+/// The oracle's SQL for [`Expect::Meet`]: `t{meet}`, each table on the
+/// members' paths inner-joined once, the distinct member values.
+fn meet_sql(case: &Case, meet: usize) -> String {
+    let mut sql = format!("t{meet} AS a{meet}");
+    let mut joined = vec![meet];
+    for d in case.members() {
+        let path = undirected_paths(case, meet, d).remove(0);
+        for w in path.windows(2) {
+            let (p, q) = (w[0], w[1]);
+            if joined.contains(&q) {
+                continue;
+            }
+            joined.push(q);
+            let on = if case.edges.contains(&(p, q)) {
+                format!("a{p}.f{q} = a{q}.id")
+            } else {
+                format!("a{q}.f{p} = a{p}.id")
+            };
+            sql.push_str(&format!(" JOIN t{q} AS a{q} ON {on}"));
+        }
+    }
+    let items: Vec<String> = case
+        .dims
+        .iter()
+        .map(|&k| format!("a{k}.g AS g{k}"))
+        .collect();
+    let filter = case
+        .filter
+        .map(|(k, c)| format!(" WHERE a{k}.g = {c}"))
+        .unwrap_or_default();
+    format!("SELECT DISTINCT {} FROM {sql}{filter}", items.join(", "))
 }
 
 /// The rows of `sql` as sorted text (every column cast to VARCHAR, so an
@@ -660,7 +756,13 @@ fn check_case(case: &Case) -> Result<(), TestCaseError> {
                     .map_err(|e| TestCaseError::fail(format!("oracle fails: {e}\n{oracle}")))?;
                 prop_assert_eq!(got, &want, "order {:?}\n--- oracle:\n{}", order, oracle);
             }
-            (Expect::Rows(_), Err(e)) => {
+            (Expect::Meet(meet), Ok(got)) => {
+                let oracle = meet_sql(case, meet);
+                let want = rows(&conn, &oracle)
+                    .map_err(|e| TestCaseError::fail(format!("oracle fails: {e}\n{oracle}")))?;
+                prop_assert_eq!(got, &want, "order {:?}\n--- oracle:\n{}", order, oracle);
+            }
+            (Expect::Rows(_) | Expect::Meet(_), Err(e)) => {
                 return Err(TestCaseError::fail(format!(
                     "order {order:?}: expected an answer, got: {e}"
                 )));
@@ -710,6 +812,26 @@ proptest! {
     }
 }
 
+proptest! {
+    #![proptest_config(ProptestConfig { cases: 4096, ..ProptestConfig::default() })]
+
+    /// Members no table reaches by chains, with no metric, are rare in
+    /// [`arb_case`] (about one draw in fifty), so this runs only those: the
+    /// meeting table's answer (Phase 7 PR 4d) and the refusal when there is
+    /// none. The other draws are skipped unchecked.
+    #[test]
+    fn members_no_table_reaches_meet_or_are_unrelated(case in arb_case()) {
+        let shape = match expect(&case) {
+            Expect::Meet(_) => true,
+            Expect::Refused(texts) => texts == ["not related"],
+            _ => false,
+        };
+        if case.metric.is_none() && shape {
+            check_case(&case)?;
+        }
+    }
+}
+
 /// The generator reaches every outcome the oracle restates, with a shared
 /// table (one referenced by two tables) in the graph, so no branch is vacuous.
 #[test]
@@ -719,7 +841,9 @@ fn generator_reaches_every_outcome() {
 
     let mut runner = TestRunner::deterministic();
     let mut seen: std::collections::HashMap<&str, usize> = std::collections::HashMap::new();
-    for _ in 0..1000 {
+    // 3000 draws: a query with no metric whose members no table reaches by
+    // chains (meeting table or unrelated) is about one draw in fifty.
+    for _ in 0..3000 {
         let case = arb_case()
             .new_tree(&mut runner)
             .expect("strategy must produce a value")
@@ -749,7 +873,9 @@ fn generator_reaches_every_outcome() {
             (Some(_), Expect::Refused(t)) if t.contains(&"many-to-many") => "metric many-to-many",
             (Some(_), Expect::Refused(_)) => "metric multi-path",
             (Some(_), Expect::Either) => "metric unrestated",
+            (Some(_), Expect::Meet(_)) => unreachable!("a metric query never meets"),
             (None, Expect::Rows(_)) => "dims answered",
+            (None, Expect::Meet(_)) => "dims meeting table",
             (None, Expect::Refused(t)) if t == ["more than one path"] => "dims multi-path",
             (None, Expect::Refused(t)) if t == ["many-to-many"] => "dims two bridges",
             (None, Expect::Refused(_)) => "dims unrelated",
@@ -770,10 +896,11 @@ fn generator_reaches_every_outcome() {
         "dims multi-path",
         "dims two bridges",
         "dims unrelated",
+        "dims meeting table",
     ] {
         assert!(
             seen.get(key).copied().unwrap_or(0) >= 10,
-            "outcome '{key}' reached {} times in 1000 cases: {seen:?}",
+            "outcome '{key}' reached {} times in 3000 cases: {seen:?}",
             seen.get(key).copied().unwrap_or(0)
         );
     }

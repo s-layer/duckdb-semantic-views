@@ -643,16 +643,32 @@ fn h13_review_count_by_country_and_review_id_is_answered() {
     );
 }
 
-/// H6 / H12: reviews and authors with no metric. Fixture 3 gave rows, but
-/// fixture 5 refused the same query (010959, "not related"), as it refused
-/// H7, H8, H10 and H11; we refuse it in every order.
+/// H6: reviews and authors with no metric meet at books, which has a metric
+/// (`total_pages`), so Snowflake lists the pairs books reach (fixture 3's H6;
+/// fixture 7's D4 and D6 found the rule, Phase 7 PR 4d). Fixture 5's H12
+/// refused the same query on a view with no books metric. Review 4's book has
+/// no author and review 5 no book, so neither is listed.
 #[test]
-fn h6_reviews_and_authors_with_no_metric_are_refused() {
-    for (order, def) in every_order(&hv()) {
-        assert!(
-            expand("v", &def, &req(&["stars", "country"], &[], None)).is_err(),
-            "TABLES ({order})"
-        );
+fn h6_reviews_and_authors_meet_at_books_with_a_metric() {
+    assert_answer(
+        &hv(),
+        &req(&["stars", "country"], &[], None),
+        &[&["3", "FR"], &["4", "UK"], &["5", "FR"]],
+    );
+}
+
+/// H12: the same query with the books metric dropped is refused (010959,
+/// "not related").
+#[test]
+fn h12_reviews_and_authors_with_no_books_metric_are_refused() {
+    let mut def = hv();
+    def.metrics
+        .retain(|m| !m.source_table.as_deref().is_some_and(|t| t == "b"));
+    for (order, def) in every_order(&def) {
+        match expand("v", &def, &req(&["stars", "country"], &[], None)) {
+            Err(ExpandError::UnrelatedTables { .. }) => {}
+            other => panic!("TABLES ({order}): expected not related, got {other:?}"),
+        }
     }
 }
 
