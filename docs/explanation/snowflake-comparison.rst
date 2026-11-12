@@ -461,9 +461,9 @@ Four boundaries apply:
   relationship under its scoped alias and groups by the dimension bound to it,
   as the single-grain path already did. A metric without ``USING`` makes the
   query ambiguous, as in Snowflake, since a grain CTE would otherwise choose
-  among the relationship instances by declaration order. This covers only a queried
-  dimension's own table -- a :ref:`WHERE <ref-sv-pre-agg-filtering>` member on a role-played table, a
-  metric aggregated at one, or a table reachable only *through* one still error.
+  among the relationship instances by declaration order. A
+  :ref:`WHERE <ref-sv-pre-agg-filtering>` member on a role-played table, or on
+  a table reached through one, is read along each grain's own role too.
   A definition that merely *declares* role-playing does not lose per-grain
   emission: the test is what the query reaches, so unrelated grains in the same
   view are computed normally. The one pairing that still declines is a role-played
@@ -503,16 +503,22 @@ Both follow the role back down, too: a dimension on a table that
 *references* the role-played one (``airport_details``, one row per airport)
 is read for the airport the metric's ``USING`` names, so ``arrivals`` by
 terminal gives the arriving airport's terminal and ``departures`` the
-departing one's. A ``WHERE`` on the airports or their details follows the
-same role when every metric names it, a semi-additive metric's snapshot
-included; beside metrics naming two roles, or none, it is refused here. A
-metric on the airports themselves reads each airport once, by its own
-dimensions or its details'.
+departing one's. A ``WHERE`` on the airports or their details is read along
+each metric's own role, a semi-additive metric's snapshot included, so
+``arrivals, departures`` filtered on a city count the flights arriving there
+and the flights departing it. Both refuse the filter beside a metric naming no
+role; beside a semi-additive metric and a metric on another role it is refused
+here. A metric on the airports themselves reads each airport once, by its own
+dimensions or its details'. Both ask a role only of a metric whose own way to
+the airports crosses the two relationships: lounges, which reference the
+airports once, by city, and regions above the airports by city, gate or
+terminal, need none, and the regions count once per group.
 
 .. versionchanged:: 0.19.0
 
-   A dimension on ``airport_details`` beside a role-naming metric, and a
-   ``WHERE`` on the role-played table, used to be refused.
+   A dimension on ``airport_details`` beside a role-naming metric, a ``WHERE``
+   on the role-played table (beside one role or two), and a lounge or region
+   metric by an airport dimension used to be refused.
 
 ``USING`` also picks a path through a diamond, where a table is reached
 along two chains of relationships through different tables (orders reach

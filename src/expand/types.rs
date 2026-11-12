@@ -930,10 +930,12 @@ impl fmt::Display for ExpandError {
                     "semantic view '{view_name}': where_clause member '{member_name}' is \
                      ambiguous -- reaching its table '{member_table}' requires the role-playing \
                      table '{role_playing_table}', joined via multiple relationships: [{}], and \
-                     the query's metrics do not all name the same one in their USING, so the \
-                     filter has no role to follow. Query metrics that name one role, filter on \
-                     a member from a non-role-playing table, or give the target table a \
-                     distinct alias per role.",
+                     a metric in the query reaches it across them with no USING naming one \
+                     (or names one beside a semi-additive metric on another), so the filter \
+                     has no role to follow. Give each such metric a USING that names one \
+                     role, query the metrics separately, filter on a member from a \
+                     non-role-playing table, or give the target table a distinct alias per \
+                     role.",
                     available_relationships.join(", ")
                 )
             }

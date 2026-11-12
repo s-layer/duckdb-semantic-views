@@ -203,18 +203,22 @@ terminal on the details reads the arriving airport's terminal, and
 ``departure_count`` the departing one's. The details are joined to the role's
 airport, so two metrics with different paths each get their own terminal.
 
-A filter on ``airports``, or on a table reached through it, follows the
-metrics' path when every metric names the same one: ``arrival_count`` with
-``where_clause := 'city = ''London'''`` counts the flights arriving in London.
-A semi-additive metric naming that path picks its snapshot from the flights
-arriving in London. Beside metrics naming two different paths, or none, the
-filter is refused.
+A filter on ``airports``, or on a table reached through it, follows each
+metric's own path: ``arrival_count`` with ``where_clause := 'city = ''London'''``
+counts the flights arriving in London, and ``arrival_count, departure_count``
+with the same filter counts the flights arriving in London and the flights
+departing it. Grouped by a flight's own dimension, a flight that one path's
+filter drops keeps its row, with ``NULL`` for that metric. A semi-additive
+metric naming a path picks its snapshot from the flights arriving in London.
+Beside a metric naming no path the filter is refused, as in Snowflake, and so
+is a filter beside a semi-additive metric and a metric on another path.
 
 .. versionchanged:: 0.19.0
 
    A dimension on a table that references the role-playing one, and a filter
    on the role-playing table, used to be refused even when every metric named
-   a path.
+   a path, and a filter beside metrics naming two different paths was refused
+   too.
 
 A window metric names its path through its inner metric: a window over
 ``departure_count`` is grouped by departure city, and two window metrics over
@@ -227,6 +231,22 @@ be grouped by ``city`` together; query those metrics separately.
    A window metric used to be refused beside a filter on the role-playing
    table, and two window metrics over different paths used to be refused
    together.
+
+Only a metric whose own way to ``airports`` crosses the two relationships
+needs a path. A ``lounges`` table that references ``airports`` once reaches it
+by that one relationship, so ``lounge_count`` by ``city``, or filtered on it,
+reads each lounge's own airport, and beside ``arrival_count`` each metric
+follows its own way. A ``regions`` table that ``airports`` references sits
+above it: ``region_count`` by ``city``, by a gate or by a terminal counts each
+region once per group, as Snowflake does. Grouping ``region_count`` by a
+flight's own dimension is refused, since it would reach the flights through one
+of the two airports without saying which.
+
+.. versionchanged:: 0.19.0
+
+   A metric on a table that references the role-playing one once, or on a
+   table above it, used to be refused when grouped or filtered by the
+   role-playing table's dimensions.
 
 A metric on a table that has no relationship to ``airports``, such as a count
 of flight legs on a ``legs`` table under ``flights``, cannot name a path,

@@ -100,6 +100,9 @@ mod tests_role_playing;
 // Pins ROWS (executes the SQL in-memory), so gated the same way.
 #[cfg(all(test, not(feature = "extension")))]
 mod tests_role_back_crossing;
+// Pins ROWS (executes the SQL in-memory), so gated the same way.
+#[cfg(all(test, not(feature = "extension")))]
+mod tests_role_reach;
 #[cfg(test)]
 mod tests_semi_additive_dependency;
 #[cfg(all(test, not(feature = "extension")))]
