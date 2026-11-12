@@ -165,6 +165,7 @@ test/sql/phase7_fan_out_once_per_group.test
 test/sql/phase7_diamond_paths.test
 test/sql/phase7_range_relationships.test
 test/sql/phase7_window_partition.test
+test/sql/phase7_window_create_rules.test
 test/sql/variables.test
 test/sql/create_or_alter.test
 test/sql/dims_only_anchoring.test

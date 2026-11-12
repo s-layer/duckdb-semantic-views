@@ -839,8 +839,8 @@ Window metric names an unrelated dimension
    '<table>', which is unrelated to the metric's table '<metric_table>', whose
    rows its inner metric '<inner>' aggregates: neither reaches the other along
    relationships (for example, they are joined through a many-to-many bridge).
-   A window clause may name dimensions of '<metric_table>', of a table it
-   references, or of a table referencing it.
+   A window clause may name dimensions of '<metric_table>' or of a table it
+   references.
 
 **Cause:** A window metric's ``PARTITION BY``, ``PARTITION BY EXCLUDING`` or ``ORDER BY`` names a dimension whose table is not related to the table its inner metric aggregates, whose rows the window runs over: books ordered by their authors' country, through a ``book_authors`` bridge, or orders ordered by a dimension of a table that only shares a parent with orders. A book has no single country to order it by. For a derived inner metric, each of its base metrics' tables is checked. Snowflake refuses these at ``CREATE`` too (010211).
 
@@ -860,7 +860,78 @@ Window metric USING over an inner metric on another table
 
 **Cause:** ``CREATE SEMANTIC VIEW`` refuses a window metric with ``USING`` whose inner metric has none and is declared on another table, or is a derived metric. The window's ``USING`` names relationships from the window metric's table, and the window reads its inner metric along them, which a metric on another table, or with no table, cannot follow. A view stored before 0.19.0 with such a metric is refused when it is queried, with ``semantic view '<view>': window function metric '<name>' has a USING clause, but its inner metric '<inner>' is not on its table.``
 
-**Fix:** Declare the inner metric on the window metric's table, or give the inner metric its own ``USING`` and drop it from the window.
+**Fix:** Declare the inner metric on the window metric's table. Giving the inner metric its own ``USING`` instead is refused too (see `Window metric over a metric with USING`_).
+
+
+Window metric over a metric with USING
+---------------------------------------
+
+.. versionadded:: 0.19.0
+
+.. code-block:: text
+
+   Window metric '<name>' is computed over metric '<inner>', which has a USING
+   clause. As in Snowflake, only a derived metric may refer to a metric with
+   USING; write the window over a metric without one.
+
+**Cause:** ``CREATE SEMANTIC VIEW`` refuses a window metric whose inner metric has ``USING``, as Snowflake does (010905). A view created by 0.18.0 with such a window keeps loading, and its queries follow the inner metric's ``USING``.
+
+**Fix:** Write the window over a metric without ``USING``. A ``USING`` on the window metric itself applies to its inner metric when that metric is on the window metric's table.
+
+
+Window metric names another table's dimension bare
+---------------------------------------------------
+
+.. versionadded:: 0.19.0
+
+.. code-block:: text
+
+   Window metric '<name>': its window clause names dimension '<dim>' bare, but
+   it is on table '<table>', not on the metric's table '<metric_table>'. As in
+   Snowflake, a bare name in a window clause names a dimension of the metric's
+   own table; write '<table>.<dim>' to name another table's.
+
+**Cause:** A window metric's ``PARTITION BY``, ``PARTITION BY EXCLUDING`` or ``ORDER BY`` names a dimension of another table without its table alias. Snowflake refuses it too (000904).
+
+**Fix:** Qualify the name, as the message shows: ``OVER (ORDER BY r.region)``.
+
+
+Window metric names a finer or doubly reached dimension
+--------------------------------------------------------
+
+.. versionadded:: 0.19.0
+
+.. code-block:: text
+
+   Window metric '<name>': its window clause names dimension '<dim>' of table
+   '<table>', which references the metric's table '<metric_table>', whose rows
+   its inner metric '<inner>' aggregates, so it is at a finer grain. ...
+
+   Window metric '<name>': its window clause names dimension '<dim>' of table
+   '<table>', which the metric's table '<metric_table>' reaches by more than one
+   path (a table it references twice, or two chains of relationships). ...
+
+**Cause:** The window clause names a dimension of a table below the metric's table, such as a line item's quantity in a window over an order metric, or of a table the metric's table reaches more than one way, such as airports that flights reference as departure and as arrival. Snowflake refuses both at ``CREATE`` (010262, 010259 for ``PARTITION BY EXCLUDING``, and 010227).
+
+**Fix:** Name a dimension of the metric's table or of a table it references along one chain of relationships. To split a window's rows by the other dimension, query that dimension beside the window metric instead: the window runs over those rows.
+
+
+Window metric needs an ORDER BY
+--------------------------------
+
+.. versionadded:: 0.19.0
+
+.. code-block:: text
+
+   Window metric '<name>': a window frame requires an ORDER BY clause, as in
+   Snowflake. ...
+
+   Window metric '<name>': window function LAG requires ORDER BY in its window
+   specification, as in Snowflake. ...
+
+**Cause:** A window metric has a frame (``ROWS BETWEEN ...``) or an order-sensitive function (``LAG``, ``LEAD``, ``FIRST_VALUE``, ``LAST_VALUE``, ``NTH_VALUE``, ``ROW_NUMBER``, ``RANK``, ``DENSE_RANK``, ``PERCENT_RANK``, ``CUME_DIST``, ``NTILE``) and no ``ORDER BY``, so its value would depend on the order the grouped rows come in. Snowflake refuses these too (002305, 002061).
+
+**Fix:** Add an ``ORDER BY`` to the window's ``OVER`` clause.
 
 
 Window metric PARTITION BY dimension not found

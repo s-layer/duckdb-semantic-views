@@ -50,7 +50,7 @@ CREATE SEMANTIC VIEW wq_plain AS
   )
   METRICS (
     p.total AS sum(p.amount),
-    b.w AS sum(total) OVER (PARTITION BY seg)
+    b.w AS sum(total) OVER (PARTITION BY p.seg)
   );
 
 # The inner aggregate is computed at its own grain: 100 + 40 = 140.
@@ -77,7 +77,7 @@ CREATE SEMANTIC VIEW wq_quoted AS
   )
   METRICS (
     p.total AS sum(p.amount),
-    b.w AS sum("total") OVER (PARTITION BY seg)
+    b.w AS sum("total") OVER (PARTITION BY p.seg)
   );
 
 # The number that matters: 140, not the 340 a base-anchored aggregate produces.
@@ -102,7 +102,7 @@ CREATE SEMANTIC VIEW wq_quoted_case AS
   )
   METRICS (
     p.total AS sum(p.amount),
-    b.w AS sum("Total") OVER (PARTITION BY seg)
+    b.w AS sum("Total") OVER (PARTITION BY p.seg)
   );
 
 query TI
@@ -126,7 +126,7 @@ CREATE SEMANTIC VIEW wq_quoted_order AS
   )
   METRICS (
     p.total AS sum(p.amount),
-    b.w AS sum(total) OVER (PARTITION BY seg ORDER BY "seg")
+    b.w AS sum(total) OVER (PARTITION BY p.seg ORDER BY p."seg")
   );
 
 # Control: quoting must not make an UNKNOWN name resolve. Without this, the
@@ -145,7 +145,7 @@ CREATE SEMANTIC VIEW wq_bad AS
   )
   METRICS (
     p.total AS sum(p.amount),
-    b.w AS sum("nope") OVER (PARTITION BY seg)
+    b.w AS sum("nope") OVER (PARTITION BY p.seg)
   );
 ----
 inner metric
@@ -165,7 +165,7 @@ CREATE SEMANTIC VIEW wq_bad_order AS
   )
   METRICS (
     p.total AS sum(p.amount),
-    b.w AS sum(total) OVER (PARTITION BY seg ORDER BY "nosuch")
+    b.w AS sum(total) OVER (PARTITION BY p.seg ORDER BY "nosuch")
   );
 ----
 ORDER BY dimension

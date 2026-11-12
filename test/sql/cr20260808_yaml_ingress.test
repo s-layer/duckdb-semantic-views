@@ -339,17 +339,18 @@ metrics:
     expr: SUM(o.amount)
     source_table: o
   - name: w
-    expr: AVG(total) OVER (PARTITION BY region ROWS BETWEEN 1 PRECEDING AND CURRENT ROW)
+    expr: AVG(total) OVER (PARTITION BY region ORDER BY region ROWS BETWEEN 1 PRECEDING AND CURRENT ROW)
     source_table: o
     window_spec:
       window_function: AVG
       inner_metric: total
       partition_dims: [region]
+      order_by: [{expr: region}]
       frame_clause: 'ROWS BETWEEN 1 PRECEDING AND CURRENT ROW'
 $$
 
 query I
 SELECT COUNT(*) FROM (SELECT GET_DDL('SEMANTIC_VIEW', 'cr0808y_goodwindow') AS d)
-WHERE d LIKE '%AVG(total) OVER (PARTITION BY region ROWS BETWEEN 1 PRECEDING AND CURRENT ROW)%';
+WHERE d LIKE '%AVG(total) OVER (PARTITION BY region ORDER BY region NULLS LAST ROWS BETWEEN 1 PRECEDING AND CURRENT ROW)%';
 ----
 1

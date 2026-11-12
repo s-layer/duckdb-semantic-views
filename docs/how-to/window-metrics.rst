@@ -98,7 +98,7 @@ With neither, the window runs over every row of the result, as in Snowflake. ``S
    OVER (ORDER BY date)  ->  OVER (ORDER BY date)   (no partition: one running total over every store)
    OVER ()               ->  OVER ()                (the grand total on every row)
 
-Give a window an ``ORDER BY`` when it has a frame (``ROWS BETWEEN ...``) or uses an order-sensitive function such as ``LAG`` or ``LEAD``. Without one, the rows have no defined order, so the value depends on the order the grouped rows happen to come in and can change between runs.
+A window with a frame (``ROWS BETWEEN ...``), or with an order-sensitive function (``LAG``, ``LEAD``, ``FIRST_VALUE``, ``LAST_VALUE``, ``NTH_VALUE``, ``ROW_NUMBER``, ``RANK``, ``DENSE_RANK``, ``PERCENT_RANK``, ``CUME_DIST`` or ``NTILE``), needs an ``ORDER BY``. Without one the rows have no defined order, so ``CREATE SEMANTIC VIEW`` refuses it, as Snowflake does. ``SUM``, ``AVG`` and the other aggregates take an empty ``OVER ()``, which is the total over the whole result.
 
 .. versionchanged:: 0.19.0
 
@@ -216,10 +216,13 @@ Windows Across Relationships
 Because a window runs over its inner metric's result, it follows the same rules as that metric:
 
 - **Dimensions of other tables.** A window can be queried with dimensions of any table its inner metric can be queried with, including tables reached through a many-to-many bridge. Each group's value is counted once, as the inner metric counts it.
-- **USING paths and roles.** A window over a metric with ``USING`` reads its inner metric along that relationship. A ``USING`` written on the window metric itself applies to its inner metric when the inner metric has none of its own; the inner metric must then be on the window metric's table.
+- **USING paths and roles.** A window cannot be computed over a metric with ``USING``: as in Snowflake, only a derived metric may refer to one, so ``CREATE SEMANTIC VIEW`` refuses it. A ``USING`` written on the window metric itself applies to its inner metric, which must then be on the window metric's table.
 - **Fan-outs.** A window queried with a dimension of a table that references the metric's table (orders by an item's quantity) counts each order once per group, as the inner metric does.
 
-The dimensions a window clause names (in ``PARTITION BY``, ``PARTITION BY EXCLUDING`` and ``ORDER BY``) can be written bare or as ``alias.name``. Each must be a dimension of the table the inner metric aggregates (the rows the window runs over), of a table that table references, or of a table that references it. ``CREATE SEMANTIC VIEW`` refuses one on an unrelated table, such as a table on the other side of a many-to-many bridge or a sibling table under the same parent, as Snowflake does:
+The dimensions a window clause names (in ``PARTITION BY``, ``PARTITION BY EXCLUDING`` and ``ORDER BY``) follow Snowflake's rules:
+
+- A bare name names a dimension of the metric's own table. Write ``alias.name`` for any other table's: ``OVER (PARTITION BY r.region ORDER BY o.day)`` partitions an order metric by its region and orders it by its own day.
+- The other table must be one the metric's table references, along one chain of relationships. ``CREATE SEMANTIC VIEW`` refuses a dimension of a finer table (a line item's quantity in a window over an order metric), of a table reached more than one way (airports, which flights reference as departure and as arrival), and of an unrelated table, such as one on the other side of a many-to-many bridge or a sibling under the same parent:
 
 .. code-block:: text
 
@@ -228,7 +231,7 @@ The dimensions a window clause names (in ``PARTITION BY``, ``PARTITION BY EXCLUD
 
 .. versionchanged:: 0.19.0
 
-   ``PARTITION BY`` and ``PARTITION BY EXCLUDING`` accept the ``alias.name`` form, which ``ORDER BY`` already accepted.
+   ``PARTITION BY`` and ``PARTITION BY EXCLUDING`` accept the ``alias.name`` form, which ``ORDER BY`` already accepted. ``CREATE`` refuses a bare name of another table's dimension, a dimension of a finer table or of one reached more than one way, a window over a metric with ``USING``, and a frame or an order-sensitive function with no ``ORDER BY``, as Snowflake does. A view created by 0.18.0 with one of these windows keeps loading and answering as before, and its ``GET_DDL`` shows the window as written; rewrite the window before running that DDL again.
 
 
 .. _howto-window-verify:
@@ -297,7 +300,16 @@ Troubleshooting
    A window metric cannot be the inner metric of another window metric; reference a base or derived metric instead. The error message is: ``Window metric 'X': inner metric 'Y' is itself a window function metric. A window metric must be computed over an aggregate metric.``
 
 **Window clause names an unrelated dimension**
-   A dimension in ``PARTITION BY``, ``PARTITION BY EXCLUDING`` or ``ORDER BY`` must be on a table related to the metric's table (see :ref:`howto-window-relationships`). The error message starts: ``Window metric 'X': its window clause names dimension 'Y' of table 'T', which is unrelated to the metric's table 'M'``.
+   A dimension in ``PARTITION BY``, ``PARTITION BY EXCLUDING`` or ``ORDER BY`` must be on a table related to the metric's table (see :ref:`howto-window-relationships`). The error message starts: ``Window metric 'X': its window clause names dimension 'Y' of table 'T', which is unrelated to the metric's table 'M'``. A dimension of a table that references the metric's table is refused with ``... so it is at a finer grain``, and one of a table the metric's table reaches more than one way with ``... reaches by more than one path``.
+
+**Bare name of another table's dimension**
+   A bare name in a window clause names a dimension of the metric's own table. Qualify another table's: ``Window metric 'X': its window clause names dimension 'Y' bare, but it is on table 'T', not on the metric's table 'M'. ... write 'T.Y' to name another table's.``
+
+**Window over a metric with USING**
+   Write the window over a metric without ``USING``: ``Window metric 'X' is computed over metric 'Y', which has a USING clause. As in Snowflake, only a derived metric may refer to a metric with USING; write the window over a metric without one.``
+
+**Window frame or order-sensitive function without ORDER BY**
+   Add an ``ORDER BY`` to the window: ``Window metric 'X': a window frame requires an ORDER BY clause, as in Snowflake.`` or ``Window metric 'X': window function LAG requires ORDER BY in its window specification, as in Snowflake.``
 
 
 .. _howto-window-related:

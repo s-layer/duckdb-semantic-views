@@ -50,24 +50,52 @@ CREATE SEMANTIC VIEW p0c_elev AS
     f.dep_elev USING (dep_airport) AS SUM(a.elev),
     f.arr_elev USING (arr_airport) AS SUM(a.elev),
     f.any_elev AS SUM(a.elev),
-    f.dep_elev_by_flight AS SUM(dep_elev) OVER (PARTITION BY flight_id),
-    f.arr_elev_by_flight AS SUM(arr_elev) OVER (PARTITION BY flight_id),
     f.any_elev_by_flight AS SUM(any_elev) OVER (PARTITION BY flight_id),
     f.dep_elev_twice_named USING (dep_airport, DEP_AIRPORT) AS SUM(a.elev),
     f.latest_arr_elev USING (arr_airport) NON ADDITIVE BY (flight_id) AS SUM(a.elev)
   );
 
-# 1. Window over the departure role: each flight's departure elevation.
+# 1. Since 0.19.0 CREATE refuses a window over a USING metric, as Snowflake
+# does (error 010905).
+statement error
+CREATE SEMANTIC VIEW p0c_elev_win AS
+  TABLES (
+    f AS p0c_flights PRIMARY KEY (flight_id),
+    a AS p0c_airports PRIMARY KEY (airport_code)
+  )
+  RELATIONSHIPS (
+    dep_airport AS f(departure_code) REFERENCES a,
+    arr_airport AS f(arrival_code) REFERENCES a
+  )
+  FACTS (a.elev AS a.elevation)
+  DIMENSIONS (f.flight_id AS f.flight_id)
+  METRICS (
+    f.dep_elev USING (dep_airport) AS SUM(a.elev),
+    f.dep_elev_by_flight AS SUM(dep_elev) OVER (PARTITION BY flight_id)
+  );
+----
+only a derived metric may refer to a metric with USING
+
+# 1. A view stored before 0.19.0 with such windows (planted here past CREATE)
+# still answers, each window through its inner metric's role.
+statement ok
+INSERT INTO semantic_layer._definitions (schema_name, name, definition) VALUES (
+  'main',
+  'p0c_elev_stored',
+  '{"tables":[{"alias":"f","pk_columns":["flight_id"],"table":"p0c_flights"},{"alias":"a","pk_columns":["airport_code"],"table":"p0c_airports"}],"joins":[{"fk_columns":["departure_code"],"from_alias":"f","name":"dep_airport","ref_columns":["airport_code"],"table":"a"},{"fk_columns":["arrival_code"],"from_alias":"f","name":"arr_airport","ref_columns":["airport_code"],"table":"a"}],"dimensions":[{"expr":"f.flight_id","name":"flight_id","source_table":"f"}],"facts":[{"expr":"a.elevation","name":"elev","source_table":"a"}],"metrics":[{"expr":"SUM(a.elev)","name":"dep_elev","source_table":"f","using_relationships":["dep_airport"]},{"expr":"SUM(a.elev)","name":"arr_elev","source_table":"f","using_relationships":["arr_airport"]},{"expr":"SUM(dep_elev) OVER (PARTITION BY flight_id)","name":"dep_elev_by_flight","source_table":"f","window_spec":{"inner_metric":"dep_elev","partition_dims":["flight_id"],"window_function":"SUM"}},{"expr":"SUM(arr_elev) OVER (PARTITION BY flight_id)","name":"arr_elev_by_flight","source_table":"f","window_spec":{"inner_metric":"arr_elev","partition_dims":["flight_id"],"window_function":"SUM"}}],"schema_version":1}'
+)
+
+# Window over the departure role: each flight's departure elevation.
 query II rowsort
-SELECT * FROM SEMANTIC_VIEW(p0c_elev DIMENSIONS flight_id METRICS dep_elev_by_flight);
+SELECT * FROM SEMANTIC_VIEW(p0c_elev_stored DIMENSIONS flight_id METRICS dep_elev_by_flight);
 ----
 1	13
 2	13
 3	5434
 
-# 1. Window over the arrival role reads the other instance.
+# Window over the arrival role reads the other instance.
 query II rowsort
-SELECT * FROM SEMANTIC_VIEW(p0c_elev DIMENSIONS flight_id METRICS arr_elev_by_flight);
+SELECT * FROM SEMANTIC_VIEW(p0c_elev_stored DIMENSIONS flight_id METRICS arr_elev_by_flight);
 ----
 1	5434
 2	5434

@@ -39,8 +39,7 @@ CREATE SEMANTIC VIEW mpu_v
     f.departures USING (f_dep) AS f.flight_count,
     f.arrivals USING (f_arr) AS flight_count,
     f.avg_seats_out USING (f_dep) AS f.total_seats / f.flight_count,
-    movements AS f.departures + f.arrivals,
-    f.all_departures AS SUM(departures) OVER (PARTITION BY EXCLUDING city)
+    movements AS f.departures + f.arrivals
   );
 
 # Departures and arrivals by city, each through its own relationship.
@@ -82,13 +81,65 @@ SELECT * FROM semantic_view('mpu_v', metrics := ['departures', 'arrivals', 'flig
 ----
 4	4	4
 
-# A window metric takes its inner metric's path: every departure city sees
-# all 4 departures, and Gamma, which only has arrivals, is not a group.
+# Since 0.19.0 CREATE refuses a window over a metric with USING, as Snowflake
+# does (error 010905): only a derived metric may refer to one.
+statement error
+CREATE SEMANTIC VIEW mpu_win
+  TABLES (f AS mpu_flights PRIMARY KEY (id), a AS mpu_airports PRIMARY KEY (code))
+  RELATIONSHIPS (f_dep AS f(dep) REFERENCES a, f_arr AS f(arr) REFERENCES a)
+  DIMENSIONS (a.city AS a.city)
+  METRICS (
+    f.flight_count AS COUNT(*),
+    f.departures USING (f_dep) AS f.flight_count,
+    f.all_departures AS SUM(departures) OVER (PARTITION BY EXCLUDING a.city)
+  );
+----
+only a derived metric may refer to a metric with USING
+
+# A view stored before 0.19.0 with such a window still loads and answers
+# (planted here past CREATE): the window takes its inner metric's path, so
+# every departure city sees all 4 departures, and Gamma, which only has
+# arrivals, is not a group.
+statement ok
+INSERT INTO semantic_layer._definitions (schema_name, name, definition) VALUES (
+  'main',
+  'mpu_stored',
+  '{"tables":[{"alias":"f","pk_columns":["id"],"table":"mpu_flights"},{"alias":"a","pk_columns":["code"],"table":"mpu_airports"}],"joins":[{"fk_columns":["dep"],"from_alias":"f","name":"f_dep","ref_columns":["code"],"table":"a"},{"fk_columns":["arr"],"from_alias":"f","name":"f_arr","ref_columns":["code"],"table":"a"}],"dimensions":[{"expr":"a.city","name":"city","source_table":"a"}],"facts":[],"metrics":[{"expr":"COUNT(*)","name":"flight_count","source_table":"f"},{"expr":"f.flight_count","name":"departures","source_table":"f","using_relationships":["f_dep"]},{"expr":"SUM(departures) OVER (PARTITION BY EXCLUDING city)","name":"all_departures","source_table":"f","window_spec":{"excluding_dims":["city"],"inner_metric":"departures","window_function":"SUM"}}],"schema_version":2}'
+)
+
 query TI rowsort
-SELECT * FROM semantic_view('mpu_v', dimensions := ['city'], metrics := ['all_departures']);
+SELECT * FROM semantic_view('mpu_stored', dimensions := ['city'], metrics := ['all_departures']);
 ----
 Alpha	4
 Beta	4
+
+# Its GET_DDL renders the stored window unchanged, which CREATE now refuses:
+# recreating the view means rewriting the window (as a CHANGELOG note says).
+query I
+SELECT GET_DDL('SEMANTIC_VIEW', 'mpu_stored') LIKE '%f.all_departures AS SUM(departures) OVER (PARTITION BY EXCLUDING city)%';
+----
+true
+
+statement error
+CREATE OR REPLACE SEMANTIC VIEW mpu_stored AS
+TABLES (
+    f AS mpu_flights PRIMARY KEY (id),
+    a AS mpu_airports PRIMARY KEY (code)
+)
+RELATIONSHIPS (
+    f_dep AS f(dep) REFERENCES a,
+    f_arr AS f(arr) REFERENCES a
+)
+DIMENSIONS (
+    a.city AS a.city
+)
+METRICS (
+    f.flight_count AS COUNT(*),
+    f.departures USING (f_dep) AS f.flight_count,
+    f.all_departures AS SUM(departures) OVER (PARTITION BY EXCLUDING city)
+)
+----
+only a derived metric may refer to a metric with USING
 
 # A metric with no USING says nothing about which airport a city is, so
 # grouping it by city is refused, also beside a metric that names a path.

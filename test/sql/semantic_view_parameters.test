@@ -313,6 +313,7 @@ metrics:
     window_spec:
       window_function: AVG
       inner_metric: n
+      order_by: [{expr: region}]
       frame_clause: 'ROWS BETWEEN $1 PRECEDING AND CURRENT ROW'
 $$;
 ----

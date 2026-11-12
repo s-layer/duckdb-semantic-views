@@ -63,8 +63,8 @@ DIMENSIONS (
 )
 METRICS (
     PRIVATE s.total_qty AS SUM(s.quantity),
-    s.avg_qty AS AVG(total_qty) OVER (PARTITION BY EXCLUDING date ORDER BY date ASC NULLS LAST),
-    s.qty_lag AS LAG(total_qty, 1) OVER (PARTITION BY EXCLUDING date ORDER BY date ASC NULLS LAST)
+    s.avg_qty AS AVG(total_qty) OVER (PARTITION BY EXCLUDING d.date ORDER BY d.date ASC NULLS LAST),
+    s.qty_lag AS LAG(total_qty, 1) OVER (PARTITION BY EXCLUDING d.date ORDER BY d.date ASC NULLS LAST)
 )
 
 # ========================================
@@ -173,7 +173,7 @@ NYC	2024-01-05	30	20.0
 statement error
 SELECT * FROM SEMANTIC_VIEW(p48_sales_view DIMENSIONS store METRICS avg_qty);
 ----
-requires dimension 'date'
+requires dimension 'd.date'
 
 # ========================================
 # Test 6: SHOW SEMANTIC DIMENSIONS FOR METRIC
@@ -204,7 +204,7 @@ SELECT GET_DDL('SEMANTIC_VIEW', 'p48_sales_view') LIKE '%PARTITION BY EXCLUDING%
 true
 
 query I
-SELECT GET_DDL('SEMANTIC_VIEW', 'p48_sales_view') LIKE '%ORDER BY date NULLS LAST%'
+SELECT GET_DDL('SEMANTIC_VIEW', 'p48_sales_view') LIKE '%ORDER BY d.date NULLS LAST%'
 ----
 true
 
@@ -217,8 +217,8 @@ true
 query TTTTT
 SELECT * FROM describe_semantic_view('p48_sales_view') WHERE property = 'WINDOW_SPEC' ORDER BY object_name;
 ----
-METRIC	avg_qty	p48_sales	WINDOW_SPEC	AVG(total_qty) OVER (PARTITION BY EXCLUDING date ORDER BY date NULLS LAST)
-METRIC	qty_lag	p48_sales	WINDOW_SPEC	LAG(total_qty, 1) OVER (PARTITION BY EXCLUDING date ORDER BY date NULLS LAST)
+METRIC	avg_qty	p48_sales	WINDOW_SPEC	AVG(total_qty) OVER (PARTITION BY EXCLUDING d.date ORDER BY d.date NULLS LAST)
+METRIC	qty_lag	p48_sales	WINDOW_SPEC	LAG(total_qty, 1) OVER (PARTITION BY EXCLUDING d.date ORDER BY d.date NULLS LAST)
 
 # ========================================
 # Test 9: Window metric over a safe many-to-one join direction

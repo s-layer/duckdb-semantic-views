@@ -49,7 +49,7 @@ CREATE SEMANTIC VIEW d1p_sv AS
     li.total_qty   AS SUM(li.qty),
     avg_qty        AS total_qty / NULLIF(n_items, 0),
     li.last_qty NON ADDITIVE BY (item_id) AS SUM(li.qty),
-    li.qty_overall AS SUM(total_qty) OVER (PARTITION BY EXCLUDING cust_region)
+    li.qty_overall AS SUM(total_qty) OVER (PARTITION BY EXCLUDING c.cust_region)
   );
 
 # Derived metric over two child metrics: EU 6 / 3, orphan 40 / 1.
