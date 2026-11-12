@@ -13,7 +13,7 @@ jobs:
     name: Check for new DuckDB latest release
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@v7.0.1
         with:
           ref: main
           submodules: recursive
@@ -52,7 +52,7 @@ jobs:
 
       - name: Install just
         if: steps.latest.outputs.is_new == 'true'
-        uses: extractions/setup-just@v4
+        uses: extractions/setup-just@v4.0.0
 
       - name: Install Rust stable
         if: steps.latest.outputs.is_new == 'true'
@@ -204,7 +204,7 @@ jobs:
             echo "Branch duckdb/1.4.x does not exist — skipping LTS check."
           fi
 
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@v7.0.1
         if: steps.branch_check.outputs.exists == 'true'
         with:
           ref: duckdb/1.4.x
@@ -235,7 +235,7 @@ jobs:
 
       - name: Install just
         if: steps.lts.outputs.is_new == 'true'
-        uses: extractions/setup-just@v4
+        uses: extractions/setup-just@v4.0.0
 
       - name: Install Rust stable
         if: steps.lts.outputs.is_new == 'true'
