@@ -385,9 +385,10 @@ arrival airports'. ``elev_climb`` composes both roles and keeps them apart:
 
 The metric's ``USING`` must name exactly one relationship to the table the fact
 lives on (spelling that relationship twice, in any case, still names one). The
-role carries through to a window metric over such a metric
-(``f.dep_elev_by_flight AS SUM(dep_elev) OVER (PARTITION BY flight_id)``) and
-to a semi-additive one.
+role carries through to a semi-additive metric over such a fact. A window metric
+over a metric with ``USING`` is refused at ``CREATE``, as in Snowflake, where
+only a derived metric may refer to one; in a view created by 0.18.0 such a window
+keeps following its inner metric's role.
 
 A member that reaches such a fact with no single role to pick is rejected as
 ambiguous at query time (see :ref:`howto-rp-errors`). That covers a metric
