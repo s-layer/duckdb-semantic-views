@@ -9,6 +9,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+_No unreleased changes yet._
+
+## [0.19.0] - 2026-11-12
+
 ### Added
 
 - ASOF relationships, written as in Snowflake: `o(cust_id, order_date) REFERENCES a(cust_id, ASOF start_date)` joins each order to its customer's latest address starting on or before the order date, with the answers Snowflake gives. An order with no such address keeps its row with `NULL` address dimensions, a metric on the address table is counted over that table, and the address table is the "one" side for fan traps. One column per relationship can be `ASOF`, and `CREATE` checks that the pair is numeric or temporal. `DESCRIBE` shows Snowflake's `REF_KEY` object for the column, and `GET_DDL` and the YAML export (`asof:`) write it back. A view with an ASOF relationship is stored in format 3: 0.18.0 refuses to read it, while 0.17.0 and older join it on equality without saying so, so don't open such a database with them.
@@ -1163,7 +1167,8 @@ Connection-lifecycle and ADBC fixes. Two downstream regressions reported against
 - `list_semantic_views()` and `describe_semantic_view()` introspection functions
 - Fuzz targets for FFI boundary testing
 
-[Unreleased]: https://github.com/s-layer/duckdb-semantic-views/compare/v0.18.0...HEAD
+[Unreleased]: https://github.com/s-layer/duckdb-semantic-views/compare/v0.19.0...HEAD
+[0.19.0]: https://github.com/s-layer/duckdb-semantic-views/compare/v0.18.0...v0.19.0
 [0.18.0]: https://github.com/s-layer/duckdb-semantic-views/compare/v0.17.0...v0.18.0
 [0.17.0]: https://github.com/s-layer/duckdb-semantic-views/compare/v0.16.0...v0.17.0
 [0.16.0]: https://github.com/s-layer/duckdb-semantic-views/compare/v0.15.0...v0.16.0
