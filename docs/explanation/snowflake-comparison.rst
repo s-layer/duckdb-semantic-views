@@ -586,7 +586,7 @@ Since 0.19.0, ``CREATE`` refuses the window metrics Snowflake refuses:
 - a bare name in the window clause for a dimension of another table (000904). A bare name names a dimension of the metric's own table, and a parent table's dimension is written qualified, as in ``OVER (PARTITION BY r.region ORDER BY o.day)``;
 - a dimension of a finer table (010262, or 010259 for ``PARTITION BY EXCLUDING``), of a table reached more than one way (010227), or of an unrelated table (010211).
 
-A view created by 0.18.0 with one of these windows keeps loading and answering as before; only a new ``CREATE``, ``ALTER`` or YAML import is checked.
+A view created by 0.18.0 with one of these windows keeps loading and answering as before; only a new ``CREATE``, ``CREATE OR ALTER`` or YAML import is checked. Its ``GET_DDL`` and YAML export still show the window as written, so rewrite the window before running that DDL again.
 
 The behavioral differences are:
 

@@ -113,6 +113,34 @@ SELECT * FROM semantic_view('mpu_stored', dimensions := ['city'], metrics := ['a
 Alpha	4
 Beta	4
 
+# Its GET_DDL renders the stored window unchanged, which CREATE now refuses:
+# recreating the view means rewriting the window (as a CHANGELOG note says).
+query I
+SELECT GET_DDL('SEMANTIC_VIEW', 'mpu_stored') LIKE '%f.all_departures AS SUM(departures) OVER (PARTITION BY EXCLUDING city)%';
+----
+true
+
+statement error
+CREATE OR REPLACE SEMANTIC VIEW mpu_stored AS
+TABLES (
+    f AS mpu_flights PRIMARY KEY (id),
+    a AS mpu_airports PRIMARY KEY (code)
+)
+RELATIONSHIPS (
+    f_dep AS f(dep) REFERENCES a,
+    f_arr AS f(arr) REFERENCES a
+)
+DIMENSIONS (
+    a.city AS a.city
+)
+METRICS (
+    f.flight_count AS COUNT(*),
+    f.departures USING (f_dep) AS f.flight_count,
+    f.all_departures AS SUM(departures) OVER (PARTITION BY EXCLUDING city)
+)
+----
+only a derived metric may refer to a metric with USING
+
 # A metric with no USING says nothing about which airport a city is, so
 # grouping it by city is refused, also beside a metric that names a path.
 statement error

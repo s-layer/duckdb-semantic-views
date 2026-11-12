@@ -64,10 +64,21 @@ const ORDER_SENSITIVE: [&str; 11] = [
 /// along a one-to-one relationship too, each relationship a way of its own
 /// (so a table referenced twice is reached two ways), each table at most once
 /// on a way. Counting stops at two.
-fn chain_count(def: &SemanticViewDefinition, from: &str, to: &str) -> usize {
-    fn walk(def: &SemanticViewDefinition, at: &str, to: &str, seen: &mut Vec<String>) -> usize {
+///
+/// With `using` (the window metric's own `USING`), only the chains that follow
+/// one of those relationships count when any does: the `USING` picks the role
+/// or the path, as the query honours it (`tests_window_result_rows`).
+fn chain_count(def: &SemanticViewDefinition, from: &str, to: &str, using: &[String]) -> usize {
+    fn walk(
+        def: &SemanticViewDefinition,
+        at: &str,
+        to: &str,
+        seen: &mut Vec<String>,
+        need: Option<&[String]>,
+        used: bool,
+    ) -> usize {
         if at.eq_ignore_ascii_case(to) {
-            return 1;
+            return usize::from(need.is_none() || used);
         }
         let mut n = 0;
         for j in &def.joins {
@@ -85,8 +96,13 @@ fn chain_count(def: &SemanticViewDefinition, from: &str, to: &str) -> usize {
             if seen.contains(&next) {
                 continue;
             }
+            let names_using = need.is_some_and(|u| {
+                j.name
+                    .as_deref()
+                    .is_some_and(|name| u.iter().any(|r| ident_matches(r, name)))
+            });
             seen.push(next.clone());
-            n += walk(def, &next, to, seen);
+            n += walk(def, &next, to, seen, need, used || names_using);
             seen.pop();
             if n >= 2 {
                 return n;
@@ -95,7 +111,13 @@ fn chain_count(def: &SemanticViewDefinition, from: &str, to: &str) -> usize {
         n
     }
     let from = from.to_ascii_lowercase();
-    walk(def, &from, to, &mut vec![from.clone()])
+    if !using.is_empty() {
+        let n = walk(def, &from, to, &mut vec![from.clone()], Some(using), false);
+        if n > 0 {
+            return n;
+        }
+    }
+    walk(def, &from, to, &mut vec![from.clone()], None, false)
 }
 
 /// Whether `to` is reached from `from` along foreign keys, stepping back along
@@ -230,7 +252,14 @@ fn validate_window_order(metric: &Metric, ws: &WindowSpec) -> Result<(), ParseEr
             metric.name
         )));
     }
-    let function = ws.window_function.trim();
+    // The parser keeps the name as written, so `"LAG"` and `main.lag` name
+    // DuckDB's `lag` too: compare the unquoted last part.
+    let function = crate::expr_tokens::scan_references(ws.window_function.trim())
+        .first()
+        .map_or_else(
+            || ws.window_function.trim().to_ascii_lowercase(),
+            crate::expr_tokens::IdentRef::last_part_key,
+        );
     if let Some(f) = ORDER_SENSITIVE
         .iter()
         .find(|f| function.eq_ignore_ascii_case(f))
@@ -260,7 +289,7 @@ fn check_window_reach(
     if ident_matches(dim_table, table) {
         return Ok(());
     }
-    match chain_count(def, table, dim_table) {
+    match chain_count(def, table, dim_table, &metric.using_relationships) {
         1 => Ok(()),
         0 if reaches(def, dim_table, table) => Err(ParseError::positionless(format!(
             "Window metric '{}': its window clause names dimension '{reference}' of table \
@@ -479,6 +508,27 @@ mod tests {
         assert!(validate_window_dimensions(&def).is_err());
     }
 
+    /// The window metric's own `USING` picks one of the two ways, as the
+    /// query follows it (`tests_window_result_rows`): accepted.
+    #[test]
+    fn a_windows_own_using_picks_one_of_two_ways() {
+        let two_ways = |using: &[&str]| {
+            let mut def = view("p.publisher");
+            let mut second = def.joins[2].clone();
+            second.name = Some("b_p2".to_string());
+            second.fk_columns = vec!["p2_id".to_string()];
+            def.joins.push(second);
+            def.metrics[1].using_relationships = using.iter().map(|u| (*u).to_string()).collect();
+            def
+        };
+        assert!(validate_window_dimensions(&two_ways(&["b_p"])).is_ok());
+        assert!(validate_window_dimensions(&two_ways(&["B_P2"])).is_ok());
+        // A USING that names neither way leaves both counted.
+        let mut def = two_ways(&["b_p"]);
+        def.metrics[1].using_relationships = vec!["nope".to_string()];
+        assert!(validate_window_dimensions(&def).is_err());
+    }
+
     /// A window over a metric with `USING` is refused: Snowflake lets only a
     /// derived metric refer to one (fixture 10, air: 010905).
     #[test]
@@ -518,7 +568,13 @@ mod tests {
             "{}",
             err.message
         );
-        for function in super::ORDER_SENSITIVE.iter().chain(&["lag", "First_Value"]) {
+        for function in super::ORDER_SENSITIVE.iter().chain(&[
+            "lag",
+            "First_Value",
+            "\"LAG\"",
+            "main.lag",
+            "\"main\".\"Lead\"",
+        ]) {
             let err = validate_window_dimensions(&unordered(function, None))
                 .expect_err("order-sensitive without ORDER BY");
             assert!(

@@ -625,6 +625,28 @@ CREATE SEMANTIC VIEW dcb_w_frame_only AS TABLES (s AS dcb_orders PRIMARY KEY (id
 ----
 a window frame requires an ORDER BY clause
 
+# A view stored by 0.18.0 with that window (planted past CREATE) still renders
+# its DDL unchanged. Running that DDL is refused, as above.
+statement ok
+INSERT INTO semantic_layer._definitions (schema_name, name, definition) VALUES ('main', 'dcb_w_frame_only', '{"tables":[{"alias":"s","pk_columns":["id"],"table":"dcb_orders"}],"joins":[],"dimensions":[{"expr":"s.region","name":"region","source_table":"s"},{"expr":"s.d","name":"d","source_table":"s"}],"facts":[],"metrics":[{"expr":"SUM(s.t)","name":"t","source_table":"s"},{"expr":"SUM(s.qty)","name":"qty","source_table":"s"},{"expr":"SUM(t) OVER (ROWS BETWEEN 1 PRECEDING AND CURRENT ROW)","name":"r","source_table":"s","window_spec":{"frame_clause":"ROWS BETWEEN 1 PRECEDING AND CURRENT ROW","inner_metric":"t","window_function":"SUM"}}],"schema_version":1}')
+
+query T nosort
+SELECT * FROM dcb_ddl('dcb_w_frame_only');
+----
+CREATE OR REPLACE SEMANTIC VIEW dcb_w_frame_only AS
+TABLES (
+    s AS dcb_orders PRIMARY KEY (id)
+)
+DIMENSIONS (
+    s.region AS s.region,
+    s.d AS s.d
+)
+METRICS (
+    s.t AS SUM(s.t),
+    s.qty AS SUM(s.qty),
+    s.r AS SUM(t) OVER (ROWS BETWEEN 1 PRECEDING AND CURRENT ROW)
+)
+
 # B-143: body_parser/mod.rs::test_over_partition_and_order_by_with_interior_whitespace — PARTITION BY / ORDER BY / frame separated by runs of spaces
 statement ok
 CREATE SEMANTIC VIEW dcb_w_spaces AS TABLES (s AS dcb_orders PRIMARY KEY (id)) DIMENSIONS (s.region AS s.region, s.d AS s.d) METRICS (s.t AS SUM(s.t), s.qty AS SUM(s.qty), s.r AS SUM(qty) OVER (PARTITION BY region   ORDER BY d ASC NULLS LAST   ROWS BETWEEN 1 PRECEDING AND CURRENT ROW));

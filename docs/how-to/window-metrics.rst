@@ -231,7 +231,7 @@ The dimensions a window clause names (in ``PARTITION BY``, ``PARTITION BY EXCLUD
 
 .. versionchanged:: 0.19.0
 
-   ``PARTITION BY`` and ``PARTITION BY EXCLUDING`` accept the ``alias.name`` form, which ``ORDER BY`` already accepted. ``CREATE`` refuses a bare name of another table's dimension, a dimension of a finer table or of one reached more than one way, a window over a metric with ``USING``, and a frame or an order-sensitive function with no ``ORDER BY``, as Snowflake does. A view created by 0.18.0 with one of these windows keeps loading and answering as before.
+   ``PARTITION BY`` and ``PARTITION BY EXCLUDING`` accept the ``alias.name`` form, which ``ORDER BY`` already accepted. ``CREATE`` refuses a bare name of another table's dimension, a dimension of a finer table or of one reached more than one way, a window over a metric with ``USING``, and a frame or an order-sensitive function with no ``ORDER BY``, as Snowflake does. A view created by 0.18.0 with one of these windows keeps loading and answering as before, and its ``GET_DDL`` shows the window as written; rewrite the window before running that DDL again.
 
 
 .. _howto-window-verify:

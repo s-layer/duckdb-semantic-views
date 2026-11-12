@@ -74,12 +74,14 @@ pub fn validate_member_references(def: &SemanticViewDefinition) -> Result<(), Pa
         }
     }
 
-    // (kind, name, source_table, expression, window clause references) for
-    // every member that carries one. A window metric's `PARTITION BY`,
-    // `PARTITION BY EXCLUDING` and `ORDER BY` name dimensions, not columns: a
-    // parent's `r.region` is Snowflake's form (fixture 10c, V1), and
-    // `validate_window_dimensions` decides which tables they may be on.
-    let no_window: HashSet<String> = HashSet::new();
+    // (kind, name, source_table, the texts to check) for every member that
+    // carries one. A window metric is emitted from its `WindowSpec` alone
+    // (`expand::window`), so its texts are the inner metric, the function's
+    // extra arguments and the frame. Its `PARTITION BY`, `PARTITION BY
+    // EXCLUDING` and `ORDER BY` name dimensions, not columns: a parent's
+    // `r.region` is Snowflake's form (fixture 10c, V1), and
+    // `validate_window_dimensions` decides which tables they may be on. Only
+    // those are left out; a raw column in an argument is still checked.
     let members = def
         .facts
         .iter()
@@ -88,8 +90,7 @@ pub fn validate_member_references(def: &SemanticViewDefinition) -> Result<(), Pa
                 "fact",
                 &f.name,
                 f.source_table.as_ref(),
-                &f.expr,
-                no_window.clone(),
+                vec![f.expr.clone()],
             )
         })
         .chain(def.dimensions.iter().map(|d| {
@@ -97,30 +98,25 @@ pub fn validate_member_references(def: &SemanticViewDefinition) -> Result<(), Pa
                 "dimension",
                 &d.name,
                 d.source_table.as_ref(),
-                &d.expr,
-                no_window.clone(),
+                vec![d.expr.clone()],
             )
         }))
         .chain(def.metrics.iter().map(|m| {
-            let window: HashSet<String> = m
-                .window_spec
-                .iter()
-                .flat_map(|ws| {
-                    ws.excluding_dims
-                        .iter()
-                        .chain(&ws.partition_dims)
-                        .chain(ws.order_by.iter().map(|ob| &ob.expr))
-                        .map(|r| normalize_ident_part(r))
-                })
-                .collect();
-            ("metric", &m.name, m.source_table.as_ref(), &m.expr, window)
+            let texts = match &m.window_spec {
+                Some(ws) => std::iter::once(ws.inner_metric.clone())
+                    .chain(ws.extra_args.iter().cloned())
+                    .chain(ws.frame_clause.iter().cloned())
+                    .collect(),
+                None => vec![m.expr.clone()],
+            };
+            ("metric", &m.name, m.source_table.as_ref(), texts)
         }));
 
-    for (kind, name, source_table, expr, window) in members {
+    for (kind, name, source_table, texts) in members {
         let own = source_table
             .map(|s| normalize_ident_part(s))
             .or_else(|| base_alias.clone());
-        for chain in scan_references(expr) {
+        for chain in texts.iter().flat_map(|t| scan_references(t)) {
             if chain.is_bare() {
                 continue; // A bare name is a column of the member's own table or a member reference.
             }
@@ -133,9 +129,6 @@ pub fn validate_member_references(def: &SemanticViewDefinition) -> Result<(), Pa
             }
             if member_keys.contains(&chain.key()) {
                 continue; // A declared fact or metric, own-qualified: the legal cross-table form.
-            }
-            if window.contains(&chain.key()) {
-                continue; // A dimension a window clause names.
             }
             return Err(ParseError::positionless(format!(
                 "semantic view: {kind} '{name}' references '{raw}', a column of \
@@ -364,5 +357,53 @@ mod tests {
             validate_member_references(&def2).is_ok(),
             "a quoted own-table qualifier is still the member's own table"
         );
+    }
+
+    /// A window metric with the parent's dimension `c.region` in its window
+    /// clause and the same raw column `c.region` in its function arguments.
+    fn window_def(extra_args: &[&str]) -> SemanticViewDefinition {
+        let mut def = base_def();
+        def.dimensions = vec![dim("region", "c.region", Some("c"))];
+        let args = std::iter::once("revenue".to_string())
+            .chain(extra_args.iter().map(|a| (*a).to_string()))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let mut w = metric(
+            "prev",
+            &format!("LAG({args}) OVER (ORDER BY c.region)"),
+            Some("o"),
+        );
+        w.window_spec = Some(crate::model::WindowSpec {
+            window_function: "LAG".to_string(),
+            inner_metric: "revenue".to_string(),
+            extra_args: extra_args.iter().map(|a| (*a).to_string()).collect(),
+            excluding_dims: vec![],
+            partition_dims: vec![],
+            order_by: vec![crate::model::WindowOrderBy {
+                expr: "c.region".to_string(),
+                order: crate::model::SortOrder::Asc,
+                nulls: crate::model::NullsOrder::Last,
+            }],
+            frame_clause: None,
+        });
+        def.metrics = vec![metric("revenue", "SUM(o.amount)", Some("o")), w];
+        def
+    }
+
+    /// Phase 7 PR 6b: a window clause names dimensions, so a parent's
+    /// `c.region` there is not a raw column (Snowflake fixture 10c, V1).
+    #[test]
+    fn accepts_another_tables_dimension_in_a_window_clause() {
+        assert!(validate_member_references(&window_def(&["1"])).is_ok());
+    }
+
+    /// The window clause's names exempt only the window clause: the same raw
+    /// column in the function's arguments is still refused, since the window
+    /// runs over the aggregated rows, where that table is not in scope.
+    #[test]
+    fn rejects_another_tables_column_in_a_window_argument() {
+        let err = validate_member_references(&window_def(&["1", "c.region"]))
+            .expect_err("raw column in a window argument");
+        assert!(err.message.contains("'c.region'"), "{}", err.message);
     }
 }
