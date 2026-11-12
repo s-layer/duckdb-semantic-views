@@ -53,7 +53,7 @@ Following a relationship many-to-one never duplicates rows, because each row on 
 - straight down, such as orders by a line-item status, or customers by the status of their orders' line items;
 - to a sibling after a hop up, such as line items by the mode of their order's shipments, when line items and shipments both reference orders;
 - through several fan-outs, such as line items by the tag of their order's notes;
-- across a many-to-many bridge (see :ref:`Many-to-many relationships through a bridge <ref-create-bridge-relationships>`).
+- across a many-to-many bridge (see :ref:`howto-many-to-many`).
 
 A filter on such a dimension keeps a metric-table row when any row it reaches matches, and counts it once.
 
@@ -144,8 +144,8 @@ The fan-out is refused with ``fan trap detected``, rather than counted once per 
 
 - the metric's table has no ``PRIMARY KEY``;
 - the metric is semi-additive and its ``NON ADDITIVE BY`` dimension is not in the query;
-- the fan-out crosses an ``ASOF`` or range relationship in reverse;
-- the path to the dimension runs through a role-played table, or the query has a dimension or filter whose expression names no table.
+- the fan-out crosses an ``ASOF`` or range relationship in reverse (see :ref:`howto-asof-range-grain`);
+- the fan-out crosses one of a role-played table's relationships back toward the table that holds them, such as an airport count by a flight's carrier when flights reference airports twice: nothing says which relationship joins an airport to its flights (see :ref:`howto-role-playing`).
 
 For example, in a view where ``line_items`` (``li``, declared without a ``PRIMARY KEY``) and ``shipments`` (``sh``) both reference ``orders``, ``revenue`` grouped by the shipments' ``mode`` raises:
 
@@ -251,24 +251,25 @@ The same applies to these shapes:
   it (metrics naming different ones are grouped separately and merged).
 - A dimension or filter across a many-to-many bridge table, such as a book
   metric grouped by author country through ``book_authors``. Each book counts
-  once per group (see :ref:`Many-to-many relationships through a bridge <ref-create-bridge-relationships>`).
+  once per group (see :ref:`howto-many-to-many`).
 
 A dimension group that exists at one grain but not another is kept, with
 ``NULL`` for the metrics that have no rows there. For example, a region with
 customers but no orders reports its balance and a ``NULL`` order count.
 
-These multi-grain queries still raise the fan trap error. Query each part at a
-single grain instead:
+These multi-grain queries are still refused. Query each part at a single grain
+instead:
 
-- A role-played dimension together with an active semi-additive metric.
-- A role-played table reached by a metric with no ``USING`` to say which
-  relationship is meant.
 - An active semi-additive metric grouped or filtered across a many-to-many
-  bridge.
+  bridge (a fan trap error).
+- A role-played table reached by a metric with no ``USING`` to say which
+  relationship is meant (an ambiguity error).
+- Metrics naming different roles beside an active semi-additive metric, grouped
+  by the role-played table (an ambiguity error). A semi-additive metric with
+  ``USING`` is grouped along its role, alone or beside metrics on the same role.
 
 :ref:`explanation-grain-multi` explains how the per-grain results are joined,
-and :ref:`explanation-grain-refused` explains why these three shapes are
-refused.
+and :ref:`explanation-grain-refused` explains why these shapes are refused.
 
 
 .. _howto-fan-other-shapes:
@@ -429,3 +430,5 @@ Related
 - :ref:`ref-show-dims-for-metric` -- List the dimensions a metric can be grouped by
 - :ref:`ref-create-relationships` -- How relationship cardinality is inferred
 - :ref:`howto-role-playing` -- Relationships that reach one table by more than one route
+- :ref:`howto-many-to-many` -- Counting a metric across a bridge table
+- :ref:`howto-asof-range` -- ASOF and range relationships, which are not crossed in reverse

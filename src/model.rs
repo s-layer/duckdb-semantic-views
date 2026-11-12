@@ -1074,6 +1074,12 @@ impl SemanticViewDefinition {
     /// metric written over a metric on its own table: a format-1 reader drops
     /// the first two and reads the third as a column, so it would answer with
     /// a wrong number or a misleading error rather than refuse.
+    ///
+    /// Format 3 (v0.19.0) is needed by ASOF and range relationships, a
+    /// `DISTINCT RANGE` constraint, and a graph 0.18.0's CREATE refused: a
+    /// table other than the first declared one referenced by two different
+    /// tables. An older reader joins the first two on equality, and walks
+    /// such a graph along its first-declared path without saying so.
     #[must_use]
     pub fn required_schema_version(&self) -> u32 {
         if self
@@ -1081,6 +1087,7 @@ impl SemanticViewDefinition {
             .iter()
             .any(|j| j.asof.is_some() || j.range_end.is_some())
             || self.tables.iter().any(|t| !t.distinct_ranges.is_empty())
+            || self.has_a_table_referenced_by_two_tables()
         {
             return 3;
         }
@@ -1092,6 +1099,29 @@ impl SemanticViewDefinition {
         } else {
             1
         }
+    }
+
+    /// Whether some table other than the first declared one is referenced by
+    /// two different tables (0.18.0's `check_no_diamonds`, which refused it at
+    /// CREATE). One table referencing another twice (role-playing) and fan-in
+    /// onto the first table are not.
+    fn has_a_table_referenced_by_two_tables(&self) -> bool {
+        use crate::ident::normalize_ident_part;
+        let first = self.tables.first().map(|t| normalize_ident_part(&t.alias));
+        let mut sources: std::collections::HashMap<String, std::collections::HashSet<String>> =
+            std::collections::HashMap::new();
+        for j in &self.joins {
+            let target = normalize_ident_part(&j.table);
+            if Some(&target) == first.as_ref() {
+                continue;
+            }
+            let from = sources.entry(target).or_default();
+            from.insert(normalize_ident_part(&j.from_alias));
+            if from.len() > 1 {
+                return true;
+            }
+        }
+        false
     }
 
     /// True when any relationship lacks foreign-key column metadata
@@ -3339,6 +3369,53 @@ metrics:
             end: "e".into(),
         });
         assert_eq!(def.required_schema_version(), 3);
+    }
+
+    /// A table other than the first declared one, referenced by two
+    /// different tables (a diamond, two children of one parent), needs format
+    /// 3: 0.18.0's CREATE refused it, and 0.18.0 reading one walks the
+    /// first-declared path silently (v0.19.0 release review F2). Fan-in onto
+    /// the first table and one table referencing another twice (role-playing)
+    /// are shapes 0.18.0 created itself, so they keep their format.
+    #[test]
+    fn required_schema_version_is_three_with_a_table_referenced_by_two_tables() {
+        let join = |from: &str, to: &str, name: &str| Join {
+            from_alias: from.into(),
+            table: to.into(),
+            fk_columns: vec!["k".into()],
+            ref_columns: vec!["k".into()],
+            name: Some(name.into()),
+            ..Default::default()
+        };
+        let mut def = format_test_def(FORMAT_ONE_YAML);
+        for alias in ["c", "s", "r"] {
+            def.tables.push(TableRef {
+                alias: alias.into(),
+                table: alias.into(),
+                ..Default::default()
+            });
+        }
+        // o -> c -> r and o -> s -> r: `r` is not first.
+        def.joins = vec![
+            join("o", "c", "o_c"),
+            join("o", "s", "o_s"),
+            join("c", "r", "c_r"),
+            join("s", "R", "s_r"),
+        ];
+        assert_eq!(def.required_schema_version(), 3);
+        // The same with `r` declared first: fan-in onto the first table.
+        let r = def.tables.pop().unwrap();
+        def.tables.insert(0, r);
+        assert_eq!(def.required_schema_version(), 1);
+        // Role-playing: `o` references `c` twice.
+        let mut def = format_test_def(FORMAT_ONE_YAML);
+        def.tables.push(TableRef {
+            alias: "c".into(),
+            table: "c".into(),
+            ..Default::default()
+        });
+        def.joins = vec![join("o", "c", "dep"), join("o", "c", "arr")];
+        assert_eq!(def.required_schema_version(), 1);
     }
 
     #[test]

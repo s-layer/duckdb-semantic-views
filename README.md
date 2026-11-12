@@ -219,7 +219,7 @@ METRICS (
 
 Relationship cardinality is **inferred** from the PRIMARY KEY / UNIQUE constraints declared in `TABLES` — you do not annotate it. The rule looks at the *FK side*: if a relationship's FK columns are themselves a PK or UNIQUE key on the table they are declared on, the relationship is one-to-one; otherwise it is many-to-one.
 
-Traversing many-to-one is always safe. A query that would have to traverse a relationship in reverse (one-to-many) to reach a dimension is a fan trap, and the extension raises an error rather than returning an inflated number.
+Traversing many-to-one is always safe. A metric grouped or filtered by a dimension reached through a relationship in reverse (one-to-many) is answered as in Snowflake: each row of the metric's table counts once in every group it reaches, never once per joined row. An order with a shipped and a pending line item counts once under each status. Where that can't be done, for example when the metric's table has no `PRIMARY KEY`, the query is refused as a fan trap rather than returning an inflated number.
 
 ```sql
 RELATIONSHIPS (
@@ -312,6 +312,8 @@ Documented in full on the [docs site](https://s-layer.github.io/duckdb-semantic-
 - **[CREATE OR ALTER](https://s-layer.github.io/duckdb-semantic-views/how-to/create-or-alter.html)** -- deploy the same definition, SQL or YAML, on every release: the view is altered to match and keeps its creation time, its tags and the materializations the change leaves valid. `verify_semantic_view_yaml` checks a YAML definition without creating anything.
 - **[Standard SQL queries](https://s-layer.github.io/duckdb-semantic-views/how-to/standard-sql.html)** -- `SELECT region, AGG(revenue) FROM sales WHERE ... GROUP BY region HAVING ...`, as in Snowflake; it works in subqueries, CTEs, `CREATE TABLE AS` and from Python.
 - **[Pre-aggregation filtering](https://s-layer.github.io/duckdb-semantic-views/how-to/filtering.html)** -- a `WHERE` inside `SEMANTIC_VIEW(...)` (`where_clause :=` in `semantic_view()`) filters rows *before* metrics are aggregated, which an outer `WHERE` cannot express. Prepared-statement parameters work there.
+- **[ASOF and range relationships](https://s-layer.github.io/duckdb-semantic-views/how-to/asof-and-range-relationships.html)** -- `o(cust_id, order_date) REFERENCES a(cust_id, ASOF start_date)` joins each order to the address in effect on its date, and `e(event_ts) REFERENCES p(BETWEEN start_ts AND end_ts EXCLUSIVE)` each event to the period that holds it, as in Snowflake.
+- **[Many-to-many relationships](https://s-layer.github.io/duckdb-semantic-views/how-to/many-to-many-relationships.html)** -- a bridge table such as `book_authors` links books and authors; a book metric grouped by author country counts each book once per country.
 - **[Multi-grain queries](https://s-layer.github.io/duckdb-semantic-views/explanation/metric-grain.html)** -- metrics at different grains are each aggregated over their own table and joined on the queried dimensions.
 - **[Semi-additive metrics](https://s-layer.github.io/duckdb-semantic-views/how-to/semi-additive-metrics.html)** -- `NON ADDITIVE BY` picks one snapshot row per group before aggregating (balances, inventory levels).
 - **[Window metrics](https://s-layer.github.io/duckdb-semantic-views/how-to/window-metrics.html)** -- `OVER (PARTITION BY ...)` for running totals and shares of parent.
@@ -326,7 +328,7 @@ Documented in full on the [docs site](https://s-layer.github.io/duckdb-semantic-
 
 Full documentation: [s-layer.github.io/duckdb-semantic-views](https://s-layer.github.io/duckdb-semantic-views/)
 
-Includes getting-started and multi-table tutorials, full DDL and query reference, how-to guides for advanced features (FACTS, derived metrics, filtering, view variables, tables defined by a query, role-playing dimensions, fan traps, semi-additive and window metrics, materializations, YAML, CREATE OR ALTER), and explanation pages covering metric grain, transactional DDL, and feature-by-feature comparisons with Snowflake and Databricks.
+Includes getting-started and multi-table tutorials, full DDL and query reference, how-to guides for advanced features (FACTS, derived metrics, filtering, view variables, tables defined by a query, role-playing dimensions, fan traps, ASOF and range relationships, many-to-many relationships, semi-additive and window metrics, materializations, YAML, CREATE OR ALTER), and explanation pages covering metric grain, transactional DDL, and feature-by-feature comparisons with Snowflake and Databricks.
 
 ## Building
 

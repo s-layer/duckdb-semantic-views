@@ -45,6 +45,12 @@ Concept Mapping
    * - Relationships
      - ``RELATIONSHIPS`` clause with FK REFERENCES
      - ``RELATIONSHIPS`` clause with FK REFERENCES
+   * - Point-in-time and period joins
+     - ``ASOF`` on a referenced column; ``REFERENCES t (BETWEEN start AND end EXCLUSIVE)`` with a ``DISTINCT RANGE`` constraint
+     - The same forms (see :ref:`howto-asof-range`)
+   * - Many-to-many relationships
+     - A bridge table that references both sides
+     - The same, each row counted once per group (see :ref:`howto-many-to-many`)
    * - Dimensions
      - ``DIMENSIONS`` clause
      - ``DIMENSIONS`` clause
@@ -339,8 +345,9 @@ An **unqualified column** is the member's own table's column in both systems:
 that also joins another table with a ``code`` column. ``CREATE`` records each
 table's columns so the expansion can tell, and refuses an unqualified column
 that only another table has, as Snowflake does. Here an unqualified name that
-is a fact, a variable or, in a metric outside an aggregate call, another
-metric on the same table means that member; a member's own name in its own
+is a variable, a fact (unless the fact is on another table and the member's
+own table has a column of that name) or, in a metric outside an aggregate
+call, another metric on the same table means that member; a member's own name in its own
 expression (``li.qty AS qty``) is its column.
 
 .. versionchanged:: 0.19.0
@@ -447,19 +454,20 @@ Four boundaries apply:
   metric", but probed directly it answers these queries this way; it refuses
   them only when the metric's table has no primary key, and so does the
   extension (``fan trap detected``). Until v0.19.0 the extension refused them
-  all. A window metric, an active semi-additive metric, and a fan-out across an
-  ``ASOF`` or range relationship are still refused in both.
+  all. An active semi-additive metric whose ``NON ADDITIVE BY`` dimension is not
+  queried, and a fan-out across an ``ASOF`` or range relationship, are still
+  refused in both. A window metric is answered, over its inner metric's
+  once-per-group numbers.
   :ref:`SHOW SEMANTIC DIMENSIONS ... FOR METRIC <ref-show-dims-for-metric>`
   lists the dimensions a metric can be grouped by, those below its grain
   included, in both.
   See :ref:`explanation-grain-below`.
-- A **window metric** whose inner aggregate lives on a non-base table is computed
-  at its own grain -- the inner aggregation is anchored at that table (a parent
-  or a child of the base table), so it is neither inflated nor thinned by a
-  base-table join. Window metrics whose inner aggregates sit
-  at *different* grains still error, as those grains would need joining before the
-  window runs. The exception is a pair joined one-to-one, where nothing fans out:
-  it is answered from the base table instead (see :ref:`explanation-grain-refused`).
+- A **window metric** is computed over the result of the query without it, with
+  its inner metric added, so the inner metric is aggregated at its own grain and
+  is neither inflated nor thinned by a join. Window metrics whose inner metrics
+  sit at *different* grains can be queried together, and beside aggregate
+  metrics, since 0.19.0; they used to be refused (see
+  :ref:`howto-window-relationships`).
 - An **active semi-additive metric** snapshots at its own grain, whether it is
   the query's only grain or one of several: the ``RANK()`` runs over the metric's
   own table rather than a base-anchored join, so the winning snapshot row is not
@@ -481,10 +489,11 @@ Four boundaries apply:
   a table reached through one, is read along each grain's own role too.
   A definition that merely *declares* role-playing does not lose per-grain
   emission: the test is what the query reaches, so unrelated grains in the same
-  view are computed normally. The one pairing that still declines is a role-played
-  dimension queried *together with* an active semi-additive metric: a snapshot
-  group cannot carry a role, so the two grains would bind different instances of
-  the same dimension and the outer join would compare them.
+  view are computed normally. An active semi-additive metric with ``USING`` is
+  grouped along its role too, and its snapshot follows that role. The one pairing
+  that still declines is metrics naming *different* roles beside an active
+  semi-additive metric, since such a query is not split into one aggregate per
+  role (see :ref:`explanation-grain-refused`).
 
 
 USING RELATIONSHIPS

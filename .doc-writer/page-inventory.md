@@ -1,47 +1,47 @@
-# Page Inventory -- v0.17.0 Content Refresh (standard-SQL queries, CREATE binds every member, member tags)
+# Page Inventory -- v0.19.0 (ASOF and range relationships, many-to-many through a bridge, Snowflake-parity query rules)
 
-**Generated:** 2026-10-26
-**Mode:** Update, content refresh of existing pages (no new pages)
-**Trigger:** `git log v0.16.0..HEAD`: #314 (query a semantic view by name with standard SQL), #315 (`CREATE SEMANTIC VIEW` binds every member and refuses one DuckDB cannot bind), #316 (member-level `[WITH] TAG`). Source of truth: CHANGELOG `[Unreleased]`, `cpp/src/shim.cpp` (standard-SQL rewrite and refusals), `test/sql/standard_sql_query*.test`, `test/sql/create_binds_members.test`, `test/sql/member_tags.test`.
+**Generated:** 2026-11-12
+**Mode:** Update: two new pages plus a content refresh
+**Trigger:** `git log v0.18.0..origin/main`: #336 (ASOF), #338 (range), #339 (bridge), #340-#352 (fan-outs, diamonds, roles, dims-only, SHOW FOR METRIC, window and semi-additive metrics, FACTS table). Source of truth: CHANGELOG `[Unreleased]`, the release build (`extension_version` f19aef0, DuckDB 2.0.0), Snowflake fixture results for ASOF and range.
 
-Approval: the inventory was not put to the project author (no interactive session); every refresh entry below was taken as approved, and the "no changes needed" entries as deselected.
+Approval: the inventory was not put to the project author (no interactive session); every entry below was taken as approved, and the "no changes needed" entries as deselected.
 
-Each changed or added SQL example was run against the debug build of this code (scratch sqllogictest files under `/tmp/claude-0/docs-pass-0170/`); output tables were produced by running them.
+Every SQL block on a new or changed page was run against the release build with the DuckDB Python package (scratch scripts outside the repo); output tables are the real outputs.
+
+## New Pages
+
+| # | Type | Title | Key Sections | File Path |
+|---|------|-------|--------------|-----------|
+| 1 | how-to | How to Join on Dates with ASOF and Range Relationships | Choose the relationship; ASOF (addresses in effect at an order's date); range with `DISTINCT RANGE` (campaign running at a signup's date); what you can group by; inspect (explain, DESCRIBE, GET_DDL, YAML); troubleshooting | docs/how-to/asof-and-range-relationships.rst |
+| 2 | how-to | How to Model Many-to-Many Relationships with a Bridge | Set up; define the bridge; group and filter across it; bridge dimensions; dimensions only; a fact table as the bridge; verify; limits; troubleshooting | docs/how-to/many-to-many-relationships.rst |
 
 ## Content Refresh
 
-| # | Type | Title | Key Sections / Discrepancies | File Path |
-|---|------|-------|------------------------------|-----------|
-| 1 | (refresh) | How to Query a Semantic View with Standard SQL | No example data, so no example runs as written; the join example joins region totals to customers by region (repeats rows). Add a set-up view, outputs, ad-hoc aggregates and fact rows, a prepared-statement / Python section for application code, a troubleshooting section quoting the refusal messages, links to the error reference. | docs/how-to/standard-sql.rst |
-| 2 | (refresh) | Getting Started | Teaches only the construct and the function. Add a step querying the same view with `SELECT ... AGG(...) ... GROUP BY`; summary line. | docs/tutorials/getting-started.rst |
-| 3 | (refresh) | Multi-Table Semantic Views | "Update the View" step: say that `CREATE OR REPLACE` binds every member and that a refused replace leaves the old view in place. | docs/tutorials/multi-table.rst |
-| 4 | (refresh) | Home page | Intro and meta description name only the construct. | docs/index.rst |
-| 5 | (refresh) | SEMANTIC_VIEW(...) and semantic_view() | Intro: the standard-SQL form is a third spelling that turns into the construct. | docs/reference/semantic-view-function.rst |
-| 6 | (refresh) | Error Messages | Query Errors intro names the standard-SQL form; new entry for the standard-SQL refusals. | docs/reference/error-messages.rst |
-| 7 | (refresh) | Snowflake Comparison | Feature Parity "Direct SQL query interface: Not planned" is false; Concept Mapping gains a row for expression checking at CREATE. | docs/explanation/snowflake-comparison.rst |
-| 8 | (refresh) | Semantic Views vs Regular Views | Query interface row and the "What a Semantic View Does" example show only the construct; add a row for what CREATE checks. | docs/explanation/semantic-views-vs-regular-views.rst |
-| 9 | (refresh) | Filtering | Tip mapping the standard-SQL form's `WHERE` / `HAVING` onto the two filters; Related link. | docs/how-to/filtering.rst |
-| 10 | (refresh) | Facts | Troubleshooting: "Fact name not found" and "syntax error at or near AS when queried" now fail at CREATE. | docs/how-to/facts.rst |
-| 11 | (refresh) | Derived Metrics | Troubleshooting: a table-qualified column in a derived metric is now refused at CREATE. | docs/how-to/derived-metrics.rst |
-| 12 | (refresh) | Window Metrics | Troubleshooting: a window metric over a window metric is now refused at CREATE. | docs/how-to/window-metrics.rst |
-| 13 | (refresh) | Data Sources | Troubleshooting "Catalog Error": CREATE now checks the tables its members read; schema-evolution note that a replace is checked. | docs/how-to/data-sources.rst |
-| 14 | (refresh) | Metadata Annotations | BOOLEAN note: CREATE binds the filter but does not check its type. | docs/how-to/metadata-annotations.rst |
-| 15 | (refresh, persona PARTIAL fix) | CREATE SEMANTIC VIEW | Bind-at-CREATE note: a refused OR REPLACE keeps the old view; what is still not checked (materialization tables, a table no member reaches, a filter's BOOLEAN type). Tags section already current. | docs/reference/create-semantic-view.rst |
+| # | Type | Title | Discrepancies | File Path |
+|---|------|-------|---------------|-----------|
+| 3 | (refresh) | How to Diagnose and Fix Fan Traps | Refusal list rewritten for 0.19.0; bridge links to the new how-to | docs/how-to/fan-traps.rst |
+| 4 | (refresh) | Metric Grain | FACTS reads the member's table and lists every row; "What Is Still Refused" rewritten | docs/explanation/metric-grain.rst |
+| 5 | (refresh) | Role-Playing Dimensions | A metric on the role-played table is answered by its own dimensions; troubleshooting entry rewritten | docs/how-to/role-playing-dimensions.rst |
+| 6 | (refresh) | Snowflake Comparison | Concept Mapping rows for ASOF / range and many-to-many; window and role-played statements | docs/explanation/snowflake-comparison.rst |
+| 7 | (refresh) | SEMANTIC_VIEW(...) | A WHERE member on a role-played table follows each metric's role | docs/reference/semantic-view-function.rst |
+| 8 | (refresh) | Filtering | Role-played filter troubleshooting | docs/how-to/filtering.rst |
+| 9 | (refresh) | CREATE SEMANTIC VIEW | Links to the worked examples | docs/reference/create-semantic-view.rst |
+| 10 | (refresh) | How-to index, home page, navbar | Entries for the two new pages | docs/how-to/index.rst, docs/index.rst, docs/conf.py |
 
 ## Pages Verified -- No Changes Needed
 
-| Type | Title | Reason | File Path |
-|------|-------|--------|-----------|
-| (refresh) -- no changes needed | DESCRIBE / YAML format / GET_DDL | Tag rows and YAML shape landed with #316. | docs/reference/describe-semantic-view.rst, docs/reference/yaml-format.rst, docs/reference/get-ddl.rst |
-| (refresh) -- no changes needed | Databricks Comparison | Query-interface rows and section updated with #314. | docs/explanation/databricks-comparison.rst |
-| (refresh) -- no changes needed | How-to index | Lists the standard-SQL guide. | docs/how-to/index.rst |
-| (refresh) -- no changes needed | Building a Complete Model | Its queries and refactors all CREATE and run on the build; no claim about when errors appear. | docs/tutorials/building-a-model.rst |
-| (refresh) -- no changes needed | Functions | Lists `__sv_check_create` as internal. | docs/reference/functions.rst |
-| (refresh) -- no changes needed | Release notes | Includes CHANGELOG.md verbatim. | docs/changelog.md |
+| Title | Reason | File Path |
+|-------|--------|-----------|
+| Error Messages | ASOF, range, multi-path and fan trap entries landed with the PRs | docs/reference/error-messages.rst |
+| SHOW SEMANTIC DIMENSIONS FOR METRIC | Fanned dimensions listed (#346) | docs/reference/show-semantic-dimensions-for-metric.rst |
+| Window Metrics, Semi-Additive Metrics | Updated with #341, #348, #349, #351 | docs/how-to/window-metrics.rst, docs/how-to/semi-additive-metrics.rst |
+| Databricks Comparison | No statement touched by this release | docs/explanation/databricks-comparison.rst |
+| Functions | Function surface unchanged | docs/reference/functions.rst |
+| Release notes | Includes CHANGELOG.md verbatim | docs/changelog.md |
 
 ## API Reference Status
 
-Manual SQL reference under `docs/reference/` (config `api_reference: manual`). New anchors: `ref-err-standard-sql`, `howto-standard-sql-setup`, `howto-standard-sql-adhoc`, `howto-standard-sql-app`, `howto-standard-sql-verify`, `howto-standard-sql-troubleshooting`, `howto-standard-sql-related`, `ref-err-facts-metrics`, `tutorial-gs-standard-sql`.
+Manual SQL reference (`api_reference: manual`). New anchors: `howto-asof-range` (+ `-choose`, `-grain`, `-inspect`, `-troubleshooting`, `-related`), `howto-asof`, `howto-range`, `howto-many-to-many`, `howto-m2m-*` (setup, define, group, filter, bridge-dims, dims-only, fact-bridge, verify, limits, troubleshooting, related).
 
 ## Audience Targeting
 
@@ -49,4 +49,4 @@ Single persona: Data engineers exploring semantic views (intermediate).
 
 ## Coverage Gaps
 
-- README.md (outside this pass's scope, `docs/**` only) does not mention the standard-SQL query form.
+None left in docs/. README.md and CHANGELOG.md were refreshed in the same pass.

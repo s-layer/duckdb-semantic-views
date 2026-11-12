@@ -19,6 +19,8 @@ query parameter:
 Each section prints both formulations where they differ, so the distinction is
 visible rather than asserted.
 """
+from decimal import Decimal
+
 import duckdb
 
 con = duckdb.connect(config={"allow_unsigned_extensions": "true"})
@@ -69,6 +71,7 @@ def show(label, sql):
     print(f"  {label}")
     for row in rows:
         print("    " + " | ".join(str(v) for v in row))
+    return rows
 
 
 # ============================================================
@@ -259,49 +262,46 @@ for line in expanded.splitlines():
 # ============================================================
 # 4. The boundaries
 #
-# Two rejections, for different reasons. Both are reported rather than
-# answered wrongly.
+# A metric has no value before aggregation runs, so the predicate cannot name
+# one: that is refused. A filter on a table that fans out from a metric's
+# table is answered, with each of the metric's rows counted once.
 # ============================================================
 print()
 print("=" * 60)
-print("4. Boundaries: what the predicate may not do")
+print("4. Boundaries: what the predicate may and may not do")
 print("=" * 60)
 
-for label, query, why in [
-    (
-        "where_clause := 'order_count > 1'",
+try:
+    con.execute(
         """SELECT * FROM semantic_view('accounts',
                dimensions := ['region'], metrics := ['order_count'],
                where_clause := 'order_count > 1'
-           )""",
-        "a metric has no value before aggregation runs",
-    ),
-    (
-        "where_clause := 'is_recent' with a parent-grain metric",
-        """SELECT * FROM semantic_view('accounts',
-               dimensions := ['region'], metrics := ['order_count', 'total_balance'],
-               where_clause := 'is_recent'
-           )""",
-        "reaching the filter's table fans out the parent metric",
-    ),
-]:
-    try:
-        con.execute(query).fetchall()
-        print(f"  UNEXPECTED: {label} was accepted")
-    except duckdb.Error as exc:
-        first_line = str(exc).strip().splitlines()[0]
-        print(f"\n  {label}")
-        print(f"  -> rejected ({why}):")
-        print(f"    {first_line[:150]}")
+           )"""
+    ).fetchall()
+except duckdb.Error as exc:
+    first_line = str(exc).strip().splitlines()[0]
+    print("\n  where_clause := 'order_count > 1'")
+    print("  -> rejected (a metric has no value before aggregation runs):")
+    print(f"    {first_line[:150]}")
+else:
+    raise SystemExit("where_clause := 'order_count > 1' was accepted")
+
+recent = show(
+    "\n  where_clause := 'is_recent' beside the customer-grain total_balance:",
+    """SELECT * FROM semantic_view('accounts',
+           dimensions := ['region'], metrics := ['order_count', 'total_balance'],
+           where_clause := 'is_recent'
+       ) ORDER BY region""",
+)
+assert recent == [("East", 2, Decimal("800.00")), ("West", 1, Decimal("900.00"))], recent
 
 print(
     "\nThe predicate is evaluated before the metrics are computed, so it can\n"
-    "name dimensions and facts but not metrics. And the tables it reaches are\n"
-    "fan-out checked exactly as a queried dimension's are -- filtering on an\n"
-    "`orders` fact while a metric aggregates `customers` would multiply that\n"
-    "metric, so it is reported instead. Filter on a member reachable from each\n"
-    "metric's table without fanning, or use an outer WHERE when you genuinely\n"
-    "mean 'after aggregation'."
+    "name dimensions and facts but not metrics. A filter on `orders` beside a\n"
+    "metric on `customers` keeps each customer with a matching order once, as\n"
+    "in Snowflake: every customer here has a 2024 order, so total_balance is\n"
+    "unchanged while order_count counts the 2024 orders. Use an outer WHERE\n"
+    "when you mean 'after aggregation'."
 )
 
 con.execute("DROP SEMANTIC VIEW accounts")

@@ -1,5 +1,5 @@
 .. meta::
-   :description: Goal-oriented guides for standard-SQL queries, view variables, tables defined by a query, CREATE OR ALTER, FACTS, derived metrics, role-playing dimensions, fan trap and multi-grain resolution, data source connectivity, query filtering, metadata annotations, semi-additive metrics, window metrics, wildcard selection, fact queries, materializations, and YAML definitions
+   :description: Goal-oriented guides for standard-SQL queries, view variables, tables defined by a query, CREATE OR ALTER, FACTS, derived metrics, role-playing dimensions, fan trap and multi-grain resolution, ASOF and range relationships, many-to-many bridges, data source connectivity, query filtering, metadata annotations, semi-additive metrics, window metrics, wildcard selection, fact queries, materializations, and YAML definitions
 
 .. _how-to-guides:
 
@@ -14,7 +14,9 @@ Goal-oriented guides for specific tasks with DuckDB Semantic Views.
 - :ref:`howto-facts` -- Define reusable row-level expressions that can be referenced inside metric aggregations.
 - :ref:`howto-derived-metrics` -- Compose metrics from other metrics using arithmetic without repeating aggregate logic.
 - :ref:`howto-role-playing` -- Join the same table through several named relationships, pick the route with ``USING``, and query a diamond.
-- :ref:`howto-fan-traps` -- Diagnose and fix the fan trap error in multi-table views, and see which queries across several grains are answered.
+- :ref:`howto-fan-traps` -- See how a metric grouped below its grain is counted, which queries still raise the fan trap error, and how to fix them.
+- :ref:`howto-asof-range` -- Join each row to the record in effect at its date, or to the period that holds it, with ASOF and range relationships.
+- :ref:`howto-many-to-many` -- Group a metric by a dimension linked many-to-many through a bridge table, counting each row once per group.
 - :ref:`howto-query-tables` -- Make a ``TABLES`` entry a query that joins, filters or pre-aggregates source tables inside the view.
 
 **Advanced Metrics**
@@ -45,6 +47,8 @@ Goal-oriented guides for specific tasks with DuckDB Semantic Views.
    derived-metrics
    role-playing-dimensions
    fan-traps
+   asof-and-range-relationships
+   many-to-many-relationships
    query-defined-tables
    data-sources
    filtering
