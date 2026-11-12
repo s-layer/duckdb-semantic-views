@@ -334,6 +334,19 @@ parameter, or a typo to be resolved.
    Before, the definition was accepted and the reference surfaced at query time
    as a DuckDB unknown-alias error -- the same rule, enforced later.
 
+An **unqualified column** is the member's own table's column in both systems:
+``ap.airport_count AS COUNT(code)`` counts the airports' ``code`` even in a query
+that also joins another table with a ``code`` column. ``CREATE`` records each
+table's columns so the expansion can tell, and refuses an unqualified column
+that only another table has, as Snowflake does. Here an unqualified name that
+is a fact, a variable or, in a metric, another metric means that member.
+
+.. versionchanged:: 0.19.0
+   Before, an unqualified column was resolved against every table the query
+   joined, so a name two of them shared raised DuckDB's ``Ambiguous reference
+   to column name``. A view created earlier keeps that behaviour until it is
+   created again.
+
 Derived metrics are unaffected: a metric that references metrics on other tables
 (``m AS t1.metric_1 + t2.metric_2``) is supported in both systems, and is
 computed per grain -- see :ref:`explanation-sf-metric-grain` below.

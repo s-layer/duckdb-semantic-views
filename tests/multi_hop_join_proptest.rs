@@ -77,6 +77,14 @@
 //! `max` rather than the expansion's `RANK`. Queried by `wcat` they are plain
 //! sums along their path.
 
+//! TECH-DEBT #83 writes every member expression bare in about half the cases
+//! (`sum(v)` rather than `sum(t.v)`, [`bare_twin`]), with each table's columns
+//! recorded as CREATE records them. Every table also has decoy columns named
+//! like the other tables' member columns ([`DECOYS`]), so the expansion must
+//! read each bare column from its member's own table: from any other it
+//! reads a decoy constant, and before #83 the shared name was ambiguous. The
+//! oracle is unchanged, as it names every column with its table.
+
 use proptest::prelude::*;
 use semantic_views::expand::{expand, DimensionName, FactName, MetricName, QueryRequest};
 use semantic_views::model::{
@@ -112,6 +120,12 @@ struct Instance {
     /// With the second path, whether `w` (the shared table) is declared first.
     /// CREATE accepts the diamond either way.
     w_first: bool,
+    /// TECH-DEBT #83: whether every member expression is written bare
+    /// ([`bare_twin`]), with the tables' columns recorded as CREATE records
+    /// them. Each table also has decoy columns named like the other tables'
+    /// ([`DECOYS`]), so a bare column read from any table but its member's
+    /// own reads a decoy and the number moves off the oracle.
+    bare: bool,
 }
 
 /// The kind of the `t → u` relationship.
@@ -402,6 +416,7 @@ fn arb_instance() -> impl Strategy<Value = Instance> {
             any::<bool>(),
             x_rows,
             any::<bool>(),
+            any::<bool>(),
         )
             .prop_map(
                 |(
@@ -414,6 +429,7 @@ fn arb_instance() -> impl Strategy<Value = Instance> {
                     diamond,
                     (x_rows, t_fk_x),
                     w_first,
+                    bare,
                 )| {
                     Instance {
                         w_rows,
@@ -426,6 +442,7 @@ fn arb_instance() -> impl Strategy<Value = Instance> {
                         x_rows,
                         t_fk_x,
                         w_first: diamond && w_first,
+                        bare,
                     }
                 },
             )
@@ -657,9 +674,58 @@ fn build_def_shaped(hop: Hop, diamond: bool, w_first: bool) -> SemanticViewDefin
         schema_name: None,
         resolution_schema_name: None,
         temp_tables: vec![],
+        table_columns: std::collections::BTreeMap::new(),
         comment: None,
         tags: Vec::new(),
     }
+}
+
+/// The physical tables' own columns, as [`make_db`] creates them.
+const SCHEMA: [(&str, &[&str]); 4] = [
+    ("w", &["id", "wcat", "ww"]),
+    ("u", &["id", "uk", "us", "rs", "re", "fk_w", "ucat", "uw"]),
+    ("x", &["id", "fk_w"]),
+    ("t", &["fk_u", "ts", "d", "v", "fk_x"]),
+];
+
+/// The columns the member expressions read. Every table that lacks one of them
+/// gets a decoy column of that name ([`make_db`]).
+const DECOYS: [&str; 6] = ["d", "v", "ucat", "uw", "wcat", "ww"];
+
+/// The decoy columns of a table with `columns`.
+fn decoys(columns: &[&str]) -> Vec<&'static str> {
+    DECOYS
+        .into_iter()
+        .filter(|d| !columns.contains(d))
+        .collect()
+}
+
+/// TECH-DEBT #83: `def` with each member expression written bare (`sum(v)`,
+/// not `sum(t.v)`) and each table's columns recorded, decoys included, as
+/// CREATE records them from the tables. The expansion must then read each
+/// bare column from its member's own table: every other table has a decoy of
+/// that name.
+fn bare_twin(mut def: SemanticViewDefinition) -> SemanticViewDefinition {
+    let strip = |e: &str| {
+        ["t.", "u.", "w.", "x."]
+            .iter()
+            .fold(e.to_string(), |acc, q| acc.replace(q, ""))
+    };
+    for d in &mut def.dimensions {
+        d.expr = strip(&d.expr);
+    }
+    for m in &mut def.metrics {
+        m.expr = strip(&m.expr);
+    }
+    def.table_columns = SCHEMA
+        .iter()
+        .filter(|(table, _)| def.tables.iter().any(|t| t.alias == *table))
+        .map(|(table, columns)| {
+            let all = columns.iter().copied().chain(decoys(columns));
+            ((*table).to_string(), all.map(str::to_string).collect())
+        })
+        .collect();
+    def
 }
 
 /// Create the physical tables and insert the generated rows.
@@ -736,6 +802,17 @@ fn make_db(inst: &Instance) -> duckdb::Connection {
             .collect();
         conn.execute_batch(&format!("INSERT INTO t VALUES {};", values.join(",")))
             .expect("insert t rows");
+    }
+    // TECH-DEBT #83's decoys: each table gets the other tables' member columns
+    // once the rows are in, each holding one constant of its own, which no generated value equals.
+    for (k, (table, columns)) in SCHEMA.iter().enumerate() {
+        for decoy in decoys(columns) {
+            conn.execute_batch(&format!(
+                "ALTER TABLE {table} ADD COLUMN {decoy} INTEGER DEFAULT {};",
+                1000 + k
+            ))
+            .expect("add a decoy column");
+        }
     }
     conn
 }
@@ -1149,6 +1226,7 @@ fn is_duckdb_group_by_bind_bug(msg: &str) -> bool {
 /// pinned cases below so a pinned case runs exactly the property's checks.
 fn check_case(case: &Case) -> Result<(), TestCaseError> {
     let def = build_def_shaped(case.inst.hop, case.inst.diamond, case.inst.w_first);
+    let def = if case.inst.bare { bare_twin(def) } else { def };
     // CREATE accepts the diamond in either TABLES order, as Snowflake does
     // (it used to refuse it unless `w`, its shared table, came first).
     let creatable = semantic_views::graph::validate_graph(&def);
@@ -1456,12 +1534,25 @@ fn generator_reaches_both_where_clause_branches() {
     // refused across the temporal one.
     let (mut fanned_answered, mut fanned_refused) = (0usize, 0usize);
     let mut distinct: HashSet<String> = HashSet::new();
+    // TECH-DEBT #83: bare-column cases, and those whose query joins tables
+    // that share a column name (every pair does, through the decoys).
+    let (mut bare, mut bare_joined) = (0usize, 0usize);
 
     for _ in 0..400 {
         let case = arb_case()
             .new_tree(&mut runner)
             .expect("strategy must produce a value")
             .current();
+        if case.inst.bare {
+            bare += 1;
+            let tables: HashSet<&str> = case
+                .sel_dims
+                .iter()
+                .map(|&d| dim_table(DIMS[d]))
+                .chain(case.sel_metrics.iter().map(|&m| metric_table(METS[m])))
+                .collect();
+            bare_joined += usize::from(tables.len() > 1);
+        }
         if !reaches_w_two_ways(&case) {
             if fans_across_a_temporal_hop(&case) {
                 fanned_refused += 1;
@@ -1521,6 +1612,11 @@ fn generator_reaches_both_where_clause_branches() {
         }
     }
 
+    assert!(
+        bare >= 150 && bare_joined >= 80,
+        "bare-column cases {bare}, of which joining two tables {bare_joined}: the \
+         qualification of a bare column is barely reached"
+    );
     assert!(
         with_pred > 0 && without_pred > 0,
         "where_clause must be both present and absent across cases \
@@ -1597,6 +1693,7 @@ fn ci_or_of_ands_instance() -> Instance {
         w_first: false,
         x_rows: vec![],
         t_fk_x: vec![],
+        bare: false,
     }
 }
 
@@ -1698,6 +1795,7 @@ fn pinned_asof_hop_takes_the_latest_period() {
         w_first: false,
         x_rows: vec![],
         t_fk_x: vec![],
+        bare: false,
     };
     let case = Case {
         inst: inst.clone(),
@@ -1854,6 +1952,7 @@ fn pinned_range_hop_takes_the_period_holding_the_value() {
         w_first: false,
         x_rows: vec![],
         t_fk_x: vec![],
+        bare: false,
     };
     assert_eq!(u_period(&inst, 0), (None, Some(1)));
     assert_eq!(u_period(&inst, 1), (Some(3), Some(5)));

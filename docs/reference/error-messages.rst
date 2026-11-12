@@ -645,6 +645,24 @@ The same message is raised for a dimension or metric expression, with ``fact`` r
 
 **Fix:** Define a fact on the other table and reference that fact by name. See :ref:`howto-facts`.
 
+.. _ref-err-bare-column:
+
+Unqualified column of another table
+-----------------------------------
+
+.. versionadded:: 0.19.0
+
+.. code-block:: text
+
+   semantic view '<view>': metric '<name>' references '<column>', a column of
+   table '<alias>', but a metric expression may only reference columns of its
+   own table ('<own>'). To use a value from another table, define a FACT on
+   that table and reference the fact by name (e.g. '<alias>.<fact_name>').
+
+**Cause:** The rule above, for an unqualified column: the expression names, without a table, a column that the member's own table does not have and another table in the view does. An unqualified column is read from the member's own table, as Snowflake reads it, so it cannot reach the other table's.
+
+**Fix:** Define a fact on the other table and reference that fact, or correct the column name if the own table's column was meant.
+
 
 Unknown metric in a derived metric
 ----------------------------------

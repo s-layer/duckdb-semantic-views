@@ -421,6 +421,7 @@ mod tests {
             schema_name: schema.map(str::to_string),
             resolution_schema_name: schema.map(str::to_string),
             temp_tables: vec![],
+            table_columns: std::collections::BTreeMap::new(),
             comment: None,
             tags: Vec::new(),
             max_staleness: None,

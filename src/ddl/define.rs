@@ -170,6 +170,10 @@ pub fn enrich_definition_for_create(
     //    release. It is added to the JSON here, not carried on the struct, so
     //    it stays out of YAML export.
     def.temp_tables = crate::expand::temp_table_candidates(&def);
+    // `table_columns` is recorded by the CREATE's member check from the tables
+    // themselves (TECH-DEBT #83); a YAML body that carries the key is not
+    // what they hold.
+    def.table_columns.clear();
     let internal = |e: serde_json::Error| crate::errors::ParseError::positionless(e.to_string());
     let mut json = serde_json::to_value(&def).map_err(internal)?;
     if let Some(object) = json.as_object_mut() {

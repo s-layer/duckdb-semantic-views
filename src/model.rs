@@ -976,6 +976,15 @@ pub struct SemanticViewDefinition {
     /// above, and stripped from a YAML export with them.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub temp_tables: Vec<String>,
+    /// The column names of each table, keyed by its alias as stored, as the
+    /// CREATE's caller saw them (`ddl::read_ffi::check_create_members`). The
+    /// expansion qualifies a bare column of a member expression with the
+    /// member's own table when that table has the column, which is
+    /// Snowflake's scoping rule (TECH-DEBT #83). A view stored before 0.19.0
+    /// has none, and its bare columns are spliced as written, as then.
+    /// Stamped at CREATE, and stripped from a YAML export.
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub table_columns: std::collections::BTreeMap<String, Vec<String>>,
     /// View-level comment describing the purpose of this semantic view.
     /// Old stored JSON without this field deserializes to None.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -3523,6 +3532,7 @@ metrics:
                 schema_name: None,
                 resolution_schema_name: None,
                 temp_tables: vec![],
+                table_columns: std::collections::BTreeMap::new(),
                 comment: None,
                 tags: Vec::new(),
                 max_staleness: None,
@@ -3901,6 +3911,7 @@ metrics:
                 schema_name: Some("main".to_string()),
                 resolution_schema_name: Some("main".to_string()),
                 temp_tables: vec![],
+                table_columns: std::collections::BTreeMap::new(),
                 ..Default::default()
             };
             let json = serde_json::to_string(&def).unwrap();

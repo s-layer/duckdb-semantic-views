@@ -1002,6 +1002,7 @@ fn build_def(names: &Names, chain: Option<&Chain>) -> SemanticViewDefinition {
         schema_name: None,
         resolution_schema_name: None,
         temp_tables: vec![],
+        table_columns: std::collections::BTreeMap::new(),
         comment: None,
         tags: Vec::new(),
         max_staleness: None,

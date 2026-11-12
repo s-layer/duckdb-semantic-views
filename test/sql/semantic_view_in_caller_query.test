@@ -260,7 +260,8 @@ US	US	70
 # query of its own, rather than reading the outer row's column of that name:
 # DuckDB binds a comma join's right side as LATERAL. CREATE binds every
 # member, so the views below are created over a `price` column that is then
-# dropped.
+# dropped. CREATE recorded `price` as a column of `o`, so the expansion writes
+# it `o.price` (TECH-DEBT #83) and DuckDB reports `o` as lacking it.
 
 statement ok
 CREATE TABLE cq_outer (price INTEGER);
@@ -288,34 +289,34 @@ ALTER TABLE cq_drift DROP COLUMN price;
 statement error
 SELECT * FROM cq_outer, semantic_view('cq_bare', metrics := ['bad']);
 ----
-Referenced column "price" not found
+does not have a column named "price"
 
 statement error
 SELECT * FROM cq_outer JOIN semantic_view('cq_bare', metrics := ['bad']) ON true;
 ----
-Referenced column "price" not found
+does not have a column named "price"
 
 statement error
 SELECT (SELECT bad FROM semantic_view('cq_bare', metrics := ['bad'])) FROM cq_outer;
 ----
-Referenced column "price" not found
+does not have a column named "price"
 
 statement error
 SELECT * FROM cq_outer, LATERAL (SELECT * FROM semantic_view('cq_bare', metrics := ['bad'])) s;
 ----
-Referenced column "price" not found
+does not have a column named "price"
 
 statement error
 SELECT (SELECT bad FROM (SELECT * FROM semantic_view('cq_bare', metrics := ['bad'])) x) FROM cq_outer;
 ----
-Referenced column "price" not found
+does not have a column named "price"
 
 # With nothing enclosing the call, the name fails all the same.
 
 statement error
 SELECT * FROM semantic_view('cq_bare', metrics := ['bad']), cq_outer;
 ----
-Referenced column "price" not found
+does not have a column named "price"
 
 # The same holds for a member that only where_clause brings into the query:
 # its expression is the semantic view's, not the caller's predicate.
@@ -323,7 +324,7 @@ Referenced column "price" not found
 statement error
 SELECT * FROM cq_outer, semantic_view('cq_bare_dim', metrics := ['revenue'], where_clause := 'd = 7');
 ----
-Referenced column "price" not found
+does not have a column named "price"
 
 statement ok
 DROP SEMANTIC VIEW cq_bare_dim;

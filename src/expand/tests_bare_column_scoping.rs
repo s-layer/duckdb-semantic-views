@@ -3,29 +3,21 @@
 //!
 //! Snowflake scopes a member expression to its own logical table: a bare
 //! column means "this table's column", and a column of another table is a
-//! CREATE error. This extension splices the expression verbatim into whatever
-//! FROM the query needs, so a bare column binds against every table joined
-//! there. Two shapes follow, both pre-existing on `main`:
+//! CREATE error. CREATE records each table's columns
+//! (`SemanticViewDefinition::table_columns`), and the expansion qualifies a
+//! bare column with the member's own table when that table has it
+//! (`expand::bare_columns`). Two shapes follow:
 //!
-//! - **Same-name collision** — `o_id` exists on both `o` and `li`. Whenever a
-//!   query joins both, DuckDB raises `Ambiguous reference to column name`. Loud,
-//!   never a wrong number. Home anchoring (#71) never joins a table the
-//!   base-anchored path would not have — in a tree of many-to-one edges the
-//!   path from a metric's table to the dimensions is a subset of the paths from
-//!   the base table to both — so it adds no collision; it removes one where the
-//!   home table alone suffices (`metric_alone_binds_its_own_table`).
-//! - **Cross-table bare reference** — `amount` exists only on `o`, used bare in
-//!   a metric on `li`. Snowflake rejects it at CREATE; `graph::validate_member_references`
-//!   (PAR-3) checks only QUALIFIED references, so it is accepted here, and binds
-//!   to `o.amount` whenever `o` happens to be joined. That is a silent cross-grain
-//!   number (`known_gap_*` below), and whether `o` is joined depends on the
-//!   query shape.
+//! - **Same-name collision** -- `o_id` exists on both `o` and `li`. A member on
+//!   either reads its own table's `o_id` whatever the query joins. Before #83
+//!   a query joining both raised DuckDB's `Ambiguous reference to column name`.
+//! - **Cross-table bare reference** -- `amount` exists only on `o`, used bare in
+//!   a metric on `li`. CREATE refuses it, as Snowflake does
+//!   (`bare_columns::check_bare_columns`); before #83 a definition that held it
+//!   bound it to `o.amount` whenever `o` happened to be joined.
 //!
-//! These tests pin today's behaviour so a change to either shows up red; the
-//! `known_gap_*` ones pin a WRONG answer on purpose and flip when #83 is fixed.
-//! The documented workaround is to qualify every column
-//! (`docs/reference/create-semantic-view.rst`, "Column qualification in
-//! expressions").
+//! A definition stored before 0.19.0 has no column lists, so its bare columns
+//! are spliced as written, as then (`stored_without_column_lists_*`).
 
 use super::*;
 use crate::expand::test_helpers::TestFixtureExt;
@@ -69,6 +61,19 @@ fn bare_def() -> SemanticViewDefinition {
             many_to_one("o_to_c", "o", "c", "c_id"),
             many_to_one("li_to_o", "li", "o", "o_id"),
         ],
+        table_columns: [
+            ("c", &["c_id", "region"][..]),
+            ("o", &["o_id", "c_id", "amount"][..]),
+            ("li", &["li_id", "o_id", "qty"][..]),
+        ]
+        .into_iter()
+        .map(|(t, cols)| {
+            (
+                t.to_string(),
+                cols.iter().map(ToString::to_string).collect(),
+            )
+        })
+        .collect(),
         ..Default::default()
     }
     .with_dimension("region", "region", Some("c"))
@@ -99,13 +104,23 @@ fn bare_db() -> duckdb::Connection {
 /// Expand and run; `Ok(rows)` as sorted `a|b|…` strings, or `Err(message)`
 /// from expansion or from DuckDB.
 fn outcome(dims: &[&str], mets: &[&str], facts: &[&str]) -> Result<Vec<String>, String> {
+    outcome_of(&bare_def(), dims, mets, facts)
+}
+
+/// [`outcome`] over `def`.
+fn outcome_of(
+    def: &SemanticViewDefinition,
+    dims: &[&str],
+    mets: &[&str],
+    facts: &[&str],
+) -> Result<Vec<String>, String> {
     let request = QueryRequest {
         where_clause: None,
         facts: facts.iter().map(|f| FactName::new(*f)).collect(),
         dimensions: dims.iter().map(|d| DimensionName::new(*d)).collect(),
         metrics: mets.iter().map(|m| MetricName::new(*m)).collect(),
     };
-    let sql = expand("bc", &bare_def(), &request).map_err(|e| e.to_string())?;
+    let sql = expand("bc", def, &request).map_err(|e| e.to_string())?;
     let cols: Vec<String> = dims
         .iter()
         .chain(facts)
@@ -136,57 +151,81 @@ fn assert_ambiguous(result: Result<Vec<String>, String>) {
     }
 }
 
-// --- Same-name collision: loud on every path that joins both tables. --------
-
-/// Metric, home-anchored (`FROM li LEFT JOIN o LEFT JOIN c`).
-#[test]
-fn metric_with_a_colliding_bare_column_is_ambiguous_on_the_home_path() {
-    assert_ambiguous(outcome(&["region"], &["sum_li_oid"], &[]));
+fn rows(rows: &[&str]) -> Result<Vec<String>, String> {
+    Ok(rows.iter().map(ToString::to_string).collect())
 }
 
-/// Metric, base-anchored (`FROM c LEFT JOIN o LEFT JOIN li`).
+// --- Same-name collision: each member reads its own table's column. --------
+
+/// Metric, home-anchored (`FROM li LEFT JOIN o LEFT JOIN c`): `li.o_id`, so
+/// EU 10 + 10 + 11 and the orphan item's NULL. Was an ambiguity error.
 #[test]
-fn metric_with_a_colliding_bare_column_is_ambiguous_on_the_base_path() {
-    assert_ambiguous(outcome(&["region_u"], &["sum_li_oid"], &[]));
+fn metric_with_a_colliding_bare_column_reads_its_own_table_on_the_home_path() {
+    assert_eq!(
+        outcome(&["region"], &["sum_li_oid"], &[]),
+        rows(&["EU|31", "NULL|NULL"])
+    );
 }
 
-/// Dimension, home-anchored: the dimension on `o` is spliced into `li`'s CTE.
+/// Metric, base-anchored (`FROM c LEFT JOIN o LEFT JOIN li`): US has no item.
 #[test]
-fn dimension_with_a_colliding_bare_column_is_ambiguous_on_the_home_path() {
-    assert_ambiguous(outcome(&["order_id"], &["total_qty"], &[]));
+fn metric_with_a_colliding_bare_column_reads_its_own_table_on_the_base_path() {
+    assert_eq!(
+        outcome(&["region_u"], &["sum_li_oid"], &[]),
+        rows(&["EU|31", "US|NULL"])
+    );
+}
+
+/// Dimension, home-anchored: the dimension on `o` reads `o.o_id` inside `li`'s
+/// query, the orphan item's order being NULL.
+#[test]
+fn dimension_with_a_colliding_bare_column_reads_its_own_table_on_the_home_path() {
+    assert_eq!(
+        outcome(&["order_id"], &["total_qty"], &[]),
+        rows(&["10|3", "11|3", "NULL|40"])
+    );
 }
 
 /// Dimension, base-anchored.
 #[test]
-fn dimension_with_a_colliding_bare_column_is_ambiguous_on_the_base_path() {
-    assert_ambiguous(outcome(&["order_id", "region_u"], &["total_qty"], &[]));
+fn dimension_with_a_colliding_bare_column_reads_its_own_table_on_the_base_path() {
+    assert_eq!(
+        outcome(&["order_id", "region_u"], &["total_qty"], &[]),
+        rows(&["10|EU|3", "11|EU|3", "12|US|NULL"])
+    );
 }
 
 /// Dimension, multi-grain plan: both grain CTEs join `o` and `li`'s CTE also
 /// joins `li`.
 #[test]
-fn dimension_with_a_colliding_bare_column_is_ambiguous_in_a_multi_grain_plan() {
-    assert_ambiguous(outcome(&["order_id"], &["sum_o_oid", "total_qty"], &[]));
+fn dimension_with_a_colliding_bare_column_reads_its_own_table_in_a_multi_grain_plan() {
+    assert_eq!(
+        outcome(&["order_id"], &["sum_o_oid", "total_qty"], &[]),
+        rows(&[
+            "10|10|3",
+            "11|11|3",
+            "12|12|NULL",
+            "13|13|NULL",
+            "NULL|NULL|40"
+        ])
+    );
 }
 
 /// Fact beside a dimension on `c`: the FACTS query reads `li` and joins `o`
-/// and `c` up to the dimension, so `o_id` is on two joined tables.
+/// and `c` up to the dimension; the fact reads `li.o_id`.
 #[test]
-fn fact_with_a_colliding_bare_column_is_ambiguous() {
-    assert_ambiguous(outcome(&[], &[], &["region", "li_order"]));
+fn fact_with_a_colliding_bare_column_reads_its_own_table() {
+    assert_eq!(
+        outcome(&[], &[], &["region", "li_order"]),
+        rows(&["EU|10", "EU|10", "EU|11", "NULL|NULL"])
+    );
 }
 
-// --- Where the home table alone suffices, the bare column binds correctly. --
-
 /// `SUM(o_id)` on `li` with no dimension scans `li` alone: 10 + 10 + 11 = 31,
-/// Snowflake's answer. Before #71 the base-anchored `FROM c LEFT JOIN o LEFT
-/// JOIN li` made this ambiguous.
+/// Snowflake's answer.
 #[test]
 fn metric_alone_binds_its_own_table() {
-    assert_eq!(
-        outcome(&[], &["sum_li_oid"], &[]),
-        Ok(vec!["31".to_string()])
-    );
+    assert_eq!(outcome(&[], &["sum_li_oid"], &[]), rows(&["31"]));
 }
 
 /// A parent-table metric whose joined tables do not share the column: binds to
@@ -196,35 +235,52 @@ fn metric_alone_binds_its_own_table() {
 fn metric_without_a_collision_binds_on_both_paths() {
     assert_eq!(
         outcome(&["region"], &["sum_o_oid"], &[]),
-        Ok(vec!["EU|21".into(), "NULL|13".into(), "US|12".into()])
+        rows(&["EU|21", "NULL|13", "US|12"])
     );
     assert_eq!(
         outcome(&["region_u"], &["sum_o_oid"], &[]),
-        Ok(vec!["EU|21".into(), "US|12".into()])
+        rows(&["EU|21", "US|12"])
     );
 }
 
-// --- Cross-table bare reference: accepted at CREATE, bound by accident. -----
+// --- Cross-table bare reference: refused at CREATE. -------------------------
 
-/// KNOWN GAP (TECH-DEBT #83): `li.li_amount AS SUM(amount)` names a column of
-/// `o`, which Snowflake rejects at CREATE. Grouped by region, `o` is joined, so
-/// it binds to `o.amount` and sums each order's amount once PER LINE ITEM
-/// (order 10 twice): EU 250 where no line-item column was ever read. Flips when
-/// #83 rejects (or qualifies) the reference.
+/// `li.li_amount AS SUM(amount)` names a column of `o` alone, which Snowflake
+/// rejects at CREATE. Before #83 it bound to `o.amount` whenever `o` was joined
+/// and summed each order's amount once per line item (EU 250).
 #[test]
-fn known_gap_cross_table_bare_column_binds_silently_when_its_table_is_joined() {
-    assert_eq!(
-        outcome(&["region"], &["li_amount"], &[]),
-        Ok(vec!["EU|250".into(), "NULL|NULL".into()])
+fn cross_table_bare_column_is_refused() {
+    let err = super::bare_columns::check_bare_columns("bc", &bare_def()).expect_err("refused");
+    assert!(
+        err.contains("metric 'li_amount'")
+            && err.contains("'amount', a column of table 'o'")
+            && err.contains("its own table ('li')"),
+        "{err}"
     );
 }
 
-/// KNOWN GAP (TECH-DEBT #83): the same metric with no dimension scans `li`
-/// alone, so `amount` does not bind at all. Before #71 this returned the same
-/// silent 250 through the base-anchored join; it is now a loud error, which is
-/// the side of the gap Snowflake is on (it rejects the definition).
+/// The view without that metric passes the check.
 #[test]
-fn known_gap_cross_table_bare_column_is_unbound_on_its_home_table() {
-    let err = outcome(&[], &["li_amount"], &[]).expect_err("must not bind");
-    assert!(err.contains("\"amount\" not found"), "{err}");
+fn own_table_bare_columns_pass_the_check() {
+    let mut def = bare_def();
+    def.metrics.retain(|m| m.name != "li_amount");
+    assert_eq!(super::bare_columns::check_bare_columns("bc", &def), Ok(()));
+}
+
+// --- A definition stored before 0.19.0 has no column lists. -----------------
+
+/// Its bare columns are spliced as written, as then: the collision is still
+/// DuckDB's ambiguity error, loud rather than a wrong number. Re-creating the
+/// view records the column lists.
+#[test]
+fn stored_without_column_lists_keeps_the_ambiguity() {
+    let mut def = bare_def();
+    def.table_columns.clear();
+    match outcome_of(&def, &["region"], &["sum_li_oid"], &[]) {
+        Err(e) => assert!(
+            e.contains("Ambiguous reference to column name \"o_id\""),
+            "{e}"
+        ),
+        Ok(rows) => panic!("expected the ambiguity, got {rows:?}"),
+    }
 }

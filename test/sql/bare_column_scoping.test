@@ -1,22 +1,21 @@
 # TECH-DEBT #83: bare (unqualified) column references in member expressions.
 #
-# Snowflake scopes a member expression to its own logical table. This
-# extension splices the expression verbatim into the query's FROM, so a bare
-# column binds against every table joined there. Pinned here end to end:
-#   * CREATE binds each member on its own, so a member whose bare column does
-#     not bind in its own query is refused at CREATE: a cross-table bare reference
-#     (`amount` exists only on `o`, used in a metric on `li`, which is scanned
-#     alone). Snowflake rejects it at CREATE too; before CREATE bound
-#     members it was accepted and, grouped by a dimension that joins `o`, gave a
-#     silent cross-grain number. A fact queried alone reads its own table, so
-#     its bare `o_id` binds there (accepted since Phase 7.3);
-#   * a same-name collision (`o_id` is on both `o` and `li`) between members
-#     that bind on their own is a LOUD ambiguity error whenever a query joins
-#     both tables -- on the home-anchored metric path and on the anchored
-#     dimensions-only path. A metric whose home table alone suffices binds.
-# The workaround is to qualify every column (create-semantic-view.rst, "Column
-# qualification in expressions"). The unit twins, one per case, are in
-# src/expand/tests_bare_column_scoping.rs.
+# Snowflake scopes a member expression to its own logical table: a bare
+# column is that table's column. CREATE records each table's columns, and the
+# expansion qualifies a bare column with the member's own table when that
+# table has it, so:
+#   * a same-name collision (`o_id` is on both `o` and `li`) reads the
+#     member's own table's column whatever the query joins -- on the
+#     home-anchored metric path, in a multi-grain plan, on the anchored
+#     dimensions-only path and in a FACTS query. Before #83 each was DuckDB's
+#     `Ambiguous reference to column name`;
+#   * a bare column of another table (`amount` exists only on `o`, used in a
+#     metric on `li`) is refused at CREATE, naming the rule, as Snowflake
+#     refuses it.
+# A view stored before 0.19.0 has no column lists and keeps splicing its
+# expressions as written; re-creating it records them. Fixture 9's cases are in
+# phase7_bare_columns.test; the unit twins are in
+# src/expand/tests_bare_column_scoping.rs and src/expand/bare_columns.rs.
 
 require semantic_views
 
@@ -38,10 +37,7 @@ INSERT INTO bcs_o VALUES (10, 1, 100), (11, 1, 50), (12, 2, 70), (13, NULL, 5);
 statement ok
 INSERT INTO bcs_li VALUES (100, 10, 1), (101, 10, 2), (102, 11, 3), (103, NULL, 40);
 
-# A fact on `li` queried alone reads `li` alone (Phase 7.3: a FACTS query
-# reads the table its facts are on), so its bare `o_id` binds to `li.o_id`
-# and CREATE accepts it. Before 7.3 its CREATE-time query was base-anchored
-# (FROM c LEFT JOIN o LEFT JOIN li) and CREATE refused it as ambiguous.
+# A fact on `li` with a bare `o_id`, which `o` has too.
 statement ok
 CREATE SEMANTIC VIEW bcs_v AS
   TABLES (
@@ -64,16 +60,25 @@ SELECT * FROM SEMANTIC_VIEW(bcs_v FACTS li_order);
 11
 NULL
 
-# A filter on `c` joins `o` too, so the bare `o_id` is a LOUD ambiguity.
-statement error
+# A filter on `c` joins `o` too; the fact still reads `li.o_id`.
+query I rowsort
 SELECT * FROM SEMANTIC_VIEW(bcs_v FACTS li_order WHERE region = 'EU');
 ----
-Ambiguous reference to column name "o_id"
+10
+10
+11
+
+# The stored definition records each table's columns.
+query T
+SELECT json_keys(definition::JSON -> 'table_columns') FROM semantic_layer._definitions
+WHERE name = 'bcs_v';
+----
+[c, li, o]
 
 statement ok
 DROP SEMANTIC VIEW bcs_v;
 
-# A metric on `li` reading `o`'s `amount`: `li` alone has no such column.
+# A metric on `li` reading `o`'s `amount`, bare: refused, naming the rule.
 statement error
 CREATE SEMANTIC VIEW bcs_v AS
   TABLES (
@@ -88,7 +93,7 @@ CREATE SEMANTIC VIEW bcs_v AS
   DIMENSIONS (c.region AS region)
   METRICS (li.li_amount AS SUM(amount));
 ----
-metric 'li_amount' does not bind:
+metric 'li_amount' references 'amount', a column of table 'o', but a metric expression may only reference columns of its own table ('li')
 
 statement ok
 CREATE SEMANTIC VIEW bcs_v AS
@@ -112,32 +117,42 @@ CREATE SEMANTIC VIEW bcs_v AS
     li.total_qty AS SUM(qty)
   );
 
-# Metric, home-anchored (FROM li LEFT JOIN o LEFT JOIN c): ambiguous.
-statement error
-SELECT * FROM SEMANTIC_VIEW(bcs_v DIMENSIONS region METRICS sum_li_oid);
+# Metric, home-anchored (FROM li LEFT JOIN o LEFT JOIN c): li.o_id.
+query TI
+SELECT * FROM SEMANTIC_VIEW(bcs_v DIMENSIONS region METRICS sum_li_oid) ORDER BY ALL NULLS LAST;
 ----
-Ambiguous reference to column name "o_id"
+EU	31
+NULL	NULL
 
-# Dimension on `o` spliced into `li`'s home-anchored query: ambiguous.
-statement error
-SELECT * FROM SEMANTIC_VIEW(bcs_v DIMENSIONS order_id METRICS total_qty);
+# Dimension on `o` inside `li`'s home-anchored query: o.o_id.
+query II
+SELECT * FROM SEMANTIC_VIEW(bcs_v DIMENSIONS order_id METRICS total_qty) ORDER BY ALL NULLS LAST;
 ----
-Ambiguous reference to column name "o_id"
+10	3
+11	3
+NULL	40
 
-# Multi-grain plan: ambiguous.
-statement error
-SELECT * FROM SEMANTIC_VIEW(bcs_v DIMENSIONS order_id METRICS sum_o_oid, total_qty);
+# Multi-grain plan: each grain reads its own table's o_id.
+query III
+SELECT * FROM SEMANTIC_VIEW(bcs_v DIMENSIONS order_id METRICS sum_o_oid, total_qty)
+ORDER BY ALL NULLS LAST;
 ----
-Ambiguous reference to column name "o_id"
+10	10	3
+11	11	3
+12	12	NULL
+13	13	NULL
+NULL	NULL	40
 
-# Dimensions-only (anchored at li: FROM li LEFT JOIN o): ambiguous.
-statement error
-SELECT * FROM SEMANTIC_VIEW(bcs_v DIMENSIONS order_id, item_qty);
+# Dimensions-only (anchored at li: FROM li LEFT JOIN o).
+query II
+SELECT * FROM SEMANTIC_VIEW(bcs_v DIMENSIONS order_id, item_qty) ORDER BY ALL NULLS LAST;
 ----
-Ambiguous reference to column name "o_id"
+10	1
+10	2
+11	3
+NULL	40
 
-# The home table alone suffices: binds to li.o_id, 10 + 10 + 11 = 31.
-# Before #71 (FROM c LEFT JOIN o LEFT JOIN li) this was ambiguous.
+# The home table alone: li.o_id, 10 + 10 + 11 = 31.
 query I
 SELECT * FROM SEMANTIC_VIEW(bcs_v METRICS sum_li_oid);
 ----
@@ -152,6 +167,142 @@ ORDER BY region NULLS LAST;
 EU	21
 US	12
 NULL	13
+
+# GET_DDL shows the expressions as written, and the YAML export leaves the
+# column lists out (CREATE records them again).
+query II
+SELECT GET_DDL('SEMANTIC_VIEW', 'bcs_v') LIKE '%li.sum_li_oid AS SUM(o_id)%',
+       read_yaml_from_semantic_view('bcs_v') LIKE '%table_columns%';
+----
+true	false
+
+# A view stored before 0.19.0 has no column lists: its bare columns are
+# spliced as written, so the collision is DuckDB's ambiguity, as it was then.
+statement ok
+INSERT INTO semantic_layer._definitions (schema_name, name, definition)
+SELECT schema_name, 'bcs_stored', json_merge_patch(definition, '{"table_columns": null}')::VARCHAR
+FROM semantic_layer._definitions WHERE name = 'bcs_v';
+
+statement error
+SELECT * FROM SEMANTIC_VIEW(bcs_stored DIMENSIONS region METRICS sum_li_oid);
+----
+Ambiguous reference to column name "o_id"
+
+# Re-creating it (here CREATE OR ALTER) records them.
+statement ok
+CREATE OR ALTER SEMANTIC VIEW bcs_stored AS
+  TABLES (
+    c  AS bcs_c  PRIMARY KEY (c_id),
+    o  AS bcs_o  PRIMARY KEY (o_id),
+    li AS bcs_li PRIMARY KEY (li_id)
+  )
+  RELATIONSHIPS (
+    o_to_c  AS o(c_id)  REFERENCES c,
+    li_to_o AS li(o_id) REFERENCES o
+  )
+  DIMENSIONS (c.region AS region)
+  METRICS (li.sum_li_oid AS SUM(o_id));
+
+query TI
+SELECT * FROM SEMANTIC_VIEW(bcs_stored DIMENSIONS region METRICS sum_li_oid) ORDER BY ALL NULLS LAST;
+----
+EU	31
+NULL	NULL
+
+# FROM YAML records them too.
+statement ok
+CREATE SEMANTIC VIEW bcs_yaml FROM YAML $$
+tables:
+- alias: c
+  table: bcs_c
+  pk_columns: [c_id]
+- alias: o
+  table: bcs_o
+  pk_columns: [o_id]
+- alias: li
+  table: bcs_li
+  pk_columns: [li_id]
+dimensions:
+- name: region
+  expr: region
+  source_table: c
+metrics:
+- name: sum_li_oid
+  expr: SUM(o_id)
+  source_table: li
+joins:
+- table: c
+  from_alias: o
+  fk_columns: [c_id]
+  ref_columns: [c_id]
+  name: o_to_c
+- table: o
+  from_alias: li
+  fk_columns: [o_id]
+  ref_columns: [o_id]
+  name: li_to_o
+$$;
+
+query TI
+SELECT * FROM SEMANTIC_VIEW(bcs_yaml DIMENSIONS region METRICS sum_li_oid) ORDER BY ALL NULLS LAST;
+----
+EU	31
+NULL	NULL
+
+# verify_semantic_view_yaml applies the CREATE's refusal.
+statement error
+SELECT * FROM verify_semantic_view_yaml('bcs_bad', $$
+tables:
+- alias: o
+  table: bcs_o
+  pk_columns: [o_id]
+- alias: li
+  table: bcs_li
+  pk_columns: [li_id]
+dimensions: []
+metrics:
+- name: li_amount
+  expr: SUM(amount)
+  source_table: li
+joins:
+- table: o
+  from_alias: li
+  fk_columns: [o_id]
+  ref_columns: [o_id]
+  name: li_to_o
+$$);
+----
+metric 'li_amount' references 'amount', a column of table 'o'
+
+# A table defined by a query records the query's columns.
+statement ok
+CREATE SEMANTIC VIEW bcs_inline AS
+  TABLES (
+    c  AS (SELECT * FROM bcs_c) PRIMARY KEY (c_id),
+    o  AS (SELECT * FROM bcs_o) PRIMARY KEY (o_id),
+    li AS (SELECT * FROM bcs_li) PRIMARY KEY (li_id)
+  )
+  RELATIONSHIPS (
+    o_to_c  AS o(c_id)  REFERENCES c,
+    li_to_o AS li(o_id) REFERENCES o
+  )
+  DIMENSIONS (c.region AS region)
+  METRICS (li.sum_li_oid AS SUM(o_id));
+
+query TI
+SELECT * FROM SEMANTIC_VIEW(bcs_inline DIMENSIONS region METRICS sum_li_oid) ORDER BY ALL NULLS LAST;
+----
+EU	31
+NULL	NULL
+
+statement ok
+DROP SEMANTIC VIEW bcs_inline;
+
+statement ok
+DROP SEMANTIC VIEW bcs_yaml;
+
+statement ok
+DROP SEMANTIC VIEW bcs_stored;
 
 statement ok
 DROP SEMANTIC VIEW bcs_v;

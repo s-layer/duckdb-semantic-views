@@ -193,11 +193,14 @@ pub unsafe extern "C" fn sv_compute_create_from_yaml_rust(
 ///   current database and schema, which the CREATE stamps.
 /// * `out_ptr`/`out_len` — on rc=1, the whole message in a heap-owned buffer
 ///   the caller releases via `sv_free_buffer` (a long member name or
-///   `DuckDB` error is not cut off).
+///   `DuckDB` error is not cut off); on rc=0 after the check, the definition
+///   to store, with each table's columns recorded (TECH-DEBT #83). Left null
+///   when the check was skipped (the view is present), and the caller keeps
+///   its definition.
 ///
 /// # Return codes
 ///
-/// * `0` — every member binds.
+/// * `0` — every member binds, or the check was skipped.
 /// * `1` — a member does not bind, or the caller was cancelled; the message is
 ///   in `(out_ptr, out_len)`.
 /// * `3` — internal error (non-UTF-8 input, panic); `error_buf` populated.
@@ -271,7 +274,10 @@ pub unsafe extern "C" fn sv_check_create_members_rust(
             return 0_u8;
         }
         match crate::ddl::read_ffi::check_create_members(name, def, database, schema) {
-            Ok(()) => 0_u8,
+            Ok(stored) => {
+                publish_owned_string(stored, out_ptr, out_len);
+                0_u8
+            }
             Err(message) => {
                 publish_owned_string(message, out_ptr, out_len);
                 1_u8
