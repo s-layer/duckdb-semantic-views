@@ -236,7 +236,11 @@ If a command not on the list needs the bypass, halt and ask first.
 
 `.github/workflows/actions.lock` pins every action the workflows use, including the actions those actions use, to an exact commit. After adding a workflow or changing any `uses:` line, run `gh actions-lock --no-interactive` and commit the lockfile with the workflow change, or the "Verify lockfile" check fails. Install the extension with `gh extension install github/gh-actions-lock --pin v0.4.1`. Never edit the lockfile by hand. Dependabot updates it in its own PRs.
 
-Some actions here are referenced by branch rather than tag (`dtolnay/rust-toolchain@stable`, `taiki-e/install-action@<tool>`), because the branch name selects what they install. Dependabot doesn't move those pins. To advance them to the branch's current commit, run `gh actions-lock --relock --no-interactive` and review the lockfile diff.
+Write `uses:` refs as tags (`@v2.1.1`), not commit SHAs: the lockfile holds the commit, and a SHA in the workflow file is redundant.
+
+Some actions here are referenced by branch rather than tag (`dtolnay/rust-toolchain@stable` and `@nightly`, `taiki-e/install-action@<tool>`), because the branch name selects what they install. Dependabot doesn't move those pins. To advance them to the branch's current commit, run `gh actions-lock --relock --no-interactive` and review the lockfile diff.
+
+The lockfile doesn't cover reusable workflows called from another repository with a job-level `uses:`: the extension-ci-tools `_extension_distribution.yml` in BuildAll/BuildQuick and `anentropic/github-reviewbot` in claude-review run at whatever their ref (`@v2.0-cyanoptera`, `@main`) points to. Changing those refs (by hand or by the DuckDB version monitor) needs no lockfile update. Nor does it follow the local composite action `.github/actions/setup-pinned-rust`; it has no `uses:` steps today, so keep it that way or the action it adds goes unlocked.
 
 ## Opening pull requests
 

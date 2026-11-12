@@ -99,11 +99,11 @@ jobs:
       - name: Clippy (extension feature, deny warnings)
         run: SV_SKIP_CPP_BUILD=1 cargo clippy --no-default-features --features extension -- -D warnings
 
-      # Pinned to a commit SHA (not the floating @v2) as a supply-chain
-      # practice — this is v2.1.1 (bundles cargo-deny 0.20.2), bumped from
-      # v2.0.20 (cargo-deny 0.19.8) in #128. The v2.1.x arg mismatch that had
-      # kept us on v2.0.20 (the step failing with "unrecognized subcommand
-      # 'warn'") does NOT occur at this SHA: the action still passes
+      # Pinned to v2.1.1 (bundles cargo-deny 0.20.2) rather than the floating
+      # @v2; actions.lock holds its commit. Bumped from v2.0.20 (cargo-deny
+      # 0.19.8) in #128. The v2.1.x arg mismatch that had kept us on v2.0.20
+      # (the step failing with "unrecognized subcommand 'warn'") does NOT
+      # occur at this release: the action still passes
       # `--log-level warn ... check` and cargo-deny 0.20.2 accepts it, running
       # the checks green (advisories/bans/licenses/sources all OK) — not merely
       # exiting clean.
