@@ -128,6 +128,21 @@ project_terms:
     variants: []
   - canonical: "semi-additive metric"
     variants: []
+  - canonical: "ASOF relationship"
+    variants: ["asof relationship", "as-of relationship"]
+    note: >-
+      Keyword in upper case, as in the DDL and GET_DDL output (Snowflake's
+      GET_DDL writes lower case; ours does not). The YAML key is `asof:`.
+  - canonical: "range relationship"
+    variants: ["BETWEEN relationship", "period relationship"]
+    note: >-
+      The target's constraint is a `DISTINCT RANGE` constraint (written
+      `CONSTRAINT <name> DISTINCT RANGE BETWEEN ... AND ... EXCLUSIVE`).
+  - canonical: "bridge table"
+    variants: ["junction table", "link table", "association table"]
+    note: >-
+      Says "many-to-many relationship through a bridge"; no new syntax, so do
+      not describe a "bridge clause" or "bridge keyword".
   - canonical: "window metric"
     variants: []
   - canonical: "non-additive"

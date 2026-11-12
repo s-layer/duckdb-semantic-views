@@ -1472,6 +1472,8 @@ Since v0.14.0 a metric is normally aggregated from its own table, where there ar
 **Fix:** Declare ``PRIMARY KEY (<cols>)`` for the metric's source table in the ``TABLES`` clause, or define the metric as ``COUNT(<alias>.<column>)`` over a NOT NULL column.
 
 
+.. _ref-err-fan-trap:
+
 Fan trap detected
 -----------------
 
@@ -1487,7 +1489,7 @@ Fan trap detected
 
 - the metric's table has no ``PRIMARY KEY`` to count its rows by;
 - the metric is a semi-additive metric whose ``NON ADDITIVE BY`` dimension is not queried;
-- a role-played table is on the path, or a dimension or filter in the query is declared on no table;
+- the hop crosses one of a role-played table's relationships back toward the table that holds them, such as an airport count by a flight's carrier (the message calls this a role-played table);
 - the one-to-many hop walks an ASOF or range relationship backwards, from the referenced table to the referencing one, which Snowflake refuses for ASOF too.
 
 In the first three cases the message ends with a sentence listing them.
@@ -1586,7 +1588,7 @@ Ambiguous fact or metric on a role-playing table
    it on the referencing table with USING instead, e.g.
    <table>.<metric> USING (<relationship>) AS SUM(<fact>).
 
-**Cause:** The first form: a metric, dimension, or fact reaches a fact on a role-playing table (or on a table reached only through one), and nothing says which relationship to read it through. The second form: a metric is declared on the role-playing table itself (or on a table reached only through it), where ``USING`` cannot be attached, and the query groups or filters it by a dimension on a table reached only across those relationships (a flight's carrier, beside an airport count), or its ``NON ADDITIVE BY`` or window names one: those would be joined to the metric's rows through one of the relationships without saying which. A metric on the role-playing table queried with no dimension, alone or beside metrics on other tables, is computed over its own table's rows and needs no role, and so is one grouped or filtered by its own table's dimensions, or by a dimension it reaches without crossing those relationships (the airports' one-to-one details).
+**Cause:** The first form: a metric, dimension, or fact reaches a fact on a role-playing table (or on a table reached only through one), and nothing says which relationship to read it through. The second form: a metric is declared on the role-playing table itself (or on a table reached only through it), where ``USING`` cannot be attached, and the query would join the metric's rows to a table across those relationships without saying which one. Since 0.19.0 the usual case, such a metric grouped or filtered by a dimension across them (a flight's carrier, beside an airport count) or with a ``NON ADDITIVE BY`` dimension there, is reported as a :ref:`fan trap <ref-err-fan-trap>` instead. A metric on the role-playing table queried with no dimension, alone or beside metrics on other tables, is computed over its own table's rows and needs no role, and so is one grouped or filtered by its own table's dimensions, or by a dimension it reaches without crossing those relationships (the airports' one-to-one details).
 
 **Fix:** Declare the metric on the referencing table and give it a ``USING`` that names one relationship, for example ``f.dep_elev USING (dep_airport) AS SUM(a.elev)``. See :ref:`howto-rp-facts`.
 

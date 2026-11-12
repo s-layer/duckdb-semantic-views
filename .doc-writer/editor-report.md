@@ -1,116 +1,73 @@
 # Editor Report
 
-**Generated:** 2026-11-06
-**Scope:** v0.18.0 docs pass, changed and new pages only (examples/ excluded)
-**Files reviewed:** 11 (docs/how-to/view-variables.rst, query-defined-tables.rst, create-or-alter.rst, role-playing-dimensions.rst, yaml-definitions.rst, data-sources.rst, how-to/index.rst, docs/explanation/snowflake-comparison.rst, docs/index.rst, docs/conf.py, README.md)
-**Changes made:** 18
-  - BLOCKING: 1
-  - SUGGESTION: 12
-  - NITPICK: 5
+**Generated:** 2026-11-12
+**Scope:** v0.19.0 docs pass, changed and new pages only (examples/ excluded)
+**Files reviewed:** 15 (docs/how-to/asof-and-range-relationships.rst, many-to-many-relationships.rst, fan-traps.rst, role-playing-dimensions.rst, filtering.rst, how-to/index.rst, docs/explanation/metric-grain.rst, snowflake-comparison.rst, docs/reference/create-semantic-view.rst, semantic-view-function.rst, error-messages.rst, docs/index.rst, docs/conf.py, README.md, CHANGELOG.md)
+**Changes made:** 14
+  - BLOCKING: 4
+  - SUGGESTION: 6
+  - NITPICK: 4
 
 ## Summary
 
-The three new how-to pages are accurate: every SQL block on them, and the new output tables on the role-playing page, was run against the built extension (DuckDB 2.0.0) and the results and error texts match. One troubleshooting entry named the wrong error for a missing table, and three pages stacked admonitions back to back. The remaining edits are wording: ambiguous "the query's WHERE", one terminology slip, missing cross-references and two British spellings. No INTERNAL NOTES blocks were present to strip. `sphinx-build -W` passes.
+The two new how-to pages are accurate: every SQL block on them was run against the release build (DuckDB 2.0.0, extension f19aef0) and the output tables, explain output, DESCRIBE rows and error texts are the real ones. Claims with no shown output (a table past the bridge's far side, a metric reaching the bridge by a hop up, `book_count` keeping a book with no author, a `UNIQUE`-only metric table being refused, a `NULL` ASOF date) were each probed. The blocking finds were refusal lists that described cases the build answers, or that a user cannot produce. No INTERNAL NOTES blocks were present. `just docs-check` passes.
 
-Accuracy method: SQL extracted from each page and run with `uv run --with duckdb==2.0.0` against `build/debug/semantic_views.duckdb_extension`; claims about errors were checked by triggering them, and two behaviors (which error a missing table reports; the `:=` default form) were confirmed against `src/query/member_types.rs` and by running them.
+Accuracy method: SQL extracted from each page and run with the DuckDB 2.0.0 Python package against the release build; output tables compared cell by cell; refusals triggered and their text compared.
 
 ---
 
-## docs/how-to/query-defined-tables.rst
+## docs/how-to/fan-traps.rst
 
 ### BLOCKING
 
 | Section | Description | Fix |
 |---------|-------------|-----|
-| Troubleshooting | Accuracy mismatch: entry was headed `table 'c' does not bind: Catalog Error ...`. When a member reads the table (as `city` and `segment` read `c` in the page's view), CREATE reports the first such member (`dimension 'city' does not bind: Catalog Error: Table with name ... does not exist`); `table 'c' does not bind` appears only when no member reads the table (`first_unbound_member`, src/query/member_types.rs). | Heading changed to the dimension form; body now says the error names the first member that reads the table, or the table itself when none does. |
+| When the Extension Raises a Fan Trap Error | Listed "a dimension or filter in the query is declared on no table". DDL (`alias.name AS expr`) and YAML (`dimension ... has no source_table`) both refuse such a member, and `WHERE 1 = 1` or a constant-valued dimension beside a fan-out is answered, so the reader cannot reach it. | Bullet removed. |
+
+## docs/reference/error-messages.rst
+
+### BLOCKING
+
+| Section | Description | Fix |
+|---------|-------------|-----|
+| Fan trap detected, Cause | "a role-played table is on the path, or a ... member declared on no table": an airport count by a gate terminal (a fan-out below the role-played table) is answered. | Now: the hop crosses one of a role-played table's relationships back toward the table that holds them. |
+| Ambiguous fact or metric on a role-playing table, Cause | Second form said an airport count by a flight's carrier, or with a `NON ADDITIVE BY` dimension on flights, raises it; both are reported as `fan trap detected`. | Cause rewritten to point to the fan trap entry for those; label `ref-err-fan-trap` added. |
+
+## docs/how-to/asof-and-range-relationships.rst
+
+### BLOCKING
+
+| Section | Description | Fix |
+|---------|-------------|-----|
+| Title | Overline shorter than the title (`sphinx-build -W` failure). | Over/underlines resized (same on many-to-many-relationships.rst). |
 
 ### SUGGESTION
 
 | Section | Description | Fix |
 |---------|-------------|-----|
-| Join and Filter | Stacked admonitions (warning + tip back to back). | Tip turned into a paragraph; the PRIMARY KEY warning stays. |
-| Join and Filter, How Table Names Resolve | "the query's WHERE" was ambiguous on a page where "the query" usually means the table's query (2 instances). | Now "the WHERE inside SEMANTIC_VIEW(...)". |
-| Pre-Aggregate | "each customer has exactly one ltv row and the relationship is one-to-one": a customer with no paid orders has none, and the reader is not told why the extension treats it as one-to-one (persona never_assume: relationship modeling). | "its foreign-key column c.id is c's primary key, so each customer has at most one ltv row and the extension infers the relationship as one-to-one". |
-| Intro | First mention of `GET_DDL` unlinked (Rule 4). | Linked to `ref-get-ddl`. |
+| ASOF | NULL handling shown for range only; a `NULL` order date was not covered. | One sentence, probed: kept with a `NULL` city. |
+| Inspect | Only the ASOF join shown. | One sentence on the range join's `ON` condition (from the real explain output). |
 
-## docs/how-to/view-variables.rst
+## Other pages
 
 ### SUGGESTION
 
-| Section | Description | Fix |
-|---------|-------------|-----|
-| Declare Variables | Stacked admonitions (tip + warning). | Typing tip turned into a paragraph; the shadowing warning stays. |
-| Make a Variable Required | Terminology: "tools that write plain SQL" (term map: "standard SQL"). | Now "standard SQL". |
-| Set Variables in a Query | First mention of the construct unlinked (Rule 4). | Linked to `ref-sv-construct`. |
+| File | Section | Description | Fix |
+|------|---------|-------------|-----|
+| fan-traps.rst | Bridge bullets, Related | Linked the CREATE reference for the worked example. | Now link `howto-many-to-many`; Related lists both new pages. |
+| create-semantic-view.rst | ASOF, range, bridge sections | No link to a worked example (Rule 4). | Links to `howto-asof`, `howto-range`, `howto-many-to-many`. |
+| how-to/index.rst, docs/index.rst, conf.py | Navigation | New pages unlisted. | Index entries, toctree, navbar children, home-page intro links. |
+| CHANGELOG.md | [Unreleased] Changed | Bullets out of order of reader impact; double blank line. | Reordered (fan-out first, window rules last); blank line removed. |
 
 ### NITPICK
 
-| Section | Description | Fix |
-|---------|-------------|-----|
-| Declare Variables | "``:=`` may stand for ``DEFAULT``" reads oddly. | "``:=`` can replace ``DEFAULT``". |
+| File | Description | Fix |
+|------|-------------|-----|
+| metric-grain.rst | Dash parenthetical (humanizer). | Split into a plain clause. |
+| semantic-view-function.rst | Dash parenthetical. | Parentheses. |
+| terminology.yaml | No entries for the release's terms. | Added ASOF relationship, range relationship, bridge table (with variants to avoid). |
+| conf.py | Fan Traps summary still said the error is raised for fan-outs. | "How a metric below its grain is counted, and when a fan trap is refused". |
 
-## docs/how-to/create-or-alter.rst
+## Checks with no finding
 
-### SUGGESTION
-
-| Section | Description | Fix |
-|---------|-------------|-----|
-| Keep Materializations Correct | Stacked admonitions (note + tip); the tip carried a Snowflake difference, which context.md assigns to `.. warning::`. | Schema-resolution note turned into a paragraph; Snowflake difference is now a warning. |
-| Deploy from a YAML File | "which is how Snowflake's create_or_alter option for YAML works here" was vague about which Snowflake surface is meant. | Names the `create_or_alter` argument of `SYSTEM$CREATE_SEMANTIC_VIEW_FROM_YAML`, matching the comparison page. |
-| Deploy from a YAML File | `verify_semantic_view_yaml` unlinked on its first mention; "pass the YAML text" omitted the view-name argument. | Linked to `ref-create-verify-yaml`; "pass the view name and the YAML text". |
-| Change the View | `SHOW SEMANTIC MATERIALIZATIONS` unlinked (Rule 4). | Linked to `ref-show-semantic-materializations`. |
-
-## docs/index.rst
-
-### SUGGESTION
-
-| Section | Description | Fix |
-|---------|-------------|-----|
-| Intro | "Snowflake's CREATE SEMANTIC VIEW clauses use Snowflake's syntax" was circular. | "The CREATE SEMANTIC VIEW clauses follow Snowflake's syntax". |
-
-## docs/explanation/snowflake-comparison.rst
-
-### NITPICK
-
-| Section | Description | Fix |
-|---------|-------------|-----|
-| USING RELATIONSHIPS, Clause semantics | British "behaviour" (2 instances); convention is American spelling. | "behavior". |
-
-## docs/how-to/role-playing-dimensions.rst
-
-No editor changes. New data rows, output tables and the corrected `:emphasize-lines` (7,8,17,18) were verified against the built extension.
-
-### NITPICK
-
-| Section | Description | Fix |
-|---------|-------------|-----|
-| Query with USING Context | (Persona-step fix, recorded here for completeness.) Arrivals query had no output; refused query had no error text. | Output and error added; see the persona report. |
-
-## docs/how-to/yaml-definitions.rst, data-sources.rst, how-to/index.rst, docs/conf.py, README.md
-
-No changes needed. The verify example in yaml-definitions runs as written. nav_links summaries and toctree entries match the new page titles. README's em dashes are in lines this pass did not touch (README is Markdown and outside the RST `--` convention).
-
-### NITPICK
-
-| Section | Description | Fix |
-|---------|-------------|-----|
-| README.md | Pre-existing em dashes in untouched lines 178-181, 220. | Left as is (out of scope). |
-
----
-
-## Diataxis Type Integrity
-
-All three new pages are how-to guides and follow the project layout (title, versionadded, intro, Prerequisites, tasks, Troubleshooting, Related). "Choose Between OR ALTER and OR REPLACE" and "Variables and Materializations" are short decision aids that stay goal-oriented; no structural blur.
-
-## Cross-Reference Linking
-
-`api_reference: manual`. Every `:ref:` on the changed pages resolves (`sphinx-build -W` exits 0). Links added: `ref-get-ddl`, `ref-sv-construct`, `ref-create-verify-yaml`, `ref-show-semantic-materializations`.
-
-## Terminology Changes
-
-| Term | Before | After | Authority |
-|------|--------|-------|-----------|
-| standard SQL | plain SQL | standard SQL | terminology.yaml project_terms |
-| behavior | behaviour | behavior | terminology.yaml conventions (American spelling) |
-
-terminology.yaml needed no new entries: the new pages use existing canonical forms ("the WHERE inside SEMANTIC_VIEW(...)", `where_clause` only in the function form, "fan trap", "define time").
+Terminology (fan trap open, American spelling, no tracker IDs), Diataxis placement (both new pages task-led, with Prerequisites, Troubleshooting and Related as the how-to layout requires), code-block languages (all set; no bare `::`), stacked admonitions (none), cross-references on first mention of `explain_semantic_view()`, `DESCRIBE SEMANTIC VIEW`, `GET_DDL`, `SHOW SEMANTIC DIMENSIONS ... FOR METRIC`.

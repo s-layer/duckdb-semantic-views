@@ -13,7 +13,7 @@ queries:
   - metrics at two different grains queried together (fan trap)
   - metrics on two different child tables of one parent (chasm trap)
   - a derived metric whose components span grains
-  - the boundary: a dimension below a metric's grain is still rejected
+  - a dimension below a metric's grain: each row counted once per group
 
 Each section prints the value the base-anchored formulation used to produce, so
 the difference per-grain aggregation makes is visible rather than asserted.
@@ -186,28 +186,32 @@ show(
 )
 
 # ============================================================
-# Section 5: the boundary — a dimension below a metric's grain
+# Section 5: a dimension below a metric's grain
 # ============================================================
 
-print("\n=== Section 5: what per-grain does NOT make answerable ===")
+print("\n=== Section 5: a dimension below a metric's grain ===")
 
-for dims, mets, why in [
-    (["sku"], ["order_count"], "each order fans across its line items' SKUs"),
-    (["status"], ["total_credit"], "each customer fans across their orders' statuses"),
-]:
-    try:
-        con.execute(
-            f"SELECT * FROM semantic_view('sales', dimensions := {dims!r}, metrics := {mets!r})"
-        ).fetchall()
-        print(f"  UNEXPECTED: {mets} by {dims} was accepted")
-    except duckdb.Error as exc:
-        first_line = str(exc).strip().splitlines()[0]
-        print(f"\n  {mets[0]} by {dims[0]} -> rejected ({why}):")
-        print(f"    {first_line[:120]}")
+# Order 1 has line items with SKUs a and b, so it counts under both; order 4
+# has no line items and counts under NULL. Each order is counted once per
+# group, never once per line item, as in Snowflake.
+by_sku = con.execute(
+    "SELECT * FROM semantic_view('sales', dimensions := ['sku'], metrics := ['order_count']) "
+    "ORDER BY sku NULLS LAST"
+).fetchall()
+print("\n  order_count by sku (each order once per SKU):")
+for row in by_sku:
+    print(f"    {row[0]}: {row[1]}")
+assert by_sku == [("a", 1), ("b", 1), ("c", 1), ("d", 1), (None, 1)], by_sku
 
-print(
-    "\nA dimension below a metric's own grain has no single correct value per "
-    "group,\nso it stays an error — Snowflake requires the same."
-)
+# Alice has an open and a closed order, so her credit counts under both;
+# Carol has no orders and counts under NULL.
+by_status = con.execute(
+    "SELECT * FROM semantic_view('sales', dimensions := ['status'], metrics := ['total_credit']) "
+    "ORDER BY status NULLS LAST"
+).fetchall()
+print("\n  total_credit by status (each customer once per status):")
+for row in by_status:
+    print(f"    {row[0]}: {row[1]}")
+assert by_status == [("closed", 500), ("open", 800), (None, 900)], by_status
 
 con.execute("DROP SEMANTIC VIEW sales")

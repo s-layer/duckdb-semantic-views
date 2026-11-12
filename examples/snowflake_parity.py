@@ -184,10 +184,10 @@ for row in con.execute("SHOW SEMANTIC DIMENSIONS IN shop LIMIT 2").fetchall():
     print(f"  {row}")
 
 # ============================================================
-# Section 4: SHOW SEMANTIC DIMENSIONS FOR METRIC (fan-trap-aware)
+# Section 4: SHOW SEMANTIC DIMENSIONS FOR METRIC
 # ============================================================
 
-print("\n=== Section 4: SHOW SEMANTIC DIMENSIONS FOR METRIC (fan-trap-aware) ===")
+print("\n=== Section 4: SHOW SEMANTIC DIMENSIONS FOR METRIC ===")
 
 # Create a view with potential fan traps
 con.execute("DROP SEMANTIC VIEW shop")
@@ -211,21 +211,27 @@ CREATE SEMANTIC VIEW fan_demo AS
   );
 """)
 
-# Show all dimensions that are safe for a given metric.
-# For li.revenue (source: line_items), traversing li->o is MANY TO ONE (safe),
-# so o.region is available.
-print("\nDimensions safe for 'revenue' (from line_items):")
-for row in con.execute("SHOW SEMANTIC DIMENSIONS IN fan_demo FOR METRIC revenue").fetchall():
+# SHOW SEMANTIC DIMENSIONS ... FOR METRIC lists the dimensions a metric can
+# be grouped by. For li.revenue (source: line_items), traversing li->o is
+# MANY TO ONE, so o.region is available.
+print("\nDimensions for 'revenue' (from line_items):")
+revenue_dims = con.execute(
+    "SHOW SEMANTIC DIMENSIONS IN fan_demo FOR METRIC revenue"
+).fetchall()
+for row in revenue_dims:
     print(f"  {row}")
+assert {r[1] for r in revenue_dims} == {"region", "category"}, revenue_dims
 
-# For o.order_count (source: orders), traversing o->li would be ONE TO MANY
-# (fan trap!), so li.category is filtered out.
-print("\nDimensions safe for 'order_count' (from orders):")
-for row in con.execute("SHOW SEMANTIC DIMENSIONS IN fan_demo FOR METRIC order_count").fetchall():
+# For o.order_count (source: orders), traversing o->li is ONE TO MANY. The
+# query is still answered, with each order counted once per category (as in
+# Snowflake), so li.category is listed too.
+print("\nDimensions for 'order_count' (from orders):")
+count_dims = con.execute(
+    "SHOW SEMANTIC DIMENSIONS IN fan_demo FOR METRIC order_count"
+).fetchall()
+for row in count_dims:
     print(f"  {row}")
-
-print("\n(Notice: 'category' is filtered out for order_count because")
-print(" traversing orders->line_items is ONE TO MANY -- a fan trap!)")
+assert {r[1] for r in count_dims} == {"region", "category"}, count_dims
 
 # Clean up
 con.execute("DROP SEMANTIC VIEW fan_demo")

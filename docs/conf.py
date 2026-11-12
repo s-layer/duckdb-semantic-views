@@ -86,7 +86,17 @@ html_theme_options = {
                 {
                     "title": "Fan Traps",
                     "url": "how-to/fan-traps",
-                    "summary": "Detect and resolve aggregation inflation from one-to-many joins",
+                    "summary": "How a metric below its grain is counted, and when a fan trap is refused",
+                },
+                {
+                    "title": "ASOF and Range Relationships",
+                    "url": "how-to/asof-and-range-relationships",
+                    "summary": "Join each row to the record in effect at its date, or to the period holding it",
+                },
+                {
+                    "title": "Many-to-Many Relationships",
+                    "url": "how-to/many-to-many-relationships",
+                    "summary": "Group a metric across a bridge table, each row counted once per group",
                 },
                 {
                     "title": "Tables Defined by a Query",

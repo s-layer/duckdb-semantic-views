@@ -399,7 +399,11 @@ Earlier versions answered these with the first-declared relationship's numbers.
 Declare such metrics on the *referencing* table, as above. A metric declared on
 the role-playing table itself (``a.total_elev AS SUM(a.elevation)``) cannot
 name a role, because a ``USING`` relationship must start at the metric's own
-table. It is rejected as ambiguous too.
+table. It needs none for the airports' own rows: queried alone, by the
+airports' own dimensions, or filtered on them, it reads each airport once
+(5530 for ``total_elev`` here). Grouped by a flight's dimension, such as
+``carrier``, it is refused, since each airport would be joined to the flights
+through one of the two relationships without saying which.
 
 Relationship names may be quoted identifiers, including names with spaces or
 embedded quotes: declare ``"Dep Airport" AS f(departure_code) REFERENCES a`` and
@@ -534,7 +538,7 @@ Troubleshooting
    - Give every queried metric a ``USING`` that targets the desired relationship, for
      example by writing ``f.departures USING (dep_airport) AS f.flight_count`` over the
      plain metric.
-   - Use a dimension from a non-ambiguous table (like the base table).
+   - Use a dimension from a non-ambiguous table (like ``carrier`` on ``flights``).
 
    .. versionchanged:: 0.19.0
 
@@ -589,21 +593,22 @@ Troubleshooting
    non-role-playing table. See :ref:`howto-rp-facts`.
 
 **A metric is declared on a role-playing table**
-   .. versionchanged:: 0.14.0
+   .. versionchanged:: 0.19.0
 
-   A metric whose own table is a role-playing table (or is reached only through
-   one) is rejected as ambiguous: ``USING`` cannot be attached to it, since a
-   ``USING`` relationship must start at the metric's own table. Previously, when
-   no fan trap stopped it (one-to-one relationships), it silently read the
-   first-declared relationship's rows. Declare the metric on the referencing
-   table with ``USING`` instead. See :ref:`howto-rp-facts`.
+   A metric on the role-playing table itself, or on a table above it, is
+   computed over that table's own rows when it is queried alone, beside
+   metrics on other tables, or grouped or filtered by the dimensions of its own
+   table, of the tables above it, or of a table it reaches without crossing the
+   two relationships (one row of ``airport_details`` per airport). It needs no
+   role there. It used to be refused as ambiguous whenever a third table
+   referenced the airports.
 
-   The one exception is the base table, the first table in ``TABLES``. A metric
-   declared on it is accepted when it is queried without dimensions, alongside
-   only other base-table metrics, and with a filter (if any) that names only
-   base-table members. Nothing is joined then, so there is no relationship to
-   choose. Grouping it by a dimension, even one on the base table, or giving it
-   ``NON ADDITIVE BY`` is still rejected.
+   Grouped or filtered by a dimension on the table that holds the two
+   relationships, such as a flight's ``carrier``, it is still refused, as a
+   fan trap: ``USING`` cannot be attached to it, since a ``USING`` relationship
+   must start at the metric's own table, so nothing says which of the two
+   relationships joins an airport to its flights. Declare the metric on the
+   referencing table with ``USING`` instead. See :ref:`howto-rp-facts`.
 
 **Semi-additive metric snapshotting on a role-playing dimension**
    .. versionchanged:: 0.11.0

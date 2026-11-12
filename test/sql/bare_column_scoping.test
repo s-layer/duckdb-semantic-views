@@ -404,6 +404,47 @@ CREATE SEMANTIC VIEW bcs_bad AS
 ----
 fact 'amount' references 'amount', a column of table 'o'
 
+# A fact on another table named like a column of the member's own table does
+# not take that column over: `o.rev AS SUM(amount)` sums the orders' amount
+# beside `c.amount` (100 + 50 + 70 + 5), and beside `li.amount` it is not a
+# fan trap. Where the own table has no such column, the bare name is the fact.
+statement ok
+CREATE SEMANTIC VIEW bcs_fact_parent AS
+  TABLES (
+    c  AS bcs_c  PRIMARY KEY (c_id),
+    o  AS bcs_o  PRIMARY KEY (o_id)
+  )
+  RELATIONSHIPS (o_to_c AS o(c_id) REFERENCES c)
+  FACTS (c.amount AS c.c_id * 1000)
+  DIMENSIONS (c.region AS region)
+  METRICS (o.rev AS SUM(amount));
+
+query I
+SELECT * FROM SEMANTIC_VIEW(bcs_fact_parent METRICS rev);
+----
+225
+
+statement ok
+CREATE SEMANTIC VIEW bcs_fact_child AS
+  TABLES (
+    o  AS bcs_o  PRIMARY KEY (o_id),
+    li AS bcs_li PRIMARY KEY (li_id)
+  )
+  RELATIONSHIPS (li_to_o AS li(o_id) REFERENCES o)
+  FACTS (li.amount AS li.qty * 2)
+  METRICS (o.rev AS SUM(amount), li.li_amount AS SUM(amount));
+
+query II
+SELECT * FROM SEMANTIC_VIEW(bcs_fact_child METRICS rev, li_amount);
+----
+225	92
+
+statement ok
+DROP SEMANTIC VIEW bcs_fact_child;
+
+statement ok
+DROP SEMANTIC VIEW bcs_fact_parent;
+
 statement ok
 DROP SEMANTIC VIEW bcs_identity_fact;
 

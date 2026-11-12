@@ -404,3 +404,14 @@ statement error
 SELECT * FROM SEMANTIC_VIEW(dv_snap DIMENSIONS r.region_name METRICS o.latest_region_any);
 ----
 by more than one path: o -> c -> r, o -> s -> r
+
+# Storage format: dv_o (regions referenced by customers and stores, orders
+# first) is a graph 0.18.0's CREATE refused and reads along its first-declared
+# path, so it is stamped 3, which 0.18.0 refuses by name. dv_r declares regions
+# first, fan-in onto the first table, which 0.18.0 created itself: format 1.
+query TI
+SELECT name, CAST(json_extract(definition, '$.schema_version') AS INTEGER)
+FROM semantic_layer._definitions WHERE name IN ('dv_o', 'dv_r') ORDER BY name;
+----
+dv_o	3
+dv_r	1

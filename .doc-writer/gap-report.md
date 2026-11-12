@@ -1,53 +1,48 @@
 # Gap Report
 
-**Generated:** 2026-10-26, worktree on `c9a767b` (v0.17.0 release prep) against `v0.16.0`
-**Source root:** src/ (plus cpp/src/shim.cpp, which holds the standard-SQL rewrite and its refusals)
+**Generated:** 2026-11-12, branch `claude/project-thread-txbnay` (origin/main `17a4c03`, v0.19.0 release prep) against `v0.18.0`
+**Source root:** src/ (plus cpp/src/shim.cpp)
 **Language:** rust
 **Total undocumented symbols:** 0 user-facing
-**Potentially stale pages:** 14 (scoped to this release's changes; see below)
+**Potentially stale pages:** 10 (scoped to this release's changes; see below)
 
-Previous run (v0.16.0): 0 undocumented symbols. Nothing persists from it.
+Previous run (v0.17.0): 0 undocumented symbols. Nothing persists from it.
 
 ## Undocumented Symbols
 
-None. The registered SQL functions, listed from `duckdb_functions()` after `LOAD`ing the
-debug build into the DuckDB 2.0.0 Python package, are the v0.16.0 set plus one internal
-helper, `__sv_check_create` (used by `CREATE` to bind each member). `docs/reference/functions.rst`
-already lists it as internal and not part of the supported interface.
+None. The SQL functions registered by `LOAD`ing the release build into the DuckDB 2.0.0 Python
+package are the v0.18.0 set; every name is in `docs/reference/functions.rst`, with the three `__sv_*`
+helpers listed as internal.
 
-The release changes behaviour and syntax, not the function surface:
+The release changes syntax and query behaviour, not the function surface:
 
-- #314: a semantic view can be queried by name with standard SQL
-  (`SELECT region, AGG(revenue) FROM sv WHERE ... GROUP BY ... HAVING ...`). Documented in
-  `docs/how-to/standard-sql.rst`; refusal messages (`must be passed to AGG`, `must appear in
-  GROUP BY`, `SELECT * is not supported ...`, `cannot be joined, pivoted or read alongside other
-  tables`, window / QUALIFY / sampling / grouping sets / correlated references) are not in the
-  error reference.
-- #315: `CREATE SEMANTIC VIEW` binds every member and refuses one DuckDB cannot bind
-  (`semantic view '<view>': <kind> '<name>' does not bind: <DuckDB error>`). Documented in the
-  CREATE reference and the error reference; several troubleshooting entries elsewhere still
-  describe the old accept-then-fail-at-query behaviour.
-- #316: member-level `[WITH] TAG (...)`. Documented in the CREATE / DESCRIBE / YAML references,
-  the metadata-annotations how-to and both comparison pages.
+- #336: `ASOF` relationships (`o(cust_id, order_date) REFERENCES a(cust_id, ASOF start_date)`).
+  In the CREATE reference and the error reference; no how-to.
+- #338: range relationships (`REFERENCES p(BETWEEN start AND end EXCLUSIVE)`) with a
+  `CONSTRAINT ... DISTINCT RANGE` on the target. In the CREATE, DESCRIBE, GET_DDL and YAML
+  references; no how-to.
+- #339, #343: many-to-many relationships through a bridge table. In the CREATE reference only;
+  fan-traps.rst pointed to the reference for the worked example.
+- #340-#352: fan-outs answered once per group, any acyclic graph at CREATE, diamond and role
+  rules, dims-only meeting tables, SHOW FOR METRIC, window metrics over the query, semi-additive
+  snapshots along USING, a filter read along each role, window rules at CREATE, a bare column
+  read from its member's own table. In the CHANGELOG; several pages still described the 0.18
+  refusals.
 
 ## Potentially Stale Pages
 
-The timestamp heuristic flags every page (src/ changed after all of them). Narrowed by grepping
-docs/ for the query forms, `direct SQL`, `Not planned`, and claims about when a member's error
-appears (`query time`, `when queried`, `CREATE succeeds`, `does not check`, `binder error`),
-then checking each claim against the debug build:
+The timestamp heuristic flags every page. Narrowed by grepping docs/ for `refused`, `fan trap`,
+`role-play`, `USING`, `window metric`, `FACTS`, `declared first` and `bridge`, then checking each
+claim against the release build:
 
-- `docs/explanation/snowflake-comparison.rst` (Feature Parity row "Direct SQL query interface: Not planned")
-- `docs/explanation/semantic-views-vs-regular-views.rst` (query interface row shows only the construct)
-- `docs/index.rst` (intro and meta description name only the construct)
-- `docs/tutorials/getting-started.rst` (teaches only the construct and the function)
-- `docs/tutorials/multi-table.rst` (CREATE OR REPLACE step says nothing of the bind check)
-- `docs/reference/semantic-view-function.rst` (intro lists two spellings, not the standard-SQL form)
-- `docs/reference/error-messages.rst` (no standard-SQL refusal entries; Query Errors intro)
-- `docs/how-to/standard-sql.rst` (no example data: none of its examples run as written)
-- `docs/how-to/filtering.rst` (no pointer to WHERE / HAVING in the standard-SQL form)
-- `docs/how-to/facts.rst` (two troubleshooting entries say CREATE succeeds and the query fails)
-- `docs/how-to/derived-metrics.rst` ("a table-qualified column ... is not caught at define time")
-- `docs/how-to/window-metrics.rst` ("CREATE does not catch this" for a window metric over a window metric)
-- `docs/how-to/data-sources.rst` ("CREATE SEMANTIC VIEW does not check that the tables in TABLES exist")
-- `docs/how-to/metadata-annotations.rst` (BOOLEAN note reasons that typing needs a binder CREATE lacks)
+- `docs/how-to/fan-traps.rst` (refusal list: window metrics, role-played tables, bridges)
+- `docs/explanation/metric-grain.rst` (FACTS reads the first-declared table; "What Is Still Refused")
+- `docs/how-to/role-playing-dimensions.rst` (a metric on the role-played table is refused; base-table exception)
+- `docs/explanation/snowflake-comparison.rst` (window metric below grain refused; no ASOF / range / bridge rows)
+- `docs/reference/semantic-view-function.rst` (a WHERE member on a role-played table is rejected)
+- `docs/how-to/filtering.rst` (role-played filter troubleshooting)
+- `docs/how-to/index.rst`, `docs/index.rst`, `docs/conf.py` (no entries for the new how-tos)
+- `docs/reference/create-semantic-view.rst` (no links to worked examples)
+
+Outside docs/: README.md (fan-trap paragraph says the error is raised; no ASOF / range / bridge),
+CHANGELOG.md `[Unreleased]` (window metric listed as refused in three bullets).

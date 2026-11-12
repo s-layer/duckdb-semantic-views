@@ -9,7 +9,7 @@ uv run examples/advanced_features.py
 Demonstrates v0.5.3 advanced semantic features:
   - FACTS: reusable row-level expressions with chaining
   - Derived metrics: metric-on-metric composition
-  - Cardinality annotations and fan trap detection
+  - Cardinality annotations and fan-outs answered once per group
   - Role-playing dimensions with USING RELATIONSHIPS
   - EXPLAIN / DESCRIBE for introspection
 """
@@ -163,10 +163,10 @@ result = con.execute("""
 print(f"  profit={result[0]}")
 
 # ============================================================
-# Section 4: Fan trap detection -- Cardinality-aware safety
+# Section 4: Fan-outs -- each row counted once per group
 # ============================================================
 
-print("\n=== Section 4: Fan trap detection -- Cardinality-aware safety ===")
+print("\n=== Section 4: Fan-outs -- each row counted once per group ===")
 
 con.execute("DROP SEMANTIC VIEW sales")
 con.execute("""
@@ -198,21 +198,20 @@ for row in con.execute("""
 """).fetchall():
     print(f"  {row[0]}: revenue={row[1]}")
 
-# Fan trap: o.order_count with li.price_tier
-# Traversing o->li is one-to-many (fan-out) -- would inflate the count!
-print("\nFan trap query (order_count by price_tier -- blocked!):")
-try:
-    con.execute("""
-        SELECT * FROM semantic_view('fan_trap_demo',
-            dimensions := ['price_tier'],
-            metrics := ['order_count']
-        )
-    """)
-except Exception as e:
-    print(f"  Error: {e}")
-    print("  (order_count is from orders, but price_tier requires joining")
-    print("   line_items. Traversing orders->line_items is one-to-many,")
-    print("   which would inflate the count.)")
+# Across the fan-out: o.order_count by li.price_tier.
+# Traversing o->li is one-to-many, so a plain join would count order 1 once
+# per line item. Each order is counted once per group instead, as in
+# Snowflake: order 1 has a low and a high line item, so it counts under both.
+print("\nAcross the fan-out (order_count by price_tier, each order once per tier):")
+by_tier = con.execute("""
+    SELECT * FROM semantic_view('fan_trap_demo',
+        dimensions := ['price_tier'],
+        metrics := ['order_count']
+    ) ORDER BY price_tier
+""").fetchall()
+for row in by_tier:
+    print(f"  {row[0]}: order_count={row[1]}")
+assert by_tier == [("high", 2), ("low", 1)], by_tier
 
 # ============================================================
 # Section 5: Role-playing dimensions with USING RELATIONSHIPS
@@ -289,23 +288,23 @@ for row in con.execute("""
 """).fetchall():
     print(f"  {row[0]}: departures={row[1]}, arrivals={row[2]}")
 
-# Ambiguous query: total_flights references both USING paths,
-# city is from airports -- which relationship should resolve it?
-print("\nAmbiguous query (total_flights by city -- blocked!):")
-try:
-    con.execute("""
-        SELECT * FROM semantic_view('flight_analytics',
-            dimensions := ['city'],
-            metrics := ['total_flights']
-        )
-    """)
-except Exception as e:
-    print(f"  Error: {e}")
-    print("  (total_flights depends on both dep_airport and arr_airport;")
-    print("   city is from airports -- ambiguous which path to use.)")
+# A derived metric over both roles: each component follows its own USING
+# path, so total_flights by city is the city's departures plus its arrivals.
+print("\nTotal flights by city (departures through dep_airport + arrivals through arr_airport):")
+by_city = con.execute("""
+    SELECT * FROM semantic_view('flight_analytics',
+        dimensions := ['city'],
+        metrics := ['total_flights', 'departure_count', 'arrival_count']
+    ) ORDER BY city
+""").fetchall()
+for row in by_city:
+    print(f"  {row[0]}: total={row[1]} (departures={row[2]}, arrivals={row[3]})")
+assert by_city == [
+    ("London", 2, 1, 1),
+    ("New York", 2, 1, 1),
+    ("San Francisco", 2, 1, 1),
+], by_city
 
-# Total flights by carrier (derived, non-ambiguous)
-# AA: 2+2=4, BA: 1+1=2
 print("\nTotal flights by carrier (non-ambiguous):")
 for row in con.execute("""
     SELECT * FROM semantic_view('flight_analytics',

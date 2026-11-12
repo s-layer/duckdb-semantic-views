@@ -216,10 +216,10 @@ read differently on its own than beside a metric from another table.
    A dimensions-only query is anchored the same way since 0.19.0: it reads the
    table under all its dimensions and joins up, so a parent and a child
    dimension list the child's rows (see :ref:`Dimensions only <ref-sv-modes>`).
-   A ``FACTS`` query is row-level and keeps its earlier behavior: it starts at
-   the base table and drops the row a parent with no children would otherwise
-   contribute, so a ``FACTS`` query on a child fact still omits a child row
-   whose foreign key is ``NULL``.
+   A ``FACTS`` query reads the same table and lists every row of it, so a
+   ``FACTS`` query on a child fact lists a child row whose foreign key is
+   ``NULL`` too, with ``NULL`` for the parent's facts. Before 0.19.0 both kinds
+   of query read the table declared first in ``TABLES``.
 
 
 .. _explanation-grain-multi:
@@ -403,8 +403,8 @@ What Is Still Refused, and Why
 ==============================
 
 Per-grain assembly widens what a semantic view can answer; it does not remove the
-guard rails. Three shapes still raise an error, and the reason behind each one is
-useful to keep in mind while you model. A dimension below a metric's grain is
+guard rails. The shapes below still raise an error, and the reason behind each one
+is useful to keep in mind while you model. A dimension below a metric's grain is
 also refused for an active semi-additive metric, a metric table with no
 ``PRIMARY KEY``, and a fan-out across an ``ASOF`` or range relationship (see
 :ref:`howto-fan-errors`).
@@ -427,25 +427,32 @@ on their own. See :ref:`howto-window-relationships`.
    on it means nothing until something says which role is intended. Each
    metric's ``USING`` clause supplies that, and per-grain assembly honors it:
    each grain joins its metrics' relationship under its own scoped alias, and
-   metrics with different roles are grouped separately and merged. A metric
+   metrics with different roles are grouped separately and merged. A ``WHERE``
+   on the airports, or on a table reached through them, is read along each
+   metric's role in the same way. A metric that crosses the two relationships
    without ``USING`` keeps the error rather than picking a relationship by
    declaration order, because picking silently is how a departure number ends up
-   labeled as an arrival one. Declaring role-playing somewhere in a view does not
-   cost the rest of that view its multi-grain queries -- the test is what the
-   query reaches, not what the definition contains. See :ref:`howto-role-playing`.
+   labeled as an arrival one. A metric needs no role when its own way to the
+   airports avoids the two relationships, as on a table that references the
+   airports once or on a table above them. Declaring role-playing somewhere in a view
+   does not cost the rest of that view its multi-grain queries: the test is what
+   the query reaches, not what the definition contains. See
+   :ref:`howto-role-playing`.
 
-**Anything other than a dimension sitting on a role-played table.**
-   Only a queried dimension's expression is rewritten to a scoped alias, so a
-   pre-aggregation filter member on a role-played table, a metric aggregated at
-   one, or a table reachable only by passing through one all remain errors. An
-   error is the right outcome here; the alternative is a plausible-looking wrong
-   number.
+**A metric on the role-played table grouped by the table that holds the relationships.**
+   An airport count, or a metric on a table above the airports, is computed over
+   its own rows by the airports' own dimensions. Grouped or filtered by a
+   flight's dimension, it would be joined to the flights through one of the two
+   relationships, and ``USING`` cannot say which, since a ``USING`` relationship
+   starts at the metric's own table. The query is refused as a fan trap.
 
-**A role-played dimension queried together with an active semi-additive metric.**
-   A snapshot group cannot carry a role, so the two grains would bind different
-   instances of the same dimension -- one under the alias ``USING`` named, the
-   other under whichever relationship was declared first -- and the outer join
-   would silently compare them. Query that pair at a single grain instead.
+**Metrics on different roles beside an active semi-additive metric.**
+   A query with an active semi-additive metric is not split into one aggregate
+   per role, so metrics naming two roles beside it would have to share one join
+   to the role-played table. It is refused as ambiguous; query the metrics
+   separately. A semi-additive metric with ``USING`` is grouped by the
+   role-played table along its own role, alone or beside metrics on the same
+   role, and its snapshot follows that role.
 
 Semi-additive metrics -- ``NON ADDITIVE BY`` snapshots such as account balances --
 are otherwise computed at their own grain and can appear alongside metrics at other
@@ -490,6 +497,8 @@ Further Reading
   ``fan trap detected`` error is telling you, and how to restructure around it.
 - :ref:`explanation-snowflake` -- how this grain model lines up with Snowflake's,
   including the granularity rule quoted above.
+- :ref:`howto-many-to-many` -- counting a metric once per group across a
+  bridge table.
 - :ref:`tutorial-multi-table` -- the star-schema model these examples build on.
 - :ref:`ref-semantic-view-function` -- the query function's parameters and the
   emission paths a predicate is injected into.

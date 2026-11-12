@@ -1,14 +1,14 @@
 # Doc Writer Context
 
-**Generated:** 2026-03-21
+**Generated:** 2026-03-21 (version line and release terms refreshed 2026-11-12 for v0.19.0)
 **Source:** /doc-writer:setup researcher
 **Editable:** Yes -- manual edits are preserved until the next --refresh-context run. To make permanent changes, edit config.yaml and re-run setup.
 
 ## Project Summary
 
-DuckDB Semantic Views is a loadable DuckDB extension (written in Rust + C++) that implements semantic views -- a declarative layer where you define dimensions, metrics, relationships, and facts once, then query them in any combination. The extension writes all GROUP BY and JOIN logic automatically, joining only the tables needed for each query. Inspired by and closely modeled on Snowflake Semantic Views, it targets data engineers who want an open-source, DuckDB-native alternative. The user interface is native SQL DDL (`CREATE [OR REPLACE | OR ALTER] SEMANTIC VIEW ... [AS] TABLES ...`, also `FROM YAML`) and, for querying, the `SEMANTIC_VIEW(...)` construct, the `semantic_view()` table function it lowers to, and standard SQL over the view by name (`SELECT region, AGG(revenue) FROM v GROUP BY region`). The extension is published on the DuckDB community extension registry (`INSTALL semantic_views FROM community`). v0.17.0 is the latest release and v0.18.0 is next; current releases target DuckDB 2.0 (v0.14.2 is the last release for DuckDB 1.5).
+DuckDB Semantic Views is a loadable DuckDB extension (written in Rust + C++) that implements semantic views -- a declarative layer where you define dimensions, metrics, relationships, and facts once, then query them in any combination. The extension writes all GROUP BY and JOIN logic automatically, joining only the tables needed for each query. Inspired by and closely modeled on Snowflake Semantic Views, it targets data engineers who want an open-source, DuckDB-native alternative. The user interface is native SQL DDL (`CREATE [OR REPLACE | OR ALTER] SEMANTIC VIEW ... [AS] TABLES ...`, also `FROM YAML`) and, for querying, the `SEMANTIC_VIEW(...)` construct, the `semantic_view()` table function it lowers to, and standard SQL over the view by name (`SELECT region, AGG(revenue) FROM v GROUP BY region`). The extension is published on the DuckDB community extension registry (`INSTALL semantic_views FROM community`). v0.18.0 is the latest release and v0.19.0 is next; current releases target DuckDB 2.0 (v0.14.2 is the last release for DuckDB 1.5).
 
-Inferred from: README.md, CHANGELOG.md, Cargo.toml (`semantic_views` v0.17.0, MIT), description.yml, source module structure (model, expand, graph, body_parser, catalog, parse, ddl, query, grammar).
+Inferred from: README.md, CHANGELOG.md, Cargo.toml (`semantic_views` v0.18.0, MIT), description.yml, source module structure (model, expand, graph, body_parser, catalog, parse, ddl, query, grammar).
 
 ## User Persona: Data engineers exploring semantic views
 
@@ -35,13 +35,13 @@ Inferred from: README.md, CHANGELOG.md, Cargo.toml (`semantic_views` v0.17.0, MI
 - **Query semantic views:** Use `SELECT * FROM SEMANTIC_VIEW(name DIMENSIONS ... METRICS ... WHERE ...)`, Snowflake's construct (since v0.16.0), to request any combination of dimensions and metrics, or expressions over them; `semantic_view('name', dimensions := [...], metrics := [...])` is the equivalent table function for application code. Understand the three query modes: dimensions-only (distinct values), metrics-only (grand totals), and both (grouped aggregation). Filter the rows the metrics aggregate with the WHERE inside the construct, and the result with WHERE on the outer query.
 - **Connect diverse data sources:** Load data from Parquet files, Iceberg tables, Postgres (via `postgres_scanner`), CSV, or other DuckDB-supported sources, then define semantic views over those tables. Understand that semantic views work over any table DuckDB can see.
 - **Compare features with Snowflake/Databricks:** Evaluate which Snowflake Semantic View features are supported, which behave differently, and which are not yet implemented. Make informed decisions about whether this extension fits their use case.
-- **Model semantic layers following best practices:** Design star/snowflake schemas with proper relationship declarations, use FACTS for shared calculations, apply cardinality annotations to catch fan traps, and use derived metrics for composed calculations like profit margins.
+- **Model semantic layers following best practices:** Design star/snowflake schemas with proper relationship declarations (including, since v0.19.0, `ASOF` relationships to the record in effect at a date, range relationships to the period that holds a date, and many-to-many relationships through a bridge table), use FACTS for shared calculations, apply cardinality annotations to catch fan traps, and use derived metrics for composed calculations like profit margins.
 - **Build a DuckDB + Iceberg + analytics app stack:** Set up DuckDB as an embedded engine in an application server, connect it to Iceberg tables (via `iceberg` extension), define semantic views for the data model, and serve query results to a web application frontend.
 
 ### Writing Guidance for This Persona
 - When explaining DDL syntax, assume they understand SQL grammar conventions (keywords, clauses, optional elements) but spell out the specific clause order and semantics unique to semantic views
 - When showing multi-table examples, assume they understand star schemas and PK/FK joins but spell out how the RELATIONSHIPS clause maps to those concepts
-- Use data engineering terminology naturally (fact table, dimension table, grain, fan-out, cardinality) but define semantic-view-specific terms (FACTS clause, derived metrics, role-playing dimensions, USING RELATIONSHIPS)
+- Use data engineering terminology naturally (fact table, dimension table, grain, fan-out, cardinality) but define semantic-view-specific terms (FACTS clause, derived metrics, role-playing dimensions, USING RELATIONSHIPS, ASOF and range relationships, `DISTINCT RANGE` constraints, bridge tables)
 - Examples should show realistic analytics scenarios: revenue by region, customer segmentation, product performance, time-series aggregations over Iceberg tables
 - When comparing to Snowflake, always compare against their SQL DDL interface (`CREATE SEMANTIC VIEW`), never the YAML spec. Use Snowflake's SQL DDL syntax as a known reference point ("If you have used Snowflake's CREATE SEMANTIC VIEW, the TABLES clause works the same way, but...")
 - Include the generated SQL (via `explain_semantic_view`) in examples so readers can verify the extension does what they expect

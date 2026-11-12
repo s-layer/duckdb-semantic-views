@@ -4,7 +4,7 @@ user_personas:
     skill_level: "intermediate"
     generated_at: "2026-08-09"
     updated_at: "2026-10-01"
-    update_note: "2026-11-06 (v0.18.0): S1-S8 reused; three how-to pages added (view-variables, query-defined-tables, create-or-alter), under the regeneration threshold; S9-S12 appended for view variables, query-defined tables, CREATE OR ALTER and multi-path USING. 2026-10-26 (v0.17.0): S1-S6 reused; docs/how-to/standard-sql.rst added to doc_pages (one new page, under the regeneration threshold); S7 and S8 appended for the standard-SQL query form and CREATE binding every member. Earlier: S1-S5 reused unchanged (page set grew by two pages, explanation/metric-grain.rst and how-to/filtering.rst, well under the regeneration threshold). S6 appended for the v0.13.0 duckdb_functions() metadata feature. 2026-10-01: docs/reference/functions.rst added to doc_pages (created by the audit-fix PR to satisfy S6)."
+    update_note: "2026-11-12 (v0.19.0): S1-S11 reused; two how-to pages added (asof-and-range-relationships, many-to-many-relationships), under the regeneration threshold; S13 and S14 appended for ASOF/range and many-to-many relationships; S2, S3 and S12 re-run because fan-traps, metric-grain, role-playing-dimensions and snowflake-comparison changed. 2026-11-06 (v0.18.0): S1-S8 reused; three how-to pages added (view-variables, query-defined-tables, create-or-alter), under the regeneration threshold; S9-S12 appended for view variables, query-defined tables, CREATE OR ALTER and multi-path USING. 2026-10-26 (v0.17.0): S1-S6 reused; docs/how-to/standard-sql.rst added to doc_pages (one new page, under the regeneration threshold); S7 and S8 appended for the standard-SQL query form and CREATE binding every member. Earlier: S1-S5 reused unchanged (page set grew by two pages, explanation/metric-grain.rst and how-to/filtering.rst, well under the regeneration threshold). S6 appended for the v0.13.0 duckdb_functions() metadata feature. 2026-10-01: docs/reference/functions.rst added to doc_pages (created by the audit-fix PR to satisfy S6)."
     doc_pages:
       - "docs/index.rst"
       - "docs/changelog.md"
@@ -30,6 +30,8 @@ user_personas:
       - "docs/how-to/view-variables.rst"
       - "docs/how-to/query-defined-tables.rst"
       - "docs/how-to/create-or-alter.rst"
+      - "docs/how-to/asof-and-range-relationships.rst"
+      - "docs/how-to/many-to-many-relationships.rst"
       - "docs/explanation/index.rst"
       - "docs/explanation/semantic-views-vs-regular-views.rst"
       - "docs/explanation/metric-grain.rst"
@@ -116,3 +118,13 @@ user_personas:
         starting_point: "docs/index.rst"
         persona_relevance: "Role-playing dimensions are standard in my star schemas; Snowflake answers this query, and splitting it into two queries in the app is friction."
         done_when: "I can define the two relationships and USING metrics, run the combined query and see its output including NULLs for unreached groups, and know which combinations are refused and what the error looks like."
+      - id: S13
+        goal: "I want each order joined to the address its customer had on the order date, and each signup to the campaign running when it happened, so I can report revenue by city-at-the-time and signups by campaign"
+        starting_point: "docs/index.rst"
+        persona_relevance: "Slowly changing history tables and period tables are everywhere in my warehouse. Without point-in-time joins I pre-join them in dbt; Snowflake semantic views added ASOF and range relationships, and I want the same model to work on DuckDB."
+        done_when: "I have the ASOF and range syntax with the key and DISTINCT RANGE constraint each needs, a runnable example with output for each, know how boundaries and NULLs match (start day included, end excluded, open bounds, unmatched rows kept), know which groupings are refused and what the error says, can see the generated join, and know how the relationships appear in DESCRIBE, GET_DDL and YAML and which releases can read them."
+      - id: S14
+        goal: "I want page counts by author country when books have several authors, without double-counting a book written by two French authors"
+        starting_point: "docs/index.rst"
+        persona_relevance: "Bridge tables (book_authors, account_owners, product_tags) are a standard star-schema pattern; a plain join double-counts, and my BI tool users will not notice. Snowflake semantic views count each row once per group across a bridge."
+        done_when: "I know how to declare the bridge (no new syntax), have a runnable example with output showing once-per-group counts, know why the groups add up to more than the total and how to get the total, know how filters and bridge-table dimensions behave, know a fact table can be the bridge, can see the generated SQL, and know what is refused (semi-additive, two bridges, window clauses) and what the errors look like."

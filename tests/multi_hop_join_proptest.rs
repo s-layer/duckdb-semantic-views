@@ -86,7 +86,9 @@
 //! metrics `sv`, `su` and `sw` are each written over a column of their own
 //! name (`sv AS sum(sv)`, [`SELF_NAMED`]), which every other table has a
 //! decoy of: a metric's own name in its expression is its column, not the
-//! metric. The oracle is unchanged, as it names every column with its table.
+//! metric. A decoy fact on `u` is named `v`, like `t`'s column, and a bare `v`
+//! in a member of `t` must still read the column. The oracle is unchanged, as
+//! it names every column with its table.
 
 use proptest::prelude::*;
 use semantic_views::expand::{expand, DimensionName, FactName, MetricName, QueryRequest};
@@ -733,6 +735,14 @@ fn bare_twin(mut def: SemanticViewDefinition) -> SemanticViewDefinition {
             strip(&m.expr)
         };
     }
+    // A decoy fact on `u` named like `t`'s column `v`: a bare `v` in a member
+    // of `t` is still `t`'s column, as in Snowflake, not this fact.
+    def.facts.push(semantic_views::model::Fact {
+        name: "v".to_string(),
+        expr: "u.uw".to_string(),
+        source_table: Some("u".to_string()),
+        ..Default::default()
+    });
     def.table_columns = SCHEMA
         .iter()
         .filter(|(table, _)| def.tables.iter().any(|t| t.alias == *table))
