@@ -301,28 +301,19 @@ fn a_city_filtered_on_the_terminal_follows_the_metrics_role() {
     );
 }
 
-/// Two metrics naming two roles share one predicate, which neither role is
-/// read for: refused, as before (fixture 9's W3 and W4 ask Snowflake;
-/// TECH-DEBT #111).
+/// Two metrics naming two roles share one predicate, which each reads along
+/// its own role, as Snowflake does (fixture 9, W3 and W4; TECH-DEBT #111):
+/// arrivals at Paris or T2 1 (flight 2), departures from it 2 (flights 1, 3).
+/// It used to be refused.
 #[test]
-fn a_filter_beside_two_roles_is_refused() {
-    for order in ORDERS {
-        for filter in ["terminal = 'T2'", "city = 'Paris'"] {
-            match try_run(
-                &air(&order),
-                &req(&[], &["arrivals", "departures"], Some(filter)),
-            ) {
-                Err(ExpandError::AmbiguousWhereClausePath {
-                    role_playing_table, ..
-                }) => assert_eq!(role_playing_table, "ap"),
-                other => panic!("{order:?} {filter}: expected a refusal, got {other:?}"),
-            }
-        }
+fn a_filter_beside_two_roles_follows_each() {
+    for filter in ["terminal = 'T2'", "city = 'Paris'"] {
+        case(&[], &["arrivals", "departures"], Some(filter), &["1/2"]);
     }
 }
 
-/// With no `USING` the filter names no role (fixture 9's W6 asks Snowflake;
-/// TECH-DEBT #111).
+/// With no `USING` the filter names no role, and Snowflake refuses it too
+/// (fixture 9, W6: 010246).
 #[test]
 fn a_filter_beside_no_role_is_refused() {
     for order in ORDERS {
@@ -448,8 +439,10 @@ fn a_filter_beside_a_semi_additive_and_a_plain_metric_on_its_role() {
     );
 }
 
-/// Beside a metric on the other role, no one role reads the city, so the
-/// filter is refused as it is without the snapshot.
+/// Beside a metric on the other role, each metric would read the city along
+/// its own role, which the snapshot's own grain cannot follow yet (TECH-DEBT
+/// #82, item 4), so the filter is refused. Without the snapshot it is
+/// answered (`a_filter_beside_two_roles_follows_each`).
 #[test]
 fn a_filter_beside_a_semi_additive_metric_and_another_role_is_refused() {
     for order in ORDERS {
@@ -543,9 +536,8 @@ fn t_roles_run(order: &[usize], dims: &[&str], mets: &[&str]) -> Result<Vec<Stri
 }
 
 /// The role-played table's own metric across a plain fan-out to the items,
-/// which reference it once: each order counted once per qty (fixture 9's O1
-/// asks Snowflake; fixture 7 answers a single-path fan-out so). It was
-/// refused as a fan trap (TECH-DEBT #111).
+/// which reference it once: each order counted once per qty, as Snowflake
+/// counts it (fixture 9b, O1). It was refused as a fan trap (TECH-DEBT #111).
 #[test]
 fn an_order_metric_across_a_plain_fan_out() {
     for order in ORDERS {
@@ -559,8 +551,8 @@ fn an_order_metric_across_a_plain_fan_out() {
 }
 
 /// Across one of the orders' roles (the notes) it is refused: which order a
-/// note names is the role, and the metric names none. Fixture 9's O3 asks
-/// Snowflake (TECH-DEBT #111).
+/// note names is the role, and the metric names none. Snowflake refuses it
+/// too, as multi-path (fixture 9b, O3: 000002).
 #[test]
 fn an_order_metric_across_a_role_is_refused() {
     for order in ORDERS {
@@ -575,7 +567,7 @@ fn an_order_metric_across_a_role_is_refused() {
 
 /// A note metric across its role and then a fan-out to the items is refused,
 /// as Snowflake refuses it (fixture 8, T3b: 000002, multi-path in many-to-many;
-/// fixture 9's G1-G3 and O4 ask about more such shapes, TECH-DEBT #111).
+/// and fixture 9b's G1-G3 and O4 the same way).
 #[test]
 fn a_role_then_a_fan_out_is_refused() {
     for order in ORDERS {

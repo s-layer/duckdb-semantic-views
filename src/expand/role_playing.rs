@@ -134,6 +134,86 @@ fn role_playing_pairs(def: &SemanticViewDefinition) -> Vec<(String, String)> {
         .collect()
 }
 
+/// Whether a query reading rows from `start` reaches the role-played table
+/// `rp` only across one of its roles. A start with a chain of foreign keys to
+/// `rp` crosses them when every such chain follows a relationship of a table
+/// that declares two or more to `rp`; one with no chain, when every way to
+/// `rp` over relationships in either direction does. The flights that play
+/// the airports' roles cross them; the lounges, which reference the airports
+/// once, and the regions above them do not, and Snowflake asks those no role
+/// (fixture 9, L1 and P1). A chain is preferred to a fan-out: a table whose
+/// one chain to `rp` is a role crosses it even when a fan-out through a third
+/// table reaches `rp` too. `rp` itself, and a start that does not reach it,
+/// cross nothing.
+pub(super) fn crosses_roles(def: &SemanticViewDefinition, start: &str, rp: &str) -> bool {
+    let start = start.to_ascii_lowercase();
+    let rp = rp.to_ascii_lowercase();
+    if start == rp {
+        return false;
+    }
+    let roles: Vec<(String, String)> = role_playing_pairs(def)
+        .into_iter()
+        .filter(|(_, target)| *target == rp)
+        .collect();
+    if roles.is_empty() || super::multi_path::undirected_path(def, &start, &rp, None).is_none() {
+        return false;
+    }
+    let is_role = |j: &crate::model::Join| {
+        roles.contains(&(
+            j.from_alias.to_ascii_lowercase(),
+            j.table.to_ascii_lowercase(),
+        ))
+    };
+    if chain_reaches(def, &start, &rp, &|_| false) {
+        return !chain_reaches(def, &start, &rp, &is_role);
+    }
+    !undirected_reaches(def, &start, &rp, &is_role)
+}
+
+/// Whether `from` reaches `to` by a chain of foreign keys (each relationship
+/// followed from its referencing table), never along one `skip` accepts.
+fn chain_reaches(
+    def: &SemanticViewDefinition,
+    from: &str,
+    to: &str,
+    skip: &dyn Fn(&crate::model::Join) -> bool,
+) -> bool {
+    let mut seen: HashSet<String> = HashSet::from([from.to_string()]);
+    let mut stack = vec![from.to_string()];
+    while let Some(current) = stack.pop() {
+        if current == to {
+            return true;
+        }
+        for j in &def.joins {
+            if j.from_alias.eq_ignore_ascii_case(&current) && !skip(j) {
+                let next = j.table.to_ascii_lowercase();
+                if seen.insert(next.clone()) {
+                    stack.push(next);
+                }
+            }
+        }
+    }
+    false
+}
+
+/// The metrics of `mets` that reach the role-played table `rp` only across
+/// one of its roles ([`crosses_roles`]) from a table they read rows from
+/// ([`query_starts`]): the ones a role must be named for.
+fn metrics_crossing<'a>(
+    def: &SemanticViewDefinition,
+    mets: &[&'a crate::model::Metric],
+    rp: &str,
+) -> Vec<&'a crate::model::Metric> {
+    mets.iter()
+        .copied()
+        .filter(|met| {
+            query_starts(def, &[met])
+                .iter()
+                .any(|home| crosses_roles(def, home, rp))
+        })
+        .collect()
+}
+
 /// Whether `from` reaches `to` by a chain of relationships in `graph`.
 fn graph_chain_reaches(graph: &crate::graph::RelationshipGraph, from: &str, to: &str) -> bool {
     let mut seen: HashSet<String> = HashSet::from([from.to_string()]);
@@ -203,6 +283,11 @@ pub(super) fn query_starts(
 /// walking up to the first-declared table instead made the answer depend on
 /// that order. An empty `from` counts every table as a start.
 ///
+/// A role-playing target counts only for a start that reaches it across its
+/// roles ([`crosses_roles`]): lounges, which reference the airports once, and
+/// regions above them, reach the airports by a relationship of their own, so
+/// no role is asked of them (Snowflake fixture 9, L1 and P1).
+///
 /// A definition whose relationship graph cannot be rebuilt (missing FK metadata
 /// or otherwise malformed), or one that contains a cycle, is reported as
 /// [`ExpandError::UncheckableDefinition`] — the same fail-loud stance
@@ -216,7 +301,9 @@ pub(super) fn role_playing_on_path(
     table: &str,
 ) -> Result<Option<String>, ExpandError> {
     let table_lower = table.to_ascii_lowercase();
-    if is_role_playing_target(def, &table_lower) {
+    if is_role_playing_target(def, &table_lower)
+        && (from.is_empty() || from.iter().any(|s| crosses_roles(def, s, &table_lower)))
+    {
         return Ok(Some(table_lower));
     }
     role_playing_past(view_name, def, from, &table_lower)
@@ -321,7 +408,9 @@ fn role_playing_past(
         }
         next.sort_unstable();
         if let Some(rp) = next.iter().find(|p| {
-            is_role_playing_target(def, p) && reached.as_ref().is_none_or(|r| r.contains(*p))
+            is_role_playing_target(def, p)
+                && reached.as_ref().is_none_or(|r| r.contains(*p))
+                && (from.is_empty() || from.iter().any(|s| crosses_roles(def, s, p)))
         }) {
             return Ok(Some(rp.clone()));
         }
@@ -494,9 +583,9 @@ pub(super) fn rewrite_where_to_scopes(sql: &str, scopes: &[(String, String)]) ->
     out
 }
 
-/// A stand-in dimension on each of `where_tables` that [`where_role_scopes`]
-/// would scope: one every metric of `mets` reads on the same role, or the
-/// role-played table itself when every metric is on it. The
+/// A stand-in dimension on each of `where_tables` that a grain CTE reads on a
+/// role: one some metric of `mets`, asked alone, reads on its role, and no
+/// metric is refused for, or the role-played table itself. The
 /// per-grain planner resolves each group's roles over these beside the queried
 /// dimensions, so a grain CTE joins such a table under the role's scoped alias
 /// and its predicate is rewritten to name it.
@@ -519,12 +608,19 @@ pub(super) fn where_role_dims(
             ..Default::default()
         };
         // Read on one role, or (unscoped) on the rows of the role-played
-        // table every metric is on.
-        let read = match find_using_context("", def, &dim, mets) {
-            Ok(Some(_)) => true,
-            Ok(None) => is_role_playing_target(def, &table),
-            Err(_) => false,
-        };
+        // table every metric is on. Each metric is asked alone: one filter
+        // beside metrics naming two roles is read along each metric's own,
+        // as Snowflake reads it (fixture 9, W3), in the group's grain CTE.
+        let mut read = !mets.is_empty();
+        let mut any_role = is_role_playing_target(def, &table);
+        for met in mets {
+            match find_using_context("", def, &dim, &[met]) {
+                Ok(Some(_)) => any_role = true,
+                Ok(None) => {}
+                Err(_) => read = false,
+            }
+        }
+        let read = read && any_role;
         if read {
             out.push(dim);
         }
@@ -874,6 +970,12 @@ pub(super) fn check_member_fact_role_playing_path(
 /// single path ([`role_path`]), takes the role the same
 /// way and is scoped as `{table}__{rel}` (Phase 6.3b).
 ///
+/// Only the metrics that reach the role-played table across its roles
+/// ([`crosses_roles`]) give or need a role: with none of them the dimension
+/// needs no scope, and a mix of metrics that cross and metrics that do not is
+/// refused here as ambiguous: one call reads the dimension one way, and the
+/// per-grain planner asks each grain's metrics on their own.
+///
 /// Returns:
 /// - `Ok(None)` if the dimension's table is not a role-playing table (single or no relationship)
 ///   and is not reached through one
@@ -912,12 +1014,18 @@ pub(super) fn find_using_context(
         // refused rather than silently bound to the first-declared relationship.
         let from = query_starts(def, resolved_mets);
         if let Some(rp) = role_above(view_name, def, &from, &dim_table_lower)? {
+            // Only the metrics that cross its roles name one (fixture 9). A
+            // query mixing them with metrics that don't is answered per grain,
+            // each metric asked alone; read across the query it has no one
+            // alias, and is refused.
+            let crossing = metrics_crossing(def, resolved_mets, &rp);
             if role_path(def, &rp, &dim_table_lower).is_some()
-                && resolved_mets
+                && crossing.len() == resolved_mets.len()
+                && crossing
                     .iter()
                     .all(|met| names_a_role_for(def, met, &rp) && !met_is_on(met, &rp))
             {
-                if let [(_, rel)] = using_edges_to(def, &rp, resolved_mets).as_slice() {
+                if let [(_, rel)] = using_edges_to(def, &rp, &crossing).as_slice() {
                     return Ok(Some(scoped_join_alias(&dim_table_lower, rel)));
                 }
             }
@@ -939,6 +1047,25 @@ pub(super) fn find_using_context(
     if reads_own_rows(def, resolved_mets, &dim_table_lower) {
         return Ok(None);
     }
+    // Snowflake asks a role only of a metric that reaches the table across one
+    // (fixture 9): lounges, which reference the airports once, and regions,
+    // above them, read a city bare. A query mixing those with metrics that
+    // cross a role is answered per grain, each metric asked alone; read across
+    // the query it has no one alias, and is refused below.
+    let crossing = metrics_crossing(def, resolved_mets, &dim_table_lower);
+    if crossing.is_empty() && !resolved_mets.is_empty() {
+        return Ok(None);
+    }
+    let resolved_mets: &[&crate::model::Metric] = if crossing.len() == resolved_mets.len() {
+        &crossing
+    } else {
+        return Err(ExpandError::AmbiguousPath {
+            view_name: view_name.to_string(),
+            dimension_name: dim.name.clone(),
+            dimension_table: dim_table_lower,
+            available_relationships: rels,
+        });
+    };
     // Otherwise look for USING context.
     let using_rels_for_table = using_edges_to(def, &dim_table_lower, resolved_mets);
 

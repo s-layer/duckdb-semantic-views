@@ -175,12 +175,15 @@ SELECT * FROM SEMANTIC_VIEW(cr803_rp METRICS arr_count WHERE city = 'NYC');
 ----
 1
 
-# EXP-10 case 2: metrics naming two roles give the predicate none to follow,
-# so its join instance would be picked by declaration order: still ambiguous.
-statement error
+# EXP-10 case 2: metrics naming two roles. This was refused, since one join
+# instance for the predicate would be picked by declaration order. Since Phase
+# 7 PR 6a each metric reads the predicate along its own role, as Snowflake
+# does (fixture 9, W3): flight 1 departs NYC, flight 2 arrives there. The
+# numbers that tell the two roles apart are in role_playing_reach.test.
+query II
 SELECT * FROM SEMANTIC_VIEW(cr803_rp METRICS dep_count, arr_count WHERE city = 'NYC');
 ----
-where_clause member 'city' is ambiguous
+1	1
 
 # EXP-10 case 3 (control): a where_clause on a NON-role-playing table's member
 # is unaffected. Without this the fix could reject every where_clause that

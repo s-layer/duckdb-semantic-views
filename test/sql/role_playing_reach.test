@@ -1,0 +1,360 @@
+# Tables that reach a role-played table without crossing its roles, and one
+# filter beside metrics on two roles (Phase 7 PR 6a, TECH-DEBT #111).
+#
+# Flights reference airports twice (dep_airport, arr_airport). Details, gates
+# and lounges each reference airports once, details reference terminals, and
+# airports reference regions. Snowflake's answers are Phase 7 fixtures 9 and
+# 9b (2026-11-12): it asks a role only of a metric whose own path to the
+# airports crosses the flights' two relationships. Each answered case below
+# used to be refused. Two views declare the tables in opposite orders and
+# give the same rows.
+#
+# Flights: 1 CDG -> LHR, 2 LHR -> CDG, 3 CDG -> JFK. Details: CDG T2, LHR T5,
+# JFK T4. Gates: CDG G1, CDG G2, LHR G3. Lounges: 1 CDG, 2 CDG, 3 JFK.
+# CDG and LHR are in EU, JFK in NA.
+
+require semantic_views
+
+statement ok
+CREATE TABLE rr_airports (code VARCHAR, city VARCHAR, region_id INTEGER);
+
+statement ok
+CREATE TABLE rr_regions (region_id INTEGER, region VARCHAR);
+
+statement ok
+CREATE TABLE rr_flights (flight_id INTEGER, dep VARCHAR, arr VARCHAR);
+
+statement ok
+CREATE TABLE rr_details (code VARCHAR, terminal VARCHAR);
+
+statement ok
+CREATE TABLE rr_gates (gate_id INTEGER, code VARCHAR, gate VARCHAR);
+
+statement ok
+CREATE TABLE rr_terminals (terminal VARCHAR, operator VARCHAR);
+
+statement ok
+CREATE TABLE rr_lounges (lounge_id INTEGER, code VARCHAR);
+
+statement ok
+INSERT INTO rr_airports VALUES ('CDG', 'Paris', 1), ('LHR', 'London', 1), ('JFK', 'New York', 2);
+
+statement ok
+INSERT INTO rr_regions VALUES (1, 'EU'), (2, 'NA');
+
+statement ok
+INSERT INTO rr_flights VALUES (1, 'CDG', 'LHR'), (2, 'LHR', 'CDG'), (3, 'CDG', 'JFK');
+
+statement ok
+INSERT INTO rr_details VALUES ('CDG', 'T2'), ('LHR', 'T5'), ('JFK', 'T4');
+
+statement ok
+INSERT INTO rr_gates VALUES (1, 'CDG', 'G1'), (2, 'CDG', 'G2'), (3, 'LHR', 'G3');
+
+statement ok
+INSERT INTO rr_terminals VALUES ('T2', 'ADP'), ('T5', 'HAL'), ('T4', 'PANYNJ');
+
+statement ok
+INSERT INTO rr_lounges VALUES (1, 'CDG'), (2, 'CDG'), (3, 'JFK');
+
+statement ok
+CREATE SEMANTIC VIEW rr_air
+  TABLES (
+    f AS rr_flights PRIMARY KEY (flight_id),
+    ap AS rr_airports PRIMARY KEY (code),
+    d AS rr_details PRIMARY KEY (code),
+    g AS rr_gates PRIMARY KEY (gate_id),
+    t AS rr_terminals PRIMARY KEY (terminal),
+    l AS rr_lounges PRIMARY KEY (lounge_id),
+    rg AS rr_regions PRIMARY KEY (region_id)
+  )
+  RELATIONSHIPS (
+    dep_airport AS f (dep) REFERENCES ap,
+    arr_airport AS f (arr) REFERENCES ap,
+    d_airport AS d (code) REFERENCES ap,
+    g_airport AS g (code) REFERENCES ap,
+    d_terminal AS d (terminal) REFERENCES t,
+    l_airport AS l (code) REFERENCES ap,
+    ap_region AS ap (region_id) REFERENCES rg
+  )
+  DIMENSIONS (
+    f.flight AS f.flight_id,
+    ap.city AS ap.city,
+    d.terminal AS d.terminal,
+    g.gate AS g.gate,
+    t.operator AS t.operator,
+    rg.region AS rg.region
+  )
+  METRICS (
+    f.flight_count AS COUNT(f.flight_id),
+    f.arrivals USING (arr_airport) AS COUNT(f.flight_id),
+    f.departures USING (dep_airport) AS COUNT(f.flight_id),
+    ap.airport_count AS COUNT(ap.code),
+    l.lounge_count AS COUNT(l.lounge_id),
+    rg.region_count AS COUNT(rg.region_id)
+  );
+
+# The same view with its tables declared in reverse order.
+statement ok
+CREATE SEMANTIC VIEW rr_air_rev
+  TABLES (
+    rg AS rr_regions PRIMARY KEY (region_id),
+    l AS rr_lounges PRIMARY KEY (lounge_id),
+    t AS rr_terminals PRIMARY KEY (terminal),
+    g AS rr_gates PRIMARY KEY (gate_id),
+    d AS rr_details PRIMARY KEY (code),
+    ap AS rr_airports PRIMARY KEY (code),
+    f AS rr_flights PRIMARY KEY (flight_id)
+  )
+  RELATIONSHIPS (
+    dep_airport AS f (dep) REFERENCES ap,
+    arr_airport AS f (arr) REFERENCES ap,
+    d_airport AS d (code) REFERENCES ap,
+    g_airport AS g (code) REFERENCES ap,
+    d_terminal AS d (terminal) REFERENCES t,
+    l_airport AS l (code) REFERENCES ap,
+    ap_region AS ap (region_id) REFERENCES rg
+  )
+  DIMENSIONS (
+    f.flight AS f.flight_id,
+    ap.city AS ap.city,
+    d.terminal AS d.terminal,
+    g.gate AS g.gate,
+    t.operator AS t.operator,
+    rg.region AS rg.region
+  )
+  METRICS (
+    f.flight_count AS COUNT(f.flight_id),
+    f.arrivals USING (arr_airport) AS COUNT(f.flight_id),
+    f.departures USING (dep_airport) AS COUNT(f.flight_id),
+    ap.airport_count AS COUNT(ap.code),
+    l.lounge_count AS COUNT(l.lounge_id),
+    rg.region_count AS COUNT(rg.region_id)
+  );
+
+# W3: one filter beside two roles: one flight arrives in Paris, two depart from it.
+query II rowsort
+SELECT * FROM SEMANTIC_VIEW(rr_air METRICS arrivals, departures WHERE city = 'Paris');
+----
+1	2
+
+query II rowsort
+SELECT * FROM SEMANTIC_VIEW(rr_air_rev METRICS arrivals, departures WHERE city = 'Paris');
+----
+1	2
+
+# W4: the same through the one-to-one details.
+query II rowsort
+SELECT * FROM SEMANTIC_VIEW(rr_air METRICS arrivals, departures WHERE terminal = 'T2');
+----
+1	2
+
+query II rowsort
+SELECT * FROM SEMANTIC_VIEW(rr_air_rev METRICS arrivals, departures WHERE terminal = 'T2');
+----
+1	2
+
+# W7: by terminal, filtered on the city: each role's T2 row.
+query TII rowsort
+SELECT * FROM SEMANTIC_VIEW(rr_air DIMENSIONS terminal METRICS arrivals, departures WHERE city = 'Paris');
+----
+T2	1	2
+
+query TII rowsort
+SELECT * FROM SEMANTIC_VIEW(rr_air_rev DIMENSIONS terminal METRICS arrivals, departures WHERE city = 'Paris');
+----
+T2	1	2
+
+# W9: an OR across the city and the terminal, each read along each role.
+query II rowsort
+SELECT * FROM SEMANTIC_VIEW(rr_air METRICS arrivals, departures WHERE city = 'Paris' OR terminal = 'T5');
+----
+2	3
+
+query II rowsort
+SELECT * FROM SEMANTIC_VIEW(rr_air_rev METRICS arrivals, departures WHERE city = 'Paris' OR terminal = 'T5');
+----
+2	3
+
+# W10: by city, filtered on the terminal.
+query TII rowsort
+SELECT * FROM SEMANTIC_VIEW(rr_air DIMENSIONS city METRICS arrivals, departures WHERE terminal = 'T2');
+----
+Paris	1	2
+
+query TII rowsort
+SELECT * FROM SEMANTIC_VIEW(rr_air_rev DIMENSIONS city METRICS arrivals, departures WHERE terminal = 'T2');
+----
+Paris	1	2
+
+# R4 (fixture 10b): by a flight's own dimension, so a flight one role's filter drops keeps its row for the other.
+query III rowsort
+SELECT * FROM SEMANTIC_VIEW(rr_air DIMENSIONS flight METRICS arrivals, departures WHERE city = 'Paris');
+----
+1	NULL	1
+2	1	NULL
+3	NULL	1
+
+query III rowsort
+SELECT * FROM SEMANTIC_VIEW(rr_air_rev DIMENSIONS flight METRICS arrivals, departures WHERE city = 'Paris');
+----
+1	NULL	1
+2	1	NULL
+3	NULL	1
+
+# W6: a metric naming no role beside the filter stays refused (Snowflake 010246).
+statement error
+SELECT * FROM SEMANTIC_VIEW(rr_air METRICS flight_count WHERE city = 'Paris');
+----
+ambiguous
+
+statement error
+SELECT * FROM SEMANTIC_VIEW(rr_air_rev METRICS flight_count WHERE city = 'Paris');
+----
+ambiguous
+
+# W8: and beside one that names a role.
+statement error
+SELECT * FROM SEMANTIC_VIEW(rr_air METRICS arrivals, flight_count WHERE city = 'Paris');
+----
+ambiguous
+
+statement error
+SELECT * FROM SEMANTIC_VIEW(rr_air_rev METRICS arrivals, flight_count WHERE city = 'Paris');
+----
+ambiguous
+
+# L1: lounges reference airports once, so lounges by city name no role.
+query TI rowsort
+SELECT * FROM SEMANTIC_VIEW(rr_air DIMENSIONS city METRICS lounge_count);
+----
+New York	1
+Paris	2
+
+query TI rowsort
+SELECT * FROM SEMANTIC_VIEW(rr_air_rev DIMENSIONS city METRICS lounge_count);
+----
+New York	1
+Paris	2
+
+# L3: lounges beside arrivals by city, each along its own path.
+query TII rowsort
+SELECT * FROM SEMANTIC_VIEW(rr_air DIMENSIONS city METRICS lounge_count, arrivals);
+----
+London	NULL	1
+New York	1	1
+Paris	2	1
+
+query TII rowsort
+SELECT * FROM SEMANTIC_VIEW(rr_air_rev DIMENSIONS city METRICS lounge_count, arrivals);
+----
+London	NULL	1
+New York	1	1
+Paris	2	1
+
+# L4: lounges filtered on the city.
+query I rowsort
+SELECT * FROM SEMANTIC_VIEW(rr_air METRICS lounge_count WHERE city = 'Paris');
+----
+2
+
+query I rowsort
+SELECT * FROM SEMANTIC_VIEW(rr_air_rev METRICS lounge_count WHERE city = 'Paris');
+----
+2
+
+# W11: lounges and arrivals under one filter on the city.
+query II rowsort
+SELECT * FROM SEMANTIC_VIEW(rr_air METRICS lounge_count, arrivals WHERE city = 'Paris');
+----
+2	1
+
+query II rowsort
+SELECT * FROM SEMANTIC_VIEW(rr_air_rev METRICS lounge_count, arrivals WHERE city = 'Paris');
+----
+2	1
+
+# P1: regions sit above the airports: each region once per city.
+query TI rowsort
+SELECT * FROM SEMANTIC_VIEW(rr_air DIMENSIONS city METRICS region_count);
+----
+London	1
+New York	1
+Paris	1
+
+query TI rowsort
+SELECT * FROM SEMANTIC_VIEW(rr_air_rev DIMENSIONS city METRICS region_count);
+----
+London	1
+New York	1
+Paris	1
+
+# P2: regions by gate, through the airports to their gates.
+query TI rowsort
+SELECT * FROM SEMANTIC_VIEW(rr_air DIMENSIONS gate METRICS region_count);
+----
+G1	1
+G2	1
+G3	1
+NULL	1
+
+query TI rowsort
+SELECT * FROM SEMANTIC_VIEW(rr_air_rev DIMENSIONS gate METRICS region_count);
+----
+G1	1
+G2	1
+G3	1
+NULL	1
+
+# P3: regions by terminal, through the airports, then one-to-one.
+query TI rowsort
+SELECT * FROM SEMANTIC_VIEW(rr_air DIMENSIONS terminal METRICS region_count);
+----
+T2	1
+T4	1
+T5	1
+
+query TI rowsort
+SELECT * FROM SEMANTIC_VIEW(rr_air_rev DIMENSIONS terminal METRICS region_count);
+----
+T2	1
+T4	1
+T5	1
+
+# P5: regions beside arrivals by city.
+query TII rowsort
+SELECT * FROM SEMANTIC_VIEW(rr_air DIMENSIONS city METRICS region_count, arrivals);
+----
+London	1	1
+New York	1	1
+Paris	1	1
+
+query TII rowsort
+SELECT * FROM SEMANTIC_VIEW(rr_air_rev DIMENSIONS city METRICS region_count, arrivals);
+----
+London	1	1
+New York	1	1
+Paris	1	1
+
+# P6: regions filtered on a city.
+query I rowsort
+SELECT * FROM SEMANTIC_VIEW(rr_air METRICS region_count WHERE city = 'Paris');
+----
+1
+
+query I rowsort
+SELECT * FROM SEMANTIC_VIEW(rr_air_rev METRICS region_count WHERE city = 'Paris');
+----
+1
+
+# G1: a role followed by a fan-out to the gates stays refused (Snowflake
+# 000002).
+statement error
+SELECT * FROM SEMANTIC_VIEW(rr_air DIMENSIONS gate METRICS arrivals);
+----
+reachable only through the role-playing table
+
+statement error
+SELECT * FROM SEMANTIC_VIEW(rr_air_rev DIMENSIONS gate METRICS arrivals);
+----
+reachable only through the role-playing table

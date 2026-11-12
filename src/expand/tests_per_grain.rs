@@ -1305,19 +1305,17 @@ fn single_grain_role_played_dimension_stays_on_the_base_anchored_path() {
     );
 }
 
-/// Guard: `USING` rescues a DIMENSION on a role-played table, not a
-/// `where_clause` member on one.
+/// A `where_clause` member on a role-played table beside metrics naming two
+/// roles is read along each metric's own role, in its own grain CTE, as
+/// Snowflake reads it (fixture 9, W3 and W10; TECH-DEBT #111).
 ///
-/// Only a dimension's expression is rewritten to the scoped alias; the
-/// predicate's is not. Answering this would bind the filter by declaration
-/// order, which is the regression PR #176 shipped and then fixed — this pins
-/// that the role-threading increment does not re-open it in a new shape.
+/// This was a guard that the predicate was refused, since only a dimension's
+/// expression was rewritten to the scoped alias then: answering it would have
+/// bound the filter by declaration order, the regression PR #176 shipped and
+/// then fixed. Each grain CTE now rewrites the predicate to its own role's
+/// alias (`per_grain::group_predicate`), so neither grain reads the bare `a`.
 #[test]
-fn using_does_not_rescue_a_where_clause_on_the_role_played_table() {
-    // Two metrics each naming its own role (Phase 6.3), so the predicate is the
-    // only thing standing between this query and a per-grain answer: without
-    // the fence each grain CTE would join the bare `a` for it by declaration
-    // order.
+fn a_where_clause_on_the_role_played_table_follows_each_metrics_role() {
     let def = flights_two_role_fixture();
     let req = QueryRequest {
         dimensions: vec![DimensionName::new("dep_city")],
@@ -1328,18 +1326,16 @@ fn using_does_not_rescue_a_where_clause_on_the_role_played_table() {
         facts: vec![],
         where_clause: Some("dep_city = 'London'".to_string()),
     };
-    let err = expand("flights_sv", &def, &req)
-        .expect_err("a predicate on a role-played table is not scoped by USING");
+    let sql = expand("flights_sv", &def, &req)
+        .expect("each metric names its role, so each grain CTE reads the predicate on it");
     assert!(
-        matches!(
-            err,
-            ExpandError::AmbiguousPath { .. }
-                | ExpandError::MetricFanTrap { .. }
-                | ExpandError::FanTrap { .. }
-                | ExpandError::RootGrainFanTrap { .. }
-                | ExpandError::WhereClauseFanTrap { .. }
-        ),
-        "expected the base-anchored path's error, got: {err}"
+        sql.contains("WHERE (a__dep.city) = 'London'")
+            && sql.contains("WHERE (a__arr.city) = 'London'"),
+        "each grain CTE filters on its own role, got:\n{sql}"
+    );
+    assert!(
+        !sql.contains("WHERE (a.city)"),
+        "no grain reads the bare role-played table, got:\n{sql}"
     );
 }
 

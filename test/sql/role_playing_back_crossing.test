@@ -176,11 +176,12 @@ SELECT * FROM SEMANTIC_VIEW(rbx_air_rev METRICS departures WHERE city = 'Paris')
 ----
 2
 
-# Beside two roles the filter names no airport, and is refused.
-statement error
+# Beside two roles the filter follows each metric's own: one flight arrives in
+# Paris and two depart from it (Phase 7 PR 6a, Snowflake fixture 9, W3).
+query II
 SELECT * FROM SEMANTIC_VIEW(rbx_air METRICS arrivals, departures WHERE city = 'Paris');
 ----
-ambiguous
+1	2
 
 # TECH-DEBT #86: the airports' own metric by their own city reads each airport
 # once. It was refused as ambiguous, since the details also reference airports.
@@ -269,7 +270,9 @@ SELECT * FROM SEMANTIC_VIEW(rbx_snap METRICS f.arrivals, f.last_arrival WHERE ci
 ----
 1	2
 
-# Beside a metric on the other role the filter has no one role to follow.
+# Beside a metric on the other role each metric would read the city along its
+# own role, which a snapshot's own grain cannot follow yet (TECH-DEBT #82, item
+# 4), so the filter is refused. Without the snapshot it is answered (above).
 statement error
 SELECT * FROM SEMANTIC_VIEW(rbx_snap METRICS f.departures, f.last_arrival WHERE city = 'Paris');
 ----

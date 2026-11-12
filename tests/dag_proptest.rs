@@ -47,10 +47,15 @@
 //! - **A doubled relationship.** A chain across it counts once per role, so a
 //!   member reached across it is refused (no role picked) unless the metric is
 //!   on `t{a}` and its `USING` names a role, which then is the one chain
-//!   followed. A member on `t{b}` or past it that no chain crosses to, a metric
+//!   followed. A member on `t{b}` or past it reached by a chain that does not
+//!   cross is answered like any other: a table that references `t{b}` once
+//!   names no role (Phase 7 PR 6a, Snowflake fixture 9, L1). About half the
+//!   draws with a `USING` query both roles' metrics, `s{a}_a` and `s{a}_b`,
+//!   and a filter reached across the doubled relationship is then read along
+//!   each metric's own role (W3, W4, W7): per role, `t{a}` joined along that
+//!   role and grouped, the two full-outer-joined on the dimensions. A metric
 //!   on `t{b}` or past it with other members, a `USING` beside a chain that
-//!   does not cross, a `USING` beside a filter on `t{b}` or past it (a filter
-//!   names no role), and a query with no metrics near the role-played table
+//!   does not cross, and a query with no metrics near the role-played table
 //!   are not restated (only the two TABLES orders are compared).
 //! - **Any query** gives the same rows, or is refused, in two TABLES orders
 //!   (with the same message, unless a relationship is doubled).
@@ -93,6 +98,11 @@ struct Case {
     /// For a metric on the doubled relationship's referencing table, the role
     /// its `USING` names: `false` the first relationship, `true` the second.
     using: Option<bool>,
+    /// Query both roles' metrics, `s{a}_a` and `s{a}_b`, side by side
+    /// ([`Case::twin`]): a filter on the role-played table, or past it, is
+    /// then read along each metric's own role (Phase 7 PR 6a, Snowflake
+    /// fixture 9, W3 and W4).
+    twin: bool,
 }
 
 impl Case {
@@ -130,6 +140,13 @@ impl Case {
             (Some((from, _)), Some(m)) if m == from => self.using,
             _ => None,
         }
+    }
+
+    /// Whether the query names both roles' metrics: drawn as [`Self::twin`],
+    /// for a metric on the doubled relationship's referencing table with a
+    /// `USING`.
+    fn twin(&self) -> bool {
+        self.twin && self.role().is_some()
     }
 
     /// Is `k` the role-played table, or reached from it by a chain?
@@ -272,6 +289,11 @@ fn arb_case() -> impl Strategy<Value = Case> {
                     using,
                     prop::bool::weighted(0.5),
                     prop::bool::weighted(0.5),
+                    (
+                        prop::bool::weighted(0.5),
+                        prop::bool::weighted(0.5),
+                        0i64..3,
+                    ),
                 ),
             )
         })
@@ -282,7 +304,7 @@ fn arb_case() -> impl Strategy<Value = Case> {
         .prop_map(
             |(
                 (n, edges, one_to_one, rows, o1, o2),
-                (metric, dims, filter, doubled, using, aim, aim_back),
+                (metric, dims, filter, doubled, using, aim, aim_back, (twin, aim_filter, c)),
             )| {
                 let mut case = Case {
                     n,
@@ -295,6 +317,9 @@ fn arb_case() -> impl Strategy<Value = Case> {
                     filter,
                     doubled,
                     using,
+                    // Not beside the step back across the role below, which
+                    // these draws are aimed at.
+                    twin: twin && !(aim && aim_back),
                 };
                 // Half the doubled graphs query the referencing table's metric
                 // by the role-played table's dimension, which random draws
@@ -319,6 +344,22 @@ fn arb_case() -> impl Strategy<Value = Case> {
                         if !case.dims.contains(&c) {
                             case.dims.push(c);
                         }
+                    }
+                }
+                // A twin query drops the dimensions a role would have to be
+                // named for (refused, W6 and W8), and half of them filter on
+                // the role-played table, or a table past it, in place of
+                // their drawn filter.
+                if let (true, Some((from, to))) = (case.twin(), case.pair()) {
+                    let twin = case.clone();
+                    case.dims
+                        .retain(|&d| twin.role_chains(from, d).iter().all(|(_, r)| r.is_none()));
+                    if aim_filter {
+                        let past: Vec<usize> = (0..case.n)
+                            .filter(|&k| !case.chains(to, k).is_empty())
+                            .collect();
+                        let k = past[usize::try_from(c).expect("small") % past.len()];
+                        case.filter = Some((k, c));
                     }
                 }
                 case
@@ -420,11 +461,18 @@ fn request(case: &Case) -> QueryRequest {
         metrics: case
             .metric
             .iter()
-            .map(|k| match case.role() {
-                Some(false) => MetricName::new(format!("s{k}_a")),
-                Some(true) => MetricName::new(format!("s{k}_b")),
-                None => MetricName::new(format!("s{k}")),
+            .flat_map(|k| {
+                if case.twin() {
+                    vec![format!("s{k}_a"), format!("s{k}_b")]
+                } else {
+                    vec![match case.role() {
+                        Some(false) => format!("s{k}_a"),
+                        Some(true) => format!("s{k}_b"),
+                        None => format!("s{k}"),
+                    }]
+                }
             })
+            .map(MetricName::new)
             .collect(),
         // PIN: a FACTS query reads one table's rows like a query with no metrics; this harness oracles the graph's paths, which the dims-only property already walks.
         facts: vec![],
@@ -559,6 +607,9 @@ fn oracle_sql(case: &Case, from: usize) -> String {
 enum Expect {
     /// Answered, read from this table.
     Rows(usize),
+    /// Answered, both roles' metrics read from the doubled relationship's
+    /// referencing table, each along its own role ([`twin_sql`]).
+    Twin,
     /// Answered with no metric from the table the members' paths meet at
     /// ([`meeting_table`]), inner-joined along those paths ([`meet_sql`]).
     Meet(usize),
@@ -568,12 +619,6 @@ enum Expect {
     /// Not restated here (a member reached by no chain from the metric's
     /// table): only the two TABLES orders are compared.
     Either,
-}
-
-/// Whether `path` steps across the doubled relationship.
-fn crosses_roles_on(case: &Case, path: &[usize]) -> bool {
-    case.pair()
-        .is_some_and(|(a, b)| path.windows(2).any(|w| w == [a, b] || w == [b, a]))
 }
 
 /// The paths from `from` to `to` over relationships in either direction, each
@@ -600,6 +645,9 @@ fn undirected_paths(case: &Case, from: usize, to: usize) -> Vec<Vec<usize>> {
 }
 
 fn expect(case: &Case) -> Expect {
+    if case.twin() {
+        return expect_twin(case);
+    }
     let members = case.members();
     if let Some(m) = case.metric {
         let crosses_roles = |path: &[usize]| {
@@ -634,12 +682,6 @@ fn expect(case: &Case) -> Expect {
             let chains = case.role_chains(m, d);
             let across = chains.iter().filter(|(_, r)| r.is_some()).count();
             let beside = chains.len() - across;
-            if across == 0 && case.past_roles(d) && !on_roles {
-                // A chain that does not cross to a role-played table: the
-                // role-playing check refuses its dimension without a USING.
-                restated = false;
-                continue;
-            }
             let count = match case.role() {
                 Some(_) if across > 0 && beside > 0 => {
                     restated = false;
@@ -718,6 +760,102 @@ fn expect(case: &Case) -> Expect {
         [_] => Expect::Refused(vec!["more than one path"]),
         _ => Expect::Refused(vec!["many-to-many"]),
     }
+}
+
+/// What the oracle expects of a [`Case::twin`] query: answered when every
+/// dimension is reached from the metrics' table by one chain that crosses no
+/// role, and the filter, if any, by one chain, across the doubled
+/// relationship or not. Snowflake reads a filter across it along each
+/// metric's own role (fixture 9, W3, W4, W7). A dimension reached across it
+/// names a role neither metric's `USING` settles for the other (W6, W8), and
+/// two chains are multi-path: those are not restated.
+fn expect_twin(case: &Case) -> Expect {
+    let (a, _) = case
+        .pair()
+        .expect("a twin query has a doubled relationship");
+    let one_beside = |d: usize| {
+        let chains = case.role_chains(a, d);
+        chains.len() == 1 && chains[0].1.is_none()
+    };
+    let one_across = |d: usize| {
+        let chains = case.role_chains(a, d);
+        chains.len() == 2 && chains.iter().all(|(_, r)| r.is_some())
+    };
+    let dims_ok = case.dims.iter().all(|&d| one_beside(d));
+    let filter_ok = case
+        .filter
+        .is_none_or(|(k, _)| one_beside(k) || one_across(k));
+    if dims_ok && filter_ok {
+        Expect::Twin
+    } else {
+        Expect::Either
+    }
+}
+
+/// The oracle's SQL for an answered [`Case::twin`] query: per role, the
+/// metrics' table LEFT JOINed along each dimension's chain and the filter's
+/// chain in that role, filtered and grouped; the two grains full-outer-joined
+/// on the dimensions, so a group either role keeps is listed.
+fn twin_sql(case: &Case) -> String {
+    let (a, _) = case
+        .pair()
+        .expect("a twin query has a doubled relationship");
+    let grain = |role: bool| {
+        let chains: Vec<(usize, Vec<usize>, Option<bool>)> = case
+            .members()
+            .into_iter()
+            .map(|m| {
+                let (chain, r) = case
+                    .role_chains(a, m)
+                    .into_iter()
+                    .find(|(_, r)| r.is_none() || *r == Some(role))
+                    .expect("an answered member has a chain");
+                (m, chain, r)
+            })
+            .collect();
+        let (from_sql, at) = joined_from(case, a, &chains);
+        let alias = |k: usize| {
+            at.iter()
+                .rev()
+                .find(|(m, _)| *m == k)
+                .map_or_else(|| "x".to_string(), |(_, al)| al.clone())
+        };
+        let mut items: Vec<String> = case
+            .dims
+            .iter()
+            .map(|&k| format!("{}.g AS g{k}", alias(k)))
+            .collect();
+        items.push("SUM(x.v) AS s".to_string());
+        let filter = case
+            .filter
+            .map(|(k, c)| format!(" WHERE {}.g = {c}", alias(k)))
+            .unwrap_or_default();
+        let group = if case.dims.is_empty() {
+            String::new()
+        } else {
+            " GROUP BY ALL".to_string()
+        };
+        format!("SELECT {} FROM {from_sql}{filter}{group}", items.join(", "))
+    };
+    let (ga, gb) = (grain(false), grain(true));
+    if case.dims.is_empty() {
+        return format!("SELECT ra.s, rb.s FROM ({ga}) AS ra CROSS JOIN ({gb}) AS rb");
+    }
+    let keys: Vec<String> = case
+        .dims
+        .iter()
+        .map(|k| format!("COALESCE(ra.g{k}, rb.g{k})"))
+        .collect();
+    let on: Vec<String> = case
+        .dims
+        .iter()
+        .map(|k| format!("ra.g{k} IS NOT DISTINCT FROM rb.g{k}"))
+        .collect();
+    format!(
+        "SELECT {}, ra.s, rb.s FROM ({ga}) AS ra FULL OUTER JOIN ({gb}) AS rb ON {}",
+        keys.join(", "),
+        on.join(" AND ")
+    )
 }
 
 /// The table a query with no metrics, whose members no table reaches by
@@ -846,13 +984,19 @@ fn check_case(case: &Case) -> Result<(), TestCaseError> {
                     .map_err(|e| TestCaseError::fail(format!("oracle fails: {e}\n{oracle}")))?;
                 prop_assert_eq!(got, &want, "order {:?}\n--- oracle:\n{}", order, oracle);
             }
+            (Expect::Twin, Ok(got)) => {
+                let oracle = twin_sql(case);
+                let want = rows(&conn, &oracle)
+                    .map_err(|e| TestCaseError::fail(format!("oracle fails: {e}\n{oracle}")))?;
+                prop_assert_eq!(got, &want, "order {:?}\n--- oracle:\n{}", order, oracle);
+            }
             (Expect::Meet(meet), Ok(got)) => {
                 let oracle = meet_sql(case, meet);
                 let want = rows(&conn, &oracle)
                     .map_err(|e| TestCaseError::fail(format!("oracle fails: {e}\n{oracle}")))?;
                 prop_assert_eq!(got, &want, "order {:?}\n--- oracle:\n{}", order, oracle);
             }
-            (Expect::Rows(_) | Expect::Meet(_), Err(e)) => {
+            (Expect::Rows(_) | Expect::Twin | Expect::Meet(_), Err(e)) => {
                 return Err(TestCaseError::fail(format!(
                     "order {order:?}: expected an answer, got: {e}"
                 )));
@@ -936,23 +1080,11 @@ enum Listing {
     /// Listed and refused, reached two ways (two paths, or across the doubled
     /// relationship), so a query needs `USING` to pick one.
     ListedTwoWays,
-    /// Listed and refused, with the metric's or the dimension's table the
-    /// role-played one or past it, and a path between them that crosses no
-    /// role: lounges by their airport's city (a metric with no `USING` on a
-    /// table that references the role-played one once), or regions by a
-    /// gate's (a fan-out through the role-played table). The query refuses
-    /// them as naming no role, or as a fan trap through a role-played table;
-    /// Snowflake fixture 9's L and P cases ask whether Snowflake answers them.
-    /// A metric on the role-played table by its own or its one-to-one
-    /// neighbour's dimension, or across a plain fan-out, is answered since
-    /// Phase 7 PR 4b and held to the listing.
-    ListedNearRoles,
 }
 
 /// Checks every metric against every dimension in `case`'s graph (the first
 /// TABLES order): each dimension a query of the metric grouped by it alone
-/// answers is listed, and a listed one the query refuses is reached two ways
-/// (or is near the role-played table, [`Listing::ListedNearRoles`]).
+/// answers is listed, and a listed one the query refuses is reached two ways.
 /// So the listing follows the query, which the other properties check
 /// against Snowflake's rules.
 fn check_listing(case: &Case) -> Result<Vec<(Listing, bool)>, TestCaseError> {
@@ -1007,15 +1139,6 @@ fn check_listing(case: &Case) -> Result<Vec<(Listing, bool)>, TestCaseError> {
                 (Ok(_), true) => Listing::Answered,
                 (Err(_), false) => Listing::Refused,
                 (Err(_), true) if two_ways => Listing::ListedTwoWays,
-                (Err(_), true)
-                    if (case.past_roles(m) || case.past_roles(d))
-                        && case.pair().is_some_and(|(_, b)| b != m)
-                        && !undirected_paths(case, m, d)
-                            .iter()
-                            .all(|p| crosses_roles_on(case, p)) =>
-                {
-                    Listing::ListedNearRoles
-                }
                 (Ok(_), false) => {
                     return Err(TestCaseError::fail(format!(
                         "{} by g{d} is answered but not listed: {listed:?}\n{case:?}",
@@ -1105,6 +1228,21 @@ fn generator_reaches_every_outcome() {
             .new_tree(&mut runner)
             .expect("strategy must produce a value")
             .current();
+        if case.twin() {
+            let (a, _) = case
+                .pair()
+                .expect("a twin query has a doubled relationship");
+            let across = case
+                .filter
+                .is_some_and(|(k, _)| case.role_chains(a, k).iter().any(|(_, r)| r.is_some()));
+            let key = match expect(&case) {
+                Expect::Twin if across => "twin filter across roles answered",
+                Expect::Twin => "twin answered",
+                _ => "twin unrestated",
+            };
+            *seen.entry(key).or_default() += 1;
+            continue;
+        }
         let across = case.metric.is_some_and(|m| {
             case.members()
                 .iter()
@@ -1154,6 +1292,7 @@ fn generator_reaches_every_outcome() {
             (Some(_), Expect::Refused(_)) => "metric multi-path",
             (Some(_), Expect::Either) => "metric unrestated",
             (Some(_), Expect::Meet(_)) => unreachable!("a metric query never meets"),
+            (_, Expect::Twin) => unreachable!("twins are counted above"),
             (None, Expect::Rows(_)) => "dims answered",
             (None, Expect::Meet(_)) => "dims meeting table",
             (None, Expect::Refused(t)) if t == ["more than one path"] => "dims multi-path",
@@ -1168,6 +1307,9 @@ fn generator_reaches_every_outcome() {
         "role answered",
         "role back across answered",
         "role filter answered",
+        "twin filter across roles answered",
+        "twin answered",
+        "twin unrestated",
         "metric on the role-played table answered",
         "metric on the role-played table refused",
         "no shared table",
@@ -1213,6 +1355,7 @@ fn a_chain_is_followed_beside_a_shorter_path_that_fans_out() {
         filter: None,
         doubled: None,
         using: None,
+        twin: false,
     };
     check_case(&case).unwrap();
     check_listing(&case).unwrap();

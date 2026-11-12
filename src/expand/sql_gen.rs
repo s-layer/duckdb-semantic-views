@@ -1480,9 +1480,9 @@ fn expand_unhoisted(
     }
 
     // TECH-DEBT #111: a predicate on a role-played table, or on one reached
-    // through or back across it, is read on the role every metric names
-    // (Snowflake fixture 6, R5). The per-grain plan reads it so in each grain
-    // CTE (`role_playing::where_role_dims`), and the base-anchored emission
+    // through or back across it, is read on each metric's own role (Snowflake
+    // fixture 6, R5; fixture 9, W3). The per-grain plan reads it so in each
+    // grain CTE (`role_playing::where_role_dims`), and the base-anchored emission
     // below rewrites the predicate and joins those instances, and so does the
     // base-anchored snapshot (`SnapshotFrom::Base`). A snapshot re-anchored at
     // a metric's own table takes no scopes (`snapshot_cte_anchor` declines a
@@ -1501,13 +1501,24 @@ fn expand_unhoisted(
     // before the fan-trap checks, like the dimensions' role check above: off
     // the per-grain path a fan trap depends on which table is declared first.
     if let Some(rw) = &resolved_where {
-        check_where_clause_role_playing_path(
-            view_name,
-            def,
-            &rw.members,
-            &resolved_mets,
-            &where_scopes,
-        )?;
+        if grain_plan.is_some() {
+            // Each grain CTE reads the predicate along its own metrics' roles
+            // (`per_grain::group_predicate`), so each metric is checked alone:
+            // one filter beside metrics naming two roles follows each
+            // (Snowflake fixture 9, W3). A metric naming none is still refused.
+            for &met in &resolved_mets {
+                let scopes = super::role_playing::where_role_scopes(def, &rw.members, &[met]);
+                check_where_clause_role_playing_path(view_name, def, &rw.members, &[met], &scopes)?;
+            }
+        } else {
+            check_where_clause_role_playing_path(
+                view_name,
+                def,
+                &rw.members,
+                &resolved_mets,
+                &where_scopes,
+            )?;
+        }
     }
 
     // Phase 31: Check for fan traps before generating SQL. In per-grain mode the

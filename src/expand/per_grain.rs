@@ -482,9 +482,9 @@ pub(super) fn plan(
     let member_tables: Vec<String> = touched_tables(def, resolved_dims, &[], where_tables, false)
         .into_iter()
         .collect();
-    // The queried dimensions, and a stand-in for each `where_clause` table read
-    // on the one role every metric names (TECH-DEBT #111): each group's roles
-    // are resolved over both.
+    // The queried dimensions, and a stand-in for each `where_clause` table a
+    // metric reads on its role (TECH-DEBT #111): each group's roles are
+    // resolved over both, so one filter beside two roles is read along each.
     let role_where = super::role_playing::where_role_dims(def, where_tables, resolved_mets);
     let role_dims: Vec<&Dimension> = resolved_dims
         .iter()
