@@ -976,8 +976,10 @@ See :ref:`howto-window-metrics` for details on both modes.
 - Window metric ``EXCLUDING`` dimension names must match declared dimensions.
 - Window metric ``PARTITION BY`` dimension names must match declared dimensions.
 - Window metric ``ORDER BY`` dimension names must match declared dimensions.
-- Each of those dimensions, bare or written ``alias.name``, must be on the table its inner metric aggregates, on a table that table references, or on a table referencing it, as in Snowflake (see :ref:`howto-window-relationships`).
-- A window metric with ``USING`` must have its inner metric on its own table, unless the inner metric has a ``USING`` of its own.
+- A bare name among those dimensions must be on the window metric's own table; another table's is written ``alias.name``. Each must be on the table its inner metric aggregates or on a table that table references along one chain of relationships, as in Snowflake (see :ref:`howto-window-relationships`).
+- A window metric's inner metric cannot have ``USING`` (Snowflake's 010905). A window metric with ``USING`` of its own must have its inner metric on its own table.
+- A window frame, or an order-sensitive function (``LAG``, ``LEAD``, ``FIRST_VALUE``, ``ROW_NUMBER``, ``RANK`` and the like), needs an ``ORDER BY``.
+- These window checks run at ``CREATE``, ``ALTER`` and YAML import; a view created by 0.18.0 that breaks one keeps loading and answering.
 - ``NON ADDITIVE BY`` and ``OVER`` cannot both appear on the same metric.
 - ``OVER`` cannot appear on a derived metric (one without a table alias). Only qualified metrics (``alias.name``) can use ``OVER``.
 

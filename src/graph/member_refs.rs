@@ -74,23 +74,49 @@ pub fn validate_member_references(def: &SemanticViewDefinition) -> Result<(), Pa
         }
     }
 
-    // (kind, name, source_table, expression) for every member that carries one.
+    // (kind, name, source_table, expression, window clause references) for
+    // every member that carries one. A window metric's `PARTITION BY`,
+    // `PARTITION BY EXCLUDING` and `ORDER BY` name dimensions, not columns: a
+    // parent's `r.region` is Snowflake's form (fixture 10c, V1), and
+    // `validate_window_dimensions` decides which tables they may be on.
+    let no_window: HashSet<String> = HashSet::new();
     let members = def
         .facts
         .iter()
-        .map(|f| ("fact", &f.name, f.source_table.as_ref(), &f.expr))
-        .chain(
-            def.dimensions
+        .map(|f| {
+            (
+                "fact",
+                &f.name,
+                f.source_table.as_ref(),
+                &f.expr,
+                no_window.clone(),
+            )
+        })
+        .chain(def.dimensions.iter().map(|d| {
+            (
+                "dimension",
+                &d.name,
+                d.source_table.as_ref(),
+                &d.expr,
+                no_window.clone(),
+            )
+        }))
+        .chain(def.metrics.iter().map(|m| {
+            let window: HashSet<String> = m
+                .window_spec
                 .iter()
-                .map(|d| ("dimension", &d.name, d.source_table.as_ref(), &d.expr)),
-        )
-        .chain(
-            def.metrics
-                .iter()
-                .map(|m| ("metric", &m.name, m.source_table.as_ref(), &m.expr)),
-        );
+                .flat_map(|ws| {
+                    ws.excluding_dims
+                        .iter()
+                        .chain(&ws.partition_dims)
+                        .chain(ws.order_by.iter().map(|ob| &ob.expr))
+                        .map(|r| normalize_ident_part(r))
+                })
+                .collect();
+            ("metric", &m.name, m.source_table.as_ref(), &m.expr, window)
+        }));
 
-    for (kind, name, source_table, expr) in members {
+    for (kind, name, source_table, expr, window) in members {
         let own = source_table
             .map(|s| normalize_ident_part(s))
             .or_else(|| base_alias.clone());
@@ -107,6 +133,9 @@ pub fn validate_member_references(def: &SemanticViewDefinition) -> Result<(), Pa
             }
             if member_keys.contains(&chain.key()) {
                 continue; // A declared fact or metric, own-qualified: the legal cross-table form.
+            }
+            if window.contains(&chain.key()) {
+                continue; // A dimension a window clause names.
             }
             return Err(ParseError::positionless(format!(
                 "semantic view: {kind} '{name}' references '{raw}', a column of \

@@ -619,25 +619,11 @@ METRICS (
 )
 
 # B-142: body_parser/mod.rs::test_over_frame_only_still_parses — a frame clause with no PARTITION BY / ORDER BY
-statement ok
+# parses, and CREATE refuses it, as Snowflake does (002305; Phase 7 PR 6b).
+statement error
 CREATE SEMANTIC VIEW dcb_w_frame_only AS TABLES (s AS dcb_orders PRIMARY KEY (id)) DIMENSIONS (s.region AS s.region, s.d AS s.d) METRICS (s.t AS SUM(s.t), s.qty AS SUM(s.qty), s.r AS SUM(t) OVER (ROWS BETWEEN 1 PRECEDING AND CURRENT ROW));
-
-query T nosort
-SELECT * FROM dcb_ddl('dcb_w_frame_only');
 ----
-CREATE OR REPLACE SEMANTIC VIEW dcb_w_frame_only AS
-TABLES (
-    s AS dcb_orders PRIMARY KEY (id)
-)
-DIMENSIONS (
-    s.region AS s.region,
-    s.d AS s.d
-)
-METRICS (
-    s.t AS SUM(s.t),
-    s.qty AS SUM(s.qty),
-    s.r AS SUM(t) OVER (ROWS BETWEEN 1 PRECEDING AND CURRENT ROW)
-)
+a window frame requires an ORDER BY clause
 
 # B-143: body_parser/mod.rs::test_over_partition_and_order_by_with_interior_whitespace — PARTITION BY / ORDER BY / frame separated by runs of spaces
 statement ok

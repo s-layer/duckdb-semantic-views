@@ -1,0 +1,286 @@
+# Phase 7 PR 6b: which window metrics CREATE accepts, after Snowflake fixtures
+# 10, 10b and 10c (each case is named as in the fixture). Snowflake refuses at
+# CREATE:
+#
+#   - a window frame with no ORDER BY (002305), and an order-sensitive function
+#     (LAG, LEAD, FIRST_VALUE, ROW_NUMBER, ...) with no ORDER BY (002061);
+#   - a window over a metric with USING (010905): only a derived metric may
+#     refer to one;
+#   - a bare name in a window clause for a dimension of another table (000904);
+#   - a qualified dimension of a finer table (010262, 010259 for EXCLUDING) or
+#     of a table reached more than one way (010227).
+#
+# It accepts a qualified dimension of the metric's own table or of a table it
+# references. Views stored before 0.19.0 still load (see
+# multi_path_using.test); only CREATE checks.
+
+require semantic_views
+
+statement ok
+CREATE TABLE p7w_regions (region_id INT, region VARCHAR);
+
+statement ok
+INSERT INTO p7w_regions VALUES (1, 'EU'), (2, 'US');
+
+statement ok
+CREATE TABLE p7w_orders (order_id INT, region_id INT, amount INT, day INT);
+
+statement ok
+INSERT INTO p7w_orders VALUES (1, 1, 10, 1), (2, 1, 30, 2), (3, 2, 10, 3), (4, 2, 20, 4);
+
+statement ok
+CREATE TABLE p7w_items (item_id INT, order_id INT, qty INT);
+
+statement ok
+INSERT INTO p7w_items VALUES (1, 1, 1), (2, 1, 2), (3, 2, 2), (4, 3, 5);
+
+statement ok
+CREATE TABLE p7w_airports (code VARCHAR, city VARCHAR);
+
+statement ok
+INSERT INTO p7w_airports VALUES ('CDG', 'Paris'), ('LHR', 'London'), ('JFK', 'New York');
+
+statement ok
+CREATE TABLE p7w_flights (flight_id INT, dep VARCHAR, arr VARCHAR, day INT);
+
+statement ok
+INSERT INTO p7w_flights VALUES (1, 'CDG', 'LHR', 1), (2, 'LHR', 'CDG', 2), (3, 'CDG', 'JFK', 3);
+
+# ============================================================
+# ORDER BY (#110)
+# ============================================================
+
+# X1: a frame with no ORDER BY (Snowflake 002305).
+statement error
+CREATE SEMANTIC VIEW p7w_x1
+  TABLES (o AS p7w_orders PRIMARY KEY (order_id))
+  DIMENSIONS (o.day AS day)
+  METRICS (
+    o.revenue AS SUM(amount),
+    o.moving AS SUM(revenue) OVER (ROWS BETWEEN 1 PRECEDING AND CURRENT ROW)
+  );
+----
+a window frame requires an ORDER BY clause
+
+# X2: LAG with an empty OVER () (Snowflake 002061).
+statement error
+CREATE SEMANTIC VIEW p7w_x2
+  TABLES (o AS p7w_orders PRIMARY KEY (order_id))
+  DIMENSIONS (o.day AS day)
+  METRICS (
+    o.revenue AS SUM(amount),
+    o.prev AS LAG(revenue, 1) OVER ()
+  );
+----
+window function LAG requires ORDER BY
+
+# X3: LAG partitioned but not ordered (Snowflake 002061).
+statement error
+CREATE SEMANTIC VIEW p7w_x3
+  TABLES (o AS p7w_orders PRIMARY KEY (order_id))
+  DIMENSIONS (o.day AS day, o.cust AS region_id)
+  METRICS (
+    o.revenue AS SUM(amount),
+    o.prev AS LAG(revenue, 1) OVER (PARTITION BY cust)
+  );
+----
+window function LAG requires ORDER BY
+
+# X5: FIRST_VALUE with no ORDER BY (Snowflake 002061).
+statement error
+CREATE SEMANTIC VIEW p7w_x5
+  TABLES (o AS p7w_orders PRIMARY KEY (order_id))
+  DIMENSIONS (o.day AS day)
+  METRICS (
+    o.revenue AS SUM(amount),
+    o.first_rev AS FIRST_VALUE(revenue) OVER ()
+  );
+----
+window function FIRST_VALUE requires ORDER BY
+
+# A frame or LAG with an ORDER BY is accepted: X7, LAG ordered by day.
+statement ok
+CREATE SEMANTIC VIEW p7w_x7
+  TABLES (o AS p7w_orders PRIMARY KEY (order_id))
+  DIMENSIONS (o.day AS day)
+  METRICS (
+    o.revenue AS SUM(amount),
+    o.prev AS LAG(revenue, 1) OVER (ORDER BY day),
+    o.moving AS SUM(revenue) OVER (ORDER BY day ROWS BETWEEN 1 PRECEDING AND CURRENT ROW)
+  );
+
+query III
+SELECT * FROM semantic_view('p7w_x7', dimensions := ['day'], metrics := ['prev', 'moving']) ORDER BY day;
+----
+1	NULL	10
+2	10	40
+3	30	40
+4	10	30
+
+# X6: an aggregate over an empty OVER () needs no order: the grand total.
+statement ok
+CREATE SEMANTIC VIEW p7w_x6
+  TABLES (o AS p7w_orders PRIMARY KEY (order_id))
+  DIMENSIONS (o.day AS day)
+  METRICS (
+    o.revenue AS SUM(amount),
+    o.grand AS SUM(revenue) OVER ()
+  );
+
+query II
+SELECT * FROM semantic_view('p7w_x6', dimensions := ['day'], metrics := ['grand']) ORDER BY day;
+----
+1	70
+2	70
+3	70
+4	70
+
+# ============================================================
+# Which dimensions a window clause may name
+# ============================================================
+
+# V1: a parent's dimension, qualified, is accepted.
+statement ok
+CREATE SEMANTIC VIEW p7w_v1
+  TABLES (r AS p7w_regions PRIMARY KEY (region_id), o AS p7w_orders PRIMARY KEY (order_id))
+  RELATIONSHIPS (o_region AS o (region_id) REFERENCES r)
+  DIMENSIONS (o.day AS day, r.region AS region)
+  METRICS (o.revenue AS SUM(amount), o.running AS SUM(revenue) OVER (ORDER BY r.region));
+
+query TII
+SELECT * FROM semantic_view('p7w_v1', dimensions := ['region'], metrics := ['revenue', 'running']) ORDER BY region;
+----
+EU	40	40
+US	30	70
+
+# V2: partitioned by a parent's dimension, ordered by the metric's own one.
+statement ok
+CREATE SEMANTIC VIEW p7w_v2
+  TABLES (r AS p7w_regions PRIMARY KEY (region_id), o AS p7w_orders PRIMARY KEY (order_id))
+  RELATIONSHIPS (o_region AS o (region_id) REFERENCES r)
+  DIMENSIONS (o.day AS day, r.region AS region)
+  METRICS (o.revenue AS SUM(amount), o.running AS SUM(revenue) OVER (PARTITION BY r.region ORDER BY o.day));
+
+query TII
+SELECT * FROM semantic_view('p7w_v2', dimensions := ['region', 'day'], metrics := ['running']) ORDER BY region, day;
+----
+EU	1	10
+EU	2	40
+US	3	10
+US	4	30
+
+# V4: PARTITION BY EXCLUDING a parent's dimension, qualified. One region per
+# day, so each day's sum across regions is its own revenue.
+statement ok
+CREATE SEMANTIC VIEW p7w_v4
+  TABLES (r AS p7w_regions PRIMARY KEY (region_id), o AS p7w_orders PRIMARY KEY (order_id))
+  RELATIONSHIPS (o_region AS o (region_id) REFERENCES r)
+  DIMENSIONS (o.day AS day, r.region AS region)
+  METRICS (o.revenue AS SUM(amount), o.excl AS SUM(revenue) OVER (PARTITION BY EXCLUDING r.region));
+
+query TIII
+SELECT * FROM semantic_view('p7w_v4', dimensions := ['region', 'day'], metrics := ['revenue', 'excl']) ORDER BY region, day;
+----
+EU	1	10	10
+EU	2	30	30
+US	3	10	10
+US	4	20	20
+
+# V3: the same parent's dimension by its bare name is refused (Snowflake
+# 000904): a bare name names a dimension of the metric's own table.
+statement error
+CREATE SEMANTIC VIEW p7w_v3
+  TABLES (r AS p7w_regions PRIMARY KEY (region_id), o AS p7w_orders PRIMARY KEY (order_id))
+  RELATIONSHIPS (o_region AS o (region_id) REFERENCES r)
+  DIMENSIONS (o.day AS day, r.region AS region)
+  METRICS (o.revenue AS SUM(amount), o.running AS SUM(revenue) OVER (ORDER BY region));
+----
+names dimension 'region' bare, but it is on table 'r'
+
+# ordf: ordered by a finer table's dimension, qualified (Snowflake 010262).
+statement error
+CREATE SEMANTIC VIEW p7w_ordf
+  TABLES (li AS p7w_items PRIMARY KEY (item_id), o AS p7w_orders PRIMARY KEY (order_id))
+  RELATIONSHIPS (li_order AS li (order_id) REFERENCES o)
+  DIMENSIONS (o.day AS day, li.qty AS qty)
+  METRICS (
+    o.order_count AS COUNT(order_id),
+    o.running_orders AS SUM(order_count) OVER (ORDER BY li.qty)
+  );
+----
+so it is at a finer grain. As in Snowflake, a window's PARTITION BY and ORDER BY may name
+
+# ordfx: PARTITION BY EXCLUDING a finer table's dimension (Snowflake 010259).
+statement error
+CREATE SEMANTIC VIEW p7w_ordfx
+  TABLES (li AS p7w_items PRIMARY KEY (item_id), o AS p7w_orders PRIMARY KEY (order_id))
+  RELATIONSHIPS (li_order AS li (order_id) REFERENCES o)
+  DIMENSIONS (o.day AS day, li.qty AS qty)
+  METRICS (
+    o.order_count AS COUNT(order_id),
+    o.share_excl_qty AS SUM(order_count) OVER (PARTITION BY EXCLUDING li.qty)
+  );
+----
+so it is at a finer grain. As in Snowflake, a window's PARTITION BY EXCLUDING may name
+
+# V8: a parent the metric's table references twice, with no USING anywhere
+# (Snowflake 010227).
+statement error
+CREATE SEMANTIC VIEW p7w_v8
+  TABLES (ap AS p7w_airports PRIMARY KEY (code), f AS p7w_flights PRIMARY KEY (flight_id))
+  RELATIONSHIPS (dep_airport AS f (dep) REFERENCES ap, arr_airport AS f (arr) REFERENCES ap)
+  DIMENSIONS (ap.city AS city, f.day AS day)
+  METRICS (f.flights AS COUNT(flight_id), f.running AS SUM(flights) OVER (ORDER BY ap.city));
+----
+reaches by more than one path
+
+# ============================================================
+# A window over a metric with USING (Snowflake 010905)
+# ============================================================
+
+# air: windows ordered by the flights' own day, each over a role's metric.
+statement error
+CREATE SEMANTIC VIEW p7w_air
+  TABLES (ap AS p7w_airports PRIMARY KEY (code), f AS p7w_flights PRIMARY KEY (flight_id))
+  RELATIONSHIPS (dep_airport AS f (dep) REFERENCES ap, arr_airport AS f (arr) REFERENCES ap)
+  DIMENSIONS (ap.city AS city, f.day AS day)
+  METRICS (
+    f.departures USING (dep_airport) AS COUNT(flight_id),
+    f.arrivals USING (arr_airport) AS COUNT(flight_id),
+    f.running_arrivals_by_day AS SUM(arrivals) OVER (ORDER BY day)
+  );
+----
+only a derived metric may refer to a metric with USING
+
+# ordw1: a window over a USING metric, ordered by the parent's region
+# (qualified, which on its own is accepted, as V1 shows).
+statement error
+CREATE SEMANTIC VIEW p7w_ordw1
+  TABLES (r AS p7w_regions PRIMARY KEY (region_id), o AS p7w_orders PRIMARY KEY (order_id))
+  RELATIONSHIPS (o_region AS o (region_id) REFERENCES r)
+  DIMENSIONS (o.day AS day, r.region AS region)
+  METRICS (
+    o.rev_by_region USING (o_region) AS SUM(amount),
+    o.running AS SUM(rev_by_region) OVER (ORDER BY r.region)
+  );
+----
+only a derived metric may refer to a metric with USING
+
+# A derived metric may still refer to the same USING metric.
+statement ok
+CREATE SEMANTIC VIEW p7w_air_ok
+  TABLES (ap AS p7w_airports PRIMARY KEY (code), f AS p7w_flights PRIMARY KEY (flight_id))
+  RELATIONSHIPS (dep_airport AS f (dep) REFERENCES ap, arr_airport AS f (arr) REFERENCES ap)
+  DIMENSIONS (ap.city AS city, f.day AS day)
+  METRICS (
+    f.departures USING (dep_airport) AS COUNT(flight_id),
+    f.arrivals USING (arr_airport) AS COUNT(flight_id),
+    movements AS f.departures + f.arrivals
+  );
+
+query TI
+SELECT * FROM semantic_view('p7w_air_ok', dimensions := ['city'], metrics := ['movements']) ORDER BY city;
+----
+London	2
+New York	NULL
+Paris	3

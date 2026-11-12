@@ -46,7 +46,7 @@ CREATE SEMANTIC VIEW cr718_v AS
   )
   METRICS (
     li."Item Count" AS COUNT(*),
-    li.rolling AS SUM("Item Count") OVER (PARTITION BY EXCLUDING channel ORDER BY region ASC NULLS LAST)
+    li.rolling AS SUM("Item Count") OVER (PARTITION BY EXCLUDING o.channel ORDER BY o.region ASC NULLS LAST)
   )
 
 # The quoted metric name round-trips through GET_DDL verbatim.

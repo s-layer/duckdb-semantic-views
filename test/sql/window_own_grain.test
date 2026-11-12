@@ -47,8 +47,8 @@ CREATE SEMANTIC VIEW wog_sv AS
   METRICS (
     c.total_balance AS sum(c.balance),
     o.order_count AS count(*),
-    o.seg_balance AS SUM(total_balance) OVER (PARTITION BY segment),
-    o.running_orders AS SUM(order_count) OVER (PARTITION BY segment)
+    o.seg_balance AS SUM(total_balance) OVER (PARTITION BY c.segment),
+    o.running_orders AS SUM(order_count) OVER (PARTITION BY c.segment)
   );
 
 # ============================================================
@@ -231,7 +231,7 @@ CREATE SEMANTIC VIEW wog_uniq AS
   )
   METRICS (
     c.cust_count AS count(*),
-    o.seg_custs AS SUM(cust_count) OVER (PARTITION BY segment)
+    o.seg_custs AS SUM(cust_count) OVER (PARTITION BY c.segment)
   );
 
 query TI rowsort
