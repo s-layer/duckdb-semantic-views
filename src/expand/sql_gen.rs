@@ -1483,11 +1483,13 @@ fn expand_unhoisted(
     // through or back across it, is read on the role every metric names
     // (Snowflake fixture 6, R5). The per-grain plan reads it so in each grain
     // CTE (`role_playing::where_role_dims`), and the base-anchored emission
-    // below rewrites the predicate and joins those instances. The snapshot
-    // path takes no scopes (the planner declines such a query beside a
-    // semi-additive metric), so for it this stays refused.
+    // below rewrites the predicate and joins those instances, and so does the
+    // base-anchored snapshot (`SnapshotFrom::Base`). A snapshot re-anchored at
+    // a metric's own table takes no scopes (`snapshot_cte_anchor` declines a
+    // query whose predicate is read on a role, so this is defensive), and for
+    // it the predicate stays refused below.
     let where_scopes: Vec<(String, String)> = match &resolved_where {
-        Some(rw) if !has_active_semi_additive => {
+        Some(rw) if snapshot_anchor.is_none() => {
             super::role_playing::where_role_scopes(def, &rw.members, &resolved_mets)
         }
         _ => Vec::new(),
@@ -1590,6 +1592,16 @@ fn expand_unhoisted(
     // the query it acts as regular (Snowflake semantics). Decided above, with
     // the snapshot anchor that depends on it.
     if has_active_semi_additive {
+        let no_paths = std::collections::HashMap::new();
+        let from = match snapshot_anchor.as_deref() {
+            Some(anchor) => super::semi_additive::SnapshotFrom::Grain {
+                anchor,
+                paths: &no_paths,
+            },
+            None => super::semi_additive::SnapshotFrom::Base {
+                where_scopes: &where_scopes,
+            },
+        };
         return super::semi_additive::expand_semi_additive(
             view_name,
             def,
@@ -1597,7 +1609,7 @@ fn expand_unhoisted(
             &resolved_mets,
             &resolved_exprs,
             resolved_where.as_ref(),
-            snapshot_anchor.as_deref(),
+            &from,
         );
     }
 

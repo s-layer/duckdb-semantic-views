@@ -504,10 +504,10 @@ Both follow the role back down, too: a dimension on a table that
 is read for the airport the metric's ``USING`` names, so ``arrivals`` by
 terminal gives the arriving airport's terminal and ``departures`` the
 departing one's. A ``WHERE`` on the airports or their details follows the
-same role when every metric names it; beside metrics naming two roles, or
-none, it is refused here, and so is one beside a semi-additive metric whose
-``NON ADDITIVE BY`` dimension is not queried. A metric on the airports themselves reads each
-airport once, by its own dimensions or its details'.
+same role when every metric names it, a semi-additive metric's snapshot
+included; beside metrics naming two roles, or none, it is refused here. A
+metric on the airports themselves reads each airport once, by its own
+dimensions or its details'.
 
 .. versionchanged:: 0.19.0
 

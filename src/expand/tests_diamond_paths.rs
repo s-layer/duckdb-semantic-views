@@ -379,18 +379,21 @@ fn window_over_a_pinned_path_follows_it() {
     }
 }
 
-/// `diamond(order)` plus `last_by_store`, a semi-additive `rev_by_store`
-/// (the latest order's amount, along the store path), and `label`, a
-/// dimension declared on no table.
+/// `diamond(order)` plus `first_by_store`, a semi-additive `rev_by_store`
+/// (`NON ADDITIVE BY (order_id DESC)`: the last order in descending order, so
+/// the earliest order's amount, along the store path), and `label`, a
+/// dimension declared on no table. The earliest order differs by path: by
+/// store region EU o3 (40), US o1 (10); by customer region EU o1 (10), US o2
+/// (20).
 fn diamond_with_unfollowed_shapes(order: &str) -> SemanticViewDefinition {
     let mut def = diamond(order);
-    let mut last = metric("last_by_store", "SUM(o.amount)", Some("o"), &["o_store"]);
-    last.non_additive_by = vec![crate::model::NonAdditiveDim {
+    let mut first = metric("first_by_store", "SUM(o.amount)", Some("o"), &["o_store"]);
+    first.non_additive_by = vec![crate::model::NonAdditiveDim {
         dimension: "order_id".to_string(),
         order: crate::model::SortOrder::Desc,
         ..Default::default()
     }];
-    def.metrics.push(last);
+    def.metrics.push(first);
     def.dimensions.push(Dimension {
         name: "label".to_string(),
         expr: "'all'".to_string(),
@@ -418,24 +421,57 @@ fn assert_unfollowed(request: &QueryRequest) {
     }
 }
 
-/// An active semi-additive metric alone on a pinned path: the planner leaves a
-/// lone snapshot group to the snapshot CTE, which joins along the usual walk
-/// (through customers), so the query is refused (TECH-DEBT #109).
-#[test]
-fn semi_additive_alone_on_a_pinned_path_is_refused() {
-    assert_unfollowed(&req(&["region_name"], &["last_by_store"], None));
+/// Assert the query gives `expected` on every table order of
+/// [`diamond_with_unfollowed_shapes`].
+fn assert_semi_answer(request: &QueryRequest, expected: &[&[&str]]) {
+    for order in ORDERS {
+        let sql = expand("dv", &diamond_with_unfollowed_shapes(order), request)
+            .unwrap_or_else(|e| panic!("TABLES order {order}: {e}"));
+        assert_eq!(
+            rows(&sql),
+            table_of(expected),
+            "TABLES order {order}\nSQL:\n{sql}"
+        );
+    }
 }
 
-/// The same metric beside one on the other path: two groups, and the snapshot
-/// group with a pinned path is declined, so the query is refused
-/// (TECH-DEBT #109).
+/// An active semi-additive metric alone on a pinned path: its snapshot ranks
+/// the orders of each store region (TECH-DEBT #109).
 #[test]
-fn semi_additive_beside_another_path_is_refused() {
-    assert_unfollowed(&req(
-        &["region_name"],
-        &["rev_by_cust", "last_by_store"],
-        None,
-    ));
+fn semi_additive_alone_on_a_pinned_path_follows_it() {
+    assert_semi_answer(
+        &req(&["region_name"], &["first_by_store"], None),
+        &[&["EU", "40"], &["US", "10"]],
+    );
+}
+
+/// The same metric beside one on the other path: each follows its own.
+#[test]
+fn semi_additive_beside_another_path_follows_its_own() {
+    assert_semi_answer(
+        &req(&["region_name"], &["rev_by_cust", "first_by_store"], None),
+        &[&["EU", "50", "40"], &["US", "20", "10"]],
+    );
+}
+
+/// Filtered on a region and not grouped by it: the filter follows the store
+/// path too, so the snapshot ranks the US store's orders (o1, o2).
+#[test]
+fn semi_additive_filtered_on_its_pinned_path_follows_it() {
+    assert_semi_answer(
+        &req(&[], &["first_by_store"], Some("r.region_name = 'US'")),
+        &[&["10"]],
+    );
+}
+
+/// The store itself is reached by one path, so a store dimension beside the
+/// region needs no pin of its own and the snapshot ranks per (store, region).
+#[test]
+fn semi_additive_by_store_and_region_follows_its_path() {
+    assert_semi_answer(
+        &req(&["store_name", "region_name"], &["first_by_store"], None),
+        &[&["S-EU", "EU", "40"], &["S-US", "US", "10"]],
+    );
 }
 
 /// A dimension declared on no table cannot be placed under a grain, so the
@@ -589,4 +625,134 @@ fn store_path_region_beside_its_store() {
         &req(&["store_name", "region_name"], &["rev_by_store"], None),
         &[&["S-EU", "EU", "40"], &["S-US", "US", "30"]],
     );
+}
+
+/// `diamond(order)` plus `latest_region`, a revenue `NON ADDITIVE BY` the
+/// region (its snapshot keeps the orders of the alphabetically last region),
+/// reaching regions along `using`. By store region the orders are o1 US, o2
+/// US, o3 EU; by customer region o1 EU, o2 US, o3 EU.
+fn diamond_with_na_region(order: &str, using: &[&str]) -> SemanticViewDefinition {
+    let mut def = diamond(order);
+    let mut m = metric("latest_region", "SUM(o.amount)", Some("o"), using);
+    m.non_additive_by = vec![crate::model::NonAdditiveDim {
+        dimension: "region_name".to_string(),
+        ..Default::default()
+    }];
+    def.metrics.push(m);
+    def
+}
+
+fn assert_na_region(using: &[&str], dims: &[&str], expected: &[&[&str]]) {
+    for order in ORDERS {
+        let sql = expand(
+            "dv",
+            &diamond_with_na_region(order, using),
+            &req(dims, &["latest_region"], None),
+        )
+        .unwrap_or_else(|e| panic!("TABLES order {order}: {e}"));
+        assert_eq!(
+            rows(&sql),
+            table_of(expected),
+            "TABLES order {order}\nSQL:\n{sql}"
+        );
+    }
+}
+
+/// A `NON ADDITIVE BY` dimension on a table reached two ways is ranked along
+/// the path the metric's `USING` picks: by store region, US's orders o1 and o2.
+#[test]
+fn na_dimension_on_a_diamond_table_follows_the_store_path() {
+    assert_na_region(&["o_store"], &[], &[&["30"]]);
+}
+
+/// The same per store: S-US's orders are both in the US by store region.
+#[test]
+fn na_dimension_on_a_diamond_table_by_store_follows_its_path() {
+    assert_na_region(
+        &["o_store"],
+        &["store_name"],
+        &[&["S-EU", "40"], &["S-US", "30"]],
+    );
+}
+
+/// Along the customer path the US holds o2 alone.
+#[test]
+fn na_dimension_on_a_diamond_table_follows_the_customer_path() {
+    assert_na_region(&["o_cust"], &[], &[&["20"]]);
+}
+
+/// With no `USING` the snapshot would have to pick a path to the region, and
+/// is refused, as a dimension there is (D12).
+#[test]
+fn na_dimension_on_a_diamond_table_without_using_is_refused() {
+    for order in ORDERS {
+        match expand(
+            "dv",
+            &diamond_with_na_region(order, &[]),
+            &req(&[], &["latest_region"], None),
+        ) {
+            Ok(sql) => panic!(
+                "TABLES order {order}: expected a refusal, got rows {:?}\nSQL:\n{sql}",
+                rows(&sql)
+            ),
+            Err(e) => {
+                let msg = e.to_string();
+                assert!(
+                    msg.contains("more than one path")
+                        && msg.contains("o -> c -> r")
+                        && msg.contains("o -> s -> r"),
+                    "TABLES order {order}: got {msg}"
+                );
+            }
+        }
+    }
+}
+
+/// `t0 <- t1` and `t0 <- t2 -> t1`, the `t2 -> t0` relationship one-to-one
+/// (found by `dag_proptest`'s listing property): `t0` reaches `t1` by no
+/// chain and two ways, which the query refuses for a dimension on `t1`. A
+/// `NON ADDITIVE BY` dimension there is refused the same way, as its snapshot
+/// would have to pick one, and nothing is listed for the metric but it.
+fn na_across_many_to_many() -> SemanticViewDefinition {
+    let mut one_to_one = rel("t2_t0", "t2", "t0", "t0_id", "id");
+    one_to_one.cardinality = Cardinality::OneToOne;
+    let mut snap = metric("snap", "SUM(t0.v)", Some("t0"), &[]);
+    snap.non_additive_by = vec![crate::model::NonAdditiveDim {
+        dimension: "g1".to_string(),
+        ..Default::default()
+    }];
+    SemanticViewDefinition {
+        tables: vec![
+            table("t0", "t0", "id"),
+            table("t1", "t1", "id"),
+            table("t2", "t2", "id"),
+        ],
+        joins: vec![
+            rel("t1_t0", "t1", "t0", "t0_id", "id"),
+            one_to_one,
+            rel("t2_t1", "t2", "t1", "t1_id", "id"),
+        ],
+        dimensions: vec![dim("g0", "t0.g", "t0"), dim("g1", "t1.g", "t1")],
+        metrics: vec![snap],
+        ..Default::default()
+    }
+}
+
+#[test]
+fn na_dimension_across_a_many_to_many_is_refused() {
+    let def = na_across_many_to_many();
+    match expand("dv", &def, &req(&["g0"], &["snap"], None)) {
+        Ok(sql) => panic!("expected a refusal, got SQL:\n{sql}"),
+        Err(e) => assert!(e.to_string().contains("many-to-many"), "got {e}"),
+    }
+}
+
+#[test]
+fn na_dimension_across_a_many_to_many_lists_only_itself() {
+    let def = na_across_many_to_many();
+    let listed: Vec<&str> = crate::expand::dimensions_for_metric(&def, &def.metrics[0])
+        .iter()
+        .map(|d| d.name.as_str())
+        .collect();
+    assert!(!listed.contains(&"g0"), "listed {listed:?}");
 }

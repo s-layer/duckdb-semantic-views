@@ -68,6 +68,14 @@
 //! `t` (see [`metric_exists`]). The diamond is declared with `w` first in
 //! about half of those cases and with `t` first in the rest; CREATE accepts
 //! both, and each case checks that it does.
+//!
+//! Phase 7 PR 5b adds `lvu USING (t_u)` and `lvx USING (t_x)` to the diamond
+//! cases: `sum(t.v) NON ADDITIVE BY (wcat)`, so their snapshot ranks `t`'s rows
+//! by a `w` value read along their own path, whether or not `w` is queried.
+//! The oracle keeps, per group, the rows whose `wcat` along that path is the
+//! group's greatest (all of them when every one is NULL), by a correlated
+//! `max` rather than the expansion's `RANK`. Queried by `wcat` they are plain
+//! sums along their path.
 
 use proptest::prelude::*;
 use semantic_views::expand::{expand, DimensionName, FactName, MetricName, QueryRequest};
@@ -146,7 +154,9 @@ fn u_key(inst: &Instance, i: usize) -> (i64, i64) {
 const DIMS: [&str; 3] = ["td", "ucat", "wcat"];
 /// `svu` / `svx` (Phase 7, diamond cases only) sum `t.v` like `sv`, with a
 /// `USING` naming the first relationship of the path through `u` or `x`.
-const METS: [&str; 6] = ["sv", "ct", "su", "sw", "svu", "svx"];
+/// `lvu` / `lvx` (Phase 7 PR 5b, diamond cases only) are the same with
+/// `NON ADDITIVE BY (wcat)`.
+const METS: [&str; 8] = ["sv", "ct", "su", "sw", "svu", "svx", "lvu", "lvx"];
 
 /// Whether metric `METS[i]` is queried in a view of `inst`'s shape. With the
 /// second path `t` references both `u` and `x`, which makes it a bridge
@@ -164,7 +174,7 @@ fn metric_exists(inst: &Instance, i: usize) -> bool {
     } else if inst.diamond {
         !matches!(METS[i], "su" | "sw")
     } else {
-        !matches!(METS[i], "svu" | "svx")
+        !matches!(METS[i], "svu" | "svx" | "lvu" | "lvx")
     }
 }
 
@@ -558,6 +568,15 @@ fn build_def_shaped(hop: Hop, diamond: bool, w_first: bool) -> SemanticViewDefin
             m.using_relationships = vec![rel.to_string()];
             metrics.push(m);
         }
+        for (name, rel) in [("lvu", "t_u"), ("lvx", "t_x")] {
+            let mut m = base_metric(name, "sum(t.v)", Some("t"));
+            m.using_relationships = vec![rel.to_string()];
+            m.non_additive_by = vec![semantic_views::model::NonAdditiveDim {
+                dimension: "wcat".to_string(),
+                ..Default::default()
+            }];
+            metrics.push(m);
+        }
     }
     let mut joins = vec![
         if hop == Hop::Range {
@@ -756,7 +775,7 @@ fn dim_table(dim: &str) -> &'static str {
 /// declared source table, which sits at the base grain.
 fn metric_table(metric: &str) -> &'static str {
     match metric {
-        "sv" | "ct" | "svu" | "svx" => "t",
+        "sv" | "ct" | "svu" | "svx" | "lvu" | "lvx" => "t",
         "su" => "u",
         "sw" => "w",
         other => unreachable!("unexpected metric {other}"),
@@ -764,12 +783,118 @@ fn metric_table(metric: &str) -> &'static str {
 }
 
 /// The oracle's grain for a metric: its table, except that `svx` reads `t`
-/// with `w` joined through `x`, a grain of its own (`tx`).
+/// with `w` joined through `x`, a grain of its own (`tx`), and the snapshots
+/// `lvu` / `lvx` are grains of their own (`tlu`, `tlx`).
 fn grain_key(metric: &str) -> &'static str {
     match metric {
         "svx" => "tx",
+        "lvu" => "tlu",
+        "lvx" => "tlx",
         other => metric_table(other),
     }
+}
+
+/// `FROM t` joined up to `w`, through `u` or (`via_x`) through `x`. `u` is
+/// joined either way, for `ucat`.
+///
+/// Phase 7.1: under the ASOF relationship each `t` row's period is the
+/// greatest `us` of its key at or before `ts`, found by a correlated `max`,
+/// never by an ASOF join; `t` then joins that one `u` row by equality.
+/// Phase 7.2: under the range relationship each `t` row's period is the one
+/// holding its `ts`, found by id with a correlated `min`.
+fn t_path_from(case: &Case, via_x: bool) -> String {
+    let t_from = match case.inst.hop {
+        Hop::Asof => {
+            "FROM (SELECT t.*, (SELECT max(u2.us) FROM u u2 WHERE u2.uk = t.fk_u AND u2.us <= t.ts) \
+             AS asof_us FROM t) t LEFT JOIN u ON t.fk_u = u.uk AND t.asof_us = u.us \
+             LEFT JOIN w ON u.fk_w = w.id"
+        }
+        Hop::Range => {
+            "FROM (SELECT t.*, (SELECT min(u2.id) FROM u u2 WHERE t.ts IS NOT NULL \
+             AND COALESCE(u2.rs <= t.ts, TRUE) AND COALESCE(t.ts < u2.re, TRUE)) AS range_id \
+             FROM t) t LEFT JOIN u ON u.id = t.range_id LEFT JOIN w ON u.fk_w = w.id"
+        }
+        Hop::Plain => "FROM t LEFT JOIN u ON t.fk_u = u.id LEFT JOIN w ON u.fk_w = w.id",
+    };
+    // Phase 7: through `x` the `w` join is replaced.
+    if via_x {
+        t_from.replace(
+            "LEFT JOIN w ON u.fk_w = w.id",
+            "LEFT JOIN x ON t.fk_x = x.id LEFT JOIN w ON x.fk_w = w.id",
+        )
+    } else {
+        t_from.to_string()
+    }
+}
+
+/// A snapshot grain's half of the oracle (Phase 7 PR 5b): `lvu` (`tlu`) or
+/// `lvx` (`tlx`), `sum(t.v) NON ADDITIVE BY (wcat)` along its path. The
+/// filtered rows of `t`, each with its `wcat` along that path; then, per
+/// group of the queried dimensions, the rows whose `wcat` is the group's
+/// greatest, or every row when all are NULL (`NON ADDITIVE BY` ascending,
+/// NULLs last: the latest non-NULL snapshot). Grouped by `wcat` the metric is
+/// a plain sum.
+fn snapshot_grain_sql(case: &Case, anchor: &str) -> String {
+    let (via_x, metric) = match anchor {
+        "tlu" => (false, "lvu"),
+        "tlx" => (true, "lvx"),
+        other => unreachable!("{other} is not a snapshot grain"),
+    };
+    let dims: Vec<&str> = case.sel_dims.iter().map(|&i| DIMS[i]).collect();
+    let raw = |d: &str| match d {
+        "td" => "t.d",
+        "ucat" => "u.ucat",
+        "wcat" => "w.wcat",
+        other => unreachable!("unexpected dim {other}"),
+    };
+    let row_items: String = dims
+        .iter()
+        .map(|d| format!("{} AS {d}, ", raw(d)))
+        .collect();
+    let where_sql = case
+        .where_pred
+        .as_ref()
+        .map_or_else(String::new, |p| format!(" WHERE {}", p.to_raw_sql()));
+    let rows = format!(
+        "SELECT {row_items}t.v AS v, w.wcat AS na {}{where_sql}",
+        t_path_from(case, via_x)
+    );
+    let snapshot = if dims.contains(&"wcat") {
+        "TRUE".to_string()
+    } else {
+        let same_group: Vec<String> = dims
+            .iter()
+            .map(|d| format!("r2.{d} IS NOT DISTINCT FROM r.{d}"))
+            .collect();
+        let same_group = if same_group.is_empty() {
+            "TRUE".to_string()
+        } else {
+            same_group.join(" AND ")
+        };
+        format!(
+            "r.na IS NOT DISTINCT FROM (SELECT max(r2.na) FROM snap_rows r2 WHERE {same_group})"
+        )
+    };
+    let items: Vec<String> = dims
+        .iter()
+        .map(|d| format!("r.{d} AS {d}"))
+        .chain(std::iter::once(format!("sum(r.v) AS {metric}")))
+        .collect();
+    let group_by = if dims.is_empty() {
+        String::new()
+    } else {
+        format!(
+            " GROUP BY {}",
+            (1..=dims.len())
+                .map(|n| n.to_string())
+                .collect::<Vec<_>>()
+                .join(", ")
+        )
+    };
+    format!(
+        "WITH snap_rows AS ({rows}) SELECT {} FROM snap_rows r WHERE {snapshot}{group_by}",
+        items.join(", ")
+    )
 }
 
 /// One grain's half of the oracle: the metrics that live on `anchor`, computed
@@ -782,6 +907,9 @@ fn grain_key(metric: &str) -> &'static str {
 fn grain_sql(case: &Case, anchor: &str) -> String {
     if fans_below(case, anchor) {
         return fanned_grain_sql(case, anchor);
+    }
+    if matches!(anchor, "tlu" | "tlx") {
+        return snapshot_grain_sql(case, anchor);
     }
     let dim_items: Vec<String> = case
         .sel_dims
@@ -815,40 +943,12 @@ fn grain_sql(case: &Case, anchor: &str) -> String {
         .join(", ");
     // The up-chain from the anchor. Joining the whole remaining chain is
     // harmless — every hop is many-to-one, so none of them changes the anchor's
-    // row multiset.
-    // Phase 7.1: under the ASOF relationship each `t` row's period is the
-    // greatest `us` of its key at or before `ts`, found by a correlated
-    // `max`, never by an ASOF join; `t` then joins that one `u` row by
-    // equality.
-    // Phase 7.2: under the range relationship each `t` row's period is the
-    // one holding its `ts`, found by id with a correlated `min`.
-    let t_from = match case.inst.hop {
-        Hop::Asof => {
-            "FROM (SELECT t.*, (SELECT max(u2.us) FROM u u2 WHERE u2.uk = t.fk_u AND u2.us <= t.ts) \
-             AS asof_us FROM t) t LEFT JOIN u ON t.fk_u = u.uk AND t.asof_us = u.us \
-             LEFT JOIN w ON u.fk_w = w.id"
-        }
-        Hop::Range => {
-            "FROM (SELECT t.*, (SELECT min(u2.id) FROM u u2 WHERE t.ts IS NOT NULL \
-             AND COALESCE(u2.rs <= t.ts, TRUE) AND COALESCE(t.ts < u2.re, TRUE)) AS range_id \
-             FROM t) t LEFT JOIN u ON u.id = t.range_id LEFT JOIN w ON u.fk_w = w.id"
-        }
-        Hop::Plain => "FROM t LEFT JOIN u ON t.fk_u = u.id LEFT JOIN w ON u.fk_w = w.id",
-    };
-    // Phase 7: the `tx` grain reaches `w` through `x` instead, so its `w`
-    // join is replaced; `u` is still joined for `ucat`.
-    let tx_from;
+    // row multiset. The `tx` grain reaches `w` through `x` instead.
     let from = match anchor {
-        "t" => t_from,
-        "tx" => {
-            tx_from = t_from.replace(
-                "LEFT JOIN w ON u.fk_w = w.id",
-                "LEFT JOIN x ON t.fk_x = x.id LEFT JOIN w ON x.fk_w = w.id",
-            );
-            tx_from.as_str()
-        }
-        "u" => "FROM u LEFT JOIN w ON u.fk_w = w.id",
-        "w" => "FROM w",
+        "t" => t_path_from(case, false),
+        "tx" => t_path_from(case, true),
+        "u" => "FROM u LEFT JOIN w ON u.fk_w = w.id".to_string(),
+        "w" => "FROM w".to_string(),
         other => unreachable!("unexpected anchor {other}"),
     };
     // PBT-6: the predicate is evaluated inside EVERY grain's CTE, filtering the
@@ -1248,6 +1348,9 @@ fn generator_reaches_both_diamond_branches() {
     let (mut refused, mut chosen, mut plain, mut differ) = (0usize, 0usize, 0usize, 0usize);
     // The same two outcomes with `w` declared first.
     let (mut refused_w_first, mut chosen_w_first) = (0usize, 0usize);
+    // Phase 7 PR 5b: a snapshot along its path, active (`wcat` not queried),
+    // with `w` named by no member (only the snapshot reads it), and filtered.
+    let (mut snap_active, mut snap_unnamed, mut snap_filtered) = (0usize, 0usize, 0usize);
     for _ in 0..400 {
         let case = arb_case()
             .new_tree(&mut runner)
@@ -1268,6 +1371,15 @@ fn generator_reaches_both_diamond_branches() {
                 p.tables(&mut tables);
                 tables.contains(&"w")
             });
+        let snapshot = case
+            .sel_metrics
+            .iter()
+            .any(|&m| matches!(METS[m], "lvu" | "lvx"));
+        if snapshot && !case.sel_dims.iter().any(|&d| DIMS[d] == "wcat") {
+            snap_active += 1;
+            snap_unnamed += usize::from(!names_w);
+            snap_filtered += usize::from(case.where_pred.is_some());
+        }
         if names_w
             && case
                 .sel_metrics
@@ -1295,6 +1407,11 @@ fn generator_reaches_both_diamond_branches() {
         }
     }
     assert!(plain > 0, "no case without the second path");
+    assert!(
+        snap_active >= 20 && snap_unnamed >= 10 && snap_filtered >= 10,
+        "the snapshot along a USING path is too rare: {snap_active} active, \
+         {snap_unnamed} with w named only by NON ADDITIVE BY, {snap_filtered} filtered"
+    );
     assert!(
         differ > 0,
         "the two paths to w never give different sums; following the wrong one \

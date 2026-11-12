@@ -550,22 +550,16 @@ pub(super) fn plan(
     // semi-additive emitter, which `snapshot_cte_anchor` already re-points at the
     // metric's own grain (TECH-DEBT #36 increment 1). Declining here keeps that
     // verified single-CTE shape instead of re-routing it through a one-group
-    // plan that would emit the same thing with an extra wrapper.
+    // plan that would emit the same thing with an extra wrapper. Unless the
+    // group follows a path a `USING` picks through a diamond: only a grain
+    // CTE's joins follow it (TECH-DEBT #109).
     let queried_dim_keys: HashSet<String> = resolved_dims
         .iter()
         .map(|d| crate::ident::normalize_ident_part(&d.name))
         .collect();
     if partition.groups.len() == 1
+        && partition.groups[0].paths.is_empty()
         && is_snapshot_group(def, &partition.groups[0], &queried_dim_keys)
-    {
-        return None;
-    }
-    // The snapshot CTE joins along the usual join walk, so a snapshot group
-    // that must follow a pinned path is declined, and the caller refuses it.
-    if partition
-        .groups
-        .iter()
-        .any(|g| !g.paths.is_empty() && is_snapshot_group(def, g, &queried_dim_keys))
     {
         return None;
     }
@@ -1343,7 +1337,14 @@ pub(super) fn expand_per_grain(
     // plan holds only `Direct` outputs — but check rather than assert: falling
     // through to the general emitter is correct for any plan, and a wrong
     // assumption here would panic inside DuckDB rather than mis-render.
+    // A lone snapshot group (one following a `USING` path, TECH-DEBT #109)
+    // ranks its rows first, which only the general emitter renders.
+    let queried_dim_keys: HashSet<String> = resolved_dims
+        .iter()
+        .map(|d| crate::ident::normalize_ident_part(&d.name))
+        .collect();
     if plan.is_single_group()
+        && !is_snapshot_group(def, &plan.groups[0], &queried_dim_keys)
         && plan
             .outputs
             .iter()
@@ -1498,7 +1499,10 @@ fn render_snapshot_group(
         &mets,
         resolved_exprs,
         where_clause,
-        Some(&group.anchor),
+        &super::semi_additive::SnapshotFrom::Grain {
+            anchor: &group.anchor,
+            paths: &group.paths,
+        },
     )?;
 
     let mut sql = String::with_capacity(256);

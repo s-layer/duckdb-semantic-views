@@ -131,11 +131,12 @@ pub fn dimensions_for_metric<'a>(
 }
 
 /// The `NON ADDITIVE BY` keys of each semi-additive metric `met` is built
-/// from whose snapshot joins a `NON ADDITIVE BY` dimension across a fan-out.
+/// from whose snapshot joins a `NON ADDITIVE BY` dimension across a fan-out,
+/// or on a table reached by several paths its `USING` does not pick between.
 /// A query of `met` grouped by any dimension but those (the metric is then
-/// active and takes the snapshot path) is refused as a fan trap, its own
-/// table's dimensions included (EXP-9,
-/// `tests_fan_trap::semi_additive_na_dim_fans_def`).
+/// active and takes the snapshot path) is refused as a fan trap (EXP-9,
+/// `tests_fan_trap::semi_additive_na_dim_fans_def`) or as multi-path
+/// (TECH-DEBT #109), its own table's dimensions included.
 fn fanning_snapshots(
     def: &SemanticViewDefinition,
     met: &Metric,
@@ -155,7 +156,7 @@ fn fanning_snapshots(
                 super::resolution::find_dimension(def, &na.dimension)
                     .and_then(|nd| nd.source_table.as_deref())
                     .is_some_and(|t| !walk(&home, &t.to_ascii_lowercase(), plain))
-            });
+            }) || super::multi_path::na_dimension_reached_two_ways(def, m, &home[0]);
             fans.then(|| {
                 m.non_additive_by
                     .iter()

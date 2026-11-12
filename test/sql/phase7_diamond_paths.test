@@ -328,3 +328,79 @@ query TTTTTT rowsort
 SHOW SEMANTIC DIMENSIONS IN dq_v FOR METRIC revenue
 ----
 dq_regions	region_name	VARCHAR	false	[]	(empty)
+
+# Phase 7 PR 5b (TECH-DEBT #109): a semi-additive metric follows the path its
+# USING picks. first_by_store keeps the earliest order (NON ADDITIVE BY
+# order_id DESC) of each store region: EU o3 (40), US o1 (10). Along the
+# customer path it would be EU o1 (10), US o2 (20). latest_region keeps the
+# orders of the alphabetically last region read along its path: by store
+# region o1 and o2 (30), by customer region o2 (20). dv_snap is declared with
+# regions first, so the first-declared walk does not happen to be the store
+# path.
+statement ok
+CREATE SEMANTIC VIEW dv_snap
+  TABLES (
+    r AS dp_regions   PRIMARY KEY (region_id),
+    c AS dp_customers PRIMARY KEY (cust_id),
+    s AS dp_stores    PRIMARY KEY (store_id),
+    o AS dp_orders    PRIMARY KEY (order_id)
+  )
+  RELATIONSHIPS (
+    o_cust   AS o (cust_id)   REFERENCES c,
+    o_store  AS o (store_id)  REFERENCES s,
+    c_region AS c (region_id) REFERENCES r,
+    s_region AS s (region_id) REFERENCES r
+  )
+  DIMENSIONS (
+    o.order_id    AS order_id,
+    s.store_name  AS store_name,
+    r.region_name AS region_name
+  )
+  METRICS (
+    o.rev_by_cust    USING (o_cust)  AS SUM(amount),
+    o.first_by_store USING (o_store) NON ADDITIVE BY (order_id DESC) AS SUM(amount),
+    o.latest_region  USING (o_store) NON ADDITIVE BY (region_name) AS SUM(amount),
+    o.latest_region_any NON ADDITIVE BY (region_name) AS SUM(amount)
+  );
+
+query TI rowsort
+SELECT * FROM SEMANTIC_VIEW(dv_snap DIMENSIONS r.region_name METRICS o.first_by_store);
+----
+EU	40
+US	10
+
+query TII rowsort
+SELECT * FROM SEMANTIC_VIEW(dv_snap DIMENSIONS r.region_name METRICS o.rev_by_cust, o.first_by_store);
+----
+EU	50	40
+US	20	10
+
+query I
+SELECT * FROM SEMANTIC_VIEW(dv_snap METRICS o.first_by_store WHERE r.region_name = 'US');
+----
+10
+
+# The region is not queried, so only the snapshot reads it, along the store path.
+query I
+SELECT * FROM SEMANTIC_VIEW(dv_snap METRICS o.latest_region);
+----
+30
+
+query TI rowsort
+SELECT * FROM SEMANTIC_VIEW(dv_snap DIMENSIONS s.store_name METRICS o.latest_region);
+----
+S-EU	40
+S-US	30
+
+# With no USING the snapshot would have to pick a path to the region.
+statement error
+SELECT * FROM SEMANTIC_VIEW(dv_snap METRICS o.latest_region_any);
+----
+NON ADDITIVE BY dimension 'region_name' of metric 'latest_region_any' is on table 'r', which metric 'latest_region_any' reaches from table 'o' by more than one path: o -> c -> r, o -> s -> r
+
+# Grouped by its NON ADDITIVE BY dimension the metric is a plain sum, refused
+# as any metric with no USING is by that dimension.
+statement error
+SELECT * FROM SEMANTIC_VIEW(dv_snap DIMENSIONS r.region_name METRICS o.latest_region_any);
+----
+by more than one path: o -> c -> r, o -> s -> r
