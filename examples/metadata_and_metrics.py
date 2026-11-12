@@ -87,7 +87,7 @@ AS
     b.latest_balance NON ADDITIVE BY (b.balance_date) AS SUM(b.balance)
       COMMENT = 'Most recent balance (snapshot metric)',
     b.all_region_deposits AS SUM(total_deposits)
-      OVER (PARTITION BY EXCLUDING region)
+      OVER (PARTITION BY EXCLUDING a.region)
       COMMENT = 'Deposits across all regions for the same day'
   );
 """)
@@ -226,7 +226,7 @@ for row in con.execute("""
 
 print("\n=== Section 8: Window function metrics ===")
 
-# all_region_deposits: SUM(total_deposits) OVER (PARTITION BY EXCLUDING region)
+# all_region_deposits: SUM(total_deposits) OVER (PARTITION BY EXCLUDING a.region)
 # When querying with dimensions [region, balance_date],
 # the window partitions by balance_date only (region excluded)
 print("\nAll-region deposits next to each region, per date (window metric):")
