@@ -23,9 +23,13 @@
 //! LAST`), a lambda's parameter, a collation, a name inside a subquery (the
 //! subquery's own), a function's named argument or a field of a value (which
 //! the scanner does not report), and a name the expansion reads as another
-//! member: a fact, a variable and, in a metric, a metric. That last rule is
-//! the precedence the expansion always had (a fact's name inlines the fact),
-//! so a member that relies on it keeps its meaning.
+//! member: a fact or a variable anywhere, and in a metric another metric of
+//! its table outside an aggregate call (`graph::same_table_metrics`). That
+//! last rule is the precedence the expansion always had (a fact's name
+//! inlines the fact), so a member that relies on it keeps its meaning. A
+//! member's own name in its own expression is not that member: an identity
+//! fact (`li.qty AS qty`) or a metric named after its column (`o.amount AS
+//! SUM(amount)`) reads the column, and so is qualified.
 //!
 //! A view stored before 0.19.0 has no column lists; its expressions are
 //! spliced as written, as they were then.
@@ -40,12 +44,30 @@ use crate::query::expr_items::{is_local_name, is_not_a_column, lambda_scopes};
 
 /// One member expression the rule applies to: its kind and name for a
 /// message, its table's alias as stored, and its expression.
-#[cfg_attr(not(feature = "extension"), allow(dead_code))]
 struct MemberExpr<'a> {
     kind: &'static str,
     name: &'a str,
     table: &'a str,
     expr: &'a str,
+    /// Where it sits in the definition.
+    slot: Slot,
+}
+
+/// A member expression's place: its list and index there.
+#[derive(Clone, Copy)]
+enum Slot {
+    Fact(usize),
+    Dimension(usize),
+    Metric(usize),
+}
+
+impl Slot {
+    fn metric(self) -> Option<usize> {
+        match self {
+            Slot::Metric(i) => Some(i),
+            Slot::Fact(_) | Slot::Dimension(_) => None,
+        }
+    }
 }
 
 /// The member expressions with a table of their own, in declaration order:
@@ -53,34 +75,37 @@ struct MemberExpr<'a> {
 /// is emitted from its window specification and whose references are
 /// members. A member with no `source_table` (a derived metric) has no table
 /// to scope to.
-#[cfg_attr(not(feature = "extension"), allow(dead_code))]
 fn member_exprs(def: &SemanticViewDefinition) -> impl Iterator<Item = MemberExpr<'_>> {
-    let facts = def.facts.iter().filter_map(|f| {
+    let facts = def.facts.iter().enumerate().filter_map(|(i, f)| {
         Some(MemberExpr {
             kind: "fact",
             name: &f.name,
             table: f.source_table.as_deref()?,
             expr: &f.expr,
+            slot: Slot::Fact(i),
         })
     });
-    let dims = def.dimensions.iter().filter_map(|d| {
+    let dims = def.dimensions.iter().enumerate().filter_map(|(i, d)| {
         Some(MemberExpr {
             kind: "dimension",
             name: &d.name,
             table: d.source_table.as_deref()?,
             expr: &d.expr,
+            slot: Slot::Dimension(i),
         })
     });
     let metrics = def
         .metrics
         .iter()
-        .filter(|m| !m.is_window())
-        .filter_map(|m| {
+        .enumerate()
+        .filter(|(_, m)| !m.is_window())
+        .filter_map(|(i, m)| {
             Some(MemberExpr {
                 kind: "metric",
                 name: &m.name,
                 table: m.source_table.as_deref()?,
                 expr: &m.expr,
+                slot: Slot::Metric(i),
             })
         });
     facts.chain(dims).chain(metrics)
@@ -104,25 +129,55 @@ fn columns_of(def: &SemanticViewDefinition, alias: &str) -> Option<HashSet<Strin
         .map(|(_, cols)| column_keys(cols))
 }
 
-/// The names the expansion reads as another member rather than a column, for
-/// a member of `kind`: every fact and variable, and for a metric every metric.
-fn member_names(def: &SemanticViewDefinition, kind: &str) -> HashSet<String> {
-    let mut names: HashSet<String> = def
-        .facts
-        .iter()
-        .map(|f| normalize_ident_part(&f.name))
-        .chain(def.variables.iter().map(|v| normalize_ident_part(&v.name)))
-        .collect();
-    if kind == "metric" {
-        names.extend(def.metrics.iter().map(|m| normalize_ident_part(&m.name)));
+/// What the expansion reads as another member rather than a column in one
+/// member's expression: the name of every fact and variable except the
+/// member's own (a fact's own name in its expression is its column, as
+/// `graph::facts` reads it), and for a metric the spans where it names
+/// another metric of its table (`graph::same_table_metric_ref_spans`).
+struct Members {
+    names: HashSet<String>,
+    own: Option<String>,
+    metric_spans: Vec<(usize, usize)>,
+}
+
+impl Members {
+    /// The fact and variable names of `def`, shared by every member.
+    fn names_of(def: &SemanticViewDefinition) -> HashSet<String> {
+        def.facts
+            .iter()
+            .map(|f| normalize_ident_part(&f.name))
+            .chain(def.variables.iter().map(|v| normalize_ident_part(&v.name)))
+            .collect()
     }
-    names
+
+    /// For a member of `kind` named `name`; `metric` is a metric's index.
+    fn of(
+        def: &SemanticViewDefinition,
+        names: HashSet<String>,
+        kind: &str,
+        name: &str,
+        metric: Option<usize>,
+    ) -> Self {
+        Self {
+            names,
+            own: (kind == "fact").then(|| normalize_ident_part(name)),
+            metric_spans: metric
+                .map(|i| crate::graph::same_table_metric_ref_spans(def, i))
+                .unwrap_or_default(),
+        }
+    }
+
+    fn read_as_member(&self, r: &IdentRef<'_>) -> bool {
+        let key = r.key();
+        (self.names.contains(&key) && self.own.as_ref() != Some(&key))
+            || self.metric_spans.contains(&(r.start, r.end))
+    }
 }
 
 /// The bare names in `text` (comment-free) that could be a column of the
 /// member's table: not a keyword where the grammar reads one, not a name of
 /// the expression's own, not inside a subquery, and not another member's name.
-fn column_candidates<'t>(text: &'t str, members: &HashSet<String>) -> Vec<IdentRef<'t>> {
+fn column_candidates<'t>(text: &'t str, members: &Members) -> Vec<IdentRef<'t>> {
     let lambdas = lambda_scopes(text);
     let spans = subquery_spans(text);
     scan_references(text)
@@ -133,7 +188,7 @@ fn column_candidates<'t>(text: &'t str, members: &HashSet<String>) -> Vec<IdentR
                 && !spans.iter().any(|&(s, e)| r.start >= s && r.end <= e)
                 && !is_local_name(text, r, &lambdas)
                 && !is_not_a_column(text, r)
-                && !members.contains(&r.key())
+                && !members.read_as_member(r)
         })
         .collect()
 }
@@ -151,7 +206,7 @@ fn qualify_expr(
     expr: &str,
     qualifier: &str,
     own: &HashSet<String>,
-    members: &HashSet<String>,
+    members: &Members,
 ) -> Option<String> {
     let text = crate::util::blank_sql_comments(expr);
     let refs: Vec<_> = column_candidates(&text, members)
@@ -185,34 +240,26 @@ pub(crate) fn qualify_bare_columns(
     if def.table_columns.is_empty() {
         return Cow::Borrowed(def);
     }
-    let (others, metric_others) = (member_names(def, "fact"), member_names(def, "metric"));
-    let qualify = |table: Option<&str>, expr: &str, members: &HashSet<String>| {
-        let table = table?;
-        let own = columns_of(def, table)?;
-        qualify_expr(
-            expr,
-            &crate::expand::quote_stored_ident(table),
-            &own,
-            members,
-        )
-    };
+    let names = Members::names_of(def);
     let mut out: Option<SemanticViewDefinition> = None;
-    for (i, f) in def.facts.iter().enumerate() {
-        if let Some(new) = qualify(f.source_table.as_deref(), &f.expr, &others) {
-            out.get_or_insert_with(|| def.clone()).facts[i].expr = new;
-        }
-    }
-    for (i, d) in def.dimensions.iter().enumerate() {
-        if let Some(new) = qualify(d.source_table.as_deref(), &d.expr, &others) {
-            out.get_or_insert_with(|| def.clone()).dimensions[i].expr = new;
-        }
-    }
-    for (i, m) in def.metrics.iter().enumerate() {
-        if m.is_window() {
+    for m in member_exprs(def) {
+        let Some(own) = columns_of(def, m.table) else {
             continue;
-        }
-        if let Some(new) = qualify(m.source_table.as_deref(), &m.expr, &metric_others) {
-            out.get_or_insert_with(|| def.clone()).metrics[i].expr = new;
+        };
+        let members = Members::of(def, names.clone(), m.kind, m.name, m.slot.metric());
+        let Some(new) = qualify_expr(
+            m.expr,
+            &crate::expand::quote_stored_ident(m.table),
+            &own,
+            &members,
+        ) else {
+            continue;
+        };
+        let out = out.get_or_insert_with(|| def.clone());
+        match m.slot {
+            Slot::Fact(i) => out.facts[i].expr = new,
+            Slot::Dimension(i) => out.dimensions[i].expr = new,
+            Slot::Metric(i) => out.metrics[i].expr = new,
         }
     }
     out.map_or(Cow::Borrowed(def), Cow::Owned)
@@ -240,12 +287,14 @@ pub(crate) fn check_bare_columns(
         .iter()
         .filter_map(|t| Some((t.alias.as_str(), columns_of(def, &t.alias)?)))
         .collect();
+    let names = Members::names_of(def);
     for m in member_exprs(def) {
         let Some(own) = columns_of(def, m.table) else {
             continue;
         };
         let text = crate::util::blank_sql_comments(m.expr);
-        for r in column_candidates(&text, &member_names(def, m.kind)) {
+        let members = Members::of(def, names.clone(), m.kind, m.name, m.slot.metric());
+        for r in column_candidates(&text, &members) {
             let key = r.key();
             if own.contains(&key) {
                 continue;
@@ -396,6 +445,59 @@ mod tests {
         assert_eq!(out.facts[0].expr, "\"o\".amount * 0.2");
         assert_eq!(out.metrics[0].expr, "SUM(\"o\".amount)");
         assert_eq!(out.metrics[1].expr, "SUM(tax) + total + v");
+    }
+
+    /// The expansion reads a bare name in a metric as a metric only when it
+    /// names another metric on the same table, outside an aggregate call
+    /// (`graph::same_table_metrics`); anywhere else it is a column.
+    #[test]
+    fn a_metric_name_is_a_metric_only_where_the_expansion_reads_one() {
+        let def = def_with(&["amount", "total", "seats"])
+            .with_metric("amount", "SUM(amount)", Some("o"))
+            .with_metric("total", "SUM(total)", Some("o"))
+            .with_metric("ratio", "total / SUM(total)", Some("o"))
+            .with_metric("seats", "SUM(qty)", Some("li"))
+            .with_metric("o_seats", "SUM(seats)", Some("o"));
+        let out = qualify_bare_columns(&def);
+        let exprs: Vec<&str> = out.metrics.iter().map(|m| m.expr.as_str()).collect();
+        assert_eq!(
+            exprs,
+            [
+                "SUM(\"o\".amount)",
+                "SUM(\"o\".total)",
+                "total / SUM(\"o\".total)",
+                "SUM(\"li\".qty)",
+                "SUM(\"o\".seats)",
+            ]
+        );
+    }
+
+    /// A fact's own name in its own expression is the column (an identity
+    /// fact, `li.qty AS qty`), as the fact DAG reads it; elsewhere the name is
+    /// the fact.
+    #[test]
+    fn an_identity_fact_reads_its_own_column() {
+        let def = def_with(&["qty"])
+            .with_fact("qty", "qty", "li")
+            .with_metric("total_qty", "SUM(qty)", Some("li"));
+        let out = qualify_bare_columns(&def);
+        assert_eq!(out.facts[0].expr, "\"li\".qty");
+        assert_eq!(out.metrics[0].expr, "SUM(qty)");
+    }
+
+    /// The refusal reads member names by the same rules.
+    #[test]
+    fn a_self_named_metric_over_another_tables_column_is_refused() {
+        let def = def_with(&["amount"]).with_metric("amount", "SUM(amount)", Some("li"));
+        let err = check_bare_columns("v", &def).expect_err("amount is o's");
+        assert!(err.contains("metric 'amount' references 'amount'"), "{err}");
+    }
+
+    #[test]
+    fn an_identity_fact_over_another_tables_column_is_refused() {
+        let def = def_with(&["code"]).with_fact("code", "code", "li");
+        let err = check_bare_columns("v", &def).expect_err("code is o's");
+        assert!(err.contains("fact 'code' references 'code'"), "{err}");
     }
 
     #[test]

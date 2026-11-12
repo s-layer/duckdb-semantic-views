@@ -83,7 +83,10 @@
 //! like the other tables' member columns ([`DECOYS`]), so the expansion must
 //! read each bare column from its member's own table: from any other it
 //! reads a decoy constant, and before #83 the shared name was ambiguous. The
-//! oracle is unchanged, as it names every column with its table.
+//! metrics `sv`, `su` and `sw` are each written over a column of their own
+//! name (`sv AS sum(sv)`, [`SELF_NAMED`]), which every other table has a
+//! decoy of: a metric's own name in its expression is its column, not the
+//! metric. The oracle is unchanged, as it names every column with its table.
 
 use proptest::prelude::*;
 use semantic_views::expand::{expand, DimensionName, FactName, MetricName, QueryRequest};
@@ -682,15 +685,24 @@ fn build_def_shaped(hop: Hop, diamond: bool, w_first: bool) -> SemanticViewDefin
 
 /// The physical tables' own columns, as [`make_db`] creates them.
 const SCHEMA: [(&str, &[&str]); 4] = [
-    ("w", &["id", "wcat", "ww"]),
-    ("u", &["id", "uk", "us", "rs", "re", "fk_w", "ucat", "uw"]),
+    ("w", &["id", "wcat", "ww", "sw"]),
+    (
+        "u",
+        &["id", "uk", "us", "rs", "re", "fk_w", "ucat", "uw", "su"],
+    ),
     ("x", &["id", "fk_w"]),
-    ("t", &["fk_u", "ts", "d", "v", "fk_x"]),
+    ("t", &["fk_u", "ts", "d", "v", "fk_x", "sv"]),
 ];
+
+/// The metrics [`bare_twin`] writes over a column of their own name: the
+/// table, the metric (and column) name, and the column it copies, so its sum
+/// is the original metric's.
+const SELF_NAMED: [(&str, &str, &str); 3] =
+    [("t", "sv", "v"), ("u", "su", "uw"), ("w", "sw", "ww")];
 
 /// The columns the member expressions read. Every table that lacks one of them
 /// gets a decoy column of that name ([`make_db`]).
-const DECOYS: [&str; 6] = ["d", "v", "ucat", "uw", "wcat", "ww"];
+const DECOYS: [&str; 9] = ["d", "v", "ucat", "uw", "wcat", "ww", "sv", "su", "sw"];
 
 /// The decoy columns of a table with `columns`.
 fn decoys(columns: &[&str]) -> Vec<&'static str> {
@@ -715,7 +727,11 @@ fn bare_twin(mut def: SemanticViewDefinition) -> SemanticViewDefinition {
         d.expr = strip(&d.expr);
     }
     for m in &mut def.metrics {
-        m.expr = strip(&m.expr);
+        m.expr = if SELF_NAMED.iter().any(|(_, name, _)| m.name == *name) {
+            format!("sum({})", m.name)
+        } else {
+            strip(&m.expr)
+        };
     }
     def.table_columns = SCHEMA
         .iter()
@@ -802,6 +818,13 @@ fn make_db(inst: &Instance) -> duckdb::Connection {
             .collect();
         conn.execute_batch(&format!("INSERT INTO t VALUES {};", values.join(",")))
             .expect("insert t rows");
+    }
+    // The self-named metrics' columns, copies of the columns they sum.
+    for (table, column, source) in SELF_NAMED {
+        conn.execute_batch(&format!(
+            "ALTER TABLE {table} ADD COLUMN {column} INTEGER; UPDATE {table} SET {column} = {source};"
+        ))
+        .expect("add a self-named metric's column");
     }
     // TECH-DEBT #83's decoys: each table gets the other tables' member columns
     // once the rows are in, each holding one constant of its own, which no generated value equals.

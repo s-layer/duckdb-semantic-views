@@ -276,11 +276,5 @@ fn own_table_bare_columns_pass_the_check() {
 fn stored_without_column_lists_keeps_the_ambiguity() {
     let mut def = bare_def();
     def.table_columns.clear();
-    match outcome_of(&def, &["region"], &["sum_li_oid"], &[]) {
-        Err(e) => assert!(
-            e.contains("Ambiguous reference to column name \"o_id\""),
-            "{e}"
-        ),
-        Ok(rows) => panic!("expected the ambiguity, got {rows:?}"),
-    }
+    assert_ambiguous(outcome_of(&def, &["region"], &["sum_li_oid"], &[]));
 }

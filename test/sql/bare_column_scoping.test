@@ -209,6 +209,46 @@ SELECT * FROM SEMANTIC_VIEW(bcs_stored DIMENSIONS region METRICS sum_li_oid) ORD
 EU	31
 NULL	NULL
 
+# Re-creating a stored view unchanged keeps its materializations: the old
+# definition's bare columns and the statement's qualified ones are compared
+# under the statement's column lists.
+statement ok
+CREATE TABLE bcs_agg AS SELECT 'EU' AS region, 150 AS revenue;
+
+statement ok
+CREATE SEMANTIC VIEW bcs_mat AS
+  TABLES (o AS bcs_o PRIMARY KEY (o_id), c AS bcs_c PRIMARY KEY (c_id))
+  RELATIONSHIPS (o_to_c AS o(c_id) REFERENCES c)
+  DIMENSIONS (c.region AS region)
+  METRICS (o.revenue AS SUM(amount))
+  MATERIALIZATIONS (by_region AS (TABLE bcs_agg, DIMENSIONS (region), METRICS (revenue)));
+
+statement ok
+INSERT INTO semantic_layer._definitions (schema_name, name, definition)
+SELECT schema_name, 'bcs_mat_stored', json_merge_patch(definition, '{"table_columns": null}')::VARCHAR
+FROM semantic_layer._definitions WHERE name = 'bcs_mat';
+
+statement ok
+CREATE OR ALTER SEMANTIC VIEW bcs_mat_stored AS
+  TABLES (o AS bcs_o PRIMARY KEY (o_id), c AS bcs_c PRIMARY KEY (c_id))
+  RELATIONSHIPS (o_to_c AS o(c_id) REFERENCES c)
+  DIMENSIONS (c.region AS region)
+  METRICS (o.revenue AS SUM(amount));
+
+query I
+SELECT count(*) FROM (SHOW SEMANTIC MATERIALIZATIONS IN bcs_mat_stored);
+----
+1
+
+statement ok
+DROP SEMANTIC VIEW bcs_mat_stored;
+
+statement ok
+DROP SEMANTIC VIEW bcs_mat;
+
+statement ok
+DROP TABLE bcs_agg;
+
 # FROM YAML records them too.
 statement ok
 CREATE SEMANTIC VIEW bcs_yaml FROM YAML $$
@@ -294,6 +334,81 @@ SELECT * FROM SEMANTIC_VIEW(bcs_inline DIMENSIONS region METRICS sum_li_oid) ORD
 ----
 EU	31
 NULL	NULL
+
+# A member's own name in its own expression is its column, not the member:
+# a metric named after its column (`li.o_id AS SUM(o_id)`) and an identity
+# fact (`li.o_id AS o_id`) read li.o_id, which `o` has too.
+statement ok
+CREATE SEMANTIC VIEW bcs_self_metric AS
+  TABLES (
+    c  AS bcs_c  PRIMARY KEY (c_id),
+    o  AS bcs_o  PRIMARY KEY (o_id),
+    li AS bcs_li PRIMARY KEY (li_id)
+  )
+  RELATIONSHIPS (
+    o_to_c  AS o(c_id)  REFERENCES c,
+    li_to_o AS li(o_id) REFERENCES o
+  )
+  DIMENSIONS (c.region AS region)
+  METRICS (li.o_id AS SUM(o_id));
+
+query TI
+SELECT * FROM SEMANTIC_VIEW(bcs_self_metric DIMENSIONS region METRICS o_id) ORDER BY ALL NULLS LAST;
+----
+EU	31
+NULL	NULL
+
+statement ok
+CREATE SEMANTIC VIEW bcs_identity_fact AS
+  TABLES (
+    c  AS bcs_c  PRIMARY KEY (c_id),
+    o  AS bcs_o  PRIMARY KEY (o_id),
+    li AS bcs_li PRIMARY KEY (li_id)
+  )
+  RELATIONSHIPS (
+    o_to_c  AS o(c_id)  REFERENCES c,
+    li_to_o AS li(o_id) REFERENCES o
+  )
+  FACTS (li.o_id AS o_id)
+  DIMENSIONS (c.region AS region)
+  METRICS (li.sum_li_oid AS SUM(o_id));
+
+query TI
+SELECT * FROM SEMANTIC_VIEW(bcs_identity_fact DIMENSIONS region METRICS sum_li_oid) ORDER BY ALL NULLS LAST;
+----
+EU	31
+NULL	NULL
+
+# The same members over a column only `o` has are refused, as any bare column
+# of another table is.
+statement error
+CREATE SEMANTIC VIEW bcs_bad AS
+  TABLES (
+    o  AS bcs_o  PRIMARY KEY (o_id),
+    li AS bcs_li PRIMARY KEY (li_id)
+  )
+  RELATIONSHIPS (li_to_o AS li(o_id) REFERENCES o)
+  METRICS (li.amount AS SUM(amount));
+----
+metric 'amount' references 'amount', a column of table 'o'
+
+statement error
+CREATE SEMANTIC VIEW bcs_bad AS
+  TABLES (
+    o  AS bcs_o  PRIMARY KEY (o_id),
+    li AS bcs_li PRIMARY KEY (li_id)
+  )
+  RELATIONSHIPS (li_to_o AS li(o_id) REFERENCES o)
+  FACTS (li.amount AS amount)
+  METRICS (li.total AS SUM(amount));
+----
+fact 'amount' references 'amount', a column of table 'o'
+
+statement ok
+DROP SEMANTIC VIEW bcs_identity_fact;
+
+statement ok
+DROP SEMANTIC VIEW bcs_self_metric;
 
 statement ok
 DROP SEMANTIC VIEW bcs_inline;

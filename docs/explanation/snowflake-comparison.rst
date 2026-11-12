@@ -339,7 +339,9 @@ An **unqualified column** is the member's own table's column in both systems:
 that also joins another table with a ``code`` column. ``CREATE`` records each
 table's columns so the expansion can tell, and refuses an unqualified column
 that only another table has, as Snowflake does. Here an unqualified name that
-is a fact, a variable or, in a metric, another metric means that member.
+is a fact, a variable or, in a metric outside an aggregate call, another
+metric on the same table means that member; a member's own name in its own
+expression (``li.qty AS qty``) is its column.
 
 .. versionchanged:: 0.19.0
    Before, an unqualified column was resolved against every table the query

@@ -149,6 +149,12 @@ fn keep_tags<T: Clone>(
 /// expand under `new`, so it is not kept. Routing takes only that exact
 /// request with no `where_clause` (`expand::materialization`), so no other
 /// query reads the table.
+///
+/// Both are expanded under `new`'s column lists (TECH-DEBT #83): a view
+/// stored before 0.19.0 has none, so its bare columns would expand as written
+/// and differ from the statement's qualified ones though they read the same
+/// column. Where a bare name would read another column under the new lists,
+/// CREATE refuses the statement before this runs.
 fn answers_the_same(
     view_name: &str,
     old: &SemanticViewDefinition,
@@ -173,6 +179,7 @@ fn answers_the_same(
     let expansion = |def: &SemanticViewDefinition| {
         let unrouted = SemanticViewDefinition {
             materializations: Vec::new(),
+            table_columns: new.table_columns.clone(),
             ..def.clone()
         };
         let bound =
@@ -389,6 +396,30 @@ mod tests {
                 mats(&got)
             );
         }
+    }
+
+    /// A view stored before 0.19.0 records no column lists, so its bare
+    /// columns expand as written while the statement's expand qualified
+    /// (TECH-DEBT #83). Both are compared under the statement's lists, so
+    /// re-creating it unchanged keeps its materializations.
+    #[test]
+    fn a_materialization_is_kept_when_the_column_lists_are_first_recorded() {
+        const BARE: &str = "TABLES (o AS orders PRIMARY KEY (id)) \
+            DIMENSIONS (o.region AS region) \
+            METRICS (o.revenue AS SUM(amount))";
+        let old = def(&format!("{BARE} {MAT}"));
+        let mut new = def(BARE);
+        new.table_columns = [(
+            "o".to_string(),
+            ["id", "region", "amount"].map(str::to_string).to_vec(),
+        )]
+        .into_iter()
+        .collect();
+        assert_eq!(mats(&merge("v", new.clone(), Some(&old))), ["by_region"]);
+        // A changed member still drops it.
+        let mut changed = def(&BARE.replace("SUM(amount)", "MAX(amount)"));
+        changed.table_columns = new.table_columns;
+        assert!(merge("v", changed, Some(&old)).materializations.is_empty());
     }
 
     /// A table name without a schema resolves in the session's schema, so a
