@@ -292,6 +292,7 @@ fn arb_case() -> impl Strategy<Value = Case> {
                     (
                         prop::bool::weighted(0.5),
                         prop::bool::weighted(0.5),
+                        0usize..8,
                         0i64..3,
                     ),
                 ),
@@ -304,7 +305,7 @@ fn arb_case() -> impl Strategy<Value = Case> {
         .prop_map(
             |(
                 (n, edges, one_to_one, rows, o1, o2),
-                (metric, dims, filter, doubled, using, aim, aim_back, (twin, aim_filter, c)),
+                (metric, dims, filter, doubled, using, aim, aim_back, (twin, aim_filter, pick, c)),
             )| {
                 let mut case = Case {
                     n,
@@ -358,7 +359,7 @@ fn arb_case() -> impl Strategy<Value = Case> {
                         let past: Vec<usize> = (0..case.n)
                             .filter(|&k| !case.chains(to, k).is_empty())
                             .collect();
-                        let k = past[usize::try_from(c).expect("small") % past.len()];
+                        let k = past[pick % past.len()];
                         case.filter = Some((k, c));
                     }
                 }
@@ -1221,9 +1222,11 @@ fn generator_reaches_every_outcome() {
 
     let mut runner = TestRunner::deterministic();
     let mut seen: std::collections::HashMap<&str, usize> = std::collections::HashMap::new();
-    // 3000 draws: a query with no metric whose members no table reaches by
+    // 4000 draws: a query with no metric whose members no table reaches by
     // chains (meeting table or unrelated) is about one draw in fifty.
-    for _ in 0..3000 {
+    // A step back across the role is rarer still since the twin draws (about
+    // one draw in 300).
+    for _ in 0..4000 {
         let case = arb_case()
             .new_tree(&mut runner)
             .expect("strategy must produce a value")
@@ -1326,7 +1329,7 @@ fn generator_reaches_every_outcome() {
     ] {
         assert!(
             seen.get(key).copied().unwrap_or(0) >= 10,
-            "outcome '{key}' reached {} times in 3000 cases: {seen:?}",
+            "outcome '{key}' reached {} times in 4000 cases: {seen:?}",
             seen.get(key).copied().unwrap_or(0)
         );
     }
