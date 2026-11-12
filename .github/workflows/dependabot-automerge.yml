@@ -30,6 +30,7 @@ on:
       - "Integration Checks"
       - "Fuzz"
       - "Claude Review"
+      - "Verify lockfile"
     types: [completed]
 
 permissions:
