@@ -635,3 +635,78 @@ fn snapshot_reanchor_resolves_using_by_relationship_identity() {
         vec!["EU|3", "NULL|40"]
     );
 }
+
+// ---------------------------------------------------------------------------
+// A snapshot filtered on a convergent parent its `USING` names.
+// ---------------------------------------------------------------------------
+
+/// `a` is referenced by `b` (`r_bal`) and `n` (`r_note`), two different
+/// tables, so it is a convergent parent, not role-played, and it is declared
+/// first. `balance USING (r_bal) NON ADDITIVE BY (snap)` sums `b.amt` at the
+/// latest `a.snap` per group. Accounts: 0 and 2 have no snapshot and no
+/// balance row, 1 has snapshot 1. Balance rows: 0 on account 1 (group 0, 5),
+/// 1 on no account (group 1, 3).
+fn convergent_def() -> SemanticViewDefinition {
+    SemanticViewDefinition {
+        tables: vec![
+            table("a", &["id"]),
+            table("b", &["id"]),
+            table("n", &["id"]),
+        ],
+        joins: vec![
+            many_to_one("r_bal", "b", "a", "acct_id", "id"),
+            many_to_one("r_note", "n", "a", "acct_id", "id"),
+        ],
+        ..Default::default()
+    }
+    .with_dimension("grp", "b.grp", Some("b"))
+    .with_dimension("snap", "a.snap", Some("a"))
+    .with_metric("balance", "SUM(b.amt)", Some("b"))
+    .with_using_relationship("balance", &["r_bal"])
+    .with_non_additive_by("balance", &[("snap", SortOrder::Asc, NullsOrder::Last)])
+}
+
+fn convergent_db() -> duckdb::Connection {
+    let conn = duckdb::Connection::open_in_memory().expect("in-memory DuckDB");
+    conn.execute_batch(
+        "CREATE TABLE d1_a (id INT, snap INT); \
+         CREATE TABLE d1_b (id INT, acct_id INT, grp INT, amt INT); \
+         CREATE TABLE d1_n (id INT, acct_id INT); \
+         INSERT INTO d1_a VALUES (0, NULL), (1, 1), (2, NULL); \
+         INSERT INTO d1_b VALUES (0, 1, 0, 5), (1, NULL, 1, 3); \
+         INSERT INTO d1_n VALUES (0, 0);",
+    )
+    .expect("load the convergent fixture");
+    conn
+}
+
+/// Filtered on the parent's snapshot value, the snapshot still reads the
+/// balance rows: only row 1 (no account, so no snapshot) passes `snap IS
+/// NULL`, and it is its group's snapshot. Anchored at `a` (declared first),
+/// the snapshot read the accounts instead, lost row 1 and gave a `NULL`
+/// group for the accounts with no balance.
+#[test]
+fn snapshot_filtered_on_a_convergent_parent_is_home_anchored() {
+    assert_eq!(
+        rows(
+            &convergent_def(),
+            &convergent_db(),
+            &req(&["grp"], &["balance"], Some("snap IS NULL"))
+        ),
+        vec!["1|3"]
+    );
+}
+
+/// The same with no dimension: one total over the filtered balance rows, row
+/// 1's 3 (anchored at `a`, the accounts with no balance gave `NULL`).
+#[test]
+fn snapshot_total_filtered_on_a_convergent_parent_is_home_anchored() {
+    assert_eq!(
+        rows(
+            &convergent_def(),
+            &convergent_db(),
+            &req(&[], &["balance"], Some("snap IS NULL"))
+        ),
+        vec!["3"]
+    );
+}

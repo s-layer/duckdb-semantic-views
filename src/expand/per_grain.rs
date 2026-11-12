@@ -550,22 +550,16 @@ pub(super) fn plan(
     // semi-additive emitter, which `snapshot_cte_anchor` already re-points at the
     // metric's own grain (TECH-DEBT #36 increment 1). Declining here keeps that
     // verified single-CTE shape instead of re-routing it through a one-group
-    // plan that would emit the same thing with an extra wrapper.
+    // plan that would emit the same thing with an extra wrapper. Unless the
+    // group follows a path a `USING` picks through a diamond: only a grain
+    // CTE's joins follow it (TECH-DEBT #109).
     let queried_dim_keys: HashSet<String> = resolved_dims
         .iter()
         .map(|d| crate::ident::normalize_ident_part(&d.name))
         .collect();
     if partition.groups.len() == 1
+        && partition.groups[0].paths.is_empty()
         && is_snapshot_group(def, &partition.groups[0], &queried_dim_keys)
-    {
-        return None;
-    }
-    // The snapshot CTE joins along the usual join walk, so a snapshot group
-    // that must follow a pinned path is declined, and the caller refuses it.
-    if partition
-        .groups
-        .iter()
-        .any(|g| !g.paths.is_empty() && is_snapshot_group(def, g, &queried_dim_keys))
     {
         return None;
     }
@@ -1284,9 +1278,15 @@ fn touched_tables(
 }
 
 /// Whether any queried metric's `USING` names a relationship whose target table
-/// this query reaches (see [`touched_tables`]). The single-CTE anchors cannot
-/// honour a role, so for them such a relationship declines the re-anchor; one
-/// whose target nothing reaches scopes nothing and is no obstacle.
+/// this query reaches (see [`touched_tables`]) and is role-played. The
+/// single-CTE anchors cannot honour a role, so for them such a relationship
+/// declines the re-anchor; one whose target nothing reaches scopes nothing and
+/// is no obstacle. Nor is one whose target is reached by one relationship from
+/// each table (a convergent parent, or a plain one): it picks no role, so the
+/// anchor joins it along the one relationship from the metric's table, as
+/// [`is_eligible`] treats it, and `anchor_needs` joins the scoped instance for
+/// the facts the metric inlines (Phase 7 PR 5b: a snapshot filtered on such a
+/// parent, declared first, used to be anchored there and read its rows).
 fn using_scopes_a_touched_table(
     def: &SemanticViewDefinition,
     resolved_dims: &[&Dimension],
@@ -1316,8 +1316,11 @@ fn using_scopes_a_touched_table(
     // to nothing is treated as scoping a touched table (decline, unchanged).
     reached.iter().any(|m| {
         m.using_relationships.iter().any(|rel| {
-            crate::graph::find_relationship(&def.joins, rel)
-                .is_none_or(|j| touched.contains(&j.table.to_ascii_lowercase()))
+            crate::graph::find_relationship(&def.joins, rel).is_none_or(|j| {
+                let target = j.table.to_ascii_lowercase();
+                touched.contains(&target)
+                    && super::role_playing::is_role_playing_target(def, &target)
+            })
         })
     })
 }
@@ -1343,7 +1346,14 @@ pub(super) fn expand_per_grain(
     // plan holds only `Direct` outputs — but check rather than assert: falling
     // through to the general emitter is correct for any plan, and a wrong
     // assumption here would panic inside DuckDB rather than mis-render.
+    // A lone snapshot group (one following a `USING` path, TECH-DEBT #109)
+    // ranks its rows first, which only the general emitter renders.
+    let queried_dim_keys: HashSet<String> = resolved_dims
+        .iter()
+        .map(|d| crate::ident::normalize_ident_part(&d.name))
+        .collect();
     if plan.is_single_group()
+        && !is_snapshot_group(def, &plan.groups[0], &queried_dim_keys)
         && plan
             .outputs
             .iter()
@@ -1498,7 +1508,10 @@ fn render_snapshot_group(
         &mets,
         resolved_exprs,
         where_clause,
-        Some(&group.anchor),
+        &super::semi_additive::SnapshotFrom::Grain {
+            anchor: &group.anchor,
+            paths: &group.paths,
+        },
     )?;
 
     let mut sql = String::with_capacity(256);

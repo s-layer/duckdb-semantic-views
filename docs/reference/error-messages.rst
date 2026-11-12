@@ -1687,13 +1687,13 @@ Table reached by more than one path
    o -> c -> r, o -> s -> r. Give the metric a USING that names the first
    relationship of the path to follow, or query members one path reaches
 
-**Cause:** The view reaches ``<table>`` from the metric's table along two chains of relationships through different tables (a diamond): orders reach regions through their customer and through their store. Grouping or filtering orders by region has to pick one, and the two give different numbers. The same error names a filter member (``filter member '<name>'``) or a fact the metric is written over, and a query with no metrics whose rows are read from ``<from>`` (``the query (with no metrics)``). Snowflake refuses the same queries: ``Multi-path relationship between the dimension entity ... and the base metric or dimension entity ... is not supported``.
+**Cause:** The view reaches ``<table>`` from the metric's table along two chains of relationships through different tables (a diamond): orders reach regions through their customer and through their store. Grouping or filtering orders by region has to pick one, and the two give different numbers. The same error names a filter member (``filter member '<name>'``) or a fact the metric is written over, a semi-additive metric's ``NON ADDITIVE BY`` dimension (``NON ADDITIVE BY dimension '<dim>' of metric '<metric>'``: its snapshot reads the dimension whether or not it is queried), and a query with no metrics whose rows are read from ``<from>`` (``the query (with no metrics)``). Snowflake refuses the same queries: ``Multi-path relationship between the dimension entity ... and the base metric or dimension entity ... is not supported``.
 
 **Fix:** Give the metric a ``USING`` that names the first relationship of one path, ``o.rev_by_store USING (o_store) AS SUM(amount)``, and the metric follows it: each order counts in its store's region. Metrics with different paths can be queried together; each is grouped through its own path and the results are merged on the queried dimensions. A query with no metrics cannot name a path: query members one path reaches, such as customers and their regions.
 
 .. versionchanged:: 0.19.0
 
-   These queries used to follow the path declared first, without saying so.
+   These queries used to follow the path declared first, without saying so. A semi-additive metric's snapshot did too, for a ``NON ADDITIVE BY`` dimension on such a table.
 
 .. code-block:: text
 
@@ -1704,7 +1704,7 @@ Table reached by more than one path
    Snowflake does not support this either (multi-path in a many-to-many
    relationship). Query members one path reaches
 
-**Cause:** No chain of relationships leads from the metric's table to ``<table>``, so reaching it crosses a many-to-many relationship (``c <- o -> s``: the orders between customers and stores) or steps back along a relationship, and there is more than one way to do that. Customers reach stores through their orders and through their regions; books reach authors through either of two bridges (``b <- ba -> a``, ``b <- be -> a``); a book reaches ``book_authors`` directly and through its lead author (``b <- ba``, ``b -> a <- ba``). Each path gives a different number. The same error names a filter member, and a query with no metrics whose members two bridges pair. Snowflake refuses the same queries: ``000002: Unsupported feature 'Multi-path in many-to-many relationship'``.
+**Cause:** No chain of relationships leads from the metric's table to ``<table>``, so reaching it crosses a many-to-many relationship (``c <- o -> s``: the orders between customers and stores) or steps back along a relationship, and there is more than one way to do that. Customers reach stores through their orders and through their regions; books reach authors through either of two bridges (``b <- ba -> a``, ``b <- be -> a``); a book reaches ``book_authors`` directly and through its lead author (``b <- ba``, ``b -> a <- ba``). Each path gives a different number. The same error names a filter member, a semi-additive metric's ``NON ADDITIVE BY`` dimension (``NON ADDITIVE BY dimension '<dim>' of metric '<metric>'``) whether or not it is queried, and a query with no metrics whose members two bridges pair. Snowflake refuses the same queries: ``000002: Unsupported feature 'Multi-path in many-to-many relationship'``.
 
 **Fix:** Query a metric on a table that reaches the member by a chain of relationships (``o.revenue`` by store, ``ba.credits`` by author country), or members one path reaches. To cross one way only, declare a view without the other path.
 
@@ -1717,13 +1717,16 @@ Table reached by more than one path
    semantic view '<view>': metric '<metric>' reaches table '<table>' along the
    path its USING names (o -> s -> r), which this query cannot follow: only the
    plan that computes each metric at its own grain follows a USING path, and
-   this query does not fit that plan (for example, it also holds an active
-   semi-additive metric, or a member declared on no table). Query the metric
-   with fewer members
+   this query does not fit that plan (for example, it also holds a member
+   declared on no table). Query the metric with fewer members
 
-**Cause:** Only part of the query planner follows a path a ``USING`` picks through a diamond. A semi-additive metric whose ``NON ADDITIVE BY`` dimension is not queried, or a dimension or filter member declared on no table, sends the query elsewhere, where it would follow the path declared first. When the query also has a dimension or filter below the metric's grain, it is reported as a fan trap instead, since the plan that would count each row once per group declined the query too.
+**Cause:** Only part of the query planner follows a path a ``USING`` picks through a diamond. A dimension or filter member declared on no table sends the query elsewhere, where it would follow the path declared first. When the query also has a dimension or filter below the metric's grain, it is reported as a fan trap instead, since the plan that would count each row once per group declined the query too.
 
 **Fix:** Query the ``USING`` metric without the members the message names.
+
+.. versionchanged:: 0.19.0
+
+   A semi-additive metric whose ``NON ADDITIVE BY`` dimension is not queried follows its ``USING`` path, its snapshot included. It used to be refused with this error.
 
 
 Window metric over a window metric

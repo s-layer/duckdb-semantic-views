@@ -504,9 +504,9 @@ Troubleshooting
    When a table is reachable through two named relationships, a predicate has no
    way to say which role it means on its own. It follows the metrics' role when
    every metric's ``USING`` names the same one: ``arrivals`` filtered on
-   ``city = 'Paris'`` counts the flights arriving in Paris. Beside metrics that
-   name two different roles, or none, or beside a semi-additive metric whose
-   ``NON ADDITIVE BY`` dimension is not queried,
+   ``city = 'Paris'`` counts the flights arriving in Paris, and a semi-additive
+   metric naming that role picks its snapshot from those flights. Beside
+   metrics that name two different roles, or none,
    the query errors rather than binding to
    whichever relationship was declared first. Query the metrics separately, or
    filter on a member of a table that is reached one way only. See

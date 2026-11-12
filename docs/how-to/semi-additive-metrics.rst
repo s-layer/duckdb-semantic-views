@@ -302,6 +302,13 @@ Troubleshooting
 **Slower queries with several non-additive dimension sets**
    When semi-additive metrics in one query declare different ``NON ADDITIVE BY`` dimensions, the extension ranks the rows once per distinct list. The results are correct, but each extra list adds a window function to the query. Query those metrics separately if that matters.
 
+**A NON ADDITIVE BY dimension is on a table reached more than one way**
+   When the view reaches the dimension's table from the metric's table along two paths through different tables (orders reach regions through their customer and through their store), the snapshot has to read the dimension along one of them. Give the metric a ``USING`` that names the first relationship of the path, ``o.latest USING (o_store) NON ADDITIVE BY (region_name) AS SUM(o.amount)``, and the snapshot ranks each order by its store's region, whether or not the region is queried. Without one, the query is refused with *by more than one path*, naming the ``NON ADDITIVE BY`` dimension. A filter on a role-played table follows the role the metric's ``USING`` names, as it does for any metric (see :ref:`howto-role-playing`).
+
+   .. versionchanged:: 0.19.0
+
+      The snapshot used to read such a dimension along the path declared first, and a semi-additive metric with a ``USING`` path through a diamond was refused. A filter on a role-played table beside an active semi-additive metric was refused too.
+
 **A co-queried metric is rejected: cannot be co-queried with semi-additive metric**
    A regular metric on the same table as the semi-additive metric is not a single ``SUM/COUNT/AVG/MIN/MAX(<expression>)`` call -- ``COUNT(*)``, for example. Query the two metrics separately, or rewrite the regular metric as a single aggregate call over a column, such as ``COUNT(a.id)``.
 

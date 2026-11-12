@@ -224,3 +224,53 @@ query I
 SELECT * FROM SEMANTIC_VIEW(rbx_air METRICS elev_at_last_city_q);
 ----
 100
+
+# Phase 7 PR 5b (TECH-DEBT #111): a filter on a role beside a semi-additive
+# metric whose NON ADDITIVE BY dimension is not queried follows the metric's
+# role. last_arrival is the latest flight's id among those it reads by their
+# arriving airport: arriving in Paris, flight 2 (departing it, 3). It used to
+# be refused as an ambiguous filter. Declared with the details first.
+statement ok
+CREATE SEMANTIC VIEW rbx_snap
+  TABLES (
+    d AS rbx_details PRIMARY KEY (airport_code),
+    ap AS rbx_airports PRIMARY KEY (code),
+    f AS rbx_flights PRIMARY KEY (flight_id)
+  )
+  RELATIONSHIPS (
+    dep_airport AS f (dep) REFERENCES ap,
+    arr_airport AS f (arr) REFERENCES ap,
+    d_airport AS d (airport_code) REFERENCES ap
+  )
+  DIMENSIONS (
+    f.flight AS f.flight_id,
+    ap.city AS ap.city,
+    d.terminal AS d.terminal
+  )
+  METRICS (
+    f.arrivals USING (arr_airport) AS COUNT(f.flight_id),
+    f.departures USING (dep_airport) AS COUNT(f.flight_id),
+    f.last_arrival USING (arr_airport) NON ADDITIVE BY (flight) AS SUM(f.flight_id)
+  );
+
+query I
+SELECT * FROM SEMANTIC_VIEW(rbx_snap METRICS f.last_arrival WHERE city = 'Paris');
+----
+2
+
+# Back across the role, through the arriving airport's details.
+query I
+SELECT * FROM SEMANTIC_VIEW(rbx_snap METRICS f.last_arrival WHERE terminal = 'T2');
+----
+2
+
+query II
+SELECT * FROM SEMANTIC_VIEW(rbx_snap METRICS f.arrivals, f.last_arrival WHERE city = 'Paris');
+----
+1	2
+
+# Beside a metric on the other role the filter has no one role to follow.
+statement error
+SELECT * FROM SEMANTIC_VIEW(rbx_snap METRICS f.departures, f.last_arrival WHERE city = 'Paris');
+----
+so the filter has no role to follow

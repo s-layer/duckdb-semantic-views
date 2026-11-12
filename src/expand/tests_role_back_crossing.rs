@@ -147,6 +147,7 @@ fn try_run(def: &SemanticViewDefinition, req: &QueryRequest) -> Result<Vec<Strin
                         duckdb::types::Value::Text(t) => t,
                         duckdb::types::Value::BigInt(n) => n.to_string(),
                         duckdb::types::Value::Int(n) => n.to_string(),
+                        duckdb::types::Value::HugeInt(n) => n.to_string(),
                         other => format!("{other:?}"),
                     })
                 })
@@ -392,25 +393,69 @@ fn a_filter_beside_a_child_metric_names_its_role_in_any_order() {
     }
 }
 
-/// Beside a semi-additive metric whose `NON ADDITIVE BY` dimension is not
-/// queried, the snapshot takes no role scope for the predicate, so a filter on
-/// the city is refused even though the metric names its role (TECH-DEBT #111).
-#[test]
-fn a_filter_beside_a_semi_additive_metric_is_refused() {
+/// `air` plus `last_arrival`, the latest flight's id among the flights its
+/// `USING (arr_airport)` reads, `NON ADDITIVE BY` the flight. The latest
+/// flight arriving in Paris is 2; the latest departing it is 3.
+fn air_with_snapshot(order: &[usize]) -> SemanticViewDefinition {
+    let mut def = air(order);
+    def.dimensions.push(dim("flight", "f.flight_id", "f"));
+    def.metrics.push(Metric {
+        non_additive_by: vec![crate::model::NonAdditiveDim {
+            dimension: "flight".to_string(),
+            ..Default::default()
+        }],
+        ..metric("last_arrival", "f", "SUM(f.flight_id)", &["arr_airport"])
+    });
+    def
+}
+
+fn snapshot_case(dims: &[&str], mets: &[&str], where_clause: Option<&str>, want: &[&str]) {
+    let mut want: Vec<String> = want.iter().map(|r| (*r).to_string()).collect();
+    want.sort();
     for order in ORDERS {
-        let mut def = air(&order);
-        def.dimensions.push(dim("flight", "f.flight_id", "f"));
-        def.metrics.push(Metric {
-            non_additive_by: vec![crate::model::NonAdditiveDim {
-                dimension: "flight".to_string(),
-                ..Default::default()
-            }],
-            ..metric("arrivals_semi", "f", "COUNT(f.flight_id)", &["arr_airport"])
-        });
-        match expand(
-            "air",
-            &def,
-            &req(&[], &["arrivals_semi"], Some("city = 'Paris'")),
+        let r = req(dims, mets, where_clause);
+        assert_eq!(
+            try_run(&air_with_snapshot(&order), &r).unwrap_or_else(|e| panic!("{order:?}: {e}")),
+            want,
+            "{r:?}, tables in order {order:?}"
+        );
+    }
+}
+
+/// Beside a semi-additive metric whose `NON ADDITIVE BY` dimension is not
+/// queried, a filter on the city follows the metric's role, and the snapshot
+/// picks the latest flight arriving in Paris (TECH-DEBT #111).
+#[test]
+fn a_filter_beside_a_semi_additive_metric_follows_its_role() {
+    snapshot_case(&[], &["last_arrival"], Some("city = 'Paris'"), &["2"]);
+}
+
+/// The same through the details, back across the role: the arriving
+/// airport's terminal T2 is Paris's.
+#[test]
+fn a_filter_back_across_the_role_beside_a_semi_additive_metric_follows_it() {
+    snapshot_case(&[], &["last_arrival"], Some("terminal = 'T2'"), &["2"]);
+}
+
+/// Beside a plain metric on the same role, both read the arriving city.
+#[test]
+fn a_filter_beside_a_semi_additive_and_a_plain_metric_on_its_role() {
+    snapshot_case(
+        &[],
+        &["arrivals", "last_arrival"],
+        Some("city = 'Paris'"),
+        &["1/2"],
+    );
+}
+
+/// Beside a metric on the other role, no one role reads the city, so the
+/// filter is refused as it is without the snapshot.
+#[test]
+fn a_filter_beside_a_semi_additive_metric_and_another_role_is_refused() {
+    for order in ORDERS {
+        match try_run(
+            &air_with_snapshot(&order),
+            &req(&[], &["departures", "last_arrival"], Some("city = 'Paris'")),
         ) {
             Err(ExpandError::AmbiguousWhereClausePath {
                 role_playing_table, ..
@@ -483,6 +528,7 @@ fn t_roles_run(order: &[usize], dims: &[&str], mets: &[&str]) -> Result<Vec<Stri
                         duckdb::types::Value::Null => "NULL".to_string(),
                         duckdb::types::Value::BigInt(n) => n.to_string(),
                         duckdb::types::Value::Int(n) => n.to_string(),
+                        duckdb::types::Value::HugeInt(n) => n.to_string(),
                         other => format!("{other:?}"),
                     })
                 })

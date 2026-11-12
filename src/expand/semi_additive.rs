@@ -170,12 +170,35 @@ pub(super) struct SnapshotBlock {
     pub(super) outer_exprs: Vec<String>,
 }
 
+/// Where a snapshot's inner SELECT reads its rows from, and how it joins.
+pub(super) enum SnapshotFrom<'a> {
+    /// `FROM` the base table, joined by the base-anchored resolver.
+    /// `where_scopes` names each `where_clause` table read on the one role
+    /// every metric names, with the role's scoped alias
+    /// ([`super::role_playing::where_role_scopes`]): the table is joined
+    /// under that alias and the predicate rewritten to name it (TECH-DEBT
+    /// #111).
+    Base {
+        where_scopes: &'a [(String, String)],
+    },
+    /// `FROM` a metric's own table: one [`super::per_grain::snapshot_cte_anchor`]
+    /// found, or a per-grain group's anchor. `paths` are the group's
+    /// [`Group::paths`](super::per_grain) — each table the anchor reaches by
+    /// several paths, joined along the one the metrics' `USING` picks
+    /// (TECH-DEBT #109).
+    Grain {
+        anchor: &'a str,
+        paths: &'a HashMap<String, Vec<String>>,
+    },
+}
+
 /// Build both halves of the snapshot for `resolved_mets`.
 ///
 /// `dim_aliases[i]` is the already-quoted alias the `i`th dimension takes in the
 /// inner SELECT — the stored name for the base-anchored path, `__sv_d{i}` for a
-/// grain CTE. `anchor` re-points the FROM at a metric's own grain when
-/// [`super::per_grain::snapshot_cte_anchor`] found a safe one.
+/// grain CTE. `from` is the base table, or a metric's own grain when
+/// [`super::per_grain::snapshot_cte_anchor`] found a safe one or the per-grain
+/// planner gave the snapshot its own group.
 #[allow(clippy::too_many_arguments)]
 pub(super) fn build_snapshot_block(
     view_name: &str,
@@ -185,7 +208,7 @@ pub(super) fn build_snapshot_block(
     resolved_mets: &[&Metric],
     resolved_exprs: &HashMap<String, String>,
     where_clause: Option<&super::where_clause::ResolvedWhere>,
-    anchor: Option<&str>,
+    from: &SnapshotFrom<'_>,
 ) -> Result<SnapshotBlock, ExpandError> {
     // `dim_aliases` is positionally parallel to `resolved_dims`; state it here so
     // a caller that builds the two separately fails on this line rather than on
@@ -260,52 +283,15 @@ pub(super) fn build_snapshot_block(
 
     sql.push_str(&cte_select_items.join(",\n"));
 
-    match anchor {
-        Some(a) => push_from_anchor(&mut sql, def, a, "\n    "),
-        None => push_from_base(&mut sql, def, "\n    "),
-    }
-
-    // SG-9: the snapshot ORDER BY references each active NA dim's raw expression
-    // even when that dim is not queried, so the NA dims' source tables must be
-    // joined too. They ride the resolver's extra-alias parameter, which appends
-    // each with its path intermediaries (aliases already joined are skipped).
-    let mut na_dim_sources = collect_na_dim_source_tables(def, &na_groups);
-    // A `where_clause` member's table must be joined here too — the predicate is
-    // applied inside this SELECT, so its aliases have to be in this FROM.
-    if let Some(w) = where_clause {
-        na_dim_sources.extend(w.source_tables.iter().cloned());
-    }
-    let dims: Vec<&crate::model::Dimension> = resolved_dims.iter().map(|rd| rd.dim).collect();
-    let join_dims = with_na_dims_reached_through_a_role(def, &dims, &na_groups);
-    let resolved_joins = match anchor {
-        // Re-anchored: walk out from the metric's own table. The NA-dim and
-        // `where_clause` tables ride the same extra-sources channel they do on
-        // the base-anchored path, so the snapshot ORDER BY still binds. So do
-        // the tables of the facts the metrics and dimensions inline, which
-        // `resolve_joins_pkfk` collects itself but `anchor_joins` does not, and
-        // the `USING`-scoped instances a metric's inlined fact was requalified
-        // to (reviewbot, #250: a per-grain snapshot group emitted `ap__dep`
-        // with no join for it). No dimension roles: `is_eligible` and
-        // `snapshot_cte_anchor` withhold the scoped-alias rescue here.
-        Some(a) => {
-            let mut needs =
-                super::per_grain::anchor_needs(def, resolved_mets, &dims, &na_dim_sources);
-            let chains = push_scoped_na_joins(def, &na_groups, &mut needs.scoped);
-            let mut joins = super::per_grain::anchor_joins(
-                def,
-                a,
-                &dims,
-                &needs.bare,
-                &std::collections::HashMap::new(),
-                &std::collections::HashMap::new(),
-                &needs.scoped,
-            );
-            joins.extend(chains);
-            joins
-        }
-        None => resolve_joins_pkfk(def, &join_dims, resolved_mets, &na_dim_sources),
-    };
-    push_join_clauses(&mut sql, &resolved_joins, def, "\n    LEFT JOIN ");
+    let where_scopes = push_snapshot_from(
+        &mut sql,
+        def,
+        resolved_dims,
+        resolved_mets,
+        &na_groups,
+        where_clause,
+        from,
+    );
 
     // The predicate goes INSIDE this SELECT, which puts it before the `RANK()`
     // in the select list is evaluated. That ordering is the whole point:
@@ -315,7 +301,10 @@ pub(super) fn build_snapshot_block(
     // them — a different, wrong answer.
     if let Some(w) = where_clause {
         sql.push_str("\n    WHERE ");
-        sql.push_str(&w.sql);
+        sql.push_str(&super::role_playing::rewrite_where_to_scopes(
+            &w.sql,
+            where_scopes,
+        ));
     }
 
     let outer_exprs = resolved_mets
@@ -337,6 +326,81 @@ pub(super) fn build_snapshot_block(
         inner_sql: sql,
         outer_exprs,
     })
+}
+
+/// The snapshot's `FROM` and `LEFT JOIN`s, pushed onto `sql`: the base table
+/// or the anchor, and every table the dimensions, the `NON ADDITIVE BY`
+/// dimensions, the metrics' facts and the predicate read. Returns the
+/// predicate's role scopes, which the caller rewrites the predicate to name.
+fn push_snapshot_from<'a>(
+    sql: &mut String,
+    def: &SemanticViewDefinition,
+    resolved_dims: &[ResolvedDim],
+    resolved_mets: &[&Metric],
+    na_groups: &[NaGroup],
+    where_clause: Option<&super::where_clause::ResolvedWhere>,
+    from: &SnapshotFrom<'a>,
+) -> &'a [(String, String)] {
+    match from {
+        SnapshotFrom::Grain { anchor, .. } => push_from_anchor(sql, def, anchor, "\n    "),
+        SnapshotFrom::Base { .. } => push_from_base(sql, def, "\n    "),
+    }
+    let where_scopes: &'a [(String, String)] = match from {
+        SnapshotFrom::Base { where_scopes } => where_scopes,
+        SnapshotFrom::Grain { .. } => &[],
+    };
+
+    // SG-9: the snapshot ORDER BY references each active NA dim's raw expression
+    // even when that dim is not queried, so the NA dims' source tables must be
+    // joined too. They ride the resolver's extra-alias parameter, which appends
+    // each with its path intermediaries (aliases already joined are skipped).
+    let mut na_dim_sources = collect_na_dim_source_tables(def, na_groups);
+    // A `where_clause` member's table must be joined here too — the predicate is
+    // applied inside this SELECT, so its aliases have to be in this FROM. One
+    // read on a role is joined as a dimension on it would be, under the role's
+    // scoped alias, as the base-anchored emitter of a plain query joins it.
+    let (where_tables, scoped_where_dims) = super::role_playing::split_where_tables(
+        where_clause.map_or(&[][..], |w| w.source_tables.as_slice()),
+        where_scopes,
+    );
+    na_dim_sources.extend(where_tables);
+    let dims: Vec<&crate::model::Dimension> = resolved_dims.iter().map(|rd| rd.dim).collect();
+    let mut join_dims = with_na_dims_reached_through_a_role(def, &dims, na_groups);
+    join_dims.extend(scoped_where_dims.iter());
+    let resolved_joins = match from {
+        // Re-anchored: walk out from the metric's own table. The NA-dim and
+        // `where_clause` tables ride the same extra-sources channel they do on
+        // the base-anchored path, so the snapshot ORDER BY still binds. So do
+        // the tables of the facts the metrics and dimensions inline, which
+        // `resolve_joins_pkfk` collects itself but `anchor_joins` does not, and
+        // the `USING`-scoped instances a metric's inlined fact was requalified
+        // to (reviewbot, #250: a per-grain snapshot group emitted `ap__dep`
+        // with no join for it). No dimension roles: `is_eligible` and
+        // `snapshot_cte_anchor` withhold the scoped-alias rescue here.
+        // A table the anchor reaches by several paths is joined along the one
+        // the group's `USING` picked (`paths`), as a plain grain CTE joins it.
+        SnapshotFrom::Grain { anchor, paths } => {
+            let mut needs =
+                super::per_grain::anchor_needs(def, resolved_mets, &dims, &na_dim_sources);
+            let chains = push_scoped_na_joins(def, na_groups, &mut needs.scoped);
+            let mut joins = super::per_grain::anchor_joins(
+                def,
+                anchor,
+                &dims,
+                &needs.bare,
+                &std::collections::HashMap::new(),
+                paths,
+                &needs.scoped,
+            );
+            joins.extend(chains);
+            joins
+        }
+        SnapshotFrom::Base { .. } => {
+            resolve_joins_pkfk(def, &join_dims, resolved_mets, &na_dim_sources)
+        }
+    };
+    push_join_clauses(sql, &resolved_joins, def, "\n    LEFT JOIN ");
+    where_scopes
 }
 
 /// Add the role-scoped instance each active NA dim's `ORDER BY` names
@@ -412,7 +476,7 @@ pub(super) fn expand_semi_additive(
     resolved_mets: &[&Metric],
     resolved_exprs: &HashMap<String, String>,
     where_clause: Option<&super::where_clause::ResolvedWhere>,
-    anchor: Option<&str>,
+    from: &SnapshotFrom<'_>,
 ) -> Result<String, ExpandError> {
     // The base-anchored path names each dimension column by its stored name, so
     // the outer SELECT can reference the alias directly.
@@ -428,7 +492,7 @@ pub(super) fn expand_semi_additive(
         resolved_mets,
         resolved_exprs,
         where_clause,
-        anchor,
+        from,
     )?;
 
     let mut sql = String::with_capacity(512);

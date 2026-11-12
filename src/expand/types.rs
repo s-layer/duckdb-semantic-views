@@ -1100,8 +1100,8 @@ impl fmt::Display for ExpandError {
                      '{member_table}' along the path its USING names ({path}), which this query \
                      cannot follow: only the plan that computes each metric at its own grain \
                      follows a USING path, and this query does not fit that plan (for example, \
-                     it also holds an active semi-additive metric, or a member declared on no \
-                     table). Query the metric with fewer members"
+                     it also holds a member declared on no table). Query the metric with fewer \
+                     members"
                 )
             }
             Self::WhereClauseReferencesMetric {

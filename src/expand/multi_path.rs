@@ -250,6 +250,57 @@ pub(super) fn query_members(
     out
 }
 
+/// The tables a component's `NON ADDITIVE BY` dimensions are on, and those of
+/// the facts they are written over. Its snapshot's `ORDER BY` reads them
+/// whether or not the query names the dimension, so they are reached like a
+/// queried dimension's table (TECH-DEBT #109). A component whose dimensions
+/// are all queried reads them as members anyway.
+fn na_dimension_members<'a>(
+    def: &'a SemanticViewDefinition,
+    component: &'a Metric,
+) -> impl Iterator<Item = Member> + 'a {
+    component.non_additive_by.iter().flat_map(move |na| {
+        let label = format!(
+            "NON ADDITIVE BY dimension '{}' of metric '{}'",
+            na.dimension, component.name
+        );
+        super::resolution::find_dimension(def, &na.dimension)
+            .into_iter()
+            .flat_map(|dim| {
+                dim.source_table
+                    .iter()
+                    .cloned()
+                    .chain(super::facts::collect_referenced_fact_tables(
+                        &dim.expr, &def.facts,
+                    ))
+                    .collect::<Vec<_>>()
+            })
+            .map(move |table| Member {
+                label: label.clone(),
+                table: table.to_ascii_lowercase(),
+            })
+    })
+}
+
+/// Whether `component`'s snapshot reads a `NON ADDITIVE BY` dimension on a
+/// table it reaches from `home` two ways: by more than one path its `USING`
+/// does not narrow to one, or by no chain and more than one path across a
+/// many-to-many relationship. A query in which it is active is refused
+/// ([`check_metric_paths`], whose two tests these are).
+pub(super) fn na_dimension_reached_two_ways(
+    def: &SemanticViewDefinition,
+    component: &Metric,
+    home: &str,
+) -> bool {
+    na_dimension_members(def, component).any(|m| {
+        let paths = admitted_paths(def, home, &m.table, &component.using_relationships);
+        paths.len() > 1
+            || (paths.is_empty()
+                && m.table != home
+                && many_to_many_paths(def, home, &m.table).is_some())
+    })
+}
+
 /// The paths each multi-path member is reached by for one metric component:
 /// member table -> `[home, …, table]`, for every member a [`pinned_path`]
 /// exists for. Members the metric's inlined facts reach are included.
@@ -264,6 +315,7 @@ pub(super) fn component_paths(
         .iter()
         .cloned()
         .chain(fact_tables)
+        .chain(na_dimension_members(def, component).map(|m| m.table))
         .filter_map(|t| {
             let t = t.to_ascii_lowercase();
             pinned_path(def, home, &t, &component.using_relationships).map(|p| (t, p))
@@ -484,6 +536,7 @@ pub(super) fn check_metric_paths(
                     table: m.table.clone(),
                 })
                 .chain(fact_members)
+                .chain(na_dimension_members(def, component))
                 .collect();
             for member in &reached {
                 let paths =

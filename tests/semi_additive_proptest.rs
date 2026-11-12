@@ -1340,6 +1340,20 @@ const ROLE_ACCOUNTS: i64 = 3;
 /// Queryable dimensions of the role-played view: `b.grp` and `a.snap`.
 const ROLE_DIMS: [&str; 2] = ["grp", "snap"];
 
+/// The role case's predicates, as `(where_clause, the oracle's raw SQL)`, with
+/// no predicate drawn about a third of the time.
+const ROLE_PREDICATES: [Option<(&str, &str)>; 9] = [
+    None,
+    None,
+    None,
+    Some(("grp = 0", "b.grp = 0")),
+    Some(("grp <> 0", "b.grp <> 0")),
+    Some(("grp IS NULL", "b.grp IS NULL")),
+    Some(("snap = 1", "a.snap = 1")),
+    Some(("snap IS NULL", "a.snap IS NULL")),
+    Some(("(grp = 0 OR snap <> 1)", "(b.grp = 0 OR a.snap <> 1)")),
+];
+
 #[derive(Debug, Clone)]
 struct RoleCase {
     /// `a.snap` for each account id.
@@ -1349,10 +1363,12 @@ struct RoleCase {
     order: SortOrder,
     /// Indices into `ROLE_DIMS`; the metric is always queried.
     sel_dims: Vec<usize>,
-    /// A predicate on `grp`, applied before the snapshot is picked, so it can
-    /// move which snapshot wins. `snap` is not filtered: a `where_clause`
-    /// member on the role-played table has no `USING` to pick its role.
-    where_grp: Option<&'static str>,
+    /// A predicate on `grp`, on `snap`, or on both, as `(where_clause, the
+    /// oracle's raw SQL)`, applied before the snapshot is picked, so it can
+    /// move which snapshot wins. A predicate on `snap` reads the role-played
+    /// table on the role the metric's `USING` names, `r_bal` (Phase 7 PR 5b,
+    /// TECH-DEBT #111); it used to be refused beside the active snapshot.
+    where_pred: Option<(&'static str, &'static str)>,
 }
 
 fn arb_role_case() -> impl Strategy<Value = RoleCase> {
@@ -1370,19 +1386,14 @@ fn arb_role_case() -> impl Strategy<Value = RoleCase> {
     let rows = prop::collection::vec((small(ROLE_ACCOUNTS + 1), small(2), amt), 0..=16);
     let order = prop_oneof![Just(SortOrder::Asc), Just(SortOrder::Desc)];
     let dims = prop::sample::subsequence(vec![0usize, 1], 0..=2);
-    let where_grp = prop_oneof![
-        2 => Just(None),
-        1 => Just(Some("grp = 0")),
-        1 => Just(Some("grp <> 0")),
-        1 => Just(Some("grp IS NULL")),
-    ];
-    (snaps, rows, order, dims, where_grp).prop_map(|(snaps, rows, order, sel_dims, where_grp)| {
+    let where_pred = prop::sample::select(ROLE_PREDICATES.to_vec());
+    (snaps, rows, order, dims, where_pred).prop_map(|(snaps, rows, order, sel_dims, where_pred)| {
         RoleCase {
             snaps,
             rows,
             order,
             sel_dims,
-            where_grp,
+            where_pred,
         }
     })
 }
@@ -1501,8 +1512,8 @@ fn role_oracle_sql(case: &RoleCase) -> String {
     // The predicate filters every reference to the rows, the snapshot
     // subquery's included: filtering happens before the snapshot is picked.
     let filter = case
-        .where_grp
-        .map_or_else(String::new, |p| format!(" WHERE b.{p}"));
+        .where_pred
+        .map_or_else(String::new, |(_, raw)| format!(" WHERE {raw}"));
     let rows = format!(
         "(SELECT b.grp, a.snap, b.amt FROM rp_b b LEFT JOIN rp_a a ON b.acct_id = a.id{filter})"
     );
@@ -1555,7 +1566,7 @@ proptest! {
     fn role_played_snapshot_matches_independent_oracle(case in arb_role_case()) {
         let def = role_def(case.order);
         let req = QueryRequest {
-            where_clause: case.where_grp.map(str::to_string),
+            where_clause: case.where_pred.map(|(member, _)| member.to_string()),
             dimensions: case.sel_dims.iter().map(|&i| DimensionName::new(ROLE_DIMS[i])).collect(),
             metrics: vec![MetricName::new("balance")],
             // PIN: a snapshot is an aggregate shape; FACTS returns unaggregated rows and cannot express NON ADDITIVE BY. TECH-DEBT #66
@@ -1587,7 +1598,34 @@ proptest! {
         prop_assert_eq!(
             diff, 0,
             "role-played snapshot disagrees with the oracle; order={:?} dims={:?} where={:?}\n--- expanded:\n{}\n--- oracle:\n{}",
-            case.order, case.sel_dims, case.where_grp, expanded, oracle
+            case.order, case.sel_dims, case.where_pred, expanded, oracle
         );
     }
+}
+
+/// The role case draws a predicate on the role-played table beside the
+/// active snapshot (`snap` filtered, not queried), so that branch of the
+/// property is not vacuous.
+#[test]
+fn role_case_filters_the_role_played_table_beside_the_snapshot() {
+    use proptest::strategy::ValueTree;
+    use proptest::test_runner::TestRunner;
+
+    let mut runner = TestRunner::deterministic();
+    let mut filtered_active = 0usize;
+    for _ in 0..300 {
+        let case = arb_role_case()
+            .new_tree(&mut runner)
+            .expect("strategy must produce a value")
+            .current();
+        let snap_queried = case.sel_dims.iter().any(|&i| ROLE_DIMS[i] == "snap");
+        let filters_snap = case
+            .where_pred
+            .is_some_and(|(_, raw)| raw.contains("a.snap"));
+        filtered_active += usize::from(filters_snap && !snap_queried);
+    }
+    assert!(
+        filtered_active >= 30,
+        "a filter on the role-played table beside the active snapshot drawn {filtered_active} times"
+    );
 }

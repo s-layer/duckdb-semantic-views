@@ -461,6 +461,39 @@ pub(super) fn where_role_scopes(
     out
 }
 
+/// How a base-anchored emitter joins a predicate's tables given its role
+/// scopes ([`where_role_scopes`]): the tables to join bare, and a stand-in
+/// dimension for each table read on a role, which the join resolver joins
+/// under the role's scoped alias as it would a dimension on it.
+pub(super) fn split_where_tables(
+    source_tables: &[String],
+    scopes: &[(String, String)],
+) -> (Vec<String>, Vec<crate::model::Dimension>) {
+    let bare = source_tables
+        .iter()
+        .filter(|t| !scopes.iter().any(|(s, _)| s == *t))
+        .cloned()
+        .collect();
+    let on_roles = scopes
+        .iter()
+        .map(|(table, _)| crate::model::Dimension {
+            source_table: Some(table.clone()),
+            ..Default::default()
+        })
+        .collect();
+    (bare, on_roles)
+}
+
+/// The predicate `sql` rewritten to name each scoped table by its role's
+/// alias ([`where_role_scopes`]).
+pub(super) fn rewrite_where_to_scopes(sql: &str, scopes: &[(String, String)]) -> String {
+    let mut out = sql.to_string();
+    for (table, scoped) in scopes {
+        out = super::join_resolver::rewrite_to_scoped_alias(&out, table, scoped);
+    }
+    out
+}
+
 /// A stand-in dimension on each of `where_tables` that [`where_role_scopes`]
 /// would scope: one every metric of `mets` reads on the same role, or the
 /// role-played table itself when every metric is on it. The

@@ -1483,11 +1483,13 @@ fn expand_unhoisted(
     // through or back across it, is read on the role every metric names
     // (Snowflake fixture 6, R5). The per-grain plan reads it so in each grain
     // CTE (`role_playing::where_role_dims`), and the base-anchored emission
-    // below rewrites the predicate and joins those instances. The snapshot
-    // path takes no scopes (the planner declines such a query beside a
-    // semi-additive metric), so for it this stays refused.
+    // below rewrites the predicate and joins those instances, and so does the
+    // base-anchored snapshot (`SnapshotFrom::Base`). A snapshot re-anchored at
+    // a metric's own table takes no scopes (`snapshot_cte_anchor` declines a
+    // query whose predicate is read on a role, so this is defensive), and for
+    // it the predicate stays refused below.
     let where_scopes: Vec<(String, String)> = match &resolved_where {
-        Some(rw) if !has_active_semi_additive => {
+        Some(rw) if snapshot_anchor.is_none() => {
             super::role_playing::where_role_scopes(def, &rw.members, &resolved_mets)
         }
         _ => Vec::new(),
@@ -1590,6 +1592,16 @@ fn expand_unhoisted(
     // the query it acts as regular (Snowflake semantics). Decided above, with
     // the snapshot anchor that depends on it.
     if has_active_semi_additive {
+        let no_paths = std::collections::HashMap::new();
+        let from = match snapshot_anchor.as_deref() {
+            Some(anchor) => super::semi_additive::SnapshotFrom::Grain {
+                anchor,
+                paths: &no_paths,
+            },
+            None => super::semi_additive::SnapshotFrom::Base {
+                where_scopes: &where_scopes,
+            },
+        };
         return super::semi_additive::expand_semi_additive(
             view_name,
             def,
@@ -1597,7 +1609,7 @@ fn expand_unhoisted(
             &resolved_mets,
             &resolved_exprs,
             resolved_where.as_ref(),
-            snapshot_anchor.as_deref(),
+            &from,
         );
     }
 
@@ -1648,20 +1660,12 @@ fn expand_unhoisted(
     // A predicate table read on a role (`where_scopes`) is joined as a
     // dimension on it would be, under the role's scoped alias, and the
     // predicate is rewritten to name that alias.
-    let where_tables: Vec<String> = resolved_where
-        .as_ref()
-        .map(|rw| rw.source_tables.clone())
-        .unwrap_or_default()
-        .into_iter()
-        .filter(|t| !where_scopes.iter().any(|(s, _)| s == t))
-        .collect();
-    let scoped_where_dims: Vec<Dimension> = where_scopes
-        .iter()
-        .map(|(table, _)| Dimension {
-            source_table: Some(table.clone()),
-            ..Default::default()
-        })
-        .collect();
+    let (where_tables, scoped_where_dims) = super::role_playing::split_where_tables(
+        resolved_where
+            .as_ref()
+            .map_or(&[][..], |rw| rw.source_tables.as_slice()),
+        &where_scopes,
+    );
     let join_dims: Vec<&Dimension> = resolved_dims
         .iter()
         .copied()
@@ -1669,9 +1673,7 @@ fn expand_unhoisted(
         .collect();
     let joins = resolve_joins_pkfk(def, &join_dims, &resolved_mets, &where_tables);
     let resolved_where = resolved_where.map(|mut rw| {
-        for (table, scoped) in &where_scopes {
-            rw.sql = super::join_resolver::rewrite_to_scoped_alias(&rw.sql, table, scoped);
-        }
+        rw.sql = super::role_playing::rewrite_where_to_scopes(&rw.sql, &where_scopes);
         rw
     });
 
