@@ -804,6 +804,7 @@ fn build_def() -> SemanticViewDefinition {
         schema_name: None,
         resolution_schema_name: None,
         temp_tables: vec![],
+        table_columns: std::collections::BTreeMap::new(),
         comment: None,
         tags: Vec::new(),
     }

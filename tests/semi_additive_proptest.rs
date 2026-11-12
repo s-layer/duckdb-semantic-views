@@ -452,6 +452,7 @@ fn build_def(order: SortOrder, na: NaKey, unit: &str) -> SemanticViewDefinition 
         schema_name: None,
         resolution_schema_name: None,
         temp_tables: vec![],
+        table_columns: std::collections::BTreeMap::new(),
         comment: None,
         tags: Vec::new(),
     }
@@ -1469,6 +1470,7 @@ fn role_def(order: SortOrder) -> SemanticViewDefinition {
         schema_name: None,
         resolution_schema_name: None,
         temp_tables: vec![],
+        table_columns: std::collections::BTreeMap::new(),
         comment: None,
         tags: Vec::new(),
     }

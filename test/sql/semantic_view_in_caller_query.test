@@ -260,7 +260,10 @@ US	US	70
 # query of its own, rather than reading the outer row's column of that name:
 # DuckDB binds a comma join's right side as LATERAL. CREATE binds every
 # member, so the views below are created over a `price` column that is then
-# dropped.
+# dropped. CREATE recorded `price` as a column of `o`, so the expansion writes
+# it `o.price` (TECH-DEBT #83) and DuckDB reports `o` as lacking it. The
+# `_stored` copies have no column lists, as a view stored before 0.19.0, so
+# their `price` is spliced bare: the case the LATERAL capture would reach.
 
 statement ok
 CREATE TABLE cq_outer (price INTEGER);
@@ -283,39 +286,44 @@ CREATE SEMANTIC VIEW cq_bare_dim AS
   METRICS (o.revenue AS sum(o.amount));
 
 statement ok
+INSERT INTO semantic_layer._definitions (schema_name, name, definition)
+SELECT schema_name, name || '_stored', json_merge_patch(definition, '{"table_columns": null}')::VARCHAR
+FROM semantic_layer._definitions WHERE name IN ('cq_bare', 'cq_bare_dim');
+
+statement ok
 ALTER TABLE cq_drift DROP COLUMN price;
 
 statement error
 SELECT * FROM cq_outer, semantic_view('cq_bare', metrics := ['bad']);
 ----
-Referenced column "price" not found
+does not have a column named "price"
 
 statement error
 SELECT * FROM cq_outer JOIN semantic_view('cq_bare', metrics := ['bad']) ON true;
 ----
-Referenced column "price" not found
+does not have a column named "price"
 
 statement error
 SELECT (SELECT bad FROM semantic_view('cq_bare', metrics := ['bad'])) FROM cq_outer;
 ----
-Referenced column "price" not found
+does not have a column named "price"
 
 statement error
 SELECT * FROM cq_outer, LATERAL (SELECT * FROM semantic_view('cq_bare', metrics := ['bad'])) s;
 ----
-Referenced column "price" not found
+does not have a column named "price"
 
 statement error
 SELECT (SELECT bad FROM (SELECT * FROM semantic_view('cq_bare', metrics := ['bad'])) x) FROM cq_outer;
 ----
-Referenced column "price" not found
+does not have a column named "price"
 
 # With nothing enclosing the call, the name fails all the same.
 
 statement error
 SELECT * FROM semantic_view('cq_bare', metrics := ['bad']), cq_outer;
 ----
-Referenced column "price" not found
+does not have a column named "price"
 
 # The same holds for a member that only where_clause brings into the query:
 # its expression is the semantic view's, not the caller's predicate.
@@ -323,7 +331,48 @@ Referenced column "price" not found
 statement error
 SELECT * FROM cq_outer, semantic_view('cq_bare_dim', metrics := ['revenue'], where_clause := 'd = 7');
 ----
+does not have a column named "price"
+
+statement error
+SELECT * FROM cq_outer, semantic_view('cq_bare_stored', metrics := ['bad']);
+----
 Referenced column "price" not found
+
+statement error
+SELECT * FROM cq_outer JOIN semantic_view('cq_bare_stored', metrics := ['bad']) ON true;
+----
+Referenced column "price" not found
+
+statement error
+SELECT (SELECT bad FROM semantic_view('cq_bare_stored', metrics := ['bad'])) FROM cq_outer;
+----
+Referenced column "price" not found
+
+statement error
+SELECT * FROM cq_outer, LATERAL (SELECT * FROM semantic_view('cq_bare_stored', metrics := ['bad'])) s;
+----
+Referenced column "price" not found
+
+statement error
+SELECT (SELECT bad FROM (SELECT * FROM semantic_view('cq_bare_stored', metrics := ['bad'])) x) FROM cq_outer;
+----
+Referenced column "price" not found
+
+statement error
+SELECT * FROM semantic_view('cq_bare_stored', metrics := ['bad']), cq_outer;
+----
+Referenced column "price" not found
+
+statement error
+SELECT * FROM cq_outer, semantic_view('cq_bare_dim_stored', metrics := ['revenue'], where_clause := 'd = 7');
+----
+Referenced column "price" not found
+
+statement ok
+DROP SEMANTIC VIEW cq_bare_dim_stored;
+
+statement ok
+DROP SEMANTIC VIEW cq_bare_stored;
 
 statement ok
 DROP SEMANTIC VIEW cq_bare_dim;

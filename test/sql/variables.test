@@ -537,12 +537,13 @@ VARIABLES needs at least one variable
 # --- explain ---------------------------------------------------------------------
 
 # A value the query sets is shown as the parameter it becomes, after the
-# where_clause's own; a default is written in.
+# where_clause's own; a default is written in. A bare column is written with
+# its member's table (TECH-DEBT #83).
 
 query I
-SELECT contains(string_agg(explain_output, chr(10)), 'SUM(amount * (CAST(($2) AS DOUBLE)))')
-  AND contains(string_agg(explain_output, chr(10)), 'WHERE (region) = (CAST(($1) AS VARCHAR))')
-  AND contains(string_agg(explain_output, chr(10)), 'amount >= (CAST((1000) AS INTEGER))')
+SELECT contains(string_agg(explain_output, chr(10)), 'SUM("sales".amount * (CAST(($2) AS DOUBLE)))')
+  AND contains(string_agg(explain_output, chr(10)), 'WHERE ("sales".region) = (CAST(($1) AS VARCHAR))')
+  AND contains(string_agg(explain_output, chr(10)), '"sales".amount >= (CAST((1000) AS INTEGER))')
 FROM explain_semantic_view('var_sv', dimensions := ['sale_category'], metrics := ['weighted_sales'],
   where_clause := 'region = target_region', variables := {'target_region': 'x', 'multiplier': 2});
 ----

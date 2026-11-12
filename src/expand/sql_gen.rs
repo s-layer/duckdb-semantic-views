@@ -997,6 +997,11 @@ pub fn expand(
     def: &SemanticViewDefinition,
     req: &QueryRequest,
 ) -> Result<String, ExpandError> {
+    // TECH-DEBT #83: a bare column of a member's own table is that table's
+    // column, whatever else the query joins (`bare_columns`). First, so the
+    // steps below see each expression as it binds.
+    let qualified = super::bare_columns::qualify_bare_columns(def);
+    let def = &*qualified;
     // Phase 6.3: a metric written over a same-table metric carries that
     // metric's aggregate from here on, so every later step sees what it
     // computes (`graph::same_table_metrics`).

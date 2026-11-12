@@ -230,19 +230,30 @@ CREATE SEMANTIC VIEW cr0806_unqual AS
     c.total_balance AS SUM(c.balance)
   );
 
-# `status` names a column on BOTH tables, so once the query is no longer
-# re-anchored onto `customers` the reference is genuinely ambiguous and DuckDB
-# says so. A loud error is the correct outcome: previously this returned 50 --
-# the balance of the 'active' CUSTOMER -- for a predicate the user wrote
-# against orders.
-statement error
+# `status` names a column on BOTH tables. Once the query was no longer
+# re-anchored onto `customers`, the bare reference was ambiguous and DuckDB
+# said so; before that it returned 50 -- the balance of the 'active' CUSTOMER
+# -- for a predicate the user wrote against orders. Since CREATE records each
+# table's columns (TECH-DEBT #83) the dimension's bare `status` is the orders'
+# column, as Snowflake reads it: no order is 'active', so no row.
+query TI
 SELECT * FROM SEMANTIC_VIEW(cr0806_unqual
     DIMENSIONS region
     METRICS total_balance
     WHERE status = 'active'
 );
 ----
-status
+
+# Every order is 'open': both customers.
+query TI rowsort
+SELECT * FROM SEMANTIC_VIEW(cr0806_unqual
+    DIMENSIONS region
+    METRICS total_balance
+    WHERE status = 'open'
+);
+----
+East	50
+West	900
 
 # Control: the same query with a QUALIFIED member still re-anchors and answers
 # normally, so the guard keys on the missing source table, not on the presence

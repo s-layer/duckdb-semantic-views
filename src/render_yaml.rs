@@ -16,6 +16,8 @@ use crate::model::SemanticViewDefinition;
 /// - `database_name` / `schema_name` / `resolution_schema_name` /
 ///   `temp_tables` (connection context: where the view lives and where its
 ///   body resolved)
+/// - `table_columns` (the tables' columns as CREATE saw them, recorded again
+///   when the export is re-created)
 ///
 /// After stripping, `serde(skip_serializing_if)` on these fields ensures
 /// they are omitted from the YAML output entirely. (`schema_version` lives
@@ -28,6 +30,7 @@ pub fn render_yaml_export(def: &SemanticViewDefinition) -> Result<String, String
     export.schema_name = None;
     export.resolution_schema_name = None;
     export.temp_tables = Vec::new();
+    export.table_columns.clear();
 
     yaml_serde::to_string(&export).map_err(|e| format!("YAML serialization error: {e}"))
 }

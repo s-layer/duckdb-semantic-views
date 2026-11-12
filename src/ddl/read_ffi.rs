@@ -459,14 +459,19 @@ fn check_relationship_types(
 /// # Errors
 ///
 /// `semantic view '<name>': <kind> '<member>' does not bind: <DuckDB's error>`
-/// for the first member that does not bind; `Interrupted!` when the caller was
-/// cancelled, which the C++ helper raises as a bare `InterruptException`.
+/// for the first member that does not bind, or the bare-column refusal of
+/// [`crate::expand::bare_columns::check_bare_columns`]; `Interrupted!` when
+/// the caller was cancelled, which the C++ helper raises as a bare
+/// `InterruptException`.
+///
+/// On success, `definition` with each table's columns recorded
+/// (`table_columns`), which is what the CREATE stores.
 pub fn check_create_members(
     view_name: &str,
     definition: &str,
     database: &str,
     schema: &str,
-) -> Result<(), String> {
+) -> Result<String, String> {
     use crate::query::member_types::{ProbeError, ProbedColumn};
     let mut def: crate::model::SemanticViewDefinition =
         serde_json::from_str(definition).map_err(|e| format!("internal error: {e}"))?;
@@ -491,6 +496,27 @@ pub fn check_create_members(
         }
     }
     def.temp_tables = temp;
+    // TECH-DEBT #83: each table's columns, as this caller sees them, so the
+    // expansion reads a member's bare column from the member's own table
+    // (`expand::bare_columns`). They are recorded in the stored definition,
+    // and a bare column of another table is refused here. A table that does
+    // not bind records none; the member checks below report it.
+    let mut table_columns = std::collections::BTreeMap::new();
+    for t in &def.tables {
+        let probe = format!(
+            "SELECT * FROM {} LIMIT 0",
+            crate::expand::table_source(t, &def)
+        );
+        match caller_describe(database, schema, &probe) {
+            Ok(cols) => {
+                table_columns.insert(t.alias.clone(), cols.into_iter().map(|(n, _)| n).collect());
+            }
+            Err(CallerError::Interrupted(m)) => return Err(m),
+            Err(CallerError::Failed(_)) => {}
+        }
+    }
+    def.table_columns.clone_from(&table_columns);
+    crate::expand::bare_columns::check_bare_columns(view_name, &def)?;
     // Each variable's default and type bind, as Snowflake checks them at
     // CREATE (Phase 6.5).
     for v in &def.variables {
@@ -533,13 +559,26 @@ pub fn check_create_members(
             Err(CallerError::Failed(m)) => Err(ProbeError::Failed(m)),
         },
     )?;
-    match unbound {
-        None => Ok(()),
-        Some(u) => Err(format!(
+    if let Some(u) = unbound {
+        return Err(format!(
             "semantic view '{view_name}': {} '{}' does not bind: {}",
             u.kind, u.name, u.error
-        )),
+        ));
     }
+    // Patched as JSON, so every stored key the model does not carry
+    // (`schema_version`) is kept as written.
+    let mut stored: serde_json::Value =
+        serde_json::from_str(definition).map_err(|e| format!("internal error: {e}"))?;
+    if let Some(object) = stored.as_object_mut() {
+        object.remove("table_columns");
+        if !table_columns.is_empty() {
+            object.insert(
+                "table_columns".to_string(),
+                serde_json::to_value(&table_columns).map_err(|e| format!("internal error: {e}"))?,
+            );
+        }
+    }
+    serde_json::to_string(&stored).map_err(|e| format!("internal error: {e}"))
 }
 
 /// The probe `check_create_members` describes for an ASOF relationship: its

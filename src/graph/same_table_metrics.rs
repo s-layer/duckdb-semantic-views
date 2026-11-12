@@ -100,6 +100,20 @@ fn same_table_refs(def: &SemanticViewDefinition, idx: usize) -> Vec<MetricRef> {
         .collect()
 }
 
+/// Where `def.metrics[idx]`'s expression names another metric of its table
+/// the way the expansion reads one: the byte ranges [`same_table_refs`]
+/// reports, outside aggregate calls. Everywhere else a metric's name is a
+/// column (`expand::bare_columns` qualifies it as one).
+pub(crate) fn same_table_metric_ref_spans(
+    def: &SemanticViewDefinition,
+    idx: usize,
+) -> Vec<(usize, usize)> {
+    same_table_refs(def, idx)
+        .into_iter()
+        .map(|r| (r.start, r.end))
+        .collect()
+}
+
 /// How deep a chain of metrics written over metrics may go, as for derived
 /// metrics (`expand::facts`' `MAX_DERIVATION_DEPTH`).
 const MAX_REFERENCE_DEPTH: usize = 64;

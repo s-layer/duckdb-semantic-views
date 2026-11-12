@@ -316,9 +316,10 @@ fn emit_native_create_sql(
     // The definition is read through the `__sv_check_create` helper TF
     // (`cpp/src/shim.cpp`), whose bind refuses it if a member does not bind in
     // the caller's context -- as `__sv_compute_create_from_yaml` does for FROM
-    // YAML FILE. Its one `new_def` row is the definition unchanged. Unless the
-    // CREATE replaces, a view already in the target schema skips the check, so
-    // IF NOT EXISTS stays a no-op and plain CREATE reports "already exists".
+    // YAML FILE. Its one `new_def` row is the definition with each table's
+    // columns recorded (TECH-DEBT #83). Unless the CREATE replaces, a view
+    // already in the target schema skips the check, so IF NOT EXISTS stays a
+    // no-op and plain CREATE reports "already exists".
     let helper_from = format!(
         "FROM __sv_check_create('{enriched_escaped}', '{}', {})",
         SqlLit::escape(name),

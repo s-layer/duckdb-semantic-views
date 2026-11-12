@@ -128,6 +128,9 @@ src/
 │   │                          #   a query no `USING` picks a path for, and gives per_grain the path one picks
 │   ├── dims_for_metric.rs     #   which dimensions SHOW SEMANTIC DIMENSIONS ... FOR METRIC lists (those a query
 │   │                          #   of the metric grouped by each answers); the ddl dispatcher calls it
+│   ├── bare_columns.rs        #   a bare column is its member's own table's (TECH-DEBT #83): qualifies it from
+│   │                          #   the column lists CREATE records (`table_columns`), and refuses at CREATE a
+│   │                          #   bare column only another table has (`ddl::read_ffi::check_create_members`)
 │   └── tests_*.rs             #   behaviour-named extracted test modules
 ├── catalog/                   # Reads/writes of semantic_layer._definitions
 │   ├── mod.rs                 #   CatalogReader (the catalog rows as the caller's transaction sees them)

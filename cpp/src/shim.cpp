@@ -1066,10 +1066,10 @@ extern "C" {
 // so metadata fields are populated on the caller's connection, preserving
 // the D-21 transactional contract.
 
-// Refuse a CREATE whose definition has a member DuckDB cannot bind (defined
-// after SvCallerScope, below).
+// Refuse a CREATE whose definition has a member DuckDB cannot bind, and record
+// each table's columns in `definition` (defined after SvCallerScope, below).
 static void sv_check_create_members(ClientContext &context, const std::string &view_name,
-                                    const std::string &definition, const std::string &schema,
+                                    std::string &definition, const std::string &schema,
                                     bool skip_if_present);
 
 struct CreateFromYamlBindData : public TableFunctionData {
@@ -1664,12 +1664,14 @@ private:
 // stored and failing only when queried. The probes run in the caller's
 // context, against the database and schema the CREATE stamps (the caller's
 // current ones), so they see the caller's transaction and temporary tables.
+// The check also records each table's columns in `definition`, which the
+// CREATE stores (TECH-DEBT #83: a bare column is its member's own table's).
 //
 // Unless `skip_if_present` is false (OR REPLACE), a view already in the
 // target schema skips the check: IF NOT EXISTS then writes nothing, and a
 // plain CREATE reports "already exists", neither of which reads the body.
 static void sv_check_create_members(ClientContext &context, const std::string &view_name,
-                                    const std::string &definition, const std::string &target_schema,
+                                    std::string &definition, const std::string &target_schema,
                                     bool skip_if_present) {
     auto database = DatabaseManager::GetDefaultDatabase(context).GetIdentifierName();
     auto schema = ClientData::Get(context).catalog_search_path->GetDefault().GetSchema().GetIdentifierName();
@@ -1691,11 +1693,16 @@ static void sv_check_create_members(ClientContext &context, const std::string &v
     if (rc != 0) {
         throw InternalException("semantic_views: checking the CREATE's members failed: %s", string(error_buf));
     }
+    // The checked definition, with each table's columns recorded (TECH-DEBT
+    // #83); no buffer when the check was skipped, which keeps `definition`.
+    if (message.ptr) {
+        definition = message.to_string();
+    }
 }
 
 // __sv_check_create(definition, view_name, schema, skip_if_present): the definition an AS-body or
 // FROM YAML CREATE lowers to (src/parse/native_sql.rs), passed through as one
-// `new_def` row once every member binds. The outer INSERT reads it the way it
+// `new_def` row, with each table's columns recorded, once every member binds. The outer INSERT reads it the way it
 // reads __sv_compute_create_from_yaml's row, so both CREATE forms are checked.
 static unique_ptr<FunctionData> sv_check_create_bind(ClientContext &context, TableFunctionBindInput &input,
                                                      vector<LogicalType> &return_types,

@@ -1,0 +1,273 @@
+# TECH-DEBT #83, Phase 7 fixtures 9 and 9b as Snowflake wrote them: every
+# member expression reads a BARE column, and several tables share the column
+# names (`code` on airports, details, gates and lounges; `region_id` on
+# airports and regions; `order_id` on orders, items and notes). Snowflake
+# reads a bare column from the member's own table, so each case below is
+# answered there (2026-11-12, phase7-fixture-9-10-snowflake.md). Before #83
+# A2, A5, A6, C3 and O6, whose queries join two tables that have the column,
+# failed here with DuckDB's `Ambiguous reference to column name`; the rest
+# pass either way and guard the qualification against changing their rows.
+
+require semantic_views
+
+statement ok
+CREATE TABLE bc9_airports (code VARCHAR, city VARCHAR, region_id INTEGER);
+
+statement ok
+CREATE TABLE bc9_regions (region_id INTEGER, region VARCHAR);
+
+statement ok
+CREATE TABLE bc9_flights (flight_id INTEGER, dep VARCHAR, arr VARCHAR);
+
+statement ok
+CREATE TABLE bc9_details (code VARCHAR, terminal VARCHAR);
+
+statement ok
+CREATE TABLE bc9_gates (gate_id INTEGER, code VARCHAR, gate VARCHAR);
+
+statement ok
+CREATE TABLE bc9_terminals (terminal VARCHAR, operator VARCHAR);
+
+statement ok
+CREATE TABLE bc9_lounges (lounge_id INTEGER, code VARCHAR);
+
+statement ok
+INSERT INTO bc9_airports VALUES ('CDG', 'Paris', 1), ('LHR', 'London', 1), ('JFK', 'New York', 2);
+
+statement ok
+INSERT INTO bc9_regions VALUES (1, 'EU'), (2, 'NA');
+
+statement ok
+INSERT INTO bc9_flights VALUES (1, 'CDG', 'LHR'), (2, 'LHR', 'CDG'), (3, 'CDG', 'JFK');
+
+statement ok
+INSERT INTO bc9_details VALUES ('CDG', 'T2'), ('LHR', 'T5'), ('JFK', 'T4');
+
+statement ok
+INSERT INTO bc9_gates VALUES (1, 'CDG', 'G1'), (2, 'CDG', 'G2'), (3, 'LHR', 'G3');
+
+statement ok
+INSERT INTO bc9_terminals VALUES ('T2', 'ADP'), ('T5', 'HAL'), ('T4', 'PANYNJ');
+
+statement ok
+INSERT INTO bc9_lounges VALUES (1, 'CDG'), (2, 'CDG'), (3, 'JFK');
+
+statement ok
+CREATE SEMANTIC VIEW bc9_air
+  TABLES (
+    f  AS bc9_flights   PRIMARY KEY (flight_id),
+    ap AS bc9_airports  PRIMARY KEY (code),
+    d  AS bc9_details   PRIMARY KEY (code),
+    g  AS bc9_gates     PRIMARY KEY (gate_id),
+    t  AS bc9_terminals PRIMARY KEY (terminal),
+    l  AS bc9_lounges   PRIMARY KEY (lounge_id),
+    rg AS bc9_regions   PRIMARY KEY (region_id)
+  )
+  RELATIONSHIPS (
+    dep_airport AS f (dep)       REFERENCES ap,
+    arr_airport AS f (arr)       REFERENCES ap,
+    d_airport   AS d (code)      REFERENCES ap,
+    g_airport   AS g (code)      REFERENCES ap,
+    d_terminal  AS d (terminal)  REFERENCES t,
+    l_airport   AS l (code)      REFERENCES ap,
+    ap_region   AS ap (region_id) REFERENCES rg
+  )
+  DIMENSIONS (ap.city AS city, d.terminal AS terminal, g.gate AS gate, t.operator AS operator)
+  METRICS (
+    f.flight_count AS COUNT(flight_id),
+    f.arrivals   USING (arr_airport) AS COUNT(flight_id),
+    f.departures USING (dep_airport) AS COUNT(flight_id),
+    ap.airport_count AS COUNT(code),
+    l.lounge_count AS COUNT(lounge_id),
+    rg.region_count AS COUNT(region_id)
+  );
+
+# A1: the airports' own metric by their own city.
+query TI
+SELECT * FROM SEMANTIC_VIEW(bc9_air DIMENSIONS ap.city METRICS ap.airport_count) ORDER BY ALL NULLS LAST;
+----
+London	1
+New York	1
+Paris	1
+
+# A2: by the one-to-one details' terminal (details also have `code`).
+query TI
+SELECT * FROM SEMANTIC_VIEW(bc9_air DIMENSIONS d.terminal METRICS ap.airport_count) ORDER BY ALL NULLS LAST;
+----
+T2	1
+T4	1
+T5	1
+
+# A3: across a fan-out to the gates (gates also have `code`).
+query TI
+SELECT * FROM SEMANTIC_VIEW(bc9_air DIMENSIONS g.gate METRICS ap.airport_count) ORDER BY ALL NULLS LAST;
+----
+G1	1
+G2	1
+G3	1
+NULL	1
+
+# A4: beside a role-named flight metric, by city.
+query TII
+SELECT * FROM SEMANTIC_VIEW(bc9_air DIMENSIONS ap.city METRICS ap.airport_count, f.arrivals) ORDER BY ALL NULLS LAST;
+----
+London	1	1
+New York	1	1
+Paris	1	1
+
+# A5: filtered on the details.
+query I
+SELECT * FROM SEMANTIC_VIEW(bc9_air METRICS ap.airport_count WHERE d.terminal = 'T2') ORDER BY ALL NULLS LAST;
+----
+1
+
+# A6: by an operator, through the details.
+query TI
+SELECT * FROM SEMANTIC_VIEW(bc9_air DIMENSIONS t.operator METRICS ap.airport_count) ORDER BY ALL NULLS LAST;
+----
+ADP	1
+HAL	1
+PANYNJ	1
+
+# C1: arrivals one chain further on (details -> terminals).
+query TI
+SELECT * FROM SEMANTIC_VIEW(bc9_air DIMENSIONS t.operator METRICS f.arrivals) ORDER BY ALL NULLS LAST;
+----
+ADP	1
+HAL	1
+PANYNJ	1
+
+# C2: departures by operator.
+query TI
+SELECT * FROM SEMANTIC_VIEW(bc9_air DIMENSIONS t.operator METRICS f.departures) ORDER BY ALL NULLS LAST;
+----
+ADP	2
+HAL	1
+
+# C3: both roles by operator and terminal.
+query TTII
+SELECT * FROM SEMANTIC_VIEW(bc9_air DIMENSIONS t.operator, d.terminal METRICS f.arrivals, f.departures) ORDER BY ALL NULLS LAST;
+----
+ADP	T2	1	2
+HAL	T5	1	1
+PANYNJ	T4	1	NULL
+
+# L2: lounges by their airport's terminal (lounges, airports and details all have `code`).
+query TI
+SELECT * FROM SEMANTIC_VIEW(bc9_air DIMENSIONS d.terminal METRICS l.lounge_count) ORDER BY ALL NULLS LAST;
+----
+T2	2
+T4	1
+
+# P3: regions by terminal (airports and regions both have `region_id`).
+query TI
+SELECT * FROM SEMANTIC_VIEW(bc9_air DIMENSIONS d.terminal METRICS rg.region_count) ORDER BY ALL NULLS LAST;
+----
+T2	1
+T4	1
+T5	1
+
+# fixture 9b's t_roles: notes reference orders twice.
+statement ok
+CREATE TABLE bc9_orders (order_id INTEGER, region_id INTEGER);
+
+statement ok
+CREATE TABLE bc9_line_items (item_id INTEGER, order_id INTEGER, qty INTEGER);
+
+statement ok
+CREATE TABLE bc9_notes (note_id INTEGER, order_id INTEGER, order_id2 INTEGER, kind VARCHAR);
+
+statement ok
+INSERT INTO bc9_orders VALUES (1, 1), (2, NULL), (3, 2);
+
+statement ok
+INSERT INTO bc9_line_items VALUES (1, 1, 5), (2, 1, 1), (3, 2, 2), (4, 3, 7);
+
+statement ok
+INSERT INTO bc9_notes VALUES (1, 1, 3, 'gift'), (2, 1, NULL, 'rush'), (3, 2, 1, 'gift');
+
+statement ok
+CREATE SEMANTIC VIEW bc9_roles
+  TABLES (
+    o  AS bc9_orders     PRIMARY KEY (order_id),
+    li AS bc9_line_items PRIMARY KEY (item_id),
+    n  AS bc9_notes      PRIMARY KEY (note_id)
+  )
+  RELATIONSHIPS (
+    li_order AS li (order_id)  REFERENCES o,
+    n_order  AS n (order_id)   REFERENCES o,
+    n_order2 AS n (order_id2)  REFERENCES o
+  )
+  DIMENSIONS (o.order_no AS order_id, li.qty AS qty, n.kind AS kind)
+  METRICS (
+    o.order_count AS COUNT(order_id),
+    li.item_count AS COUNT(item_id),
+    n.notes_by_first  USING (n_order)  AS COUNT(note_id),
+    n.notes_by_second USING (n_order2) AS COUNT(note_id)
+  );
+
+# O1: the orders' own metric by an item's qty (a plain fan-out).
+query II
+SELECT * FROM SEMANTIC_VIEW(bc9_roles DIMENSIONS li.qty METRICS o.order_count) ORDER BY ALL NULLS LAST;
+----
+1	1
+2	1
+5	1
+7	1
+
+# O2: by its own column.
+query II
+SELECT * FROM SEMANTIC_VIEW(bc9_roles DIMENSIONS o.order_no METRICS o.order_count) ORDER BY ALL NULLS LAST;
+----
+1	1
+2	1
+3	1
+
+# O6: notes by the order they name first (notes also have `order_id`).
+query II
+SELECT * FROM SEMANTIC_VIEW(bc9_roles DIMENSIONS o.order_no METRICS n.notes_by_first) ORDER BY ALL NULLS LAST;
+----
+1	2
+2	1
+
+# GET_DDL shows each expression as written, bare.
+query I
+SELECT GET_DDL('SEMANTIC_VIEW', 'bc9_roles') LIKE '%o.order_count AS COUNT(order_id)%';
+----
+true
+
+statement ok
+DROP SEMANTIC VIEW bc9_roles;
+
+statement ok
+DROP SEMANTIC VIEW bc9_air;
+
+statement ok
+DROP TABLE bc9_notes;
+
+statement ok
+DROP TABLE bc9_line_items;
+
+statement ok
+DROP TABLE bc9_orders;
+
+statement ok
+DROP TABLE bc9_lounges;
+
+statement ok
+DROP TABLE bc9_terminals;
+
+statement ok
+DROP TABLE bc9_gates;
+
+statement ok
+DROP TABLE bc9_details;
+
+statement ok
+DROP TABLE bc9_flights;
+
+statement ok
+DROP TABLE bc9_regions;
+
+statement ok
+DROP TABLE bc9_airports;

@@ -20,8 +20,8 @@
 //! role (W6, W8), and a role followed by a fan-out (G1-G3).
 //!
 //! Each case asks several `TABLES` orders and expects Snowflake's rows from
-//! each. The expressions are qualified, since a bare column binds against
-//! every joined table (TECH-DEBT #83).
+//! each. The expressions are qualified; the fixture as Snowflake wrote it,
+//! with bare columns, is `test/sql/phase7_bare_columns.test` (TECH-DEBT #83).
 
 use super::*;
 use crate::model::{Cardinality, Dimension, Join, Metric, SemanticViewDefinition, TableRef};
