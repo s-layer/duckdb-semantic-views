@@ -300,12 +300,11 @@ pub(super) fn build_snapshot_block(
     // it would pick the snapshot from unfiltered rows and then discard some of
     // them — a different, wrong answer.
     if let Some(w) = where_clause {
-        let mut predicate = w.sql.clone();
-        for (table, scoped) in where_scopes {
-            predicate = super::join_resolver::rewrite_to_scoped_alias(&predicate, table, scoped);
-        }
         sql.push_str("\n    WHERE ");
-        sql.push_str(&predicate);
+        sql.push_str(&super::role_playing::rewrite_where_to_scopes(
+            &w.sql,
+            where_scopes,
+        ));
     }
 
     let outer_exprs = resolved_mets
@@ -360,21 +359,11 @@ fn push_snapshot_from<'a>(
     // applied inside this SELECT, so its aliases have to be in this FROM. One
     // read on a role is joined as a dimension on it would be, under the role's
     // scoped alias, as the base-anchored emitter of a plain query joins it.
-    if let Some(w) = where_clause {
-        na_dim_sources.extend(
-            w.source_tables
-                .iter()
-                .filter(|t| !where_scopes.iter().any(|(s, _)| s == *t))
-                .cloned(),
-        );
-    }
-    let scoped_where_dims: Vec<crate::model::Dimension> = where_scopes
-        .iter()
-        .map(|(table, _)| crate::model::Dimension {
-            source_table: Some(table.clone()),
-            ..Default::default()
-        })
-        .collect();
+    let (where_tables, scoped_where_dims) = super::role_playing::split_where_tables(
+        where_clause.map_or(&[][..], |w| w.source_tables.as_slice()),
+        where_scopes,
+    );
+    na_dim_sources.extend(where_tables);
     let dims: Vec<&crate::model::Dimension> = resolved_dims.iter().map(|rd| rd.dim).collect();
     let mut join_dims = with_na_dims_reached_through_a_role(def, &dims, na_groups);
     join_dims.extend(scoped_where_dims.iter());

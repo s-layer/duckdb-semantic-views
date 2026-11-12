@@ -1278,9 +1278,15 @@ fn touched_tables(
 }
 
 /// Whether any queried metric's `USING` names a relationship whose target table
-/// this query reaches (see [`touched_tables`]). The single-CTE anchors cannot
-/// honour a role, so for them such a relationship declines the re-anchor; one
-/// whose target nothing reaches scopes nothing and is no obstacle.
+/// this query reaches (see [`touched_tables`]) and is role-played. The
+/// single-CTE anchors cannot honour a role, so for them such a relationship
+/// declines the re-anchor; one whose target nothing reaches scopes nothing and
+/// is no obstacle. Nor is one whose target is reached by one relationship from
+/// each table (a convergent parent, or a plain one): it picks no role, so the
+/// anchor joins it along the one relationship from the metric's table, as
+/// [`is_eligible`] treats it, and `anchor_needs` joins the scoped instance for
+/// the facts the metric inlines (Phase 7 PR 5b: a snapshot filtered on such a
+/// parent, declared first, used to be anchored there and read its rows).
 fn using_scopes_a_touched_table(
     def: &SemanticViewDefinition,
     resolved_dims: &[&Dimension],
@@ -1310,8 +1316,11 @@ fn using_scopes_a_touched_table(
     // to nothing is treated as scoping a touched table (decline, unchanged).
     reached.iter().any(|m| {
         m.using_relationships.iter().any(|rel| {
-            crate::graph::find_relationship(&def.joins, rel)
-                .is_none_or(|j| touched.contains(&j.table.to_ascii_lowercase()))
+            crate::graph::find_relationship(&def.joins, rel).is_none_or(|j| {
+                let target = j.table.to_ascii_lowercase();
+                touched.contains(&target)
+                    && super::role_playing::is_role_playing_target(def, &target)
+            })
         })
     })
 }

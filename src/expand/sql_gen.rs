@@ -1660,20 +1660,12 @@ fn expand_unhoisted(
     // A predicate table read on a role (`where_scopes`) is joined as a
     // dimension on it would be, under the role's scoped alias, and the
     // predicate is rewritten to name that alias.
-    let where_tables: Vec<String> = resolved_where
-        .as_ref()
-        .map(|rw| rw.source_tables.clone())
-        .unwrap_or_default()
-        .into_iter()
-        .filter(|t| !where_scopes.iter().any(|(s, _)| s == t))
-        .collect();
-    let scoped_where_dims: Vec<Dimension> = where_scopes
-        .iter()
-        .map(|(table, _)| Dimension {
-            source_table: Some(table.clone()),
-            ..Default::default()
-        })
-        .collect();
+    let (where_tables, scoped_where_dims) = super::role_playing::split_where_tables(
+        resolved_where
+            .as_ref()
+            .map_or(&[][..], |rw| rw.source_tables.as_slice()),
+        &where_scopes,
+    );
     let join_dims: Vec<&Dimension> = resolved_dims
         .iter()
         .copied()
@@ -1681,9 +1673,7 @@ fn expand_unhoisted(
         .collect();
     let joins = resolve_joins_pkfk(def, &join_dims, &resolved_mets, &where_tables);
     let resolved_where = resolved_where.map(|mut rw| {
-        for (table, scoped) in &where_scopes {
-            rw.sql = super::join_resolver::rewrite_to_scoped_alias(&rw.sql, table, scoped);
-        }
+        rw.sql = super::role_playing::rewrite_where_to_scopes(&rw.sql, &where_scopes);
         rw
     });
 
