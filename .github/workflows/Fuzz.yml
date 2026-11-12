@@ -47,7 +47,7 @@ jobs:
     outputs:
       should_fuzz: ${{ steps.check.outputs.should_fuzz }}
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@v7.0.1
         with:
           fetch-depth: 0
       - id: check
@@ -97,7 +97,7 @@ jobs:
         # fuzz_where_predicate was missing from `fuzz-all` until 2026-08-04).
         target: [fuzz_json_parse, fuzz_sql_expand, fuzz_query_names, fuzz_ddl_parse, fuzz_yaml_parse, fuzz_create_text, fuzz_keyword_body, fuzz_render_roundtrip, fuzz_where_predicate]
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@v7.0.1
       - uses: dtolnay/rust-toolchain@nightly
       - run: cargo install cargo-fuzz
 
@@ -141,14 +141,14 @@ jobs:
 
       - name: Upload crash artifacts
         if: steps.check.outputs.crash_found == 'true'
-        uses: actions/upload-artifact@v7
+        uses: actions/upload-artifact@v7.0.2
         with:
           name: crash-${{ matrix.target }}-${{ github.sha }}
           path: fuzz/artifacts/${{ matrix.target }}/
 
       - name: Open issue on crash
         if: steps.check.outputs.crash_found == 'true'
-        uses: actions/github-script@v9
+        uses: actions/github-script@v9.0.0
         with:
           script: |
             await github.rest.issues.create({
