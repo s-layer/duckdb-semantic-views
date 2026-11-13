@@ -1492,7 +1492,7 @@ Fan trap detected
 - the hop crosses one of a role-played table's relationships back toward the table that holds them, such as an airport count by a flight's carrier (the message calls this a role-played table);
 - the one-to-many hop walks an ASOF or range relationship backwards, from the referenced table to the referencing one, which Snowflake refuses for ASOF too.
 
-In the first three cases the message ends with a sentence saying why the fan-out could not be counted once. When another metric in the query is the reason, the error is reported for that metric and the sentence names it and its cause, for example ``... only when every metric in the query can be, and metric 'last_rev' is semi-additive and its NON ADDITIVE BY dimension 'day' is not queried.`` Each of the other metrics is answered on its own.
+In the first three cases the message ends with a sentence saying why the fan-out could not be counted once. When another metric in the query whose rows fan out too is the reason, the error is reported for that metric and the sentence names it and its cause, for example ``... only when every metric in the query can be, and metric 'last_rev' is semi-additive and its NON ADDITIVE BY dimension 'day' is not queried.`` Each of the other metrics is answered on its own.
 
 **Fix:** Declare a ``PRIMARY KEY`` on the metric's table when that is the cause. Otherwise see :ref:`howto-fan-traps`: remove the problematic dimension, use a metric from the same table as the dimension, or restructure the view.
 

@@ -2955,6 +2955,20 @@ mod tests {
         assert_ne!(twins[0].name, twins[1].name);
     }
 
+    /// The generated name survives `GET_DDL` (which drops a REFERENCES list
+    /// that matches the primary key) and the YAML export (which writes the
+    /// list the CREATE inferred): it does not depend on the REFERENCES
+    /// columns (PR #358 review).
+    #[test]
+    fn a_generated_name_does_not_depend_on_the_references_columns() {
+        let bare = parse_relationships_clause("o(cid) REFERENCES c", 0).unwrap();
+        let listed = parse_relationships_clause("o(cid) REFERENCES c(cid)", 0).unwrap();
+        assert_eq!(bare[0].name, listed[0].name);
+        let mut inferred = bare[0].clone();
+        inferred.ref_columns = vec!["cid".to_string()];
+        assert_eq!(Some(inferred.generated_name_at(0)), bare[0].name);
+    }
+
     #[test]
     fn unnamed_range_and_asof_relationships_parse() {
         let joins = parse_relationships_clause(

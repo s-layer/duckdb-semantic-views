@@ -544,6 +544,41 @@ mod tests {
         assert_eq!(qualified(&["ignore"], "ignore * 2"), "\"o\".ignore * 2");
     }
 
+    /// A column named `ignore` or `respect` before an ordering's `NULLS FIRST`
+    /// / `NULLS LAST` is a column, not the window modifier (PR #358 review).
+    #[test]
+    fn ignore_or_respect_before_nulls_first_or_last_is_a_column() {
+        assert_eq!(
+            qualified(
+                &["ignore", "name"],
+                "string_agg(name ORDER BY ignore NULLS FIRST)"
+            ),
+            "string_agg(\"o\".name ORDER BY \"o\".ignore NULLS FIRST)"
+        );
+        assert_eq!(
+            qualified(
+                &["respect", "name"],
+                "string_agg(name ORDER BY respect NULLS LAST)"
+            ),
+            "string_agg(\"o\".name ORDER BY \"o\".respect NULLS LAST)"
+        );
+    }
+
+    /// A comprehension's `IN <source>` is outside its variable's scope, as in
+    /// `DuckDB`'s rewrite to `list_transform(list_filter(src, ...), ...)`, so
+    /// a source named like the variable is a column (PR #358 review).
+    #[test]
+    fn a_comprehension_source_named_like_its_variable_is_a_column() {
+        assert_eq!(
+            qualified(&["day"], "[day FOR day IN day]"),
+            "[day FOR day IN \"o\".day]"
+        );
+        assert_eq!(
+            qualified(&["day"], "[day + 1 FOR day IN day IF day > 2]"),
+            "[day + 1 FOR day IN \"o\".day IF day > 2]"
+        );
+    }
+
     /// A list comprehension's `FOR <name> IN` variable is local to it, as a
     /// lambda's parameter is (O3).
     #[test]

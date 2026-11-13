@@ -1280,3 +1280,39 @@ fn the_counts_once_note_lists_no_unreachable_cause() {
         .to_string();
     assert!(!err.contains("names no"), "{err}");
 }
+
+/// PR #358 review: an active snapshot whose own rows do not fan out does not
+/// stop the once-per-group plan, so the refusal blames the metric that does:
+/// here the order count on a keyless `o`, not the line items' snapshot.
+#[test]
+fn a_snapshot_that_does_not_fan_out_is_not_blamed() {
+    let mut def = fan_trap_three_table_def();
+    def.tables[0].pk_columns.clear();
+    def.metrics.push(Metric {
+        name: "last_revenue".to_string(),
+        expr: "SUM(li.extended_price)".to_string(),
+        source_table: Some("li".to_string()),
+        non_additive_by: vec![crate::model::NonAdditiveDim {
+            dimension: "region".to_string(),
+            ..Default::default()
+        }],
+        ..Default::default()
+    });
+    let req = QueryRequest {
+        where_clause: None,
+        facts: vec![],
+        dimensions: vec![DimensionName::new("status")],
+        metrics: vec![
+            MetricName::new("last_revenue"),
+            MetricName::new("order_count"),
+        ],
+    };
+    let err = expand("sales", &def, &req)
+        .expect_err("refused")
+        .to_string();
+    assert!(err.contains("table 'o' has no PRIMARY KEY"), "{err}");
+    assert!(
+        !err.contains("metric 'last_revenue' is semi-additive"),
+        "{err}"
+    );
+}

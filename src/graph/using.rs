@@ -19,7 +19,12 @@ pub fn validate_using_relationships(def: &SemanticViewDefinition) -> Result<(), 
     // Names resolve with `graph::find_relationship` (spelling first, then
     // DuckDB's identifier rule), the lookup the join resolver, the role-playing
     // fences, the fact rewrite and the per-grain path share.
-    let available_names: Vec<&str> = def.joins.iter().filter_map(|j| j.name.as_deref()).collect();
+    let available_names: Vec<&str> = def
+        .joins
+        .iter()
+        .filter(|j| !j.generated_name)
+        .filter_map(|j| j.name.as_deref())
+        .collect();
 
     for metric in &def.metrics {
         if metric.using_relationships.is_empty() {
@@ -47,6 +52,16 @@ pub fn validate_using_relationships(def: &SemanticViewDefinition) -> Result<(), 
                          Available: [{}]",
                         metric.name,
                         available_names.join(", ")
+                    )));
+                }
+                // A generated name depends on the relationship's position, so
+                // a USING naming it would break when one is declared before it.
+                Some(join) if join.generated_name => {
+                    return Err(ParseError::positionless(format!(
+                        "relationship '{rel_name}' in USING clause of metric '{}' was \
+                         declared without a name, and its generated name can change; name \
+                         it ('rel_name AS {}(...) REFERENCES {}') and USING that name",
+                        metric.name, join.from_alias, join.table
                     )));
                 }
                 Some(join) => {
@@ -89,6 +104,24 @@ mod tests {
             validate_using_relationships(&def).is_ok(),
             "Valid USING reference should be accepted"
         );
+    }
+
+    /// A relationship declared without a name cannot be named by `USING`:
+    /// its generated name depends on its position, so it would change when
+    /// a relationship is declared before it (PR #358 review).
+    #[test]
+    fn validate_using_generated_name_rejected() {
+        let mut def = make_def_with_named_joins(
+            vec![("f", "flights", vec!["id"]), ("a", "airports", vec!["id"])],
+            vec![(None, "f", "a", vec!["dep_id"])],
+            vec![("departure_count", Some("f"), vec![])],
+        );
+        let generated = def.joins[0].generated_name_at(0);
+        def.joins[0].name = Some(generated.clone());
+        def.joins[0].generated_name = true;
+        def.metrics[0].using_relationships = vec![generated];
+        let err = validate_using_relationships(&def).unwrap_err().message;
+        assert!(err.contains("declared without a name"), "{err}");
     }
 
     #[test]

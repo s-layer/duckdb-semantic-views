@@ -123,6 +123,56 @@ SELECT count(*) FROM ur_names JOIN (SELECT DISTINCT object_name FROM describe_se
 ----
 1
 
+# A REFERENCES list that matches the key does not change the generated name,
+# so a view re-created from GET_DDL (which drops the list) or from the YAML
+# export (which writes the inferred one) keeps it.
+statement ok
+CREATE SEMANTIC VIEW ur_u1_listed
+  TABLES (customers AS ur_customers PRIMARY KEY (customer_id), orders AS ur_orders PRIMARY KEY (order_id))
+  RELATIONSHIPS (orders(customer_id) REFERENCES customers(customer_id))
+  DIMENSIONS (customers.region AS region)
+  METRICS (orders.total AS SUM(amount));
+
+query I
+SELECT count(*) FROM ur_names JOIN (SELECT DISTINCT object_name FROM describe_semantic_view('ur_u1_listed') WHERE object_kind = 'RELATIONSHIP') USING (object_name);
+----
+1
+
+statement ok
+CREATE SEMANTIC VIEW ur_u1_yaml FROM YAML $$
+tables:
+  - alias: customers
+    table: ur_customers
+    pk_columns: [customer_id]
+  - alias: orders
+    table: ur_orders
+    pk_columns: [order_id]
+joins:
+  - from_alias: orders
+    table: customers
+    fk_columns: [customer_id]
+    ref_columns: [customer_id]
+dimensions:
+  - name: region
+    expr: customers.region
+    source_table: customers
+metrics:
+  - name: total
+    expr: SUM(amount)
+    source_table: orders
+$$;
+
+query I
+SELECT count(*) FROM ur_names JOIN (SELECT DISTINCT object_name FROM describe_semantic_view('ur_u1_yaml') WHERE object_kind = 'RELATIONSHIP') USING (object_name);
+----
+1
+
+statement ok
+DROP SEMANTIC VIEW ur_u1_yaml;
+
+statement ok
+DROP SEMANTIC VIEW ur_u1_listed;
+
 statement ok
 DROP SEMANTIC VIEW ur_u3;
 

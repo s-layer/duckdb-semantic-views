@@ -890,18 +890,23 @@ impl Join {
     /// The name an unnamed relationship gets: `SYS_RELATIONSHIP_` and a
     /// lowercase, hyphenated 128-bit hex id, the shape Snowflake gives one
     /// (fixture 12). Snowflake draws a random UUID on every `CREATE`; this one is
-    /// derived from the entry's position and its tables and columns, so the same
-    /// view always names it the same, and two entries differ by position at least.
+    /// derived from the entry's position, its tables and its foreign-key
+    /// columns, so the same view always names it the same, through `GET_DDL` and
+    /// the YAML export too, and two entries differ by position at least. The
+    /// position makes it change when an entry is inserted before it.
     #[must_use]
     pub fn generated_name_at(&self, index: usize) -> String {
         // FNV-1a over the entry, twice with different offsets, for 128 bits that
         // stay the same across builds (std's hasher makes no such promise).
+        // Not the REFERENCES columns: CREATE fills an empty list from the
+        // target's key and `GET_DDL` drops one that matches it, so they differ
+        // between the written and the stored form. The position already tells
+        // two entries apart.
         let key = format!(
-            "{index}\u{1f}{}\u{1f}{}\u{1f}{}\u{1f}{}",
+            "{index}\u{1f}{}\u{1f}{}\u{1f}{}",
             self.from_alias.to_ascii_lowercase(),
             self.fk_columns.join("\u{1e}").to_ascii_lowercase(),
             self.table.to_ascii_lowercase(),
-            self.ref_columns.join("\u{1e}").to_ascii_lowercase(),
         );
         let fnv = |offset: u64| {
             key.bytes().fold(offset, |h, b| {
@@ -1212,9 +1217,11 @@ impl SemanticViewDefinition {
         }
         // A relationship may be declared without a name, as in the DDL form;
         // it gets the same generated name the DDL parser would give it.
+        // The flag is never taken from the body, so a YAML name cannot skip
+        // the name checks by claiming to be generated.
         for (index, j) in def.joins.iter_mut().enumerate() {
-            if j.name.is_none() {
-                j.generated_name = true;
+            j.generated_name = j.name.is_none();
+            if j.generated_name {
                 j.name = Some(j.generated_name_at(index));
             }
         }
@@ -1969,6 +1976,21 @@ mod tests {
     }
 
     const VALID_TABLES: &str = "tables:\n  - alias: o\n    table: orders\n    pk_columns: [id]\n";
+
+    /// A YAML body cannot mark its own name as generated to skip the name
+    /// checks: the flag is set only on a relationship with no name (PR #358
+    /// review).
+    #[test]
+    fn yaml_generated_name_flag_is_not_taken_from_the_body() {
+        let yaml = "tables:\n  - alias: o\n    table: orders\n    pk_columns: [id]\n  \
+             - alias: c\n    table: customers\n    pk_columns: [id]\n\
+             joins:\n  - name: \"a b; x\"\n    generated_name: true\n    from_alias: o\n    \
+             table: c\n    fk_columns: [customer_id]\n\
+             dimensions:\n  - name: region\n    expr: c.region\n    source_table: c\n\
+             metrics:\n  - name: total\n    expr: sum(o.amount)\n    source_table: o\n";
+        let e = yaml_err(yaml);
+        assert!(e.contains("relationship"), "{e}");
+    }
 
     #[test]
     fn yaml_join_without_a_name_gets_the_generated_name() {

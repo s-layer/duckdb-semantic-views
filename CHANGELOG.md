@@ -11,7 +11,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
-- A relationship's name is optional, as in Snowflake: `RELATIONSHIPS (orders(customer_id) REFERENCES customers)` is accepted, in the DDL and in YAML. The relationship gets a generated name, `SYS_RELATIONSHIP_` followed by an id, which `DESCRIBE SEMANTIC VIEW` shows. Snowflake draws a new random id on every `CREATE`; here the id comes from the entry's position, tables and columns, so re-creating the view keeps it. `GET_DDL` and the YAML export leave the generated name out. A metric's `USING` needs a named relationship.
+- A relationship's name is optional, as in Snowflake: `RELATIONSHIPS (orders(customer_id) REFERENCES customers)` is accepted, in the DDL and in YAML. The relationship gets a generated name, `SYS_RELATIONSHIP_` followed by an id, which `DESCRIBE SEMANTIC VIEW` shows. Snowflake draws a new random id on every `CREATE`; here the id comes from the entry's position, tables and columns, so re-creating the view, also from its `GET_DDL` or YAML export, keeps it. `GET_DDL` and the YAML export leave the generated name out. A metric's `USING` cannot name a generated name, which changes when a relationship is declared before it; name the relationship instead.
 
 ### Fixed
 

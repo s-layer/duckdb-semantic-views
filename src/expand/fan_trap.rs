@@ -153,16 +153,17 @@ pub(super) fn check_fan_traps(
             .iter()
             .map(|d| crate::ident::normalize_ident_part(&d.name))
             .collect();
-        // An active snapshot blocks the plan wherever it is; a keyless table
-        // only when its metric's own rows fan out.
+        // Only a metric whose own rows fan out can stop the plan (an active
+        // snapshot on a table that does not fan out is answered beside it):
+        // an active snapshot first, then a keyless table.
         let fans = |m: &Metric| bridge_traps.iter().any(|(t, _)| std::ptr::eq(*t, m));
-        let blocker = resolved_mets
+        let fanning: Vec<&Metric> = resolved_mets.iter().copied().filter(|m| fans(m)).collect();
+        let blocker = fanning
             .iter()
             .find_map(|m| once_blocker(def, m, &queried, false).map(|why| (*m, why)))
             .or_else(|| {
-                resolved_mets
+                fanning
                     .iter()
-                    .filter(|m| fans(m))
                     .find_map(|m| once_blocker(def, m, &queried, true).map(|why| (*m, why)))
             });
         let at = blocker
