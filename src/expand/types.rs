@@ -831,7 +831,8 @@ impl fmt::Display for ExpandError {
                             " A fan-out like this one is counted once per group only for \
                              ordinary metrics on a table with a PRIMARY KEY (not a \
                              semi-additive metric whose NON ADDITIVE BY dimension is not \
-                             queried, nor a window metric), and not across a role-played \
+                             queried, a derived metric over a semi-additive one, nor a \
+                             window metric), and not across a role-played \
                              table's relationships back toward the table that holds them."
                         )?,
                     }
