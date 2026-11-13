@@ -18,6 +18,7 @@ use crate::model::SemanticViewDefinition;
 ///   body resolved)
 /// - `table_columns` (the tables' columns as CREATE saw them, recorded again
 ///   when the export is re-created)
+/// - the generated name of a relationship declared without one
 ///
 /// After stripping, `serde(skip_serializing_if)` on these fields ensures
 /// they are omitted from the YAML output entirely. (`schema_version` lives
@@ -31,6 +32,12 @@ pub fn render_yaml_export(def: &SemanticViewDefinition) -> Result<String, String
     export.resolution_schema_name = None;
     export.temp_tables = Vec::new();
     export.table_columns.clear();
+    // A relationship declared without a name keeps none in the export; the
+    // import gives it the same generated name again.
+    for j in export.joins.iter_mut().filter(|j| j.generated_name) {
+        j.name = None;
+        j.generated_name = false;
+    }
 
     yaml_serde::to_string(&export).map_err(|e| format!("YAML serialization error: {e}"))
 }

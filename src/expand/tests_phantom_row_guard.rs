@@ -106,6 +106,7 @@ fn child_def() -> SemanticViewDefinition {
             cardinality: Cardinality::ManyToOne,
             asof: None,
             range_end: None,
+            generated_name: false,
         }],
         facts: vec![],
         materializations: vec![],

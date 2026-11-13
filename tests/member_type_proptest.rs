@@ -297,6 +297,7 @@ fn build_def(case: &Case) -> SemanticViewDefinition {
                 cardinality: Cardinality::ManyToOne,
                 asof: None,
                 range_end: None,
+                generated_name: false,
             })
             .collect(),
         facts,

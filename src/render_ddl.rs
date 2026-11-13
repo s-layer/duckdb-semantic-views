@@ -340,7 +340,9 @@ fn emit_relationships(out: &mut String, def: &SemanticViewDefinition) {
     out.push_str("RELATIONSHIPS (\n");
     for (i, join) in def.joins.iter().enumerate() {
         out.push_str("    ");
-        if let Some(ref rel_name) = join.name {
+        // An unnamed relationship reads back unnamed, as Snowflake writes it;
+        // its generated name is regenerated the same way.
+        if let Some(rel_name) = join.name.as_ref().filter(|_| !join.generated_name) {
             // The entry is split at its first `AS`, so a name that is itself
             // `AS` (storable bare only from YAML) would leave no name. Any other
             // name, a dotted one included, is emitted as stored.
@@ -349,8 +351,8 @@ fn emit_relationships(out: &mut String, def: &SemanticViewDefinition) {
             } else {
                 out.push_str(rel_name);
             }
+            out.push_str(" AS ");
         }
-        out.push_str(" AS ");
         out.push_str(&emit_alias(&join.from_alias));
         out.push('(');
         out.push_str(&emit_column_list(&join.fk_columns));

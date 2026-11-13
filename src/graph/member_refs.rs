@@ -225,6 +225,7 @@ mod tests {
                 cardinality: Cardinality::ManyToOne,
                 asof: None,
                 range_end: None,
+                generated_name: false,
             }],
             ..SemanticViewDefinition::default()
         }

@@ -382,6 +382,7 @@ fn cyclic_relationships_are_rejected_by_expand() {
                 cardinality: Cardinality::ManyToOne,
                 asof: None,
                 range_end: None,
+                generated_name: false,
             },
             Join {
                 from_alias: "b".to_string(),
@@ -392,6 +393,7 @@ fn cyclic_relationships_are_rejected_by_expand() {
                 cardinality: Cardinality::ManyToOne,
                 asof: None,
                 range_end: None,
+                generated_name: false,
             },
         ],
         ..Default::default()

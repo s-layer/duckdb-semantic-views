@@ -395,6 +395,7 @@ fn arb_join() -> impl Strategy<Value = Join> {
                     ref_columns,
                     name,
                     cardinality,
+                    generated_name: false,
                 }
             },
         )
@@ -446,6 +447,17 @@ fn arb_definition() -> impl Strategy<Value = SemanticViewDefinition> {
                 (sql_generation, question_categorization),
                 verified_queries,
             )| {
+                // A relationship declared without a name gets its generated
+                // name at CREATE (DDL or YAML), so that is the only nameless
+                // shape a definition can hold. Exporting drops it again and
+                // the re-import regenerates it.
+                let mut joins = joins;
+                for (index, j) in joins.iter_mut().enumerate() {
+                    if j.name.is_none() {
+                        j.generated_name = true;
+                        j.name = Some(j.generated_name_at(index));
+                    }
+                }
                 SemanticViewDefinition {
                     variables: Vec::new(),
                     tables,

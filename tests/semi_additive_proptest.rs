@@ -1420,6 +1420,7 @@ fn role_def(order: SortOrder) -> SemanticViewDefinition {
         cardinality: Cardinality::ManyToOne,
         asof: None,
         range_end: None,
+        generated_name: false,
     };
     let dim = |name: &str, expr: &str, table: &str| Dimension {
         cortex_search_service: None,

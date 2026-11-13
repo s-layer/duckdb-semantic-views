@@ -33,9 +33,9 @@ Syntax
        [, ... ]
    )
    [ RELATIONSHIPS (
-       <rel_name> AS <from_alias>( <fk_column> [, <fk_column> ...] )
+       [ <rel_name> AS ] <from_alias>( <fk_column> [, <fk_column> ...] )
            REFERENCES <to_alias> [( [ ASOF ] <ref_column> [, [ ASOF ] <ref_column> ...] )]
-     | <rel_name> AS <from_alias>( <fk_column> )
+     | [ <rel_name> AS ] <from_alias>( <fk_column> )
            REFERENCES <to_alias>( BETWEEN <start_column> AND <end_column> EXCLUSIVE )
        [, ... ]
    ) ]
@@ -513,7 +513,7 @@ Declares FK/PK join paths between tables. Each entry names a relationship, speci
 
 **Parameters:**
 
-- ``<rel_name>``, a unique name identifying this relationship. It may be a quoted identifier (``"Dep Airport"``), including one with spaces or an embedded ``""``.
+- ``<rel_name>``, optional, a unique name identifying this relationship. It may be a quoted identifier (``"Dep Airport"``), including one with spaces or an embedded ``""``. A relationship declared without one, as in ``orders(customer_id) REFERENCES customers``, gets a generated name of the form ``SYS_RELATIONSHIP_<id>``, as in Snowflake, which ``DESCRIBE SEMANTIC VIEW`` shows. Snowflake draws a new random id on every ``CREATE``; here the id comes from the entry's position, tables and columns, so re-creating the same view gives the same name. ``GET_DDL`` and the YAML export leave a generated name out. Name a relationship when a metric's ``USING`` needs to pick it. *(Added in 0.20.0.)*
 - ``<from_alias>``, the table alias containing the FK columns.
 - ``(<fk_column>, ...)``, one or more FK column names on the "from" table.
 - ``REFERENCES <to_alias> [(<ref_column>, ...)]``, the target table alias. Optionally specify which columns on the target table to join against. If omitted, the target's ``PRIMARY KEY`` columns are used. The JOIN ON clause is synthesized as ``from_alias.fk_column = to_alias.ref_column``.

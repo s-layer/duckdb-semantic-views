@@ -741,6 +741,7 @@ fn build_def() -> SemanticViewDefinition {
         cardinality: Cardinality::ManyToOne,
         asof: None,
         range_end: None,
+        generated_name: false,
     };
     let joins = vec![
         Join {
@@ -752,6 +753,7 @@ fn build_def() -> SemanticViewDefinition {
             cardinality: Cardinality::ManyToOne,
             asof: None,
             range_end: None,
+            generated_name: false,
         },
         role("t_p1", "p1"),
         role("t_p2", "p2"),
@@ -764,6 +766,7 @@ fn build_def() -> SemanticViewDefinition {
             cardinality: Cardinality::ManyToOne,
             asof: None,
             range_end: None,
+            generated_name: false,
         },
         Join {
             from_alias: "q".to_string(),
@@ -774,6 +777,7 @@ fn build_def() -> SemanticViewDefinition {
             cardinality: Cardinality::ManyToOne,
             asof: None,
             range_end: None,
+            generated_name: false,
         },
     ];
     SemanticViewDefinition {
