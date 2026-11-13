@@ -60,6 +60,16 @@
 //! - **Any query** gives the same rows, or is refused, in two TABLES orders
 //!   (with the same message, unless a relationship is doubled).
 //!
+//! - **An ASOF relationship.** A quarter of the graphs make one plain
+//!   relationship ASOF, `t{a}(f{b}, ts) REFERENCES t{b}(id, ASOF vs)`
+//!   (Phase 8.1, closing the v0.19.0 review's coverage gap 1). `id` stays
+//!   unique, so a `t{a}` row joins its `t{b}` row only when `vs <= ts`, which
+//!   the oracle writes as that condition on a plain LEFT JOIN, never as an
+//!   ASOF join. A chain across it is answered like any other. A fan-out back
+//!   across it is refused (010956) and is left to the listing property, and a
+//!   query with no metric whose members meet across it is refused as not
+//!   related (fixture 8, T1).
+//!
 //! Rows are compared as sorted multisets of text, every column cast to
 //! VARCHAR inside DuckDB.
 
@@ -103,9 +113,24 @@ struct Case {
     /// then read along each metric's own role (Phase 7 PR 6a, Snowflake
     /// fixture 9, W3 and W4).
     twin: bool,
+    /// An index into `edges`: that relationship is ASOF,
+    /// `t{from}(f{to}, ts) REFERENCES t{to}(id, ASOF vs)`. Never the doubled
+    /// relationship nor a one-to-one one.
+    asof: Option<usize>,
 }
 
 impl Case {
+    /// The ASOF relationship's `(from, to)`.
+    fn asof_pair(&self) -> Option<(usize, usize)> {
+        self.asof.map(|i| self.edges[i])
+    }
+
+    /// Whether `path` steps across the ASOF relationship, either way.
+    fn crosses_asof(&self, path: &[usize]) -> bool {
+        self.asof_pair()
+            .is_some_and(|(a, b)| path.windows(2).any(|w| w == [a, b] || w == [b, a]))
+    }
+
     fn out_edges(&self, from: usize) -> Vec<usize> {
         self.edges
             .iter()
@@ -279,8 +304,17 @@ fn arb_case() -> impl Strategy<Value = Case> {
             let filter = prop_oneof![2 => Just(None), 1 => (0..n, 0i64..3).prop_map(Some)];
             let doubled = prop_oneof![3 => Just(None), 1 => (0..edges.len()).prop_map(Some)];
             let using = prop_oneof![1 => Just(None), 2 => any::<bool>().prop_map(Some)];
+            let asof = prop_oneof![3 => Just(None), 1 => (0..edges.len()).prop_map(Some)];
             (
-                (Just(n), Just(edges), one_to_one, rows, order(), order()),
+                (
+                    Just(n),
+                    Just(edges),
+                    one_to_one,
+                    rows,
+                    order(),
+                    order(),
+                    asof,
+                ),
                 (
                     metric,
                     dims,
@@ -294,6 +328,7 @@ fn arb_case() -> impl Strategy<Value = Case> {
                         prop::bool::weighted(0.5),
                         0usize..8,
                         0i64..3,
+                        prop::bool::weighted(0.5),
                     ),
                 ),
             )
@@ -304,8 +339,17 @@ fn arb_case() -> impl Strategy<Value = Case> {
         )
         .prop_map(
             |(
-                (n, edges, one_to_one, rows, o1, o2),
-                (metric, dims, filter, doubled, using, aim, aim_back, (twin, aim_filter, pick, c)),
+                (n, edges, one_to_one, rows, o1, o2, asof),
+                (
+                    metric,
+                    dims,
+                    filter,
+                    doubled,
+                    using,
+                    aim,
+                    aim_back,
+                    (twin, aim_filter, pick, c, aim_asof),
+                ),
             )| {
                 let mut case = Case {
                     n,
@@ -321,6 +365,7 @@ fn arb_case() -> impl Strategy<Value = Case> {
                     // Not beside the step back across the role below, which
                     // these draws are aimed at.
                     twin: twin && !(aim && aim_back),
+                    asof,
                 };
                 // Half the doubled graphs query the referencing table's metric
                 // by the role-played table's dimension, which random draws
@@ -363,6 +408,38 @@ fn arb_case() -> impl Strategy<Value = Case> {
                         case.filter = Some((k, c));
                     }
                 }
+                // The ASOF relationship is a plain many-to-one one: not the
+                // doubled relationship, and not one made one-to-one above.
+                if let Some(i) = case.asof {
+                    if case.one_to_one[i] || case.doubled == Some(i) {
+                        case.asof = None;
+                    }
+                }
+                // Half the ASOF graphs query the referencing table's metric
+                // (or, one time in four, no metric) by the referenced table's
+                // dimension, which random draws reach too rarely; one time in
+                // eight, with no metric, the referencing table's dimension
+                // beside one of a table that references the referenced table
+                // too, which meet only across the ASOF relationship.
+                if let (true, Some((from, to)), false) = (aim_asof, case.asof_pair(), case.twin()) {
+                    let sibling = case
+                        .edges
+                        .iter()
+                        .find(|&&(f, t)| t == to && f != from)
+                        .map(|&(f, _)| f);
+                    match (pick, sibling) {
+                        (4, Some(sib)) => {
+                            case.metric = None;
+                            case.dims = vec![from, sib];
+                        }
+                        _ => {
+                            case.metric = if pick % 4 == 0 { None } else { Some(from) };
+                            if !case.dims.contains(&to) {
+                                case.dims.push(to);
+                            }
+                        }
+                    }
+                }
                 case
             },
         )
@@ -376,18 +453,31 @@ fn build_def(case: &Case, order: &[usize], reverse_relationships: bool) -> Seman
         .edges
         .iter()
         .zip(&case.one_to_one)
-        .map(|(&(from, to), &one)| Join {
-            table: t(to),
-            from_alias: t(from),
-            fk_columns: vec![format!("f{to}")],
-            ref_columns: vec!["id".to_string()],
-            name: Some(format!("r{from}_{to}")),
-            cardinality: if one {
-                Cardinality::OneToOne
+        .enumerate()
+        .map(|(i, (&(from, to), &one))| {
+            let asof = case.asof == Some(i);
+            let (fk, rf) = if asof {
+                (
+                    vec![format!("f{to}"), "ts".to_string()],
+                    vec!["id".to_string(), "vs".to_string()],
+                )
             } else {
-                Cardinality::ManyToOne
-            },
-            ..Default::default()
+                (vec![format!("f{to}")], vec!["id".to_string()])
+            };
+            Join {
+                table: t(to),
+                from_alias: t(from),
+                fk_columns: fk,
+                ref_columns: rf,
+                name: Some(format!("r{from}_{to}")),
+                cardinality: if one {
+                    Cardinality::OneToOne
+                } else {
+                    Cardinality::ManyToOne
+                },
+                asof: asof.then_some(1),
+                ..Default::default()
+            }
         })
         .collect();
     let mut metrics: Vec<Metric> = (0..case.n)
@@ -434,6 +524,13 @@ fn build_def(case: &Case, order: &[usize], reverse_relationships: bool) -> Seman
                 alias: t(k),
                 table: t(k),
                 pk_columns: vec!["id".to_string()],
+                // The ASOF relationship references `(id, vs)`, which a key
+                // must cover; `id` alone is unique, so this one is too.
+                unique_constraints: if case.asof_pair().is_some_and(|(_, to)| to == k) {
+                    vec![vec!["id".to_string(), "vs".to_string()]]
+                } else {
+                    vec![]
+                },
                 ..Default::default()
             })
             .collect(),
@@ -490,6 +587,16 @@ fn make_db(case: &Case) -> duckdb::Connection {
         if let Some(to) = second {
             fk_cols.push_str(&format!(", f{to}b INTEGER"));
         }
+        let (asof_from, asof_to) = (
+            case.asof_pair().is_some_and(|(f, _)| f == k),
+            case.asof_pair().is_some_and(|(_, t)| t == k),
+        );
+        if asof_from {
+            fk_cols.push_str(", ts INTEGER");
+        }
+        if asof_to {
+            fk_cols.push_str(", vs INTEGER");
+        }
         conn.execute_batch(&format!(
             "CREATE TABLE t{k} (id INTEGER, g INTEGER, v INTEGER{fk_cols});"
         ))
@@ -504,6 +611,18 @@ fn make_db(case: &Case) -> duckdb::Connection {
                     // NULL in four and some dangling (4 is past every table).
                     let b = (i % 4 != 3).then_some((i as i64 * 2 + 1) % 5);
                     fks.push_str(&format!(", {}", cell(&b)));
+                }
+                // The ASOF columns: a `t{from}` row's `ts` and a `t{to}`
+                // row's `vs`, spread over 0..6 with some NULL, so a match
+                // is kept or dropped by `vs <= ts` both ways.
+                let i = i as i64;
+                if asof_from {
+                    let ts = (i % 5 != 4).then_some((i * 3 + k as i64 + 2) % 6);
+                    fks.push_str(&format!(", {}", cell(&ts)));
+                }
+                if asof_to {
+                    let vs = (i % 4 != 2).then_some((i * 2 + k as i64) % 6);
+                    fks.push_str(&format!(", {}", cell(&vs)));
                 }
                 format!("({i}, {}, {}{fks})", cell(g), cell(v))
             })
@@ -531,8 +650,15 @@ fn joined_from(
             let alias = format!("c{ci}_{step}");
             let second = *role == Some(true) && case.pair() == Some((pair[0], pair[1]));
             if case.edges.contains(&(pair[0], pair[1])) {
+                // Across the ASOF relationship the one `t{to}` row with the
+                // key matches only when its `vs` is not after the row's `ts`.
+                let asof = if case.asof_pair() == Some((pair[0], pair[1])) && !second {
+                    format!(" AND {alias}.vs <= {prev}.ts")
+                } else {
+                    String::new()
+                };
                 sql.push_str(&format!(
-                    " LEFT JOIN t{to} AS {alias} ON {prev}.f{to}{b} = {alias}.id",
+                    " LEFT JOIN t{to} AS {alias} ON {prev}.f{to}{b} = {alias}.id{asof}",
                     to = pair[1],
                     b = if second { "b" } else { "" }
                 ));
@@ -876,7 +1002,9 @@ fn meeting_table(case: &Case, members: &[usize]) -> Option<usize> {
             let [path] = paths.as_slice() else {
                 return None;
             };
-            if path.windows(2).any(doubled) {
+            // Members meeting across the ASOF relationship are refused as
+            // not related (fixture 8, T1), like across the doubled one.
+            if path.windows(2).any(doubled) || case.crosses_asof(path) {
                 return None;
             }
             for &t in path {
@@ -900,7 +1028,15 @@ fn meeting_table(case: &Case, members: &[usize]) -> Option<usize> {
         .filter(|&t| !meeting.iter().any(|&o| o != t && under(o, t)))
         .collect();
     match lowest.as_slice() {
-        [one] => Some(*one),
+        [one]
+            if !members.iter().any(|&d| {
+                undirected_paths(case, *one, d)
+                    .iter()
+                    .any(|p| case.crosses_asof(p))
+            }) =>
+        {
+            Some(*one)
+        }
         _ => None,
     }
 }
@@ -1231,6 +1367,39 @@ fn generator_reaches_every_outcome() {
             .new_tree(&mut runner)
             .expect("strategy must produce a value")
             .current();
+        // The ASOF relationship: a metric's chain across it answered, a
+        // query with no metric answered across it, and members meeting
+        // across it refused.
+        if case.asof.is_some() {
+            let across = |from: usize| {
+                case.members()
+                    .iter()
+                    .any(|&d| case.chains(from, d).iter().any(|p| case.crosses_asof(p)))
+            };
+            let key = match expect(&case) {
+                Expect::Rows(from) if case.metric.is_some() && across(from) => {
+                    Some("asof chain answered")
+                }
+                Expect::Rows(from) if across(from) => Some("asof dims answered"),
+                Expect::Refused(t)
+                    if case.metric.is_none()
+                        && t == ["not related"]
+                        && case.members().iter().enumerate().any(|(i, &a)| {
+                            case.members()[i + 1..].iter().any(|&b| {
+                                undirected_paths(&case, a, b)
+                                    .iter()
+                                    .any(|p| case.crosses_asof(p))
+                            })
+                        }) =>
+                {
+                    Some("asof meeting refused")
+                }
+                _ => None,
+            };
+            if let Some(key) = key {
+                *seen.entry(key).or_default() += 1;
+            }
+        }
         if case.twin() {
             let (a, _) = case
                 .pair()
@@ -1306,6 +1475,9 @@ fn generator_reaches_every_outcome() {
         *seen.entry(key).or_default() += 1;
     }
     for key in [
+        "asof chain answered",
+        "asof dims answered",
+        "asof meeting refused",
         "role refused",
         "role answered",
         "role back across answered",
@@ -1359,7 +1531,50 @@ fn a_chain_is_followed_beside_a_shorter_path_that_fans_out() {
         doubled: None,
         using: None,
         twin: false,
+        asof: None,
     };
+    check_case(&case).unwrap();
+    check_listing(&case).unwrap();
+}
+
+/// Phase 8.1: the ASOF relationship with its answer written out, so the
+/// generated ASOF cases are known to compare real matches, the boundary
+/// `vs = ts` included. `t1(f0, ts) REFERENCES t0(id, ASOF vs)`; `t0` rows
+/// have `vs` 0 and 2, `t1` rows `ts` 3, 0, 3, 0 ([`make_db`]'s formulas).
+/// Row 1 (`ts` 0) matches `t0` row 0 (`vs` 0) at the boundary; row 3 (`ts`
+/// 0) does not match `t0` row 1 (`vs` 2).
+#[test]
+fn asof_relationship_matches_when_vs_is_not_after_ts() {
+    let case = Case {
+        n: 2,
+        edges: vec![(1, 0)],
+        one_to_one: vec![false],
+        rows: vec![
+            vec![(Some(1), Some(10), vec![]), (Some(2), Some(20), vec![])],
+            vec![
+                (None, Some(1), vec![Some(1)]),
+                (None, Some(2), vec![Some(0)]),
+                (None, Some(4), vec![Some(1)]),
+                (None, Some(8), vec![Some(1)]),
+            ],
+        ],
+        orders: [vec![0, 1], vec![1, 0]],
+        metric: Some(1),
+        dims: vec![0],
+        filter: None,
+        doubled: None,
+        using: None,
+        twin: false,
+        asof: Some(0),
+    };
+    let conn = make_db(&case);
+    let def = build_def(&case, &case.orders[0], false);
+    let sql = expand("dag", &def, &request(&case)).unwrap();
+    assert!(sql.contains("ASOF"), "{sql}");
+    assert_eq!(
+        rows(&conn, &sql).unwrap(),
+        vec!["1|2".to_string(), "2|5".to_string(), "NULL|8".to_string()]
+    );
     check_case(&case).unwrap();
     check_listing(&case).unwrap();
 }
