@@ -18,11 +18,11 @@ workflows:
         - 'actions/deploy-pages@v5.0.1'
         - 'actions/setup-python@v7.1.0'
         - 'actions/upload-pages-artifact@v5.0.0'
-        - 'astral-sh/setup-uv@v7.6.0'
+        - 'astral-sh/setup-uv@v10.3.3'
     '.github/workflows/DocsCheck.yml':
         - 'actions/checkout@v7.0.1'
         - 'actions/setup-python@v7.1.0'
-        - 'astral-sh/setup-uv@v7.6.0'
+        - 'astral-sh/setup-uv@v10.3.3'
     '.github/workflows/DuckDBVersionMonitor.yml':
         - 'actions/checkout@v7.0.1'
         - 'dtolnay/rust-toolchain@stable'
@@ -105,9 +105,9 @@ dependencies:
         repo_id: 496012378
         uses:
             - 'actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f'
-    'astral-sh/setup-uv@v7.6.0':
-        ref: 'v7.6.0'
-        commit: 'sha1-37802adc94f370d6bfd71619e3f0bf239e1f3b78'
+    'astral-sh/setup-uv@v10.3.3':
+        ref: 'v10.3.3'
+        commit: 'sha1-68559e99cc807c1eb7e9238fd43a15bba460eec2'
         owner_id: 115962839
         repo_id: 846733598
     'dtolnay/rust-toolchain@nightly':
