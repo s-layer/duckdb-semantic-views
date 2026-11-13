@@ -52,6 +52,14 @@
 //! (`q.sid -> s.id`, dimension `scat`), puts a chain edge whose left side is
 //! itself a chain table under the same check.
 //!
+//! Phase 8.1 (the v0.19.0 review's coverage gap 2) writes every member
+//! expression bare in about half the cases (`sum(v)`, `pcat`; [`bare_twin`]),
+//! with the tables' columns recorded as CREATE records them, and gives every
+//! table a decoy column of each member column it lacks. The bare-column pass
+//! (TECH-DEBT #83) must read each column from its member's own table, under a
+//! role's scoped alias for `p` and at each grain; reading a decoy shows in
+//! the numbers, and before #83 the shared names were ambiguous.
+//!
 //! Phase 6.4 reads any of the five tables through an INLINE QUERY
 //! (`alias AS (<query>)`) instead of by name, chosen per case. The query reads
 //! `<x>_src`, which holds every row of `<x>` twice, once marked as noise, and
@@ -364,6 +372,90 @@ struct Case {
     /// Phase 6.4: which of [`TABLES`] the definition reads through an inline
     /// query, by position.
     inline: Vec<bool>,
+    /// Phase 8.1: every member expression written bare, with the tables'
+    /// columns recorded ([`bare_twin`]).
+    bare: bool,
+}
+
+/// The definition a case queries: [`build_def`], written bare when the case
+/// is ([`bare_twin`]), with the tables it marks read inline.
+fn def_for(case: &Case) -> SemanticViewDefinition {
+    let def = build_def();
+    let def = if case.bare { bare_twin(def) } else { def };
+    with_inline_tables(def, &case.inline)
+}
+
+/// Each table's own columns, as [`make_db`] creates them before the decoys.
+const SCHEMA: [(&str, &[&str]); 5] = [
+    ("t", &["fk", "d", "v", "p1", "p2"]),
+    ("u", &["id", "ucat", "w"]),
+    ("p", &["id", "pcat", "qid"]),
+    ("q", &["id", "qcat", "sid"]),
+    ("s", &["id", "scat"]),
+];
+
+/// The physical columns the member expressions read.
+const MEMBER_COLUMNS: [&str; 7] = ["d", "v", "w", "ucat", "pcat", "qcat", "scat"];
+
+/// The value of every decoy column, far from any generated value.
+const DECOY: i64 = 1000;
+
+/// The member columns a table lacks, each of which it gets as a decoy.
+fn decoys(own: &[&str]) -> Vec<&'static str> {
+    MEMBER_COLUMNS
+        .into_iter()
+        .filter(|c| !own.contains(c))
+        .collect()
+}
+
+/// `text` with each `<table>.` qualifier of [`TABLES`] removed.
+fn strip_qualifiers(text: &str) -> String {
+    let mut out = String::new();
+    let chars: Vec<char> = text.chars().collect();
+    let mut i = 0;
+    while i < chars.len() {
+        let starts_word = i == 0 || !(chars[i - 1].is_alphanumeric() || chars[i - 1] == '_');
+        let qualifier = starts_word
+            && i + 1 < chars.len()
+            && chars[i + 1] == '.'
+            && TABLES
+                .iter()
+                .any(|t| t.starts_with(chars[i]) && t.len() == 1);
+        if qualifier {
+            i += 2;
+        } else {
+            out.push(chars[i]);
+            i += 1;
+        }
+    }
+    out
+}
+
+/// Phase 8.1 (the v0.19.0 review's coverage gap 2): `def` with every member
+/// expression written bare (`sum(v)`, not `sum(t.v)`; `pcat`, not `p.pcat`)
+/// and each table's columns recorded as CREATE records them, decoys
+/// included: every table has a column, holding [`DECOY`], of each member
+/// column it lacks. The bare-column pass (TECH-DEBT #83) must then read each
+/// column from its member's own table, under a role's scoped alias for `p`
+/// and in each grain of the per-grain plan.
+fn bare_twin(mut def: SemanticViewDefinition) -> SemanticViewDefinition {
+    for d in &mut def.dimensions {
+        d.expr = strip_qualifiers(&d.expr);
+    }
+    for m in &mut def.metrics {
+        m.expr = strip_qualifiers(&m.expr);
+    }
+    for f in &mut def.facts {
+        f.expr = strip_qualifiers(&f.expr);
+    }
+    def.table_columns = SCHEMA
+        .iter()
+        .map(|(t, own)| {
+            let all = own.iter().copied().chain(decoys(own));
+            ((*t).to_string(), all.map(str::to_string).collect())
+        })
+        .collect();
+    def
 }
 
 /// The definition's tables, in declaration order.
@@ -489,18 +581,30 @@ fn arb_case() -> impl Strategy<Value = Case> {
         // Phase 6.4: each table is read through its inline query in about
         // one case in three, independently, so every mix occurs.
         let inline = prop::collection::vec(prop::bool::weighted(0.35), TABLES.len());
-        (Just(inst), dim_sel, met_sel, where_pred, inline)
+        (
+            Just(inst),
+            dim_sel,
+            met_sel,
+            where_pred,
+            inline,
+            any::<bool>(),
+        )
             .prop_filter(
                 "at least one of dimensions/metrics must be selected",
-                |(_, sel_dims, sel_metrics, _, _)| !sel_dims.is_empty() || !sel_metrics.is_empty(),
+                |(_, sel_dims, sel_metrics, _, _, _)| {
+                    !sel_dims.is_empty() || !sel_metrics.is_empty()
+                },
             )
-            .prop_map(|(inst, sel_dims, sel_metrics, where_pred, inline)| Case {
-                inst,
-                sel_dims,
-                sel_metrics,
-                where_pred,
-                inline,
-            })
+            .prop_map(
+                |(inst, sel_dims, sel_metrics, where_pred, inline, bare)| Case {
+                    inst,
+                    sel_dims,
+                    sel_metrics,
+                    where_pred,
+                    inline,
+                    bare,
+                },
+            )
     })
 }
 
@@ -898,6 +1002,16 @@ fn make_db(inst: &Instance, inline: &[bool]) -> duckdb::Connection {
         .collect();
     conn.execute_batch(&format!("INSERT INTO s VALUES {};", values.join(",")))
         .expect("insert s rows");
+    // Phase 8.1: the decoys, after the rows, so every row holds `DECOY` in
+    // them; an inline table's source copies them.
+    for (table, own) in SCHEMA {
+        for d in decoys(own) {
+            conn.execute_batch(&format!(
+                "ALTER TABLE {table} ADD COLUMN {d} INTEGER DEFAULT {DECOY};"
+            ))
+            .expect("add a decoy column");
+        }
+    }
     // Phase 6.4: what an inline-query table reads, every row twice, the
     // second copy marked as noise for the query to drop. The table itself is
     // the oracle's alone.
@@ -1307,10 +1421,11 @@ proptest! {
         inst in arb_instance(),
         sel_dims in prop::sample::subsequence(vec![7usize, 8, 9], 1..=3),
         inline in prop::collection::vec(prop::bool::weighted(0.35), TABLES.len()),
+        bare in any::<bool>(),
     ) {
-        let case = Case { inst, sel_dims, sel_metrics: vec![], where_pred: None, inline };
+        let case = Case { inst, sel_dims, sel_metrics: vec![], where_pred: None, inline, bare };
         prop_assert!(is_role_only(&case));
-        let def = with_inline_tables(build_def(), &case.inline);
+        let def = def_for(&case);
         let req = QueryRequest {
             // PIN: every filterable member is on `t` or `u`, below `p`, so a filter would make the query cross one of `t`'s two relationships to `p` (refused as ambiguous, Snowflake's R7); `star_join_fence_and_aggregation` varies the filter.
             where_clause: None,
@@ -1354,8 +1469,9 @@ proptest! {
             2 => arb_pred().prop_filter("a filter on u", |p| !p.touches_child()).prop_map(Some),
         ],
         inline in prop::collection::vec(prop::bool::weighted(0.35), TABLES.len()),
+        bare in any::<bool>(),
     ) {
-        let case = Case { inst, sel_dims, sel_metrics: vec![], where_pred, inline };
+        let case = Case { inst, sel_dims, sel_metrics: vec![], where_pred, inline, bare };
         let items = RequestItems::parse(
             &case.sel_dims.iter().map(|&i| item_text(DIMS[i])).collect::<Vec<_>>(),
             &[],
@@ -1363,7 +1479,7 @@ proptest! {
             &[],
         )
         .expect("the pool's items parse");
-        let stored = with_inline_tables(build_def(), &case.inline);
+        let stored = def_for(&case);
         let lowered = lower_expression_items("star", &stored, items, &Default::default())
             .unwrap_or_else(|e| panic!("the pool's expression items lower: {e:?}"));
         let def = lowered.def.clone().unwrap_or(stored);
@@ -1424,7 +1540,7 @@ proptest! {
             &[],
         )
         .expect("the pool's items parse");
-        let stored = with_inline_tables(build_def(), &case.inline);
+        let stored = def_for(&case);
         let lowered = lower_expression_items("star", &stored, items, &Default::default())
             .unwrap_or_else(|e| panic!("the pool's expression items lower: {e:?}"));
         let def = lowered.def.clone().unwrap_or(stored);
@@ -1604,6 +1720,10 @@ fn generator_reaches_both_where_clause_branches() {
     let mut pcat_refused = 0usize;
     let mut pcat_oracled = 0usize;
     let mut pcat_both_paths_oracled = 0usize;
+    // Phase 8.1: bare-column cases compared with the oracle, those grouping
+    // by `pcat` along a role, and those carrying the parent metric (its own
+    // grain).
+    let (mut bare_oracled, mut bare_pcat_oracled, mut bare_parent_oracled) = (0usize, 0, 0);
     let mut pcat_sv_p2_oracled = 0usize;
     let mut using_without_pcat_oracled = 0usize;
     // Phase 6.3b: `qcat`, past the role-played table, refused and oracled, the
@@ -1650,6 +1770,11 @@ fn generator_reaches_both_where_clause_branches() {
         }
         if selects_scat && oracled && both_paths {
             scat_both_paths_oracled += 1;
+        }
+        if case.bare && oracled {
+            bare_oracled += 1;
+            bare_pcat_oracled += usize::from(selects_pcat);
+            bare_parent_oracled += usize::from(selects_parent_metric);
         }
         if selects_pcat && oracled {
             pcat_oracled += 1;
@@ -1808,6 +1933,11 @@ fn generator_reaches_both_where_clause_branches() {
         expression_bridged > 0,
         "the parent-grain expression metric `esw` was never oracled with a child \
          dimension, so an expression item is never taken across the bridge"
+    );
+    assert!(
+        bare_oracled >= 100 && bare_pcat_oracled >= 10 && bare_parent_oracled >= 30,
+        "bare-column cases oracled {bare_oracled}, by pcat {bare_pcat_oracled}, with the \
+         parent metric {bare_parent_oracled}"
     );
     assert!(
         pcat_refused > 0 && pcat_oracled > 0,
