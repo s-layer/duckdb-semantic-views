@@ -318,12 +318,18 @@ pub struct FanTrapError {
     pub dimension_table: String,
     pub relationship_name: String,
     /// Phase 7.3 and PR 4c: the fan-out is one the per-grain plan answers once
-    /// per group, but could not for this query (a window metric, an active
-    /// semi-additive metric, a member that names no table, or a metric table
-    /// with no PRIMARY KEY). The message then says so, instead of only
-    /// suggesting the dimension be removed. `false` for a fan-out across an
-    /// ASOF or range relationship, which is never counted that way.
+    /// per group, but could not for this query (an active semi-additive
+    /// metric, a metric table with no PRIMARY KEY, or a hop back across a
+    /// role-played table's relationships). The message then says so, instead
+    /// of only suggesting the dimension be removed. `false` for a fan-out
+    /// across an ASOF or range relationship, which is never counted that way.
     pub counts_once: bool,
+    /// With `counts_once`: the metric of the query that cannot be counted once
+    /// per group, and why, as a clause (`metric 'm' is semi-additive and ...`).
+    /// `None` when no metric explains it (a role-played table on the path).
+    /// v0.19.0 review O2: the message used to name only the first metric that
+    /// fanned, which was often not the one blocking the plan.
+    pub once_blocker: Option<String>,
 }
 
 /// Detail payload for [`ExpandError::ReferencedFactFanTrap`], boxed for the
@@ -461,6 +467,10 @@ pub enum ExpandError {
         dimension_table: String,
         role_playing_table: String,
         available_relationships: Vec<String>,
+        /// The dimension's table references the role-played table (it is
+        /// below it), so reaching it crosses a role and then fans out: no
+        /// `USING` answers it, and the message says so.
+        fans_out: bool,
     },
     /// A fact whose source table is (or is reached only through) a role-playing
     /// table. Facts carry no USING context, so the role is unresolvable
@@ -797,6 +807,7 @@ impl fmt::Display for ExpandError {
                     dimension_table,
                     relationship_name,
                     counts_once,
+                    once_blocker,
                 } = &**detail;
                 write!(
                     f,
@@ -809,13 +820,20 @@ impl fmt::Display for ExpandError {
                      relationship."
                 )?;
                 if *counts_once {
-                    write!(
-                        f,
-                        " A fan-out like this one is counted once per group only for ordinary \
-                         metrics on a table with a PRIMARY KEY: not for a semi-additive metric \
-                         whose NON ADDITIVE BY dimension is not queried, a role-played table, a query with a dimension or filter that names no \
-                         table, or a metric table with no PRIMARY KEY."
-                    )?;
+                    match once_blocker {
+                        Some(blocker) => write!(
+                            f,
+                            " A fan-out like this one is counted once per group only when every \
+                             metric in the query can be, and {blocker}."
+                        )?,
+                        None => write!(
+                            f,
+                            " A fan-out like this one is counted once per group only for \
+                             ordinary metrics on a table with a PRIMARY KEY, and not across a \
+                             role-played table's relationships back toward the table that \
+                             holds them."
+                        )?,
+                    }
                 }
                 Ok(())
             }
@@ -887,6 +905,28 @@ impl fmt::Display for ExpandError {
                 dimension_table,
                 role_playing_table,
                 available_relationships,
+                fans_out: true,
+            } => {
+                write!(
+                    f,
+                    "semantic view '{view_name}': dimension '{dimension_name}' cannot be \
+                     grouped by here -- its table '{dimension_table}' references the \
+                     role-playing table '{role_playing_table}', so a metric that reaches \
+                     '{role_playing_table}' across one of its relationships [{}] then fans out \
+                     from table '{role_playing_table}' to table '{dimension_table}', which no \
+                     USING changes (Snowflake refuses a role followed by a fan-out too). Query \
+                     it with metrics on '{role_playing_table}' or '{dimension_table}', or use a \
+                     dimension on another table.",
+                    available_relationships.join(", ")
+                )
+            }
+            Self::AmbiguousDescendantPath {
+                view_name,
+                dimension_name,
+                dimension_table,
+                role_playing_table,
+                available_relationships,
+                fans_out: false,
             } => {
                 write!(
                     f,
@@ -1101,9 +1141,9 @@ impl fmt::Display for ExpandError {
                     "semantic view '{view_name}': metric '{metric_name}' reaches table \
                      '{member_table}' along the path its USING names ({path}), which this query \
                      cannot follow: only the plan that computes each metric at its own grain \
-                     follows a USING path, and this query does not fit that plan (for example, \
-                     it also holds a member declared on no table). Query the metric with fewer \
-                     members"
+                     follows a USING path, and this query does not fit that plan (a member \
+                     that names no table, which only a view stored before every member had to \
+                     name one can hold). Query the metric with fewer members"
                 )
             }
             Self::WhereClauseReferencesMetric {

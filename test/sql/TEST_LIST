@@ -168,6 +168,7 @@ test/sql/phase7_window_partition.test
 test/sql/phase7_window_create_rules.test
 test/sql/phase7_bare_columns.test
 test/sql/phase8_bare_column_keywords.test
+test/sql/phase8_error_messages.test
 test/sql/variables.test
 test/sql/create_or_alter.test
 test/sql/dims_only_anchoring.test
