@@ -90,7 +90,8 @@ parameter, a new aggregation shape, a new join or CTE topology — is not
 adequately covered by hand-written `.test` rows alone. Hand-picked examples
 check the cases you thought of; the differential proptests in `tests/`
 (`differential_proptest`, `star_schema_proptest`, `multi_hop_join_proptest`,
-`bridge_proptest`, `semi_additive_proptest`, `window_metric_proptest`) check the cases you didn't,
+`bridge_proptest`, `semi_additive_proptest`, `window_metric_proptest`, `dag_proptest`,
+`child_grain_proptest`) check the cases you didn't,
 against an independently-formulated oracle. Extend at least one of them in the
 same change: generate the new construct and mirror it into that harness's oracle
 so the comparison stays honest.
