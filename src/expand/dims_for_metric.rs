@@ -47,10 +47,6 @@ struct Step {
 /// by several paths is still listed; a query that needs one path picks it
 /// with `USING`, and one that needs none is refused by the query's own checks.
 ///
-/// A dimension a role-played table makes the query refuse (no role named, a
-/// role followed by a fan-out, a fan-out back across a role) is left out:
-/// the walk cannot see roles, so [`refused_by_a_role`] asks the query.
-///
 /// A table reached by no chain and two ways is left out, as the query refuses
 /// it ([`super::refused_as_many_to_many`]): a step back along a one-to-one
 /// relationship does not fan out, but it is not a chain either.
@@ -129,39 +125,9 @@ pub fn dimensions_for_metric<'a>(
                 .iter()
                 .any(|na_keys| met.source_table.is_none() || na_keys.iter().any(|k| *k != key));
             let fans = any_dim || super::fan_trap::metric_answers_fan_outs(def, met, Some(d));
-            !snapshot_fans
-                && reached(def, d, &met_tables, if fans { &fanning } else { &plain })
-                && !refused_by_a_role(def, met, d)
+            !snapshot_fans && reached(def, d, &met_tables, if fans { &fanning } else { &plain })
         })
         .collect()
-}
-
-/// Whether a query of `met` grouped by `dim` alone is refused because of a
-/// role-played table: no role named for it, or a role followed by a fan-out
-/// (v0.19.0 review O1). The graph walk above cannot see roles, so the query
-/// is expanded and its refusal read. A table reached by two paths is still
-/// listed (a `USING` on another metric may pick one), and so is anything
-/// refused for a reason the walk already decides.
-fn refused_by_a_role(def: &SemanticViewDefinition, met: &Metric, dim: &Dimension) -> bool {
-    use super::types::{DimensionName, ExpandError, MetricName, QueryRequest};
-    let req = QueryRequest {
-        dimensions: vec![DimensionName::new(&dim.name)],
-        metrics: vec![MetricName::new(&met.name)],
-        facts: vec![],
-        where_clause: None,
-    };
-    match super::expand("", def, &req) {
-        Err(
-            ExpandError::AmbiguousPath { .. }
-            | ExpandError::AmbiguousDescendantPath { .. }
-            | ExpandError::AmbiguousMetricPath { .. }
-            | ExpandError::AmbiguousMemberFactPath { .. }
-            | ExpandError::AmbiguousFactPath { .. },
-        ) => true,
-        // A fan-out the plan would count once but for a role on the way.
-        Err(ExpandError::FanTrap { detail }) => detail.counts_once && detail.once_blocker.is_none(),
-        _ => false,
-    }
 }
 
 /// The `NON ADDITIVE BY` keys of each semi-additive metric `met` is built

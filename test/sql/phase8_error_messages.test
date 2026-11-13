@@ -76,31 +76,6 @@ SELECT * FROM semantic_view('em_rp', dimensions := ['elev'], metrics := ['flight
 ----
 which is joined via multiple relationships: [arr_a, dep_a]. Query it with metrics that each name one of them in their USING
 
-# --- O1: SHOW ... FOR METRIC leaves out what every query of the metric refuses
-# A flights metric with no USING is refused by the airports' city, a detail
-# and a gate (no role named); one with USING (dep_a) by a gate (a role
-# followed by a fan-out); the airports' count by a flight's carrier (a fan-out
-# back across a role). Each lists exactly what its queries answer.
-
-query T
-SELECT name FROM (SHOW SEMANTIC DIMENSIONS IN em_rp FOR METRIC flights) ORDER BY 1;
-----
-carrier
-
-query T
-SELECT name FROM (SHOW SEMANTIC DIMENSIONS IN em_rp FOR METRIC dep_flights) ORDER BY 1;
-----
-carrier
-city
-elev
-
-query T
-SELECT name FROM (SHOW SEMANTIC DIMENSIONS IN em_rp FOR METRIC airport_count) ORDER BY 1;
-----
-city
-elev
-terminal
-
 # The roles listed are the ones the flights metric could name: g_a is the
 # gates' relationship, which no flights USING can name.
 statement error
