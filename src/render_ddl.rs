@@ -2325,4 +2325,31 @@ mod tests {
             assert!(!ddl.contains("TAG"), "{ddl}");
         }
     }
+
+    /// Render is idempotent on a parsed expression that ends in a dot and a
+    /// whitespace character `trim` drops but the annotation scanner did not
+    /// skip (a vertical tab): `x.<VT> WITH TAG (...)` once parsed to `x.`
+    /// with the tag, and `x. WITH TAG` then read `WITH` as a column of `x`
+    /// (fuzz_render_roundtrip, PR #358).
+    #[test]
+    fn a_dot_before_a_vertical_tab_and_an_annotation_renders_idempotently() {
+        use crate::body_parser::parse_keyword_body;
+        let render_body = |body: &str| {
+            let kb = parse_keyword_body(body, 0).expect("parse");
+            let ddl = render_create_ddl("rt", &kb.into_definition()).expect("render");
+            let as_pos = ddl.find(" AS\n").expect("AS");
+            format!("AS {}", &ddl[as_pos + 4..])
+        };
+        let drifted: Vec<&str> = ["\u{b}", "\u{c}", "\u{2003}"]
+            .into_iter()
+            .filter(|ws| {
+                let body = format!(
+                    "AS\nTABLES (\n    a AS (\u{1})\n)\nDIMENSIONS (\n    a.d AS x.{ws} WITH TAG (t = '')\n)\n"
+                );
+                let first = render_body(&body);
+                first != render_body(&first)
+            })
+            .collect();
+        assert!(drifted.is_empty(), "render drifted after {drifted:?}");
+    }
 }

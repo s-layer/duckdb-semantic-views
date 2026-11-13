@@ -28,6 +28,14 @@ fn annotation_boundary_before(bytes: &[u8], i: usize) -> bool {
     if is_ident_continuation(bytes[i - 1]) {
         return false;
     }
+    // Skip the whitespace `str::trim` drops (a vertical tab, U+2003), not just
+    // ASCII whitespace: the expression before the keyword is trimmed that
+    // way, so a dot found only past it would come back abutting the keyword
+    // on render (fuzz_render_roundtrip, PR #358). `i` starts an ASCII
+    // keyword, so it is a char boundary.
+    if let Ok(head) = std::str::from_utf8(&bytes[..i]) {
+        return !head.trim_end().ends_with('.');
+    }
     let mut j = i;
     while j > 0 && bytes[j - 1].is_ascii_whitespace() {
         j -= 1;
@@ -40,6 +48,10 @@ fn annotation_boundary_before(bytes: &[u8], i: usize) -> bool {
 fn annotation_boundary_after(bytes: &[u8], end: usize) -> bool {
     if end < bytes.len() && is_ident_continuation(bytes[end]) {
         return false;
+    }
+    // As in `annotation_boundary_before`, skip what `str::trim` drops.
+    if let Ok(tail) = std::str::from_utf8(&bytes[end..]) {
+        return !tail.trim_start().starts_with('.');
     }
     let mut j = end;
     while j < bytes.len() && bytes[j].is_ascii_whitespace() {
