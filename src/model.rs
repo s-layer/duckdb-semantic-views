@@ -1217,12 +1217,18 @@ impl SemanticViewDefinition {
         }
         // A relationship may be declared without a name, as in the DDL form;
         // it gets the same generated name the DDL parser would give it.
-        // The flag is never taken from the body, so a YAML name cannot skip
-        // the name checks by claiming to be generated.
+        // A body's flag is believed only when its name is exactly the one
+        // this entry would be given (so a serialized definition reads back
+        // unchanged); any other name is a written one and gets the name
+        // checks, flag or not.
         for (index, j) in def.joins.iter_mut().enumerate() {
-            j.generated_name = j.name.is_none();
+            let generated = j.generated_name_at(index);
+            j.generated_name = match j.name.as_deref() {
+                None => true,
+                Some(name) => j.generated_name && name == generated,
+            };
             if j.generated_name {
-                j.name = Some(j.generated_name_at(index));
+                j.name = Some(generated);
             }
         }
         // A variable's type and default, likewise.
@@ -2009,6 +2015,47 @@ mod tests {
         assert!(!out.contains("generated_name"), "{out}");
         let back = SemanticViewDefinition::from_yaml_with_size_cap("v", &out).expect("re-import");
         assert_eq!(back.joins, def.joins);
+    }
+
+    /// A parsed definition serialized with serde (as `fuzz_yaml_parse` does)
+    /// and parsed again is unchanged: a generated name written back with its
+    /// flag is still recognised as generated (fuzz crash on PR #358).
+    #[test]
+    fn yaml_serde_round_trip_keeps_a_generated_name() {
+        let yaml = "tables:\n  - alias: o\n    table: orders\n    pk_columns: [id]\n  \
+             - alias: c\n    table: customers\n    pk_columns: [id]\n\
+             joins:\n  - from_alias: o\n    table: c\n    fk_columns: [customer_id]\n\
+             dimensions:\n  - name: region\n    expr: c.region\n    source_table: c\n\
+             metrics:\n  - name: total\n    expr: sum(o.amount)\n    source_table: o\n";
+        let def = SemanticViewDefinition::from_yaml("v", yaml).expect("accepted");
+        let out = yaml_serde::to_string(&def).expect("serialize");
+        let back = SemanticViewDefinition::from_yaml("v", &out).expect("re-parse");
+        assert_eq!(back, def);
+    }
+
+    /// A body flag on a name that is not this entry's generated name is
+    /// ignored: the name is kept as a written one (and gets the name checks).
+    #[test]
+    fn yaml_generated_flag_on_another_entrys_generated_name_is_ignored() {
+        let mut j = Join {
+            table: "c".into(),
+            from_alias: "o".into(),
+            fk_columns: vec!["customer_id".into()],
+            ..Join::default()
+        };
+        let other = j.generated_name_at(1);
+        j.name = Some(other.clone());
+        let yaml = format!(
+            "tables:\n  - alias: o\n    table: orders\n    pk_columns: [id]\n  \
+             - alias: c\n    table: customers\n    pk_columns: [id]\n\
+             joins:\n  - name: \"{other}\"\n    generated_name: true\n    from_alias: o\n    \
+             table: c\n    fk_columns: [customer_id]\n\
+             dimensions:\n  - name: region\n    expr: c.region\n    source_table: c\n\
+             metrics:\n  - name: total\n    expr: sum(o.amount)\n    source_table: o\n"
+        );
+        let def = SemanticViewDefinition::from_yaml("v", &yaml).expect("accepted");
+        assert!(!def.joins[0].generated_name);
+        assert_eq!(def.joins[0].name.as_deref(), Some(other.as_str()));
     }
 
     #[test]

@@ -499,15 +499,12 @@ proptest! {
         let yaml_str = yaml_serde::to_string(&def).expect("YAML serialize");
 
         // Deserialize both
-        let mut from_json = SemanticViewDefinition::from_json("proptest", &json_str)
+        let from_json = SemanticViewDefinition::from_json("proptest", &json_str)
             .expect("JSON deserialize");
+        // A generated name keeps its flag through YAML too: the import
+        // believes the flag when the name is the entry's own generated one.
         let from_yaml = SemanticViewDefinition::from_yaml("proptest", &yaml_str)
             .expect("YAML deserialize");
-        // The stored JSON keeps a generated name's flag; a YAML body cannot
-        // claim one (PR #358 review), so its import reads a written name.
-        for j in &mut from_json.joins {
-            j.generated_name = false;
-        }
 
         // Assert structural equality
         prop_assert_eq!(from_json, from_yaml);
