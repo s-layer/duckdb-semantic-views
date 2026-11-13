@@ -687,9 +687,27 @@ fn make_db(inst: &Instance) -> duckdb::Connection {
 }
 
 fn run(con: &duckdb::Connection, sql: &str) -> Vec<Vec<Option<i128>>> {
-    let mut stmt = con
-        .prepare(sql)
-        .unwrap_or_else(|e| panic!("emitted SQL must bind: {e}\n{sql}"));
+    let mut stmt = match con.prepare(sql) {
+        Ok(stmt) => stmt,
+        // TECH-DEBT #84: DuckDB 1.4/1.5 raise this internal error while
+        // optimizing some GROUP BYs over a joined chain under a filter (here
+        // a bridge count beside a child sum filtered through `h` to `z`,
+        // `bare_bridge_and_child_metrics_under_a_filter_reaching_z`). It is
+        // an engine bug, not an answer, so the query is re-run with the pass
+        // that trips it switched off, which cannot change a result. Any other
+        // error still fails the case.
+        Err(e)
+            if e.to_string()
+                .contains("INTERNAL Error: Failed to bind column reference") =>
+        {
+            con.execute_batch("SET disabled_optimizers = 'compressed_materialization'")
+                .expect("disable compressed_materialization");
+            con.prepare(sql).unwrap_or_else(|e| {
+                panic!("emitted SQL must bind with compressed_materialization off: {e}\n{sql}")
+            })
+        }
+        Err(e) => panic!("emitted SQL must bind: {e}\n{sql}"),
+    };
     let mut rows: Vec<Vec<Option<i128>>> = stmt
         .query_map([], |r| {
             let n = r.as_ref().column_count();
@@ -1193,4 +1211,56 @@ fn generator_reaches_bridged_refused_and_filtered_cases() {
         bare_fanned >= 100,
         "bare-column fanned cases: {bare_fanned}"
     );
+}
+
+/// Found by the bridge property in Phase 8.1's run: a bridge count and a
+/// child sum by `hcat` and `rcat`, filtered on `rcat`, `hcat` and `zcat`.
+/// The emitted SQL is correct (DuckDB 2.0 runs it), but the test harness's
+/// DuckDB 1.5 raises TECH-DEBT #84's internal bind error on it, written bare
+/// or not; `run` retries it with `compressed_materialization` off.
+#[test]
+fn bare_bridge_and_child_metrics_under_a_filter_reaching_z() {
+    let inst = Instance {
+        h: vec![(Some(9), Some(0), Some(4)), (Some(0), Some(1), Some(18))],
+        x: vec![
+            (Some(0), Some(1), Some(16)),
+            (Some(0), None, Some(1)),
+            (Some(1), None, None),
+            (Some(1), Some(2), Some(6)),
+        ],
+        z: vec![Some(1), Some(1)],
+        y: vec![Some(2), None, Some(1)],
+        bt: vec![
+            (Some(1), Some(2), Some(2), Some(18)),
+            (Some(1), None, Some(1), Some(5)),
+            (Some(1), Some(11), Some(0), Some(15)),
+            (Some(0), Some(0), None, Some(5)),
+            (Some(0), Some(11), Some(1), Some(2)),
+            (Some(9), Some(0), Some(1), Some(16)),
+            (Some(1), Some(0), Some(1), None),
+            (None, Some(2), Some(0), None),
+        ],
+        c: vec![(Some(1), Some(0), Some(9)), (Some(1), Some(2), Some(17))],
+        s: vec![(Some(0), Some(1))],
+    };
+    let pred = Pred::And(
+        Box::new(Pred::Or(
+            Box::new(Pred::Eq(2, 0)),
+            Box::new(Pred::In(0, 0, 0)),
+        )),
+        Box::new(Pred::Eq(3, 0)),
+    );
+    for bare in [false, true] {
+        let case = Case {
+            inst: inst.clone(),
+            first: "x",
+            dims: vec![0, 2],
+            mets: vec![3, 5],
+            pred: Some(pred.clone()),
+            h_metrics: true,
+            z_metric: false,
+            bare,
+        };
+        check(&case).unwrap_or_else(|e| panic!("bare={bare}: {e}"));
+    }
 }

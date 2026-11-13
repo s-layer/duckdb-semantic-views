@@ -352,9 +352,9 @@ SELECT * FROM SEMANTIC_VIEW(rr_air_rev METRICS region_count WHERE city = 'Paris'
 statement error
 SELECT * FROM SEMANTIC_VIEW(rr_air DIMENSIONS gate METRICS arrivals);
 ----
-reachable only through the role-playing table
+then fans out from table
 
 statement error
 SELECT * FROM SEMANTIC_VIEW(rr_air_rev DIMENSIONS gate METRICS arrivals);
 ----
-reachable only through the role-playing table
+then fans out from table
