@@ -1,0 +1,92 @@
+# name: test/sql/phase8_bare_column_keywords.test
+# description: Bare-column qualification leaves keyword positions and
+#   comprehension variables alone, and qualifies a field or method read off an
+#   own column (v0.19.0 review O3, O4).
+# group: [sql]
+
+require semantic_views
+
+statement ok
+CREATE TABLE bk_t (id INT, n INT, within INT, escape INT, ignore INT, respect INT, day INT,
+  txt VARCHAR, tags INT[], s STRUCT(a INT), m MAP(VARCHAR, INT));
+
+statement ok
+INSERT INTO bk_t VALUES
+  (1, 5, 1, 1, 1, 1, 3, 'ba', [5, 20], {'a': 7}, MAP {'day': 9}),
+  (2, 7, 2, 2, 2, 2, 4, 'xa', [30], {'a': 8}, MAP {'day': 10});
+
+# A second table with columns of the same names, so a column left bare is
+# ambiguous wherever the query joins it.
+statement ok
+CREATE TABLE bk_u (uid INT, id INT, n INT, txt VARCHAR, tags INT[], s STRUCT(a INT), m MAP(VARCHAR, INT), day INT);
+
+statement ok
+INSERT INTO bk_u VALUES (1, 1, 0, 'q', [0], {'a': 0}, MAP {'day': 0}, 0), (2, 2, 0, 'r', [0], {'a': 0}, MAP {'day': 0}, 0);
+
+# --- O3: keywords named like a column of the member's table ------------------
+
+statement ok
+CREATE SEMANTIC VIEW bk_kw
+  TABLES (t AS bk_t PRIMARY KEY (id), u AS bk_u PRIMARY KEY (uid))
+  RELATIONSHIPS (u_t AS u (id) REFERENCES t)
+  DIMENSIONS (u.uid AS uid)
+  METRICS (
+    t.mode_n AS PERCENTILE_DISC(0.5) WITHIN GROUP (ORDER BY n),
+    t.escaped AS COUNT(*) FILTER (WHERE txt LIKE '%a' ESCAPE '!'),
+    t.big_tags AS SUM(len([day FOR day IN tags IF day > 10])),
+    t.kw_cols AS SUM(within + escape + ignore + respect)
+  );
+
+# (IGNORE / RESPECT NULLS, the review's third keyword pair, is DuckDB syntax
+# for window functions only, which the pass leaves alone; its unit test in
+# bare_columns.rs guards the scanner for when facts may hold windows.)
+query IIII
+SELECT * FROM semantic_view('bk_kw', metrics := ['mode_n', 'escaped', 'big_tags', 'kw_cols']);
+----
+5	2	2	12
+
+query IIIII
+SELECT * FROM semantic_view('bk_kw', dimensions := ['uid'], metrics := ['mode_n', 'escaped', 'big_tags', 'kw_cols']) ORDER BY 1;
+----
+1	5	1	1	4
+2	7	1	1	8
+
+# --- O4: a field or method read off an own column ----------------------------
+
+statement ok
+CREATE SEMANTIC VIEW bk_dot
+  TABLES (t AS bk_t PRIMARY KEY (id), u AS bk_u PRIMARY KEY (uid))
+  RELATIONSHIPS (u_t AS u (id) REFERENCES t)
+  DIMENSIONS (
+    t.sa AS s.a,
+    t.mday AS m.day,
+    t.ntags AS tags.len(),
+    t.utxt AS txt.upper(),
+    u.uid AS uid,
+    u.utxt_u AS txt.upper()
+  )
+  METRICS (u.cnt AS COUNT(*));
+
+query IIITIT
+SELECT * FROM semantic_view('bk_dot', dimensions := ['sa', 'mday', 'ntags', 'utxt', 'uid', 'utxt_u']) ORDER BY uid;
+----
+7	9	2	BA	1	Q
+8	10	1	XA	2	R
+
+query IIITI
+SELECT * FROM semantic_view('bk_dot', dimensions := ['sa', 'mday', 'ntags', 'utxt'], metrics := ['cnt']) ORDER BY 1;
+----
+7	9	2	BA	1
+8	10	1	XA	1
+
+statement ok
+DROP SEMANTIC VIEW bk_dot;
+
+statement ok
+DROP SEMANTIC VIEW bk_kw;
+
+statement ok
+DROP TABLE bk_u;
+
+statement ok
+DROP TABLE bk_t;

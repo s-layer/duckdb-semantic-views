@@ -39,7 +39,7 @@
 use std::borrow::Cow;
 use std::collections::{HashMap, HashSet};
 
-use crate::expr_tokens::{scan_references, subquery_spans, IdentRef};
+use crate::expr_tokens::{scan_function_heads, scan_references, subquery_spans, IdentRef};
 use crate::ident::normalize_ident_part;
 use crate::model::SemanticViewDefinition;
 use crate::query::expr_items::{is_local_name, is_not_a_column, lambda_scopes};
@@ -136,6 +136,7 @@ fn columns_of(def: &SemanticViewDefinition, alias: &str) -> Option<HashSet<Strin
 struct Names {
     facts: HashMap<String, Option<String>>,
     variables: HashSet<String>,
+    aliases: HashSet<String>,
 }
 
 impl Names {
@@ -153,6 +154,11 @@ impl Names {
                 .variables
                 .iter()
                 .map(|v| normalize_ident_part(&v.name))
+                .collect(),
+            aliases: def
+                .tables
+                .iter()
+                .map(|t| normalize_ident_part(&t.alias))
                 .collect(),
         }
     }
@@ -231,6 +237,35 @@ fn column_candidates<'t>(text: &'t str, members: &Members<'_>) -> Vec<IdentRef<'
         .collect()
 }
 
+/// The dotted names and method-call heads in `text` that read a field or
+/// call a method on a column of the member's own table (`s.a`, `m.day`,
+/// `txt.upper()`): their first part is an own column and no table alias of
+/// the view (an alias first is that table's column, as `DuckDB` reads it), and
+/// they are not a lambda's or comprehension's variable or inside a subquery.
+/// Only the first part is qualified, so `s.a` becomes `"o".s.a`.
+fn dotted_own_columns<'t>(
+    text: &'t str,
+    own: &HashSet<String>,
+    members: &Members<'_>,
+) -> Vec<IdentRef<'t>> {
+    let lambdas = lambda_scopes(text);
+    let spans = subquery_spans(text);
+    scan_references(text)
+        .into_iter()
+        .chain(scan_function_heads(text))
+        .filter(|r| {
+            let first = r.first_part_key();
+            !r.is_bare()
+                && !r.raw.starts_with('"')
+                && own.contains(&first)
+                && !members.names.aliases.contains(&first)
+                && !text[..r.start].trim_end().ends_with('.')
+                && !spans.iter().any(|&(s, e)| r.start >= s && r.end <= e)
+                && !is_local_name(text, r, &lambdas)
+        })
+        .collect()
+}
+
 /// Whether `r` is a part of a name written with spaces round its dots
 /// (`o . comment`, which `DuckDB` reads as `o.comment`): the scanner reports
 /// such parts one by one, and neither is a bare column.
@@ -247,10 +282,13 @@ fn qualify_expr(
     members: &Members<'_>,
 ) -> Option<String> {
     let text = crate::util::blank_sql_comments(expr);
-    let refs: Vec<_> = column_candidates(&text, members)
+    let mut refs: Vec<_> = column_candidates(&text, members)
         .into_iter()
         .filter(|r| own.contains(&r.key()))
+        .chain(dotted_own_columns(&text, own, members))
         .collect();
+    refs.sort_by_key(|r| r.start);
+    refs.dedup_by_key(|r| r.start);
     if refs.is_empty() {
         return None;
     }
@@ -447,7 +485,9 @@ mod tests {
                 "{expr}"
             );
         }
-        assert_eq!(qualified(&["comment"], "comment.x"), "comment.x");
+        // Written without spaces, a field of an own column is qualified (O4):
+        // see `a_field_or_method_of_an_own_column_is_qualified`.
+        assert_eq!(qualified(&["comment"], "comment.x"), "\"o\".comment.x");
     }
 
     #[test]
@@ -464,6 +504,85 @@ mod tests {
             qualified(&["code"], "code IN (SELECT code FROM other)"),
             "\"o\".code IN (SELECT code FROM other)"
         );
+    }
+
+    /// `WITHIN GROUP`'s `within` is a keyword, not a column named `within`
+    /// (v0.19.0 review O3).
+    #[test]
+    fn within_group_is_left_alone() {
+        assert_eq!(
+            qualified(&["within", "n"], "MODE() WITHIN GROUP (ORDER BY n)"),
+            "MODE() WITHIN GROUP (ORDER BY \"o\".n)"
+        );
+        assert_eq!(qualified(&["within"], "within + 1"), "\"o\".within + 1");
+    }
+
+    /// `ESCAPE` after a `LIKE` pattern is a keyword (O3).
+    #[test]
+    fn like_escape_is_left_alone() {
+        assert_eq!(
+            qualified(&["escape", "txt"], "txt LIKE '%a' ESCAPE '!'"),
+            "\"o\".txt LIKE '%a' ESCAPE '!'"
+        );
+        assert_eq!(
+            qualified(&["escape"], "upper(escape)"),
+            "upper(\"o\".escape)"
+        );
+    }
+
+    /// `IGNORE NULLS` / `RESPECT NULLS` are keywords (O3).
+    #[test]
+    fn ignore_and_respect_nulls_are_left_alone() {
+        assert_eq!(
+            qualified(&["ignore", "n"], "FIRST(n IGNORE NULLS)"),
+            "FIRST(\"o\".n IGNORE NULLS)"
+        );
+        assert_eq!(
+            qualified(&["respect", "n"], "FIRST(n RESPECT NULLS)"),
+            "FIRST(\"o\".n RESPECT NULLS)"
+        );
+        assert_eq!(qualified(&["ignore"], "ignore * 2"), "\"o\".ignore * 2");
+    }
+
+    /// A list comprehension's `FOR <name> IN` variable is local to it, as a
+    /// lambda's parameter is (O3).
+    #[test]
+    fn comprehension_variables_are_left_alone() {
+        assert_eq!(
+            qualified(&["day", "tags"], "[day FOR day IN tags IF day > 10]"),
+            "[day FOR day IN \"o\".tags IF day > 10]"
+        );
+        assert_eq!(
+            qualified(&["day", "tags"], "day + len([x * 2 FOR x IN tags])"),
+            "\"o\".day + len([x * 2 FOR x IN \"o\".tags])"
+        );
+    }
+
+    /// A field or method read off an own column (`s.a`, `txt.upper()`) is
+    /// qualified when its first part is no table alias of the view, so a
+    /// joined table with a column of that name leaves it unambiguous
+    /// (v0.19.0 review O4).
+    #[test]
+    fn a_field_or_method_of_an_own_column_is_qualified() {
+        assert_eq!(qualified(&["s"], "s.a"), "\"o\".s.a");
+        assert_eq!(qualified(&["s"], "s.a.b + 1"), "\"o\".s.a.b + 1");
+        assert_eq!(qualified(&["m"], "m.day"), "\"o\".m.day");
+        assert_eq!(qualified(&["tags"], "tags.len()"), "\"o\".tags.len()");
+        assert_eq!(qualified(&["txt"], "txt.upper()"), "\"o\".txt.upper()");
+        assert_eq!(
+            qualified(&["txt"], "txt.lower().upper()"),
+            "\"o\".txt.lower().upper()"
+        );
+    }
+
+    /// A dotted name whose first part is a table alias of the view is that
+    /// table's column, as `DuckDB` reads it, even when the member's table has a
+    /// column of that name; one whose first part is no column is left too.
+    #[test]
+    fn a_dotted_name_led_by_an_alias_or_no_own_column_is_left_alone() {
+        for expr in ["li.qty", "o.code", "li.upper()", "x.a", "x.upper()"] {
+            assert_eq!(qualified(&["li", "o", "code", "qty"], expr), expr, "{expr}");
+        }
     }
 
     /// A fact's or variable's name is that member, as the expansion always

@@ -906,7 +906,60 @@ pub(crate) fn lambda_scopes(text: &str) -> Vec<LambdaScope> {
             }
         }
     }
+    out.extend(comprehension_scopes(text, &refs));
     out
+}
+
+/// The list comprehensions in `text` (`[x * 2 FOR x IN xs IF x > 1]`), each
+/// as a scope whose one parameter is its `FOR <name> IN` variable and whose
+/// span is its brackets.
+fn comprehension_scopes(text: &str, refs: &[IdentRef<'_>]) -> Vec<LambdaScope> {
+    let bytes = text.as_bytes();
+    let mut quotes = crate::util::QuoteState::default();
+    // Open brackets: the `[`'s position and the comprehension variable found
+    // directly inside it, if any.
+    let mut open: Vec<(u8, usize, Option<String>)> = Vec::new();
+    let mut out = Vec::new();
+    let mut i = 0;
+    while i < bytes.len() {
+        let (next, live) = quotes.step(bytes, i);
+        if live {
+            match bytes[i] {
+                b @ (b'(' | b'[' | b'{') => open.push((b, i, None)),
+                b')' | b']' | b'}' => {
+                    if let Some((b'[', start, Some(var))) = open.pop() {
+                        out.push(LambdaScope {
+                            params: vec![var],
+                            span: start..i + 1,
+                        });
+                    }
+                }
+                _ => {
+                    if let Some((b'[', _, var @ None)) = open.last_mut() {
+                        if let Some(name) = comprehension_variable(text, refs, i) {
+                            *var = Some(name);
+                        }
+                    }
+                }
+            }
+        }
+        i = next;
+    }
+    out
+}
+
+/// The variable of a comprehension's `FOR <name> IN` starting at byte `at`
+/// of `text`, if a bare `FOR` starts there.
+fn comprehension_variable(text: &str, refs: &[IdentRef<'_>], at: usize) -> Option<String> {
+    let kw = refs.iter().find(|r| r.start == at)?;
+    if !kw.raw.eq_ignore_ascii_case("for") {
+        return None;
+    }
+    let from = skip_spaces(text.as_bytes(), kw.end);
+    let var = refs.iter().find(|r| r.start == from && r.is_bare())?;
+    word_after(text, var.end)
+        .eq_ignore_ascii_case("in")
+        .then(|| var.key())
 }
 
 /// Whether the name or call head `r` starts with a parameter of a lambda it
@@ -1020,6 +1073,9 @@ pub(crate) fn is_not_a_column(text: &str, r: &IdentRef<'_>) -> bool {
         })
         || ((word == "first" || word == "last")
             && word_before(text, r.start).eq_ignore_ascii_case("nulls"))
+        || (word == "within" && word_after(text, r.end).eq_ignore_ascii_case("group"))
+        || ((word == "ignore" || word == "respect")
+            && word_after(text, r.end).eq_ignore_ascii_case("nulls"))
 }
 
 /// Refuse the calls in `text` that read columns other than through the names
