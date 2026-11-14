@@ -545,6 +545,18 @@ pub enum ExpandError {
         table_a: String,
         table_b: String,
     },
+    /// A metric is grouped or filtered across a many-to-many relationship, which
+    /// counts each row of its table once per value it matches, and its table
+    /// has no PRIMARY KEY to count the rows by (Snowflake's 010933).
+    ManyToManyWithoutKey {
+        view_name: String,
+        /// What is refused, as `metric 'total'`.
+        subject: String,
+        table: String,
+        /// The member, as `dimension 'channel'`.
+        member: String,
+        relationship: String,
+    },
     /// A query with no metrics names members on two tables that no table
     /// reaches both of by following relationships many-to-one (two children of
     /// one parent), so there are no rows that hold them together. Snowflake
@@ -1079,6 +1091,22 @@ impl fmt::Display for ExpandError {
                      table paths -- neither table '{table_a}' nor '{table_b}' can be reached from \
                      the other without crossing a one-to-many relationship, so joining them would \
                      duplicate the rows returned"
+                )
+            }
+            Self::ManyToManyWithoutKey {
+                view_name,
+                subject,
+                table,
+                member,
+                relationship,
+            } => {
+                write!(
+                    f,
+                    "semantic view '{view_name}': {subject} cannot be grouped or filtered \
+                     by {member} across many-to-many relationship '{relationship}': each row of \
+                     table '{table}' is counted once per value it matches, by its key, and table \
+                     '{table}' has no PRIMARY KEY. Declare PRIMARY KEY (cols) for '{table}' in the \
+                     TABLES clause, or leave out the members across the relationship."
                 )
             }
             Self::UnrelatedTables {

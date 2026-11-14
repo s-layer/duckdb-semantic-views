@@ -426,6 +426,10 @@ pub(super) fn member_anchor(def: &SemanticViewDefinition, members: &[String]) ->
 /// refuses ("not related"), as for two children of a customer table with no
 /// metric (W1-W4) or a metric only on the members' own tables (D1).
 ///
+/// The members of a many-to-many relationship's two sides meet at its table
+/// of keys ([`super::many_to_many`]), which needs no metric: Snowflake lists
+/// the combinations that occur together.
+///
 /// `None` when there is no meeting table or no such metric, when two members
 /// are joined by more than one path, or when a hop on the way is a
 /// role-played table's or an ASOF or range relationship's (fixture 8's T1-T3
@@ -495,11 +499,17 @@ fn meeting_table(def: &SemanticViewDefinition, members: &[String]) -> Option<Str
             super::multi_path::two_undirected_paths(def, t, m).is_none() && fans_then_climbs(t, m)
         })
     };
-    def.metrics
-        .iter()
-        .filter_map(|m| m.source_table.as_deref().map(str::to_ascii_lowercase))
-        .any(|t| qualifies(&t))
-        .then(|| (**meet).clone())
+    // Phase 8.4: the two sides of a many-to-many relationship meet at its table
+    // of keys, and Snowflake lists the combinations that occur together with
+    // no metric anywhere (fixture 11, part M).
+    let key_table = super::many_to_many::is_key_table(def, meet);
+    (key_table
+        || def
+            .metrics
+            .iter()
+            .filter_map(|m| m.source_table.as_deref().map(str::to_ascii_lowercase))
+            .any(|t| qualifies(&t)))
+    .then(|| (**meet).clone())
 }
 
 /// Whether `alias` sits BELOW `base` in the relationship graph — i.e. following
@@ -704,7 +714,17 @@ fn expand_facts(
     if let Some(rw) = &resolved_where {
         dim_tables.extend(rw.source_tables.iter().cloned());
     }
-    validate_fact_table_path(view_name, def, &fact_tables, &dim_tables)?;
+    // Phase 8.4: a fact query across a many-to-many relationship reads the
+    // rows that match, through the relationship's table of keys.
+    let across = facts_across_many_to_many(
+        def,
+        &resolved_facts,
+        &resolved_dims,
+        resolved_where.as_ref(),
+    );
+    if across.is_none() {
+        validate_fact_table_path(view_name, def, &fact_tables, &dim_tables)?;
+    }
 
     // A fact query reads the rows of the table under all its members, as a
     // dimensions-only query does (`member_anchor`), but every row, not each
@@ -740,6 +760,9 @@ fn expand_facts(
             }
         }
     }
+    if across.is_some() {
+        members = None;
+    }
     let anchored = match members.map(|m| member_anchor(def, &m)) {
         Some(Anchor::At(anchor)) => Some(anchor),
         Some(Anchor::MultiPath(anchor, member_table, paths)) => {
@@ -762,6 +785,7 @@ fn expand_facts(
                 true,
             ));
         }
+        _ if across.is_some() => None,
         _ => {
             // Unplaced rows (a member declared on no table): two placed
             // members joined by two paths are still refused, as for a
@@ -801,7 +825,7 @@ fn expand_facts(
     // same error the metrics path raises when no co-queried metric supplies
     // USING. Previously the facts path skipped this check and silently bound
     // the dimension to an arbitrary relationship edge.
-    if anchored.is_none() {
+    if anchored.is_none() && across.is_none() {
         for dim in &resolved_dims {
             let _ = find_using_context(view_name, def, dim, &[])?;
         }
@@ -811,7 +835,7 @@ fn expand_facts(
     // table has no USING context to pick a role — reject rather than silently
     // binding to the first-declared relationship, mirroring the dimension
     // check above.
-    if anchored.is_none() {
+    if anchored.is_none() && across.is_none() {
         for fact in &resolved_facts {
             check_fact_role_playing_path(
                 view_name,
@@ -835,7 +859,10 @@ fn expand_facts(
     // role-playing table has no way to name its role either — the predicate is
     // spliced as the member's own expression, never rewritten to a scoped
     // alias. Same reasoning as 3b/3c.
-    if let Some(rw) = resolved_where.as_ref().filter(|_| anchored.is_none()) {
+    if let Some(rw) = resolved_where
+        .as_ref()
+        .filter(|_| anchored.is_none() && across.is_none())
+    {
         check_where_clause_role_playing_path(view_name, def, &rw.members, &[], &[])?;
     }
 
@@ -882,8 +909,27 @@ fn expand_facts(
             &fact.expr, &def.facts,
         ));
     }
+    // The tables the listed members read, without those only the predicate
+    // names.
+    let mut listed_sources = fact_sources.clone();
+    for dim in &resolved_dims {
+        listed_sources.extend(super::facts::collect_referenced_fact_tables(
+            &dim.expr, &def.facts,
+        ));
+    }
     if let Some(rw) = &resolved_where {
         fact_sources.extend(rw.source_tables.iter().cloned());
+    }
+    if let Some(across) = across {
+        return render_facts_across(
+            view_name,
+            def,
+            across,
+            &resolved_dims,
+            &listed_sources,
+            items,
+            resolved_where,
+        );
     }
     if let Some(anchor) = anchored {
         let mut extra = fact_sources;
@@ -947,6 +993,181 @@ fn expand_facts(
     .render())
 }
 
+/// How a fact query across a many-to-many relationship reads its rows (Phase
+/// 8.4, Snowflake's documented rule).
+enum FactsAcross {
+    /// One row per combination of matching rows, from the relationship's key
+    /// table, every join inner, not deduplicated.
+    Meet(String),
+    /// The far side is only in the `WHERE` clause: one row per row of the
+    /// grain table that passes the filter, kept when its key is among the keys
+    /// of the matching rows.
+    SemiJoin { grain: String, key_table: String },
+}
+
+/// Whether a fact query's members meet at a many-to-many relationship's key
+/// table, and how it then reads its rows ([`FactsAcross`]). `None` otherwise,
+/// or when a `WHERE` member is declared on no table.
+fn facts_across_many_to_many(
+    def: &SemanticViewDefinition,
+    facts: &[&Fact],
+    dims: &[&Dimension],
+    resolved_where: Option<&super::where_clause::ResolvedWhere>,
+) -> Option<FactsAcross> {
+    if !super::many_to_many::has_key_table(def) {
+        return None;
+    }
+    let mut selected: Vec<String> = Vec::new();
+    for fact in facts {
+        selected.push(fact.source_table.clone()?);
+        selected.extend(super::facts::collect_referenced_fact_tables(
+            &fact.expr, &def.facts,
+        ));
+    }
+    for dim in dims {
+        selected.push(dim.source_table.clone()?);
+        selected.extend(super::facts::collect_referenced_fact_tables(
+            &dim.expr, &def.facts,
+        ));
+    }
+    let where_tables: Vec<String> = match resolved_where {
+        Some(w) if w.members.iter().any(|m| m.table.is_none()) => return None,
+        Some(w) => w.source_tables.clone(),
+        None => Vec::new(),
+    };
+    let all: Vec<String> = selected.iter().chain(&where_tables).cloned().collect();
+    let Anchor::Meet(key_table) = member_anchor(def, &all) else {
+        return None;
+    };
+    if !super::many_to_many::is_key_table(def, &key_table) {
+        return None;
+    }
+    match member_anchor(def, &selected) {
+        Anchor::At(grain) if !where_tables.is_empty() => {
+            Some(FactsAcross::SemiJoin { grain, key_table })
+        }
+        _ => Some(FactsAcross::Meet(key_table)),
+    }
+}
+
+/// Render a fact query across a many-to-many relationship ([`FactsAcross`]).
+/// `listed` holds the tables the listed members read beyond their own
+/// (facts' tables, and the tables of the facts they are written over); the
+/// predicate's tables come from `resolved_where`.
+fn render_facts_across(
+    view_name: &str,
+    def: &SemanticViewDefinition,
+    across: FactsAcross,
+    dims: &[&Dimension],
+    listed: &[String],
+    items: Vec<SelectItem>,
+    resolved_where: Option<super::where_clause::ResolvedWhere>,
+) -> Result<String, ExpandError> {
+    let mut reached = listed.to_vec();
+    if let Some(rw) = &resolved_where {
+        reached.extend(rw.source_tables.iter().cloned());
+    }
+    let (roles, paths) = (
+        std::collections::HashMap::new(),
+        std::collections::HashMap::new(),
+    );
+    let joins_from = |anchor: &str, extra: &[String]| {
+        super::per_grain::anchor_joins(def, anchor, dims, extra, &roles, &paths, &[])
+    };
+    match across {
+        FactsAcross::Meet(key_table) => {
+            let joins = joins_from(&key_table, &reached);
+            Ok(SelectSpec {
+                where_clause: resolved_where.map(|rw| rw.sql),
+                distinct: false,
+                items,
+                from: FromSource::AnchorTable {
+                    def,
+                    anchor: key_table,
+                    joins,
+                    inner: true,
+                },
+                group_by: GroupBy::None,
+            }
+            .render())
+        }
+        FactsAcross::SemiJoin { grain, key_table } => {
+            let table = def
+                .tables
+                .iter()
+                .find(|t| t.alias.eq_ignore_ascii_case(&grain));
+            let (Some(table), Some(rw)) = (table, resolved_where) else {
+                return Err(ExpandError::FactPathViolation {
+                    view_name: view_name.to_string(),
+                    table_a: grain.clone(),
+                    table_b: key_table,
+                });
+            };
+            if table.pk_columns.is_empty() {
+                let member = rw.source_tables.iter().find_map(|t| {
+                    let path = super::multi_path::undirected_path(
+                        def,
+                        &grain,
+                        &t.to_ascii_lowercase(),
+                        None,
+                    )?;
+                    Some((t.clone(), super::many_to_many::crossed(def, &path)?))
+                });
+                let (member, relationship) = member.unwrap_or_default();
+                return Err(ExpandError::ManyToManyWithoutKey {
+                    view_name: view_name.to_string(),
+                    subject: format!("a FACTS query of table '{grain}'"),
+                    table: grain,
+                    member: format!("table '{member}'"),
+                    relationship,
+                });
+            }
+            let alias = quote_stored_ident(&table.alias);
+            let key: Vec<String> = table
+                .pk_columns
+                .iter()
+                .map(|c| format!("{alias}.{}", quote_stored_ident(c)))
+                .collect();
+            // The rows that pass: the keys of the grain's rows among the
+            // matching combinations, read from the key table as `Meet` reads
+            // them.
+            reached.push(grain.clone());
+            let matching = SelectSpec {
+                where_clause: Some(rw.sql),
+                distinct: false,
+                items: key
+                    .iter()
+                    .enumerate()
+                    .map(|(i, k)| SelectItem::new(k.clone(), None, format!("\"__sv_k{i}\"")))
+                    .collect(),
+                from: FromSource::AnchorTable {
+                    def,
+                    joins: joins_from(&key_table, &reached),
+                    anchor: key_table,
+                    inner: true,
+                },
+                group_by: GroupBy::None,
+            }
+            .render();
+            // The rows themselves, read from the grain with the tables the
+            // listed members read, not those only the filter names.
+            Ok(SelectSpec {
+                where_clause: Some(format!("({}) IN (\n{matching}\n)", key.join(", "))),
+                distinct: false,
+                items,
+                from: FromSource::AnchorTable {
+                    def,
+                    joins: joins_from(&grain, listed),
+                    anchor: grain,
+                    inner: false,
+                },
+                group_by: GroupBy::None,
+            }
+            .render())
+        }
+    }
+}
+
 /// The name of each column [`expand`] returns for `req`, in its order: the
 /// requested dimensions, then metrics, then facts, each named after its stored
 /// name with the quotes taken off (`"Order Date"` is the column `Order Date`).
@@ -997,6 +1218,11 @@ pub fn expand(
     def: &SemanticViewDefinition,
     req: &QueryRequest,
 ) -> Result<String, ExpandError> {
+    // Phase 8.4: a many-to-many relationship is read through a hidden table of
+    // its distinct keys, which both tables reference (`many_to_many`). First,
+    // so every later step sees two many-to-one relationships.
+    let bridged = super::many_to_many::lower_many_to_many(def);
+    let def = &*bridged;
     // TECH-DEBT #83: a bare column of a member's own table is that table's
     // column, whatever else the query joins (`bare_columns`). First, so the
     // steps below see each expression as it binds.
@@ -1139,6 +1365,9 @@ fn expand_unhoisted(
             .map_or(&[][..], |w| w.members.as_slice());
         let members = super::multi_path::query_members(def, &resolved_dims, where_members);
         super::multi_path::check_metric_paths(view_name, def, &root, &resolved_mets, &members)?;
+        // Phase 8.4: a metric across a many-to-many relationship needs its
+        // table's key (Snowflake's 010933).
+        super::many_to_many::check_metric_keys(view_name, def, &resolved_mets, &members)?;
         Some((root, members))
     };
 

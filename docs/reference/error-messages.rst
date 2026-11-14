@@ -624,7 +624,7 @@ Key missing on a relationship target
    <target>. (v0.10.0: physical-catalog PK auto-inference removed -- see
    CHANGELOG.)
 
-**Cause:** A relationship references a table whose ``TABLES`` entry declares neither ``PRIMARY KEY`` nor ``UNIQUE``. An explicit column list on the relationship (``REFERENCES <target>(<cols>)``) does not satisfy the requirement.
+**Cause:** A relationship references a table whose ``TABLES`` entry declares neither ``PRIMARY KEY`` nor ``UNIQUE``, with no column list (``REFERENCES <target>``), so there is no key to join on. With a column list (``REFERENCES <target>(<cols>)``) the relationship is many-to-many since 0.20.0, and the target needs no key (see :ref:`direct many-to-many relationships <ref-create-direct-many-to-many>`).
 
 **Fix:** Declare the key on the target table's ``TABLES`` entry: ``c AS customers PRIMARY KEY (id)``, or ``UNIQUE (email)`` when the relationship joins on a unique column.
 
@@ -1736,6 +1736,26 @@ Private fact
 **Cause:** A fact marked ``PRIVATE`` was requested in ``FACTS`` (the ``facts := [...]`` list), or used in an expression item.
 
 **Fix:** Remove the ``PRIVATE`` keyword from the fact to make it queryable, or reference the fact only from metric expressions.
+
+
+.. _ref-err-many-to-many-key:
+
+Many-to-many relationship without a key
+---------------------------------------
+
+.. versionadded:: 0.20.0
+
+.. code-block:: text
+
+   semantic view '<view>': metric '<metric>' cannot be grouped or filtered by
+   dimension '<dim>' across many-to-many relationship '<rel>': each row of table
+   '<table>' is counted once per value it matches, by its key, and table
+   '<table>' has no PRIMARY KEY. Declare PRIMARY KEY (cols) for '<table>' in the
+   TABLES clause, or leave out the members across the relationship.
+
+**Cause:** A metric is grouped or filtered by a member on the other side of a :ref:`direct many-to-many relationship <ref-create-direct-many-to-many>`, and its table has no ``PRIMARY KEY`` to count each of its rows once by. Snowflake refuses the same query (010933). A ``FACTS`` query filtered across the relationship, with nothing from the other side in its list, says ``a FACTS query of table '<table>'`` in place of the metric: it returns each row of its table once, by the key.
+
+**Fix:** Declare a ``PRIMARY KEY`` for the table in the ``TABLES`` clause, or query the metric without members across the relationship.
 
 
 .. _ref-err-facts-metrics:

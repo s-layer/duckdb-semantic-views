@@ -4,6 +4,7 @@ mod dims_for_metric;
 mod facts;
 mod fan_trap;
 mod join_resolver;
+mod many_to_many;
 #[cfg(feature = "extension")]
 pub(crate) use join_resolver::range_condition;
 mod materialization;
@@ -128,6 +129,7 @@ pub use types::{
 };
 
 // Crate-internal API (used by ddl/show_dims_for_metric.rs under extension feature)
+pub use many_to_many::{has_many_to_many, lower_many_to_many};
 #[cfg(feature = "extension")]
 pub(crate) use materialization::find_routing_materialization_name;
 pub(crate) use multi_path::refused_as_many_to_many;

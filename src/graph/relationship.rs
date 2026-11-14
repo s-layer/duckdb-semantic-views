@@ -291,7 +291,12 @@ fn validate_fk_references(def: &SemanticViewDefinition) -> Result<(), String> {
             check_range_reference(def, join, end)?;
             continue;
         }
-        if join.fk_columns.is_empty() || join.ref_columns.is_empty() {
+        // Phase 8.4: a many-to-many relationship references columns that
+        // are no key, by definition.
+        if join.fk_columns.is_empty()
+            || join.ref_columns.is_empty()
+            || join.cardinality == crate::model::Cardinality::ManyToMany
+        {
             continue;
         }
         let to_alias_lower = join.table.to_ascii_lowercase();
@@ -301,29 +306,10 @@ fn validate_fk_references(def: &SemanticViewDefinition) -> Result<(), String> {
             .find(|t| t.alias.to_ascii_lowercase() == to_alias_lower);
         let Some(target) = target else { continue };
 
-        let ref_set: HashSet<String> = join
-            .ref_columns
-            .iter()
-            .map(|c| c.to_ascii_lowercase())
-            .collect();
-
-        // Check PK
-        let pk_set: HashSet<String> = target
-            .pk_columns
-            .iter()
-            .map(|c| c.to_ascii_lowercase())
-            .collect();
-        if !pk_set.is_empty() && ref_set == pk_set {
-            continue; // Valid: matches PK
-        }
-
-        // Check UNIQUE constraints
-        let matches_unique = target.unique_constraints.iter().any(|uc| {
-            let uc_set: HashSet<String> = uc.iter().map(|c| c.to_ascii_lowercase()).collect();
-            ref_set == uc_set
-        });
-        if matches_unique {
-            continue; // Valid: matches a UNIQUE constraint
+        // PRIMARY KEY or a UNIQUE key, each column matched as DuckDB matches
+        // identifiers (`id`, `ID` and `"ID"` are one column).
+        if super::cardinality::references_a_key(target, &join.ref_columns) {
+            continue;
         }
 
         // Neither matches -- build error

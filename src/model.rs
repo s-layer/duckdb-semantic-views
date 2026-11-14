@@ -780,6 +780,9 @@ pub struct Fact {
 /// Inferred from PK/UNIQUE constraints at define time (Phase 33).
 /// `ManyToOne`: FK columns on the from-side table are bare (no PK/UNIQUE match).
 /// `OneToOne`: FK columns on the from-side table match a PK or UNIQUE constraint.
+/// `ManyToMany` (Phase 8.4): the referenced columns are not a PK or UNIQUE
+/// key of the referenced table, so a row on either side can match many on the
+/// other (Snowflake's direct many-to-many relationship).
 /// Defaults to `ManyToOne` when deserialized from JSON without this field.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[cfg_attr(feature = "arbitrary", derive(arbitrary::Arbitrary))]
@@ -787,6 +790,7 @@ pub enum Cardinality {
     #[default]
     ManyToOne,
     OneToOne,
+    ManyToMany,
 }
 
 impl Cardinality {
@@ -1140,8 +1144,14 @@ impl SemanticViewDefinition {
         // Phase 8.3: a window fact's reference to another table's dimension
         // is stored the same way, and an older reader would read it as a
         // column.
+        // Phase 8.4: a direct many-to-many relationship, which an older
+        // reader would join as many-to-one and count each row once per match.
         if !crate::graph::dimension_references(self).is_empty()
             || !crate::graph::window_fact_references(self).is_empty()
+            || self
+                .joins
+                .iter()
+                .any(|j| j.cardinality == Cardinality::ManyToMany)
         {
             return 4;
         }
@@ -3443,6 +3453,39 @@ metrics:
         assert_eq!(def.required_schema_version(), 1);
     }
 
+    /// Phase 8.4: so does a many-to-many relationship: a format-3 reader
+    /// cannot read its cardinality.
+    #[test]
+    fn required_schema_version_is_four_with_a_many_to_many_relationship() {
+        let yaml = "
+tables:
+  - alias: o
+    table: orders
+    pk_columns: [id]
+  - alias: p
+    table: promotions
+joins:
+  - name: op
+    from_alias: o
+    table: p
+    fk_columns: [code]
+    ref_columns: [code]
+    cardinality: ManyToMany
+dimensions:
+  - name: region
+    expr: o.region
+    source_table: o
+metrics:
+  - name: total
+    expr: SUM(o.amount)
+    source_table: o
+";
+        let mut def = format_test_def(yaml);
+        assert_eq!(def.required_schema_version(), 4);
+        def.joins[0].cardinality = Cardinality::ManyToOne;
+        assert_eq!(def.required_schema_version(), 1);
+    }
+
     /// Phase 8.3: so does a window fact written over another table's
     /// dimension; a plain fact holds no reference.
     #[test]
@@ -3856,6 +3899,7 @@ metrics:
             for (variant, expected_json) in [
                 (Cardinality::ManyToOne, r#""ManyToOne""#),
                 (Cardinality::OneToOne, r#""OneToOne""#),
+                (Cardinality::ManyToMany, r#""ManyToMany""#),
             ] {
                 let json = serde_json::to_string(&variant).unwrap();
                 assert_eq!(json, expected_json);
