@@ -17,7 +17,7 @@
 use std::collections::HashSet;
 
 use crate::errors::ParseError;
-use crate::expr_tokens::scan_references;
+use crate::expr_tokens::{has_window_call, scan_references};
 use crate::ident::normalize_ident_part;
 use crate::model::SemanticViewDefinition;
 
@@ -142,9 +142,14 @@ pub fn validate_member_references(def: &SemanticViewDefinition) -> Result<(), Pa
             if member_keys.contains(&chain.key()) {
                 continue; // A declared fact or metric, own-qualified: the legal cross-table form.
             }
-            if kind == "dimension" && dimension_keys.contains(&chain.key()) {
+            if dimension_keys.contains(&chain.key())
+                && (kind == "dimension"
+                    || (kind == "fact" && texts.iter().any(|t| has_window_call(t))))
+            {
                 // Phase 8.2: a dimension may reference a related table's
-                // dimension (`graph::dim_refs` checks which ones).
+                // dimension (`graph::dim_refs` checks which ones). Phase 8.3:
+                // so may a fact holding a window function, which is computed
+                // before the query, as Snowflake allows (fixture 11 W9).
                 continue;
             }
             return Err(ParseError::positionless(format!(
@@ -343,6 +348,29 @@ mod tests {
         let mut def = base_def();
         def.dimensions = vec![dim("label", "'c.discount is not a ref'", Some("o"))];
         assert!(validate_member_references(&def).is_ok());
+    }
+
+    /// Phase 8.3 (fixture 11 W9): a fact holding a window function may read a
+    /// related table's dimension, as a dimension may; a plain fact may not.
+    #[test]
+    fn a_window_fact_may_read_another_tables_dimension() {
+        let mut def = base_def();
+        def.dimensions = vec![dim("region", "c.region", Some("c"))];
+        def.facts = vec![fact(
+            "rev_by_region",
+            "SUM(o.amount) OVER (PARTITION BY c.region)",
+            Some("o"),
+        )];
+        assert!(validate_member_references(&def).is_ok());
+        def.facts = vec![fact("plain", "o.amount + c.region", Some("o"))];
+        assert!(validate_member_references(&def).is_err());
+        // A window only inside a subquery is the subquery's.
+        def.facts = vec![fact(
+            "sub",
+            "c.region || (SELECT max(1) OVER () FROM t)",
+            Some("o"),
+        )];
+        assert!(validate_member_references(&def).is_err());
     }
 
     /// The check covers dimensions and facts, not only metrics.

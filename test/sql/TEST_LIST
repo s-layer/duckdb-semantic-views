@@ -175,3 +175,4 @@ test/sql/create_or_alter.test
 test/sql/dims_only_anchoring.test
 test/sql/phase8_cross_table_dimension_refs.test
 test/sql/phase8_dimension_subqueries.test
+test/sql/phase8_window_members.test

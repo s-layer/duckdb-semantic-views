@@ -760,7 +760,7 @@ Facts can reference other facts by name. The extension resolves dependencies in 
 
 **Validation rules:**
 
-- Aggregate functions (``SUM``, ``COUNT``, ``AVG``, ``MIN``, ``MAX``, etc.) in fact expressions are rejected. An aggregate inside a subquery or with ``OVER`` (a windowed aggregate) is one value per row and is allowed. See :ref:`ref-error-messages`.
+- Aggregate functions (``SUM``, ``COUNT``, ``AVG``, ``MIN``, ``MAX``, etc.) in fact expressions are rejected. An aggregate inside a subquery or with ``OVER`` (a windowed aggregate) is one value per row and is allowed. A fact holding a window function is computed over every row of its table, and a metric can aggregate it (see :ref:`window functions in facts and dimensions <ref-create-window-members>`). See :ref:`ref-error-messages`.
 - A prepared statement parameter (``?``, ``$1``, ``$name``) in a fact expression is rejected; use one in the query's ``WHERE`` clause instead.
 - Circular references between distinct facts are rejected (a fact referencing its own name resolves to the physical column).
 
@@ -810,6 +810,31 @@ Declares named grouping expressions available for queries.
    )
 
 ``customer.d_customer_region`` is the name of the customer's region, and ``orders.d_order_region`` the region of the order's customer. A reference can sit inside an expression, and it can name a dimension that is itself a reference. The value is always read along the referencing dimension's own path: when orders reach regions through their customer and through their store, ``customer.d_customer_region`` is the customer's region in every query, also for a metric whose ``USING`` takes the store path. A query that would also need the store path's region, through a dimension on ``region`` itself, is refused, since one join to the table cannot follow both. ``DESCRIBE``, ``GET_DDL`` and the YAML export show the reference as written. ``CREATE`` refuses a reference to a dimension of a table that references the dimension's own table, such as a child table, since that dimension has no single value per row (Snowflake's 010214). It also refuses a reference to a table reached more than one way, such as a role-played table (Snowflake's 010227), and references that form a cycle. A view with such a dimension is stored in format 4, which 0.19.0 and older refuse to read. Unlike Snowflake, where the form is DDL-only, the YAML format accepts it too.
+
+.. _ref-create-window-members:
+
+**Window functions in facts and dimensions.** As in Snowflake, a fact or a dimension can hold a window function. Its value is computed over every row of its table, before the query's ``WHERE``:
+
+.. code-block:: sql
+
+   FACTS (
+       sales.total_units         AS SUM(units) OVER (),
+       sales.revenue_by_category AS SUM(revenue) OVER (PARTITION BY category),
+       sales.region_revenue      AS SUM(revenue) OVER (PARTITION BY st.region)
+   )
+   DIMENSIONS (
+       sales.units_rank    AS ROW_NUMBER() OVER (ORDER BY units),
+       sales.prev_category AS COALESCE(LAG(category) OVER (ORDER BY id), 'none')
+   )
+   METRICS (
+       sales.sum_cat_rev AS SUM(revenue_by_category)
+   )
+
+A query filtered on ``sales.category = 'A'`` still gets each sale's rank among all the sales, and ``total_units`` is the total of every sale. A query can group by a window dimension, filter on a window fact or dimension, and a metric can aggregate a window fact. A window fact or dimension can read a table its own table references, directly or through other tables (``PARTITION BY st.region``, ``st`` being the store each sale references), which is joined for it, and it can read another window fact. ``CREATE`` refuses one that reads a table that references its own, such as a child table, which has no single value per row of it, or a table reached more than one way. ``DESCRIBE``, ``GET_DDL`` and the YAML export show the expression as written.
+
+.. versionchanged:: 0.20.0
+
+   A metric over a window fact, a window fact that reads another table's dimension, and a window dimension on a table a metric's table references were refused at ``CREATE`` or failed at query time, and a window dimension's value was computed over the rows left after the ``WHERE``.
 
 .. note::
 

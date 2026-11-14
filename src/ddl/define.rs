@@ -159,6 +159,9 @@ pub fn enrich_definition_for_create(
     // Phase 8.2: a dimension references only a dimension of a table it
     // reaches by one path (Snowflake's 010214, 010227).
     crate::graph::validate_dimension_references(&def)?;
+    // Phase 8.3: a window fact or dimension reads only tables its own table
+    // reaches by one path, so its window runs over one row per row of it.
+    crate::expand::validate_window_members(&def)?;
     // TECH-DEBT #95: no aggregate in a dimension, no parameter in any member.
     crate::graph::validate_member_expressions(&def)?;
 
