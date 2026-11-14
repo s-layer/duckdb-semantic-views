@@ -689,18 +689,18 @@ Window fact or dimension reading a table not reached by one path
 .. code-block:: text
 
    <kind> '<own>.<name>' holds a window function and reads table '<other>', but
-   table '<own>' does not reach table '<other>' along its relationships, so
-   '<other>' has no single value per row of '<own>'. A window <kind> can read a
+   table '<from>' does not reach table '<other>' along its relationships, so
+   '<other>' has no single value per row of '<from>'. A window <kind> can read a
    table its own table references, directly or through other tables, not one
    that references it.
 
 .. code-block:: text
 
    <kind> '<own>.<name>' holds a window function and reads table '<other>', but
-   table '<own>' reaches table '<other>' by more than one path (for example, as
+   table '<from>' reaches table '<other>' by more than one path (for example, as
    two roles), so which one is meant is not said.
 
-**Cause:** A fact or dimension holding a window function (see :ref:`window functions in facts and dimensions <ref-create-window-members>`) reads, directly or through a fact, a table its own table does not reach along foreign keys, such as a child table, or one it reaches two ways. Its window runs over one row per row of its own table, which such a table cannot give.
+**Cause:** A fact or dimension holding a window function (see :ref:`window functions in facts and dimensions <ref-create-window-members>`) reads, directly or through a fact, a table its own table does not reach along foreign keys, such as a child table, or one it reaches two ways. Its window runs over one row per row of its own table, which such a table cannot give. ``<from>`` is the member's own table, or, for a table read through a fact, that fact's table: the table is measured from there, as the query reaches it.
 
 **Fix:** Read only the member's own table and the tables it references along one chain. For a child table's value, aggregate it in a metric instead; for a role-played table, read a fact on the member's own table that names the role's column.
 
