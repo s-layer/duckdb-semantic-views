@@ -23,7 +23,7 @@
 //! loading and answering as it did.
 
 use crate::errors::ParseError;
-use crate::ident::{first_unquoted_dot, ident_matches};
+use crate::ident::{first_unquoted_dot, ident_matches, normalize_ident_part};
 use crate::model::{Cardinality, Dimension, Metric, SemanticViewDefinition, WindowSpec};
 
 /// The declared dimension a window clause reference names, bare or in the
@@ -60,10 +60,71 @@ const ORDER_SENSITIVE: [&str; 11] = [
     "NTILE",
 ];
 
-/// The number of ways from `from` to `to` along foreign keys, stepping back
-/// along a one-to-one relationship too, each relationship a way of its own
-/// (so a table referenced twice is reached two ways), each table at most once
-/// on a way. Counting stops at two.
+/// The ways from `from` to `to` along foreign keys, stepping back along a
+/// one-to-one relationship too, each relationship a way of its own (so a table
+/// referenced twice is reached two ways), each table at most once on a way:
+/// each a list of indices into `def.joins`. Only the ways `keep` accepts are
+/// collected, and collecting stops at two. Names match as `DuckDB` matches
+/// identifiers (`ident_matches`).
+pub(crate) fn chain_paths(
+    def: &SemanticViewDefinition,
+    from: &str,
+    to: &str,
+    keep: &dyn Fn(&[usize]) -> bool,
+) -> Vec<Vec<usize>> {
+    struct Walk<'a> {
+        def: &'a SemanticViewDefinition,
+        to: &'a str,
+        keep: &'a dyn Fn(&[usize]) -> bool,
+        seen: Vec<String>,
+        path: Vec<usize>,
+        out: Vec<Vec<usize>>,
+    }
+    impl Walk<'_> {
+        fn walk(&mut self, at: &str) {
+            if ident_matches(at, self.to) {
+                if (self.keep)(&self.path) {
+                    self.out.push(self.path.clone());
+                }
+                return;
+            }
+            for (i, j) in self.def.joins.iter().enumerate() {
+                let next = if ident_matches(&j.from_alias, at) {
+                    j.table.clone()
+                } else if ident_matches(&j.table, at) && j.cardinality == Cardinality::OneToOne {
+                    j.from_alias.clone()
+                } else {
+                    continue;
+                };
+                let key = normalize_ident_part(&next);
+                if self.seen.contains(&key) {
+                    continue;
+                }
+                self.seen.push(key);
+                self.path.push(i);
+                self.walk(&next);
+                self.path.pop();
+                self.seen.pop();
+                if self.out.len() >= 2 {
+                    return;
+                }
+            }
+        }
+    }
+    let mut w = Walk {
+        def,
+        to,
+        keep,
+        seen: vec![normalize_ident_part(from)],
+        path: Vec::new(),
+        out: Vec::new(),
+    };
+    w.walk(from);
+    w.out
+}
+
+/// The number of ways from `from` to `to` ([`chain_paths`]). Counting stops
+/// at two.
 ///
 /// With `using` (the window metric's own `USING`), only the chains that follow
 /// one of those relationships count when any does: the `USING` picks the role
@@ -74,55 +135,21 @@ pub(super) fn chain_count(
     to: &str,
     using: &[String],
 ) -> usize {
-    fn walk(
-        def: &SemanticViewDefinition,
-        at: &str,
-        to: &str,
-        seen: &mut Vec<String>,
-        need: Option<&[String]>,
-        used: bool,
-    ) -> usize {
-        if at.eq_ignore_ascii_case(to) {
-            return usize::from(need.is_none() || used);
-        }
-        let mut n = 0;
-        for j in &def.joins {
-            let (src, dst) = (
-                j.from_alias.to_ascii_lowercase(),
-                j.table.to_ascii_lowercase(),
-            );
-            let next = if src == at {
-                dst
-            } else if dst == at && j.cardinality == Cardinality::OneToOne {
-                src
-            } else {
-                continue;
-            };
-            if seen.contains(&next) {
-                continue;
-            }
-            let names_using = need.is_some_and(|u| {
-                j.name
-                    .as_deref()
-                    .is_some_and(|name| u.iter().any(|r| ident_matches(r, name)))
-            });
-            seen.push(next.clone());
-            n += walk(def, &next, to, seen, need, used || names_using);
-            seen.pop();
-            if n >= 2 {
-                return n;
-            }
-        }
-        n
-    }
-    let from = from.to_ascii_lowercase();
     if !using.is_empty() {
-        let n = walk(def, &from, to, &mut vec![from.clone()], Some(using), false);
+        let names_using = |path: &[usize]| {
+            path.iter().any(|&i| {
+                def.joins[i]
+                    .name
+                    .as_deref()
+                    .is_some_and(|name| using.iter().any(|r| ident_matches(r, name)))
+            })
+        };
+        let n = chain_paths(def, from, to, &names_using).len();
         if n > 0 {
             return n;
         }
     }
-    walk(def, &from, to, &mut vec![from.clone()], None, false)
+    chain_paths(def, from, to, &|_| true).len()
 }
 
 /// Whether `to` is reached from `from` along foreign keys, stepping back along

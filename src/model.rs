@@ -1137,7 +1137,12 @@ impl SemanticViewDefinition {
     /// such a graph along its first-declared path without saying so.
     #[must_use]
     pub fn required_schema_version(&self) -> u32 {
-        if !crate::graph::dimension_references(self).is_empty() {
+        // Phase 8.3: a window fact's reference to another table's dimension
+        // is stored the same way, and an older reader would read it as a
+        // column.
+        if !crate::graph::dimension_references(self).is_empty()
+            || !crate::graph::window_fact_references(self).is_empty()
+        {
             return 4;
         }
         if self
@@ -3435,6 +3440,42 @@ metrics:
         let mut def = format_test_def(yaml);
         assert_eq!(def.required_schema_version(), 4);
         def.dimensions[1].expr = "o.region".into();
+        assert_eq!(def.required_schema_version(), 1);
+    }
+
+    /// Phase 8.3: so does a window fact written over another table's
+    /// dimension; a plain fact holds no reference.
+    #[test]
+    fn required_schema_version_is_four_with_a_window_facts_dimension_reference() {
+        let yaml = "
+tables:
+  - alias: o
+    table: orders
+    pk_columns: [id]
+  - alias: c
+    table: customers
+    pk_columns: [id]
+joins:
+  - name: oc
+    from_alias: o
+    table: c
+    fk_columns: [cid]
+dimensions:
+  - name: region
+    expr: c.region
+    source_table: c
+facts:
+  - name: by_region
+    expr: SUM(o.amount) OVER (PARTITION BY c.region)
+    source_table: o
+metrics:
+  - name: total
+    expr: SUM(o.amount)
+    source_table: o
+";
+        let mut def = format_test_def(yaml);
+        assert_eq!(def.required_schema_version(), 4);
+        def.facts[0].expr = "SUM(o.amount) OVER (PARTITION BY o.cid)".into();
         assert_eq!(def.required_schema_version(), 1);
     }
 

@@ -41,7 +41,7 @@ use std::fmt::Write as _;
 use crate::errors::ParseError;
 use crate::expr_tokens::{has_window_call, references_ref, scan_references};
 use crate::ident::{ident_matches, normalize_ident_part};
-use crate::model::{Cardinality, Fact, SemanticViewDefinition};
+use crate::model::{Fact, SemanticViewDefinition};
 
 use super::join_resolver::synthesize_on_clause;
 use super::resolution::{quote_ident, quote_stored_ident, table_source};
@@ -107,27 +107,37 @@ fn reached_facts(expr: &str, facts: &[Fact]) -> HashSet<usize> {
     reached
 }
 
-/// The tables other than `own` that `expr` reads: those its qualified names
-/// name, and those of the facts it reaches and of their qualified names. Each
-/// is a declared alias, as declared, in first-reached order.
-fn tables_read(def: &SemanticViewDefinition, own: &str, expr: &str) -> Vec<String> {
-    let mut out: Vec<String> = Vec::new();
-    let mut add = |alias: &str| {
-        if !ident_matches(alias, own) && !out.iter().any(|a| ident_matches(a, alias)) {
-            out.push(alias.to_string());
+/// The hops by which `expr`, on table `own`, reads other tables: a
+/// `(from, to)` pair of declared aliases for each table a qualified name in
+/// it names, and for the table of each fact it reads, from `own`; then, for
+/// the expression of each fact so reached, the same from that fact's table,
+/// as the query reaches a fact's own references through the fact's table. In
+/// first-reached order, each pair once. `base` is the table of a member
+/// without one.
+fn hops(def: &SemanticViewDefinition, base: &str, own: &str, expr: &str) -> Vec<(String, String)> {
+    let alias_of = |name: &str| {
+        def.tables
+            .iter()
+            .find(|t| ident_matches(&t.alias, name))
+            .map(|t| t.alias.clone())
+    };
+    let mut out: Vec<(String, String)> = Vec::new();
+    let mut add = |from: &str, to: &str| {
+        if !ident_matches(from, to)
+            && !out
+                .iter()
+                .any(|(f, t)| ident_matches(f, from) && ident_matches(t, to))
+        {
+            out.push((from.to_string(), to.to_string()));
         }
     };
-    let mut texts: Vec<&str> = vec![expr];
-    let mut reached: Vec<usize> = reached_facts(expr, &def.facts).into_iter().collect();
-    reached.sort_unstable();
-    for i in reached {
-        if let Some(t) = def.facts[i].source_table.as_deref() {
-            add(t);
-        }
-        texts.push(&def.facts[i].expr);
-    }
-    for text in texts {
-        for chain in scan_references(text) {
+    let mut done: HashSet<usize> = HashSet::new();
+    let mut pending: Vec<(String, String)> = vec![(expr.to_string(), own.to_string())];
+    let mut next = 0;
+    while next < pending.len() {
+        let (text, at) = pending[next].clone();
+        next += 1;
+        for chain in scan_references(&text) {
             if chain.is_bare() {
                 continue;
             }
@@ -137,62 +147,28 @@ fn tables_read(def: &SemanticViewDefinition, own: &str, expr: &str) -> Vec<Strin
                 .iter()
                 .find(|t| normalize_ident_part(&t.alias) == qualifier)
             {
-                add(&t.alias);
+                add(&at, &t.alias);
+            }
+        }
+        for (i, fact) in def.facts.iter().enumerate() {
+            if !done.contains(&i) && references_ref(&text, &fact.name, fact.source_table.as_deref())
+            {
+                done.insert(i);
+                let table = fact.source_table.as_deref().unwrap_or(base);
+                let table = alias_of(table).unwrap_or_else(|| table.to_string());
+                add(&at, &table);
+                pending.push((fact.expr.clone(), table));
             }
         }
     }
     out
 }
 
-/// The ways from `from` to `to` along foreign keys, stepping back along a
-/// one-to-one relationship too, each table at most once on a way: each a list
-/// of indices into `def.joins`. Collecting stops at two, as
-/// `graph::window_dims::chain_count` counts.
+/// The ways from `from` to `to` along foreign keys
+/// ([`crate::graph::chain_paths`]), the walker a dimension reference is
+/// path-counted with, so the two CREATE checks agree.
 fn paths(def: &SemanticViewDefinition, from: &str, to: &str) -> Vec<Vec<usize>> {
-    fn walk(
-        def: &SemanticViewDefinition,
-        at: &str,
-        to: &str,
-        seen: &mut Vec<String>,
-        path: &mut Vec<usize>,
-        out: &mut Vec<Vec<usize>>,
-    ) {
-        if ident_matches(at, to) {
-            out.push(path.clone());
-            return;
-        }
-        for (i, j) in def.joins.iter().enumerate() {
-            let next = if ident_matches(&j.from_alias, at) {
-                &j.table
-            } else if ident_matches(&j.table, at) && j.cardinality == Cardinality::OneToOne {
-                &j.from_alias
-            } else {
-                continue;
-            };
-            let key = normalize_ident_part(next);
-            if seen.contains(&key) {
-                continue;
-            }
-            seen.push(key);
-            path.push(i);
-            walk(def, next, to, seen, path, out);
-            path.pop();
-            seen.pop();
-            if out.len() >= 2 {
-                return;
-            }
-        }
-    }
-    let mut out = Vec::new();
-    walk(
-        def,
-        from,
-        to,
-        &mut vec![normalize_ident_part(from)],
-        &mut Vec::new(),
-        &mut out,
-    );
-    out
+    crate::graph::chain_paths(def, from, to, &|_| true)
 }
 
 /// Refuse at CREATE a window fact or dimension that reads a table its own
@@ -213,23 +189,24 @@ pub fn validate_window_members(def: &SemanticViewDefinition) -> Result<(), Parse
     for member in window_members(def) {
         let own = member.table(def, &base);
         let (kind, name) = member.describe(def);
-        for other in tables_read(def, own, member.expr(def)) {
-            match paths(def, own, &other).len() {
+        for (from, other) in hops(def, &base, own, member.expr(def)) {
+            match paths(def, &from, &other).len() {
                 1 => {}
                 0 => {
                     return Err(ParseError::positionless(format!(
                         "{kind} '{own}.{name}' holds a window function and reads table \
-                         '{other}', but table '{own}' does not reach table '{other}' along its \
-                         relationships, so '{other}' has no single value per row of '{own}'. A \
-                         window {kind} can read a table its own table references, directly or \
-                         through other tables, not one that references it."
+                         '{other}', but table '{from}' does not reach table '{other}' along \
+                         its relationships, so '{other}' has no single value per row of \
+                         '{from}'. A window {kind} can read a table its own table references, \
+                         directly or through other tables, not one that references it."
                     )));
                 }
                 _ => {
                     return Err(ParseError::positionless(format!(
                         "{kind} '{own}.{name}' holds a window function and reads table \
-                         '{other}', but table '{own}' reaches table '{other}' by more than one \
-                         path (for example, as two roles), so which one is meant is not said."
+                         '{other}', but table '{from}' reaches table '{other}' by more than \
+                         one path (for example, as two roles), so which one is meant is not \
+                         said."
                     )));
                 }
             }
@@ -262,7 +239,7 @@ fn column_name(def: &SemanticViewDefinition, table: &str, n: usize) -> String {
 
 /// The derived table that reads `table` with `columns` added: each a column
 /// name and the window expression it holds, read over the table's rows, with
-/// the tables the expressions read joined along their one path.
+/// the tables the expressions read joined along their one path ([`hops`]).
 fn derived_table(
     def: &SemanticViewDefinition,
     table: &str,
@@ -273,9 +250,10 @@ fn derived_table(
     };
     let alias = quote_stored_ident(&t.alias);
     let mut joins: Vec<usize> = Vec::new();
+    let base = def.tables.first().map_or("", |b| b.alias.as_str());
     for (_, expr) in columns {
-        for other in tables_read(def, &t.alias, expr) {
-            if let Some(path) = paths(def, &t.alias, &other).into_iter().next() {
+        for (from, other) in hops(def, base, &t.alias, expr) {
+            if let Some(path) = paths(def, &from, &other).into_iter().next() {
                 for j in path {
                     if !joins.contains(&j) {
                         joins.push(j);
@@ -404,7 +382,7 @@ pub(super) fn lower_window_members<'a>(
         .filter(|&m| {
             let (_, name) = m.describe(def);
             !needed.contains(&normalize_ident_part(name))
-                && !tables_read(def, m.table(def, &base), m.expr(def)).is_empty()
+                && !hops(def, &base, m.table(def, &base), m.expr(def)).is_empty()
         })
         .collect();
     loop {
@@ -490,7 +468,7 @@ pub(super) fn lower_window_members<'a>(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::model::{Dimension, Join, TableRef};
+    use crate::model::{Cardinality, Dimension, Join, TableRef};
 
     fn def() -> SemanticViewDefinition {
         let t = |a: &str, pk: &str| TableRef {
@@ -665,6 +643,80 @@ mod tests {
             err.message.contains("more than one path"),
             "{}",
             err.message
+        );
+    }
+
+    /// `sales` references `st` and `region`, and `st` references `region`.
+    /// A fact `st.f AS region.g` reaches `region` through `st` only, so a
+    /// window fact on `sales` reading `st.f` reads `region` that way.
+    fn through_a_fact() -> SemanticViewDefinition {
+        let mut d = def();
+        d.tables.push(TableRef {
+            alias: "region".into(),
+            table: "w_region".into(),
+            pk_columns: vec!["region_id".into()],
+            ..Default::default()
+        });
+        let join = |name: &str, from: &str, fk: &str| Join {
+            name: Some(name.into()),
+            from_alias: from.into(),
+            table: "region".into(),
+            fk_columns: vec![fk.into()],
+            ref_columns: vec!["region_id".into()],
+            cardinality: Cardinality::ManyToOne,
+            ..Default::default()
+        };
+        d.joins.push(join("sale_region", "sales", "region_id"));
+        d.joins.push(join("store_region", "st", "region_id"));
+        d.facts = vec![
+            Fact {
+                name: "f".into(),
+                expr: "region.g".into(),
+                source_table: Some("st".into()),
+                ..Default::default()
+            },
+            Fact {
+                name: "w".into(),
+                expr: "SUM(sales.units) OVER (PARTITION BY st.f)".into(),
+                source_table: Some("sales".into()),
+                ..Default::default()
+            },
+        ];
+        d.dimensions.truncate(1);
+        d
+    }
+
+    #[test]
+    fn a_table_read_through_a_fact_is_measured_from_the_facts_table() {
+        let d = through_a_fact();
+        validate_window_members(&d).expect("st reaches region one way");
+        let out = lower_window_members(&d, &all(&d));
+        let sales = out.tables[1].definition.as_deref().expect("derived table");
+        // Joined along sales -> st -> region, not along sales -> region.
+        assert!(
+            sales.contains("LEFT JOIN \"w_region\" AS \"region\" ON \"st\".\"region_id\""),
+            "{sales}"
+        );
+        assert!(!sales.contains("\"sales\".\"region_id\""), "{sales}");
+        // Read from `sales` itself, `region` is reached two ways.
+        let mut d = d;
+        d.facts[1].expr = "SUM(sales.units) OVER (PARTITION BY region.g)".into();
+        let err = validate_window_members(&d).expect_err("two ways from sales");
+        assert!(
+            err.message.contains("more than one path"),
+            "{}",
+            err.message
+        );
+    }
+
+    #[test]
+    fn paths_match_aliases_as_duckdb_matches_identifiers() {
+        let mut d = def();
+        d.joins[0].table = "\"St\"".into();
+        assert_eq!(paths(&d, "sales", "st").len(), 1);
+        assert_eq!(
+            crate::graph::chain_paths(&d, "SALES", "\"st\"", &|_| true).len(),
+            1
         );
     }
 }

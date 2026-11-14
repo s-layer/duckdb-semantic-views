@@ -133,9 +133,14 @@ struct Instance {
 /// (`COUNT(*) OVER (PARTITION BY u.ucat)`). Each is computed over every row of
 /// its table, before the predicate and the joins, which the oracle writes as a
 /// correlated count over the whole table ([`WTD_ORACLE`], [`WUCAT_ORACLE`]).
-const DIMS: [&str; 14] = [
+///
+/// `wtu` (Phase 8.3) is a window dimension on the child that reads the parent:
+/// `COUNT(*) OVER (PARTITION BY u.ucat)`, the child rows sharing the row's
+/// parent category. Its table is read as `t LEFT JOIN u` inside the derived
+/// table, before the query's own joins and predicate ([`WTU_ORACLE`]).
+const DIMS: [&str; 15] = [
     "td", "ucat", "uwd", "etd", "eucat", "uw1", "tv1", "pcat", "qcat", "scat", "sqtd", "squcat",
-    "wtd", "wucat",
+    "wtd", "wucat", "wtu",
 ];
 
 /// `wtd`, written out independently: one more than the number of distinct
@@ -150,6 +155,13 @@ const WTD_ORACLE: &str = "(CASE WHEN t.fk IS NULL AND u.id IS NOT NULL THEN NULL
 /// row's `ucat`, NULL for a child row that reaches no parent.
 const WUCAT_ORACLE: &str = "(CASE WHEN u.id IS NULL THEN NULL ELSE \
      (SELECT count(*) FROM u u2 WHERE u2.ucat IS NOT DISTINCT FROM u.ucat) END)";
+
+/// `wtu`, written out independently: the number of rows of `t LEFT JOIN u`
+/// whose parent category is the row's (a child reaching no parent has a NULL
+/// one), NULL for a parent that no child row references.
+const WTU_ORACLE: &str = "(CASE WHEN t.fk IS NULL AND u.id IS NOT NULL THEN NULL ELSE \
+     (SELECT count(*) FROM t t2 LEFT JOIN u u2 ON t2.fk = u2.id \
+     WHERE u2.ucat IS NOT DISTINCT FROM u.ucat) END)";
 
 /// Whether a dimension is on `p` or reached only through it, so its path comes
 /// from the metrics' `USING`.
@@ -220,7 +232,7 @@ fn is_parent_metric(name: &str) -> bool {
 
 /// Whether a dimension lives on the CHILD (`t`), below the parent's grain.
 fn is_child_dim(name: &str) -> bool {
-    matches!(name, "td" | "etd" | "tv1" | "sqtd" | "wtd")
+    matches!(name, "td" | "etd" | "tv1" | "sqtd" | "wtd" | "wtu")
 }
 
 /// Members a generated `where_clause` may name (PBT-6), and which side of the
@@ -485,8 +497,11 @@ fn strip_qualifiers(text: &str) -> String {
 /// column it lacks. The bare-column pass (TECH-DEBT #83) must then read each
 /// column from its member's own table, under a role's scoped alias for `p`
 /// and in each grain of the per-grain plan.
+///
+/// `wtu` keeps its `u.` qualifier: it reads another table, and a bare `ucat`
+/// in a member of `t` is `t`'s own column (its decoy), as it should be.
 fn bare_twin(mut def: SemanticViewDefinition) -> SemanticViewDefinition {
-    for d in &mut def.dimensions {
+    for d in def.dimensions.iter_mut().filter(|d| d.name != "wtu") {
         d.expr = strip_qualifiers(&d.expr);
     }
     for m in &mut def.metrics {
@@ -863,6 +878,13 @@ fn build_def() -> SemanticViewDefinition {
             source_table: Some("u".to_string()),
             ..Default::default()
         },
+        // Phase 8.3: a window dimension on the child reading the parent.
+        Dimension {
+            name: "wtu".to_string(),
+            expr: "COUNT(*) OVER (PARTITION BY u.ucat)".to_string(),
+            source_table: Some("t".to_string()),
+            ..Default::default()
+        },
     ];
     let using_metric = |name: &str, expr: &str, source: Option<&str>, using: &[&str]| Metric {
         name: name.to_string(),
@@ -1119,6 +1141,7 @@ fn child_dim_item(name: &str) -> String {
         // Phase 8.3: the windows, over the whole tables.
         "wtd" => format!("{WTD_ORACLE} AS wtd"),
         "wucat" => format!("{WUCAT_ORACLE} AS wucat"),
+        "wtu" => format!("{WTU_ORACLE} AS wtu"),
         // Facts grouped on in DIMENSIONS, written out independently.
         "uw1" => "u.w + 1 AS uw1".to_string(),
         "tv1" => "t.v + 1 AS tv1".to_string(),
@@ -1799,9 +1822,9 @@ fn generator_reaches_both_where_clause_branches() {
     let mut expression_oracled = [0usize; 10];
     // Phase 8.3: each window member oracled, and oracled under a predicate,
     // which the window must not see; and the window dimension in a predicate.
-    const WINDOW_MEMBERS: [&str; 3] = ["wtd", "wucat", "swv"];
-    let mut window_oracled = [0usize; 3];
-    let mut window_pred_oracled = [0usize; 3];
+    const WINDOW_MEMBERS: [&str; 4] = ["wtd", "wucat", "swv", "wtu"];
+    let mut window_oracled = [0usize; 4];
+    let mut window_pred_oracled = [0usize; 4];
     let mut wtd_in_pred_oracled = 0usize;
     let mut expression_bridged = 0usize;
     // Phase 6.3: `pcat` both refused and oracled, the oracled cases including

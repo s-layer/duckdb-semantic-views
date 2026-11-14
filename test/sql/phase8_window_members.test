@@ -282,6 +282,112 @@ SELECT prev_category, AGG(rev_sum) FROM wdim_sv WHERE yr = 2025 GROUP BY prev_ca
 ----
 B	900
 
+# X10: an ad-hoc metric over a window dimension aggregates the member's
+# per-row values, computed over the whole table, also under a WHERE (the
+# category-A ranks are 1, 3, 5, not 1, 2, 3).
+query I
+SELECT * FROM SEMANTIC_VIEW(wdim_sv METRICS MAX(units_rank));
+----
+5
+
+query I
+SELECT * FROM SEMANTIC_VIEW(wdim_sv METRICS SUM(units_rank) AS s WHERE category = 'A');
+----
+9
+
+query TI
+SELECT * FROM SEMANTIC_VIEW(wdim_sv DIMENSIONS category METRICS SUM(units_rank) AS s) ORDER BY 1;
+----
+A	9
+B	6
+
+# X11: a window member reading a table across an ASOF relationship joins it
+# inside its table's derived table with the ASOF join (order 4 predates every
+# address and partitions with the NULL city), before the WHERE.
+statement ok
+CREATE TABLE w_addr (ca_cust_id INTEGER, ca_start DATE, ca_city VARCHAR);
+
+statement ok
+CREATE TABLE w_ord (o_id INTEGER, o_cust_id INTEGER, o_date DATE);
+
+statement ok
+INSERT INTO w_addr VALUES (1, '2024-01-01', 'London'), (1, '2024-06-01', 'Paris'),
+  (3, '2024-05-01', 'Berlin');
+
+statement ok
+INSERT INTO w_ord VALUES (1, 1, '2024-02-10'), (2, 1, '2024-07-01'), (3, 1, '2024-03-01'),
+  (4, 1, '2023-01-01'), (5, 3, '2024-06-01');
+
+statement ok
+CREATE SEMANTIC VIEW wdim_asof
+  TABLES (o AS w_ord PRIMARY KEY (o_id), a AS w_addr PRIMARY KEY (ca_cust_id, ca_start))
+  RELATIONSHIPS (ord_addr AS o (o_cust_id, o_date) REFERENCES a (ca_cust_id, ASOF ca_start))
+  DIMENSIONS (
+    o.order_id AS o_id,
+    a.city AS ca_city,
+    o.city_orders AS COUNT(*) OVER (PARTITION BY a.city)
+  );
+
+query II
+SELECT * FROM SEMANTIC_VIEW(wdim_asof DIMENSIONS o.order_id, o.city_orders) ORDER BY 1;
+----
+1	2
+2	1
+3	2
+4	1
+5	1
+
+query II
+SELECT * FROM SEMANTIC_VIEW(wdim_asof DIMENSIONS o.order_id, o.city_orders WHERE o.order_id <= 2) ORDER BY 1;
+----
+1	2
+2	1
+
+# X12: the same across a range relationship: e4 and e6 match no period and
+# partition together, also when the WHERE keeps e4 alone.
+statement ok
+CREATE TABLE w_periods (period_id INTEGER, start_ts TIMESTAMP, end_ts TIMESTAMP, label VARCHAR);
+
+statement ok
+CREATE TABLE w_events (e_id INTEGER, e_ts TIMESTAMP);
+
+statement ok
+INSERT INTO w_periods VALUES (1, NULL, '2024-01-01', 'before'), (2, '2024-01-01', '2024-02-01', 'jan'),
+  (3, '2024-03-01', NULL, 'after');
+
+statement ok
+INSERT INTO w_events VALUES (1, '2023-06-01'), (2, '2024-01-05'), (3, '2024-01-20'),
+  (4, '2024-02-20'), (5, '2025-01-01'), (6, NULL);
+
+statement ok
+CREATE SEMANTIC VIEW wdim_range
+  TABLES (
+    e AS w_events PRIMARY KEY (e_id),
+    p AS w_periods PRIMARY KEY (period_id)
+      CONSTRAINT period_range DISTINCT RANGE BETWEEN start_ts AND end_ts EXCLUSIVE
+  )
+  RELATIONSHIPS (event_period AS e (e_ts) REFERENCES p (BETWEEN start_ts AND end_ts EXCLUSIVE))
+  DIMENSIONS (
+    e.event_id AS e_id,
+    p.label AS label,
+    e.label_events AS COUNT(*) OVER (PARTITION BY p.label)
+  );
+
+query II
+SELECT * FROM SEMANTIC_VIEW(wdim_range DIMENSIONS e.event_id, e.label_events) ORDER BY 1;
+----
+1	1
+2	2
+3	2
+4	2
+5	1
+6	2
+
+query II
+SELECT * FROM SEMANTIC_VIEW(wdim_range DIMENSIONS e.event_id, e.label_events WHERE e.event_id = 4);
+----
+4	2
+
 # X4: a window member reads the whole table also from a query that uses no
 # window member of it (the table is read as written then).
 query I

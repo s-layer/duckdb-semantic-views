@@ -830,7 +830,7 @@ Declares named grouping expressions available for queries.
        sales.sum_cat_rev AS SUM(revenue_by_category)
    )
 
-A query filtered on ``sales.category = 'A'`` still gets each sale's rank among all the sales, and ``total_units`` is the total of every sale. A query can group by a window dimension, filter on a window fact or dimension, and a metric can aggregate a window fact. A window fact or dimension can read a table its own table references, directly or through other tables (``PARTITION BY st.region``, ``st`` being the store each sale references), which is joined for it, and it can read another window fact. ``CREATE`` refuses one that reads a table that references its own, such as a child table, which has no single value per row of it, or a table reached more than one way. ``DESCRIBE``, ``GET_DDL`` and the YAML export show the expression as written.
+A query filtered on ``sales.category = 'A'`` still gets each sale's rank among all the sales, and ``total_units`` is the total of every sale. A query can group by a window dimension, filter on a window fact or dimension, and a metric, declared or written in the query (``METRICS MAX(units_rank)``), can aggregate a window fact or dimension. A window fact or dimension can read a table its own table references, directly or through other tables (``PARTITION BY st.region``, ``st`` being the store each sale references), also across an ASOF or range relationship, which is joined for it, and it can read another window fact. ``CREATE`` refuses one that reads a table that references its own, such as a child table, which has no single value per row of it, or a table reached more than one way. ``DESCRIBE``, ``GET_DDL`` and the YAML export show the expression as written.
 
 .. versionchanged:: 0.20.0
 

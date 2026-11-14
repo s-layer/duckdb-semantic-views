@@ -198,6 +198,7 @@ pub fn lower_expression_items(
         taken: index.names.clone(),
         labels: Vec::new(),
         ctes: Vec::new(),
+        window_dims: std::cell::RefCell::new(Vec::new()),
     };
     for (group, list) in [
         (Group::Dimensions, &mut items.dimensions),
@@ -228,11 +229,23 @@ pub fn lower_expression_items(
         }
     }
     let Lowering {
-        added,
+        mut added,
         labels,
         ctes,
+        window_dims,
         ..
     } = lowering;
+    for i in window_dims.into_inner() {
+        let d = &def.dimensions[i];
+        added.facts.push(Fact {
+            name: window_twin_name(&index, i),
+            expr: d.expr.clone(),
+            source_table: d.source_table.clone(),
+            output_type: d.output_type.clone(),
+            access: AccessModifier::Private,
+            ..Fact::default()
+        });
+    }
     let def = (!labels.is_empty()).then(|| {
         let mut def = def.clone();
         def.dimensions.extend(added.dimensions);
@@ -432,6 +445,23 @@ struct Lowering<'d, 'i> {
     labels: Vec<(String, String)>,
     /// The CTEs the subqueries of `DIMENSIONS` items became.
     ctes: Vec<String>,
+    /// Phase 8.3: the window dimensions an item reads, as indices into
+    /// `def.dimensions`. Each is read through a private fact twin
+    /// ([`window_twin_name`]) rather than pasted as its expression, so the
+    /// expansion computes it over its table before the query, as it does the
+    /// dimension itself (`expand::window_members`), also inside an aggregate.
+    window_dims: std::cell::RefCell<Vec<usize>>,
+}
+
+/// The private fact twin a window dimension `index` is read through in an
+/// expression item: `__sv_wdim_<index>`, with `_` appended while it would
+/// match a member the view declares.
+fn window_twin_name(index: &MemberIndex<'_>, i: usize) -> String {
+    let mut name = format!("__sv_wdim_{i}");
+    while index.names.contains(&normalize_ident_part(&name)) {
+        name.push('_');
+    }
+    name
 }
 
 /// What one reference in an expression item names.
@@ -660,7 +690,30 @@ impl<'d> Lowering<'d, '_> {
                 Some(_) => {}
                 None => table = Some((member_table.clone(), r.raw.to_string())),
             }
+            let window = match member {
+                Member::Dimension(d) if crate::expr_tokens::has_window_call(&d.expr) => {
+                    self.def.dimensions.iter().position(|x| std::ptr::eq(x, d))
+                }
+                _ => None,
+            };
             let replacement = match member {
+                Member::Dimension(d) if window.is_some() => {
+                    let i = window.unwrap_or_default();
+                    let mut seen = self.window_dims.borrow_mut();
+                    if !seen.contains(&i) {
+                        seen.push(i);
+                    }
+                    let name = quote_ident(&window_twin_name(self.index, i));
+                    let name = match &d.source_table {
+                        Some(t) => format!("{}.{name}", quote_stored_ident(t)),
+                        None => name,
+                    };
+                    if field_at < r.raw.len() {
+                        format!("({name})")
+                    } else {
+                        name
+                    }
+                }
                 Member::Dimension(d) => format!("({})", d.expr),
                 // A fact by its name, qualified when it has a table, as fact
                 // inlining keys it, and in brackets when a field path follows,
