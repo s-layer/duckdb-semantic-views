@@ -366,6 +366,21 @@ CREATE SEMANTIC VIEW m2m_cycle
 ----
 cycle detected
 
+# M22b: name uniqueness is still checked before the graph (SG-13), in a view
+# with no many-to-many relationship: a duplicate name in a view that also
+# has a cycle gets the name error.
+statement error
+CREATE SEMANTIC VIEW m2m_order_of_checks
+  TABLES (orders AS m_orders PRIMARY KEY (order_id), customers AS m_customers PRIMARY KEY (customer_id))
+  RELATIONSHIPS (
+    orders_to_customers AS orders (customer_id) REFERENCES customers,
+    customers_to_orders AS customers (customer_id) REFERENCES orders
+  )
+  DIMENSIONS (orders.total_amount AS order_id)
+  METRICS (orders.total_amount AS SUM(amount));
+----
+duplicate name
+
 # M23: a key column written in another case or quoting is the same column,
 # as in DuckDB: the relationship is many-to-one, not many-to-many, so a
 # dimension may reference a dimension across it.

@@ -144,12 +144,15 @@ pub fn enrich_definition_for_create(
     // reads it, through its table of keys (`expand::lower_many_to_many`), so a
     // check that walks the relationships finds no step across one: a dimension
     // reference or a window member across it is refused, as in Snowflake.
-    // The relationships as declared are checked too, so a self-reference or a
-    // cycle through a many-to-many relationship is refused as any other is.
-    crate::graph::validate_graph(&def)?;
+    // The relationships as declared are checked too, after name uniqueness,
+    // so a self-reference or a cycle through a many-to-many relationship is
+    // refused as any other is.
     let bridged = crate::expand::lower_many_to_many(&def);
     let checked = &*bridged;
     crate::graph::validate_name_uniqueness(checked)?;
+    if crate::expand::has_many_to_many(&def) {
+        crate::graph::validate_graph(&def)?;
+    }
     crate::graph::validate_graph(checked)?;
     crate::graph::validate_facts(checked)?;
     crate::graph::validate_derived_metrics(checked)?;
