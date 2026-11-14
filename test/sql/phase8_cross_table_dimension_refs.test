@@ -307,7 +307,9 @@ CREATE SEMANTIC VIEW xref_diamond
   DIMENSIONS (
     region.d_region_name AS region.r_name,
     customer.d_customer_region AS region.d_region_name,
-    orders.d_order_region AS customer.d_customer_region
+    orders.d_order_region AS customer.d_customer_region,
+    store.d_store_region AS region.d_region_name,
+    orders.d_any_region AS COALESCE(customer.d_customer_region, store.d_store_region)
   )
   METRICS (
     orders.revenue AS SUM(orders.amount),
@@ -337,5 +339,18 @@ US	20
 # follow both, so the query is refused rather than reading one of them.
 statement error
 SELECT * FROM SEMANTIC_VIEW(xref_diamond DIMENSIONS customer.d_customer_region, region.d_region_name METRICS orders.rev_by_store);
+----
+more than one path
+
+# One dimension reading regions through customers and through stores needs
+# both paths at once: refused, with or without a USING, rather than reading
+# the store's region through the customer join.
+statement error
+SELECT * FROM SEMANTIC_VIEW(xref_diamond DIMENSIONS orders.d_any_region METRICS orders.rev_by_store);
+----
+more than one path
+
+statement error
+SELECT * FROM SEMANTIC_VIEW(xref_diamond DIMENSIONS orders.d_any_region METRICS orders.revenue);
 ----
 more than one path

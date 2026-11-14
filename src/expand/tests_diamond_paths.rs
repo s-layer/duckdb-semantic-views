@@ -771,6 +771,14 @@ fn diamond_with_references(order: &str) -> SemanticViewDefinition {
     // A reference to the reference, on orders: still the customer's region.
     def.dimensions
         .push(dim("order_cust_region", "c.cust_region", "o"));
+    // The store's region by reference, and one dimension reading both.
+    def.dimensions
+        .push(dim("store_region", "r.region_name", "s"));
+    def.dimensions.push(dim(
+        "any_region",
+        "COALESCE(c.cust_region, s.store_region)",
+        "o",
+    ));
     def.facts.push(Fact {
         name: "region_fact".to_string(),
         expr: "r.region_name".to_string(),
@@ -876,4 +884,29 @@ fn filter_on_a_reference_to_a_reference_reads_the_intermediate_tables_path() {
         &req(&[], &["rev_by_store"], Some("o.order_cust_region = 'EU'")),
         &[&["50"]],
     );
+}
+
+/// Review of #362, round 3: one dimension reading regions through customers
+/// and through stores needs both paths to regions, which one join cannot
+/// follow: refused naming both, with or without a `USING`.
+#[test]
+fn one_dimension_reaching_a_table_two_ways_is_refused() {
+    for metric in ["rev_by_store", "revenue"] {
+        let request = req(&["any_region"], &[metric], None);
+        for order in ORDERS {
+            match expand("dv", &diamond_with_references(order), &request) {
+                Ok(sql) => panic!(
+                    "{metric}, TABLES order {order}: expected a refusal, got rows {:?}\nSQL:\n{sql}",
+                    rows(&sql)
+                ),
+                Err(e) => {
+                    let msg = e.to_string();
+                    assert!(
+                        msg.contains("o -> c -> r") && msg.contains("o -> s -> r"),
+                        "{metric}, TABLES order {order}: expected both paths named, got: {msg}"
+                    );
+                }
+            }
+        }
+    }
 }
