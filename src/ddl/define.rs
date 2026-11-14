@@ -74,13 +74,10 @@ pub fn enrich_definition_for_create(
     //    Two sub-cases:
     //      (a) `REFERENCES target` (no col list) — `infer_cardinality` left
     //          `ref_columns` empty because target has no `pk_columns`.
-    //      (b) `REFERENCES target(cols)` — `ref_columns` was set explicitly
-    //          but target has no `pk_columns` and no UNIQUE constraint
-    //          matching `ref_columns`. (Without the D-06 wrapping this
-    //          would surface as the more generic CARD-03 "FK ... does not
-    //          match any PRIMARY KEY or UNIQUE constraint" error in
-    //          `validate_fk_references`. The D-06 message is more
-    //          actionable because it names the fix verbatim.)
+    //      (b) `REFERENCES target(cols)` for an ASOF or range relationship
+    //          whose target has no `pk_columns` and no UNIQUE constraint.
+    //          Any other relationship naming columns that are no key is
+    //          many-to-many (Phase 8.4) and skipped below.
     for join in &def.joins {
         // Phase 8.4: a many-to-many relationship names the referenced
         // columns, which need not be a key.

@@ -91,10 +91,13 @@ statement ok
 DROP SEMANTIC VIEW p33_multi_unique;
 
 # ============================================================
-# Test 3 (CARD-03): FK must reference PK or UNIQUE on target -- error
+# Test 3 (CARD-03): referenced columns that are no PK or UNIQUE key of the
+# target make a direct many-to-many relationship since 0.20.0 (Phase 8.4, as
+# in Snowflake; `phase8_many_to_many.test`), so CREATE accepts it. It was
+# refused before.
 # ============================================================
 
-statement error
+statement ok
 CREATE SEMANTIC VIEW p33_bad_ref AS
   TABLES (
     c AS p33_customers PRIMARY KEY (id) UNIQUE (email),
@@ -109,8 +112,6 @@ CREATE SEMANTIC VIEW p33_bad_ref AS
   METRICS (
     o.revenue AS SUM(o.amount)
   );
-----
-does not match any PRIMARY KEY or UNIQUE constraint
 
 # ============================================================
 # Test 4 (CARD-04): Cardinality inferred -- ManyToOne (bare FK)
@@ -379,10 +380,12 @@ statement ok
 DROP SEMANTIC VIEW p33_chain;
 
 # ============================================================
-# Test 12 (CARD-09): Composite FK subset rejected
+# Test 12 (CARD-09): a subset of a composite PRIMARY KEY is no key, so the
+# relationship is many-to-many since 0.20.0 (Phase 8.4), and accepted. It was
+# refused before.
 # ============================================================
 
-statement error
+statement ok
 CREATE SEMANTIC VIEW p33_subset AS
   TABLES (
     c AS p33_customers PRIMARY KEY (id, email),
@@ -397,8 +400,6 @@ CREATE SEMANTIC VIEW p33_subset AS
   METRICS (
     o.revenue AS SUM(o.amount)
   );
-----
-does not match any PRIMARY KEY or UNIQUE constraint
 
 # ============================================================
 # Test 13: DESCRIBE shows UNIQUE and inferred cardinality

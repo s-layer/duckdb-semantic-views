@@ -624,7 +624,7 @@ Key missing on a relationship target
    <target>. (v0.10.0: physical-catalog PK auto-inference removed -- see
    CHANGELOG.)
 
-**Cause:** A relationship references a table whose ``TABLES`` entry declares neither ``PRIMARY KEY`` nor ``UNIQUE``. An explicit column list on the relationship (``REFERENCES <target>(<cols>)``) does not satisfy the requirement.
+**Cause:** A relationship references a table whose ``TABLES`` entry declares neither ``PRIMARY KEY`` nor ``UNIQUE``, with no column list (``REFERENCES <target>``), so there is no key to join on. With a column list (``REFERENCES <target>(<cols>)``) the relationship is many-to-many since 0.20.0, and the target needs no key (see :ref:`direct many-to-many relationships <ref-create-direct-many-to-many>`).
 
 **Fix:** Declare the key on the target table's ``TABLES`` entry: ``c AS customers PRIMARY KEY (id)``, or ``UNIQUE (email)`` when the relationship joins on a unique column.
 

@@ -50,7 +50,7 @@ Concept Mapping
      - The same forms (see :ref:`howto-asof-range`)
    * - Many-to-many relationships
      - A bridge table that references both sides, or a relationship to columns that are not a key
-     - The same, each row counted once per group (see :ref:`howto-many-to-many` and :ref:`ref-create-direct-many-to-many`)
+     - The same, each row counted once per group (see :ref:`howto-many-to-many` and :ref:`direct many-to-many relationships <ref-create-direct-many-to-many>`)
    * - Dimensions
      - ``DIMENSIONS`` clause
      - ``DIMENSIONS`` clause
@@ -256,9 +256,10 @@ constraint imported from the catalog.
    DIMENSIONS (c.name AS c.name)
    METRICS (o.revenue AS SUM(o.amount));
 
-If a relationship's target table declares neither key, the extension rejects the
-definition at ``CREATE`` time, whether or not the ``REFERENCES`` side lists columns.
-With ``c AS customers`` declared without a key in the example above, the error is:
+If a relationship's target table declares neither key and the ``REFERENCES`` side
+lists no columns, the extension rejects the definition at ``CREATE`` time. With
+``c AS customers`` declared without a key and ``REFERENCES c`` in the example
+above, the error is:
 
 .. code-block:: text
 
@@ -266,7 +267,10 @@ With ``c AS customers`` declared without a key in the example above, the error i
    Add PRIMARY KEY (cols) or UNIQUE (cols) to the TABLES clause for c. (v0.10.0:
    physical-catalog PK auto-inference removed -- see CHANGELOG.)
 
-This prevents the extension from synthesizing an incorrect JOIN ON clause.
+This prevents the extension from synthesizing an incorrect JOIN ON clause. A
+``REFERENCES`` list naming columns that are no key of the target, which then needs
+no key at all, makes the relationship many-to-many, as in Snowflake (see
+:ref:`direct many-to-many relationships <ref-create-direct-many-to-many>`).
 
 
 Query Interface
@@ -710,7 +714,7 @@ Snowflake ``CREATE SEMANTIC VIEW`` features that are commonly asked about, and w
    * - Many-to-many relationships through a bridge table -- ``ba(author_id) REFERENCES a`` and ``ba(book_id) REFERENCES b``, with a metric on ``b`` grouped by a dimension on ``a``
      - **Supported**, with the answers Snowflake gives: each row of the metric's table counts once per group, a row with no bridge row counts in the ``NULL`` group, and the total with no dimension is not inflated. A dimension on the bridge itself, or past the far table, and a filter across the bridge work too, and a fact table that references both sides is a bridge as well. A dimension on a plain child of the metric's table counts the same way, once per group, as in Snowflake. ``USING`` cannot pick between two bridges: both systems create a view with two bridges between the same pair of tables, and refuse a query that crosses from one side to the other (Snowflake's 000002 ``Multi-path in many-to-many relationship``). Both refuse the same way any member a metric reaches by no chain of relationships and by a second path, such as a customer count by store when customers and stores also share regions. A metric whose table reaches the bridge by a hop up (a review count by author country, with reviews referencing books) counts each review once per group, as in Snowflake. A window metric across a bridge is computed over its inner metric's once-per-group result, as in Snowflake, and its window clause can name only dimensions of tables related to the metric's own (Snowflake's 010211). Active semi-additive metrics can't be grouped across a bridge. A query with only dimensions on the two sides lists the pairs the bridge holds, as in Snowflake. See :ref:`Many-to-many relationships through a bridge <ref-create-bridge-relationships>`.
    * - Direct many-to-many relationships -- ``orders(promo_code) REFERENCES promotions(promo_code)``, where ``promo_code`` is not a key of ``promotions``
-     - **Supported**, with the answers Snowflake gives: a metric grouped or filtered across it counts each row of its table once per value it matches, a row that matches nothing, or has a ``NULL``, counts in the ``NULL`` group, a query with only dimensions lists the combinations that occur together, and a ``FACTS`` query returns one row per matching combination, or one per row of its table when the other side is only in the filter, every join inner. The metric's table needs a ``PRIMARY KEY`` (Snowflake's 010933), a query across two such relationships between the same tables is refused (000002), and ``CREATE`` refuses a dimension reference or a window across it (010227). See :ref:`ref-create-direct-many-to-many`.
+     - **Supported**, with the answers Snowflake gives: a metric grouped or filtered across it counts each row of its table once per value it matches, a row that matches nothing, or has a ``NULL``, counts in the ``NULL`` group, a query with only dimensions lists the combinations that occur together, and a ``FACTS`` query returns one row per matching combination, or one per row of its table when the other side is only in the filter, every join inner. The metric's table needs a ``PRIMARY KEY`` (Snowflake's 010933), a query across two such relationships between the same tables is refused (000002), and ``CREATE`` refuses a dimension reference or a window across it (010227). See :ref:`direct many-to-many relationships <ref-create-direct-many-to-many>`.
    * - Dimensions-only queries over several tables -- ``SEMANTIC_VIEW( v DIMENSIONS customers.name, orders.status )``
      - **Supported**, with the rows Snowflake lists: the query reads the one table every queried dimension and filtered member is reached from, and joins up from it, whatever the order of ``TABLES``. A parent and a child dimension list the child's rows, a dimension alone lists its table's own values, and the two sides of a bridge list the pairs it holds. A role-played table queried on its own, or from a table above it, lists its own rows. When no single table reaches every member, such as dimensions on two children of one parent, the query is answered when the table where their paths meet, or a table above it that reaches every member through it, has a metric, with the distinct member tuples the meeting table reaches, and refused otherwise, as in Snowflake. A ``FACTS`` query reads the same table and lists every row of it. See :ref:`Dimensions only <ref-sv-modes>`.
    * - Column-level security

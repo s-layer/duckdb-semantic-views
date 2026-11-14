@@ -12,7 +12,8 @@
 #       PK-less target fails with the D-06 template message (substring match
 #       on the actionable text plus the v0.10.0 CHANGELOG parenthetical).
 #   B2: CREATE SEMANTIC VIEW with FK reference (WITH explicit ref cols) to a
-#       PK-less and UNIQUE-less target fails with the same D-06 template.
+#       PK-less and UNIQUE-less target is accepted as a direct many-to-many
+#       relationship since 0.20.0 (it failed with the D-06 template before).
 #   B3: The same view declared with `PRIMARY KEY (cols)` on the target
 #       succeeds — no false-positive on the new error path.
 #
@@ -50,10 +51,11 @@ CREATE SEMANTIC VIEW v_bad1
 ----
 has no PRIMARY KEY declared but is referenced by FK in
 
-# B2: explicit REFERENCES with column list, but target still has no PK or
-# UNIQUE declared. D-06 hard error must still fire (Phase 65 enrichment
-# wraps the CARD-03 case in the more actionable D-06 message).
-statement error
+# B2: explicit REFERENCES with column list, and the target has no PK or
+# UNIQUE declared. Since 0.20.0 (Phase 8.4) this is a direct many-to-many
+# relationship, as in Snowflake, whose target needs no key
+# (`phase8_many_to_many.test`), so CREATE accepts it.
+statement ok
 CREATE SEMANTIC VIEW v_bad2
   AS
     TABLES (
@@ -69,8 +71,6 @@ CREATE SEMANTIC VIEW v_bad2
     METRICS (
       o.total AS SUM(o.total)
     )
-----
-(v0.10.0: physical-catalog PK auto-inference removed -- see CHANGELOG.)
 
 # B3: same view, but orders declares PRIMARY KEY (order_id) -- succeeds.
 statement ok
