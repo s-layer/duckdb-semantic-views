@@ -788,12 +788,28 @@ Declares named grouping expressions available for queries.
 
 - ``PUBLIC``, optional. Accepted as an explicit no-op (dimensions are always public). ``PRIVATE`` is **not** allowed on a dimension and is rejected rather than silently downgraded. This matches Snowflake, whose grammar lists ``{ PRIVATE | PUBLIC }`` on a dimension but whose rule is that `"You cannot mark a dimension as private. Dimensions are always public." <https://docs.snowflake.com/en/sql-reference/sql/create-semantic-view>`_
 - ``<alias>.<dim_name>``, the table alias and dimension name. The alias indicates which table the dimension comes from (used for join dependency resolution).
-- ``<expression>``, any row-level SQL expression: no aggregate (outside a subquery or ``OVER``) and no prepared statement parameter. Can be a simple column reference (``o.region``) or a computed expression (``date_trunc('month', o.ordered_at)``).
+- ``<expression>``, any row-level SQL expression: no aggregate (outside a subquery or ``OVER``) and no prepared statement parameter. Can be a simple column reference (``o.region``) or a computed expression (``date_trunc('month', o.ordered_at)``). It can also name a dimension of another table, written ``<alias>.<dim_name>`` (see :ref:`ref-create-dimension-references`).
 - ``COMMENT = '<text>'``, optional. A human-readable description.
 - ``WITH SYNONYMS = ('<synonym>', ...)``, optional. Alternative names for discoverability.
 - ``LABELS = (FILTER)``, optional. Declares the dimension a :ref:`named filter <howto-annotations-filters>` -- a boolean-valued member meant for reuse in a query's :ref:`WHERE <ref-sv-pre-agg-filtering>`. Metadata only: it does not hide the dimension from output, and the ``BOOLEAN`` requirement is enforced by DuckDB's binder at query time. ``FILTER`` is the only accepted label. Write it between the dimension's name and ``AS``, as Snowflake does, or after the expression.
 - ``[WITH] TAG (<tag_name> = '<value>', ...)``, optional. Name/value metadata tags. See :ref:`Tags <ref-create-tags>`.
 - ``SAMPLE_VALUES ('<value>', ...)``, ``IS_ENUM`` and ``WITH CORTEX SEARCH SERVICE <service_name> [USING <column>]``, optional. Cortex Analyst metadata. See :ref:`Cortex Analyst metadata <ref-create-cortex-metadata>`.
+
+
+.. _ref-create-dimension-references:
+
+**Dimensions of other tables.** As in Snowflake, a dimension can be written as a dimension of a table its own table references, directly or through other tables, so the value is read along that path:
+
+.. code-block:: sql
+
+   DIMENSIONS (
+       region.d_region_name     AS r_name,
+       customer.d_customer_region AS region.d_region_name,
+       orders.d_order_region    AS customer.d_customer_region,
+       nation.d_region_lower    AS LOWER(region.d_region_name)
+   )
+
+``customer.d_customer_region`` is the name of the customer's region, and ``orders.d_order_region`` the region of the order's customer. A reference can sit inside an expression, and it can name a dimension that is itself a reference. ``DESCRIBE``, ``GET_DDL`` and the YAML export show the reference as written. ``CREATE`` refuses a reference to a dimension of a table that references the dimension's own table, such as a child table, since that dimension has no single value per row (Snowflake's 010214). It also refuses a reference to a table reached more than one way, such as a role-played table (Snowflake's 010227), and references that form a cycle. A view with such a dimension is stored in format 4, which 0.19.0 and older refuse to read. Unlike Snowflake, where the form is DDL-only, the YAML format accepts it too.
 
 .. note::
 

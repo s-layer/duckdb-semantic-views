@@ -12,6 +12,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Added
 
 - A relationship's name is optional, as in Snowflake: `RELATIONSHIPS (orders(customer_id) REFERENCES customers)` is accepted, in the DDL and in YAML. The relationship gets a generated name, `SYS_RELATIONSHIP_` followed by an id, which `DESCRIBE SEMANTIC VIEW` shows. Snowflake draws a new random id on every `CREATE`; here the id comes from the entry's position, tables and columns, so re-creating the view, also from its `GET_DDL` or YAML export, keeps it. `GET_DDL` and the YAML export leave the generated name out. A metric's `USING` cannot name a generated name, which changes when a relationship is declared before it; name the relationship instead.
+- A dimension can be written as a dimension of a table its own table references, as in Snowflake: `customer.d_customer_region AS region.d_region_name` is the customer's region name, read along the path from `customer` to `region`. The reference can sit inside an expression (`LOWER(region.d_region_name)`) and can name a dimension that is itself a reference. `DESCRIBE`, `GET_DDL` and the YAML export show it as written. `CREATE` refuses a reference to a child table's dimension, to a table reached more than one way (such as a role-played one), and references that form a cycle, as Snowflake does. Such a view is stored in format 4, which 0.19.0 and older refuse to read.
 
 ### Fixed
 

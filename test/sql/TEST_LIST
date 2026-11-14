@@ -173,3 +173,4 @@ test/sql/phase8_unnamed_relationships.test
 test/sql/variables.test
 test/sql/create_or_alter.test
 test/sql/dims_only_anchoring.test
+test/sql/phase8_cross_table_dimension_refs.test

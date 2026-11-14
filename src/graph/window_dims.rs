@@ -68,7 +68,12 @@ const ORDER_SENSITIVE: [&str; 11] = [
 /// With `using` (the window metric's own `USING`), only the chains that follow
 /// one of those relationships count when any does: the `USING` picks the role
 /// or the path, as the query honours it (`tests_window_result_rows`).
-fn chain_count(def: &SemanticViewDefinition, from: &str, to: &str, using: &[String]) -> usize {
+pub(super) fn chain_count(
+    def: &SemanticViewDefinition,
+    from: &str,
+    to: &str,
+    using: &[String],
+) -> usize {
     fn walk(
         def: &SemanticViewDefinition,
         at: &str,

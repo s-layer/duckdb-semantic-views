@@ -169,7 +169,7 @@ INSERT INTO semantic_layer._definitions (schema_name, name, definition) VALUES (
 statement error
 SELECT * FROM SEMANTIC_VIEW(ar4_future DIMENSIONS region METRICS total)
 ----
-semantic view 'ar4_future' was written by a newer version of semantic_views (storage format 99; this version reads up to 3)
+semantic view 'ar4_future' was written by a newer version of semantic_views (storage format 99; this version reads up to 4)
 
 statement error
 DESCRIBE SEMANTIC VIEW ar4_future

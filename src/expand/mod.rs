@@ -1,4 +1,5 @@
 pub(crate) mod bare_columns;
+mod dim_refs;
 mod dims_for_metric;
 mod facts;
 mod fan_trap;

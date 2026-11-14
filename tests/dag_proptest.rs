@@ -240,6 +240,27 @@ impl Case {
             .any(|(&e, &one)| one && e == (from, to))
     }
 
+    /// The requested dimensions a cross-table dimension reference can stand
+    /// in for (Phase 8.2): with a metric and no roles, ASOF or one-to-one
+    /// relationship in the graph, each dimension of another table the
+    /// metric's table reaches by one chain. A dimension `rg{k}` on the
+    /// metric's table, written `t{k}.g{k}`, must answer as `g{k}` does.
+    fn ref_dims(&self) -> Vec<usize> {
+        let Some(m) = self.metric else {
+            return Vec::new();
+        };
+        if self.doubled.is_some() || self.asof.is_some() || self.one_to_one.iter().any(|&o| o) {
+            return Vec::new();
+        }
+        let mut ks: Vec<usize> = self.dims.clone();
+        ks.extend(self.filter.map(|(k, _)| k));
+        ks.sort_unstable();
+        ks.dedup();
+        ks.into_iter()
+            .filter(|&k| k != m && self.chains(m, k).len() == 1)
+            .collect()
+    }
+
     fn members(&self) -> Vec<usize> {
         let mut m: Vec<usize> = self.dims.clone();
         m.extend(self.filter.map(|(k, _)| k));
@@ -574,6 +595,44 @@ fn request(case: &Case) -> QueryRequest {
             .collect(),
         // PIN: a FACTS query reads one table's rows like a query with no metrics; this harness oracles the graph's paths, which the dims-only property already walks.
         facts: vec![],
+    }
+}
+
+/// [`build_def`] with a reference dimension `rg{k}` on the metric's table for
+/// each of [`Case::ref_dims`], written as table `t{k}`'s dimension `g{k}`.
+fn build_ref_def(case: &Case, order: &[usize], reverse: bool) -> SemanticViewDefinition {
+    let mut def = build_def(case, order, reverse);
+    let m = case.metric.expect("a reference twin has a metric");
+    for k in case.ref_dims() {
+        def.dimensions.push(Dimension {
+            name: format!("rg{k}"),
+            expr: format!("t{k}.g{k}"),
+            source_table: Some(format!("t{m}")),
+            ..Default::default()
+        });
+    }
+    def
+}
+
+/// [`request`] naming each of [`Case::ref_dims`] by its reference dimension,
+/// in the query's dimensions and its filter.
+fn ref_request(case: &Case) -> QueryRequest {
+    let refs = case.ref_dims();
+    let name = |k: usize| {
+        if refs.contains(&k) {
+            format!("rg{k}")
+        } else {
+            format!("g{k}")
+        }
+    };
+    QueryRequest {
+        where_clause: case.filter.map(|(k, c)| format!("{} = {c}", name(k))),
+        dimensions: case
+            .dims
+            .iter()
+            .map(|&k| DimensionName::new(name(k)))
+            .collect(),
+        ..request(case)
     }
 }
 
@@ -1156,6 +1215,42 @@ fn check_case(case: &Case) -> Result<(), TestCaseError> {
         }
         answers.push(answer);
     }
+    // Phase 8.2: the same query with each dimension it can be written as a
+    // reference to, so named, answers or refuses as the direct query did.
+    if !case.ref_dims().is_empty() {
+        let req = ref_request(case);
+        for (i, order) in case.orders.iter().enumerate() {
+            let def = build_ref_def(case, order, i == 1);
+            if let Err(e) = semantic_views::graph::validate_dimension_references(&def) {
+                return Err(TestCaseError::fail(format!(
+                    "CREATE must accept a reference along one chain: {}",
+                    e.message
+                )));
+            }
+            let answer = match expand("dag", &def, &req) {
+                Ok(sql) => Ok(rows(&conn, &sql)
+                    .map_err(|e| TestCaseError::fail(format!("emitted SQL fails: {e}\n{sql}")))?),
+                Err(e) => Err(e.to_string()),
+            };
+            match (&answers[i], &answer) {
+                (Ok(want), Ok(got)) => prop_assert_eq!(
+                    got,
+                    want,
+                    "order {:?}: the reference dimensions {:?} answer otherwise",
+                    order,
+                    case.ref_dims()
+                ),
+                (Err(_), Err(_)) => {}
+                (want, got) => {
+                    return Err(TestCaseError::fail(format!(
+                        "order {order:?}: the reference dimensions {:?} gave {got:?} where \
+                         the direct query gave {want:?}",
+                        case.ref_dims()
+                    )));
+                }
+            }
+        }
+    }
     // With a doubled relationship more fences can refuse one query (a fan
     // trap relative to the base table, a filter that names no role), and
     // which speaks first may follow the TABLES order: the two orders must
@@ -1400,6 +1495,16 @@ fn generator_reaches_every_outcome() {
                 *seen.entry(key).or_default() += 1;
             }
         }
+        // Phase 8.2: a reference twin run on a query that answers.
+        if !case.ref_dims().is_empty() && matches!(expect(&case), Expect::Rows(_)) {
+            *seen.entry("reference twin answered").or_default() += 1;
+            if case
+                .filter
+                .is_some_and(|(k, _)| case.ref_dims().contains(&k))
+            {
+                *seen.entry("reference twin filtered").or_default() += 1;
+            }
+        }
         if case.twin() {
             let (a, _) = case
                 .pair()
@@ -1475,6 +1580,8 @@ fn generator_reaches_every_outcome() {
         *seen.entry(key).or_default() += 1;
     }
     for key in [
+        "reference twin answered",
+        "reference twin filtered",
         "asof chain answered",
         "asof dims answered",
         "asof meeting refused",

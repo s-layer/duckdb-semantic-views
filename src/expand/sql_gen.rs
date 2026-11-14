@@ -1002,6 +1002,10 @@ pub fn expand(
     // steps below see each expression as it binds.
     let qualified = super::bare_columns::qualify_bare_columns(def);
     let def = &*qualified;
+    // Phase 8.2: a dimension written as another table's dimension reads it
+    // through a private fact twin on that table (`dim_refs`).
+    let lowered = super::dim_refs::lower_dimension_references(def);
+    let def = &*lowered;
     // Phase 6.3: a metric written over a same-table metric carries that
     // metric's aggregate from here on, so every later step sees what it
     // computes (`graph::same_table_metrics`).

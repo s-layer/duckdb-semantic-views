@@ -156,6 +156,9 @@ pub fn enrich_definition_for_create(
     // expression may legitimately reference those across tables, and only a
     // RAW column of another table is out of scope.
     crate::graph::validate_member_references(&def)?;
+    // Phase 8.2: a dimension references only a dimension of a table it
+    // reaches by one path (Snowflake's 010214, 010227).
+    crate::graph::validate_dimension_references(&def)?;
     // TECH-DEBT #95: no aggregate in a dimension, no parameter in any member.
     crate::graph::validate_member_expressions(&def)?;
 

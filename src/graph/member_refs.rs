@@ -74,6 +74,18 @@ pub fn validate_member_references(def: &SemanticViewDefinition) -> Result<(), Pa
         }
     }
 
+    // Phase 8.2: the keys a dimension's expression may also name, another
+    // table's dimension (`region.d_region_name`).
+    let dimension_keys: HashSet<String> = def
+        .dimensions
+        .iter()
+        .filter_map(|d| {
+            d.source_table
+                .as_ref()
+                .map(|src| normalize_ident_part(&format!("{src}.{}", d.name)))
+        })
+        .collect();
+
     // (kind, name, source_table, the texts to check) for every member that
     // carries one. A window metric is emitted from its `WindowSpec` alone
     // (`expand::window`), so its texts are the inner metric, the function's
@@ -129,6 +141,11 @@ pub fn validate_member_references(def: &SemanticViewDefinition) -> Result<(), Pa
             }
             if member_keys.contains(&chain.key()) {
                 continue; // A declared fact or metric, own-qualified: the legal cross-table form.
+            }
+            if kind == "dimension" && dimension_keys.contains(&chain.key()) {
+                // Phase 8.2: a dimension may reference a related table's
+                // dimension (`graph::dim_refs` checks which ones).
+                continue;
             }
             return Err(ParseError::positionless(format!(
                 "semantic view: {kind} '{name}' references '{raw}', a column of \

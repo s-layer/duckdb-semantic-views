@@ -941,16 +941,21 @@ impl Join {
 /// references, which a version-1 reader misreads or cannot load.
 ///
 /// 3 (Phase 7.1, 7.2): ASOF and range relationships (`Join::asof`,
-/// `Join::range_end`), which a version-2 reader would join on equality. A stamp
-/// above this value is refused by [`SemanticViewDefinition::from_json`], so
-/// the next such change is reported instead of misread.
+/// `Join::range_end`), which a version-2 reader would join on equality.
+///
+/// 4 (Phase 8.2): a dimension written as another table's dimension
+/// (`region.d_region_name`), which a version-3 reader reads as a column of
+/// that table: a binder error, or that column's value where the dimension's
+/// is meant. A stamp above this value is refused by
+/// [`SemanticViewDefinition::from_json`], so the next such change is reported
+/// instead of misread.
 ///
 /// This is the newest format this release reads and writes, not the stamp
 /// every row gets: a view is stamped with
 /// [`SemanticViewDefinition::required_schema_version`], the lowest format
 /// that reads it, so a view that uses nothing newer stays readable by an
 /// older release after a newer one has opened the database.
-pub const CURRENT_SCHEMA_VERSION: u32 = 3;
+pub const CURRENT_SCHEMA_VERSION: u32 = 4;
 
 /// Top-level definition of a semantic view.
 ///
@@ -1132,6 +1137,9 @@ impl SemanticViewDefinition {
     /// such a graph along its first-declared path without saying so.
     #[must_use]
     pub fn required_schema_version(&self) -> u32 {
+        if !crate::graph::dimension_references(self).is_empty() {
+            return 4;
+        }
         if self
             .joins
             .iter()
@@ -3387,11 +3395,47 @@ mod tests {
         }
     }
 
-    /// v0.18.0 stores constructs a v1 reader misreads (variables, same-table
-    /// metric references, query-defined tables), so the stamp moved to 2.
+    /// Each release that stores constructs an older reader misreads moves the
+    /// newest format: 2 in v0.18.0, 3 for ASOF and range relationships, 4 for
+    /// cross-table dimension references.
     #[test]
-    fn current_schema_version_is_two() {
-        assert_eq!(CURRENT_SCHEMA_VERSION, 3);
+    fn current_schema_version_is_four() {
+        assert_eq!(CURRENT_SCHEMA_VERSION, 4);
+    }
+
+    /// A dimension written as another table's dimension needs format 4: a
+    /// format-3 reader reads it as that table's column.
+    #[test]
+    fn required_schema_version_is_four_with_a_dimension_reference() {
+        let yaml = "
+tables:
+  - alias: o
+    table: orders
+    pk_columns: [id]
+  - alias: c
+    table: customers
+    pk_columns: [id]
+joins:
+  - name: oc
+    from_alias: o
+    table: c
+    fk_columns: [cid]
+dimensions:
+  - name: region
+    expr: c.region
+    source_table: c
+  - name: o_region
+    expr: c.region
+    source_table: o
+metrics:
+  - name: total
+    expr: SUM(o.amount)
+    source_table: o
+";
+        let mut def = format_test_def(yaml);
+        assert_eq!(def.required_schema_version(), 4);
+        def.dimensions[1].expr = "o.region".into();
+        assert_eq!(def.required_schema_version(), 1);
     }
 
     /// A definition from YAML, for the storage-format tests below.
