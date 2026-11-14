@@ -122,8 +122,12 @@ struct Instance {
 ///
 /// `pcat` (Phase 6.3) is on the role-played table `p`, and `qcat` (6.3b) on
 /// `q`, reached only through `p`; `scat` is on `s`, one hop further.
-const DIMS: [&str; 10] = [
-    "td", "ucat", "uwd", "etd", "eucat", "uw1", "tv1", "pcat", "qcat", "scat",
+///
+/// `sqtd` and `squcat` (Phase 8.2b) are expression items holding an
+/// uncorrelated subquery over `sq_keys`, on the child and the parent: an
+/// `IN` list with a NULL in it, and a scalar subquery.
+const DIMS: [&str; 12] = [
+    "td", "ucat", "uwd", "etd", "eucat", "uw1", "tv1", "pcat", "qcat", "scat", "sqtd", "squcat",
 ];
 
 /// Whether a dimension is on `p` or reached only through it, so its path comes
@@ -178,6 +182,8 @@ fn item_text(name: &str) -> String {
         "esw" => "max(uw1) AS esw",
         "edsv" => "sv + ct AS edsv",
         "esvf" => "sum(tv1) FILTER (WHERE td > 0) AS esvf",
+        "sqtd" => "td IN (SELECT k FROM sq_keys) AS sqtd",
+        "squcat" => "ucat + (SELECT max(k) FROM sq_keys) AS squcat",
         other => other,
     }
     .to_string()
@@ -190,7 +196,7 @@ fn is_parent_metric(name: &str) -> bool {
 
 /// Whether a dimension lives on the CHILD (`t`), below the parent's grain.
 fn is_child_dim(name: &str) -> bool {
-    matches!(name, "td" | "etd" | "tv1")
+    matches!(name, "td" | "etd" | "tv1" | "sqtd")
 }
 
 /// Members a generated `where_clause` may name (PBT-6), and which side of the
@@ -943,7 +949,8 @@ fn make_db(inst: &Instance, inline: &[bool]) -> duckdb::Connection {
          CREATE TABLE p (id INTEGER, pcat INTEGER, qid INTEGER); \
          CREATE TABLE q (id INTEGER, qcat INTEGER, sid INTEGER); \
          CREATE TABLE s (id INTEGER, scat INTEGER); \
-         CREATE TABLE t (fk INTEGER, d INTEGER, v INTEGER, p1 INTEGER, p2 INTEGER);",
+         CREATE TABLE t (fk INTEGER, d INTEGER, v INTEGER, p1 INTEGER, p2 INTEGER); \
+         CREATE TABLE sq_keys AS SELECT * FROM (VALUES (0), (2), (NULL)) v(k);",
     )
     .expect("create tables");
 
@@ -1043,6 +1050,9 @@ fn child_dim_item(name: &str) -> String {
         // TECH-DEBT #76: the expression items, written out independently.
         "etd" => "t.d * 2 + 1 AS etd".to_string(),
         "eucat" => "coalesce(u.ucat, -1) + (u.w + 1) AS eucat".to_string(),
+        // Phase 8.2b: the subqueries, written out in place.
+        "sqtd" => "t.d IN (SELECT k FROM sq_keys) AS sqtd".to_string(),
+        "squcat" => "u.ucat + (SELECT max(k) FROM sq_keys) AS squcat".to_string(),
         // Facts grouped on in DIMENSIONS, written out independently.
         "uw1" => "u.w + 1 AS uw1".to_string(),
         "tv1" => "t.v + 1 AS tv1".to_string(),
@@ -1206,6 +1216,7 @@ fn parent_dim_items(case: &Case) -> Vec<String> {
             "uwd" => Some("u.w + 1 AS uwd".to_string()),
             "eucat" => Some("coalesce(u.ucat, -1) + (u.w + 1) AS eucat".to_string()),
             "uw1" => Some("u.w + 1 AS uw1".to_string()),
+            "squcat" => Some("u.ucat + (SELECT max(k) FROM sq_keys) AS squcat".to_string()),
             _ => None,
         })
         .collect()
@@ -1496,6 +1507,7 @@ proptest! {
             facts: vec![],
         };
         let expanded = expand("star", &def, &req)
+            .map(|sql| lowered.with_ctes(&sql))
             .map_err(|e| TestCaseError::fail(format!("refused: {e}")))?;
         let renamed = lowered
             .items
@@ -1565,7 +1577,7 @@ proptest! {
         let selects_pcat = case.sel_dims.iter().any(|&i| is_role_dim(DIMS[i]));
         let every_metric_names_p = !case.sel_metrics.is_empty()
             && case.sel_metrics.iter().all(|&i| names_p_path(METS[i]));
-        let result = expand("star", &def, &req);
+        let result = expand("star", &def, &req).map(|sql| lowered.with_ctes(&sql));
         // Dimensions on `p` and above alone are answered from `p`'s rows and
         // need no path: `role_played_tables_alone_list_their_own_rows`.
         if is_role_only(&case) {
@@ -1711,9 +1723,10 @@ fn generator_reaches_both_where_clause_branches() {
     let mut svf_and_dsv_oracled = 0usize;
     // `uw1` / `tv1`: facts grouped on in DIMENSIONS, lowered like the
     // expression items.
-    const EXPRESSION_ITEMS: [&str; 8] =
-        ["etd", "eucat", "esv", "esw", "edsv", "esvf", "uw1", "tv1"];
-    let mut expression_oracled = [0usize; 8];
+    const EXPRESSION_ITEMS: [&str; 10] = [
+        "etd", "eucat", "esv", "esw", "edsv", "esvf", "uw1", "tv1", "sqtd", "squcat",
+    ];
+    let mut expression_oracled = [0usize; 10];
     let mut expression_bridged = 0usize;
     // Phase 6.3: `pcat` both refused and oracled, the oracled cases including
     // both paths at once and the metric-over-metric `sv_p2`.
@@ -1737,7 +1750,9 @@ fn generator_reaches_both_where_clause_branches() {
     let mut inline_read_oracled = [0usize; 5];
     let mut distinct: HashSet<String> = HashSet::new();
 
-    for _ in 0..400 {
+    // 600 draws since Phase 8.2b's two subquery dimensions widened the pool,
+    // which spreads the same draws over more dimension sets.
+    for _ in 0..600 {
         let case = arb_case()
             .new_tree(&mut runner)
             .expect("strategy must produce a value")

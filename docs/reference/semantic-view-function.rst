@@ -362,6 +362,8 @@ Because it is part of your query, a semantic-view query reads your open transact
                     METRICS revenue
                     WHERE region = t.r)) s;
 
+So can a subquery in a ``DIMENSIONS`` item (see :ref:`ref-sv-expression-items`). The rest of a query item, and every member expression, reads only the semantic view's tables.
+
 If the generated SQL does not bind, for example because a metric names a column that has since been dropped, the query fails with DuckDB's own error. Its caret points at the ``semantic_view(...)`` call, or, for the construct, at the start of the query. Use :ref:`explain_semantic_view() <ref-explain-semantic-view>` to see the generated SQL.
 
 .. versionchanged:: 0.16.0
@@ -403,7 +405,22 @@ An expression reads only the view's members and its :ref:`variables <ref-sv-vari
 
 This is a check of the expression as written, not access control, which DuckDB does not have: the body of a macro the expression calls is not checked.
 
-No item holds a subquery, a window function (declare a :ref:`window metric <howto-window-metrics>` instead) or a prepared statement parameter, and a ``PRIVATE`` fact or metric cannot be used, as anywhere else in a query. An item is one expression: separate two with a comma, in two items.
+No item holds a window function (declare a :ref:`window metric <howto-window-metrics>` instead) or a prepared statement parameter, and a ``PRIVATE`` fact or metric cannot be used, as anywhere else in a query. An item is one expression: separate two with a comma, in two items.
+
+A ``DIMENSIONS`` expression can hold a subquery, as in Snowflake. The subquery computes a value or a set of values, and the expression around it compares the dimension with them:
+
+.. code-block:: sql
+
+   SELECT * FROM SEMANTIC_VIEW(shop
+       DIMENSIONS region IN (SELECT region FROM focus_regions) AS in_focus,
+                  ordered_at - (SELECT max(ordered_at) FROM holidays) AS since_holiday
+       METRICS revenue
+   );
+
+The expression must still use a dimension or fact outside the subquery. A subquery on its own, such as ``DIMENSIONS (SELECT max(code) FROM codes)``, names no member and is refused. The subquery is uncorrelated, as one in the :ref:`WHERE clause <ref-sv-filtering>` is. Names inside it are its own tables' columns, never members, and it sees none of the semantic view's tables. So a name its tables lack, such as ``region`` in ``EXISTS (SELECT 1 FROM codes WHERE code = region)``, fails with DuckDB's ``Referenced column ... not found`` error. Like the ``WHERE`` clause's, the subquery is part of your query: it can read your CTEs and, in a ``LATERAL`` join, a column of the enclosing query. The subquery can read another semantic view, with the construct or ``semantic_view()``. A ``FACTS`` or ``METRICS`` expression can't hold a subquery, as in Snowflake. The standard-SQL form takes one too, in a ``SELECT`` item the query groups by.
+
+.. versionchanged:: 0.20.0
+   A ``DIMENSIONS`` expression can hold an uncorrelated subquery. Earlier releases refused every subquery in an item.
 
 Without an alias, the column is named by the expression as written, so ``DIMENSIONS lower(region)`` gives a column named ``lower(region)``. An error about an expression item, such as a fan trap, names the expression as written.
 
@@ -646,7 +663,7 @@ If a name does not match any defined dimension, metric, or fact, the error messa
 
 **Tables in the definition.** Each table in ``TABLES`` is the one CREATE found. A name written without a schema is the table of that name in the database and schema the view was created in, or your session's temporary table of that name if that is what it named at CREATE, so a semantic view over a temporary table can be queried in the session that has the table. A name written ``schema.table`` is looked up in the database the view was created in. A table created later, in your current schema or as a temporary table, is not read in its place.
 
-**Names in member expressions.** A table in a subquery inside a dimension, fact or metric expression, a function or macro, and a type in a cast resolve as they would in a DuckDB view stored in the schema the semantic view was created in: your session's temporary objects first, then that schema, then its database's default schema, then your search path. A CTE of the same name in your query, or an object of that name in your current schema, is not used in their place. A table named in a ``where_clause`` subquery is part of your query and resolves there, so it can read your CTEs. A function or type ``where_clause`` names outside its subqueries resolves like the definition's.
+**Names in member expressions.** A table in a subquery inside a dimension, fact or metric expression, a function or macro, and a type in a cast resolve as they would in a DuckDB view stored in the schema the semantic view was created in: your session's temporary objects first, then that schema, then its database's default schema, then your search path. A CTE of the same name in your query, or an object of that name in your current schema, is not used in their place. A table named in a ``where_clause`` subquery, or in a subquery of a ``DIMENSIONS`` item, is part of your query and resolves there, so it can read your CTEs. A function or type ``where_clause`` names outside its subqueries resolves like the definition's.
 
 .. versionchanged:: 0.16.0
    Names in member expressions no longer resolve to your query's CTEs or your current schema, and a semantic view over a temporary table can be queried.

@@ -414,7 +414,7 @@ fn item_text(
                 .to_string(),
         ));
     }
-    let expr = clean(&tree.text(item.expr));
+    let expr = clean(&lower_constructs(tree, item.expr)?);
     Ok(match item.alias {
         None => expr,
         Some((alias, true)) => format!("{expr} AS {}", clean(&tree.text(alias))),
@@ -516,6 +516,54 @@ fn lower_inside(tree: &Tree, node: &Node, params: &mut Params<'_>) -> Result<Str
         text.replace_range(range, &lowered);
     }
     Ok(text)
+}
+
+/// `node`'s text with each construct inside it lowered: an item outside the
+/// WHERE clause (Phase 8.2b: a `DIMENSIONS` item's subquery can read another
+/// semantic view). A parameter in such a construct is one outside the outer
+/// construct's WHERE clause, so it is refused, as one in the item is
+/// ([`item_text`]).
+fn lower_constructs(tree: &Tree, node: &Node) -> Result<String, ParseError> {
+    let mut text = tree.text(node);
+    let start = node.offset().unwrap_or_default();
+    let mut replacements = Vec::new();
+    for (inner, is_construct) in inner_parts(node) {
+        if !is_construct {
+            continue;
+        }
+        let range = inner
+            .span
+            .and_then(|(o, l)| o.checked_sub(start).map(|at| at..at + l))
+            .filter(|r| text.get(r.clone()).is_some())
+            .ok_or_else(|| internal(inner, "construct outside its expression"))?;
+        let mut parameter = false;
+        let lowered = lower(tree, inner, &mut || {
+            parameter = true;
+            String::new()
+        })?;
+        if parameter {
+            let at = first_parameter(inner).unwrap_or(inner);
+            return Err(error_at(
+                Some(at),
+                "prepared statement parameters are only supported in the WHERE clause of \
+                 SEMANTIC_VIEW(...)"
+                    .to_string(),
+            ));
+        }
+        replacements.push((range, lowered));
+    }
+    for (range, lowered) in replacements.into_iter().rev() {
+        text.replace_range(range, &lowered);
+    }
+    Ok(text)
+}
+
+/// The first `Parameter` node under `node`, constructs inside it included.
+fn first_parameter(node: &Node) -> Option<&Node> {
+    if node.rule.eq_ignore_ascii_case("Parameter") {
+        return Some(node);
+    }
+    node.children.iter().find_map(first_parameter)
 }
 
 /// The constructs (`true`) and parameters (`false`) under `node`, in the
@@ -960,6 +1008,71 @@ mod tests {
              'd IN (SELECT r FROM semantic_view(''v'', dimensions := [''d AS r''], \
              metrics := [''m'']) AS z WHERE m < 100)') AS s"
         );
+    }
+
+    /// Phase 8.2b: a `DIMENSIONS` item may hold a subquery, and so a
+    /// construct, which is lowered as one inside the predicate is.
+    fn nested_dimension_sql(inner: &str) -> String {
+        format!("SEMANTIC_VIEW(v DIMENSIONS d IN (SELECT r FROM {inner}) AS k METRICS m) AS s")
+    }
+
+    fn nested_dimension_tree(inner_parts: &[(&str, &str)], inner: &str) -> Tree {
+        let sql = nested_dimension_sql(inner);
+        let item = format!("d IN (SELECT r FROM {inner})");
+        nested(
+            &sql,
+            &[
+                (W, "DIMENSIONS"),
+                (E, &item),
+                (A, "AS k"),
+                (W, "METRICS"),
+                (E, "m"),
+            ],
+            Some("AS s"),
+            inner,
+            inner_parts,
+            Some("AS z"),
+        )
+    }
+
+    #[test]
+    fn a_construct_inside_a_dimensions_item_is_lowered() {
+        let tree = nested_dimension_tree(
+            &[(W, "DIMENSIONS"), (E, "d"), (A, "AS r")],
+            "SEMANTIC_VIEW(v DIMENSIONS d AS r) AS z",
+        );
+        assert_eq!(
+            transform(&tree).unwrap(),
+            "SELECT * FROM semantic_view('v', dimensions := ['d IN (SELECT r FROM \
+             semantic_view(''v'', dimensions := [''d AS r'']) AS z) AS k'], \
+             metrics := ['m']) AS s"
+        );
+    }
+
+    /// A parameter in a construct inside a `DIMENSIONS` item is still one
+    /// outside the WHERE clause of the outer construct.
+    #[test]
+    fn a_parameter_in_a_construct_inside_a_dimensions_item_is_refused() {
+        let inner = "SEMANTIC_VIEW(v DIMENSIONS d AS r WHERE y = ?) AS z";
+        let tree = nested_dimension_tree(
+            &[
+                (W, "DIMENSIONS"),
+                (E, "d"),
+                (A, "AS r"),
+                (W, "WHERE"),
+                (E, "y = ?"),
+            ],
+            inner,
+        );
+        let sql = nested_dimension_sql(inner);
+        let tree = with_parameters(tree, &sql, &["?"]);
+        let e = transform(&tree).unwrap_err();
+        assert!(
+            e.message.contains("only supported in the WHERE clause"),
+            "{}",
+            e.message
+        );
+        assert_eq!(e.position, sql.find('?'));
     }
 
     /// `tree` with a `Parameter` node for each of `params`, found in `sql` in

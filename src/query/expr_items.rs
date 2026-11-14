@@ -26,9 +26,14 @@
 //!   around them becomes a derived metric over those metrics and the ones it
 //!   names. An item that is one aggregate is that metric.
 //!
-//! No item holds a subquery, a window function or a prepared statement
-//! parameter, and a private fact or metric cannot be named, as in a query
-//! anywhere else.
+//! No item holds a window function or a prepared statement parameter, and a
+//! private fact or metric cannot be named, as in a query anywhere else.
+//!
+//! A `DIMENSIONS` item may hold uncorrelated subqueries (Phase 8.2b), as in
+//! Snowflake: the expression around them must still read a dimension or fact,
+//! names inside a subquery are its own, and each subquery becomes a CTE ahead
+//! of the expansion ([`LoweredItems::with_ctes`]), so that it cannot see the
+//! query's tables. A `FACTS` or `METRICS` item cannot hold one.
 
 use std::collections::{HashMap, HashSet};
 
@@ -59,9 +64,52 @@ pub struct LoweredItems {
     pub items: RequestItems,
     /// Each added member's name and the item text it stands for, for display.
     pub labels: Vec<(String, String)>,
+    /// `__sv_sqdN AS (<subquery>)`, one per subquery of a `DIMENSIONS` item,
+    /// in order: the expansion goes after them ([`with_ctes`](Self::with_ctes)).
+    pub ctes: Vec<String>,
+}
+
+/// `sql` with `ctes` ahead of it: merged into its own `WITH` when it has one,
+/// so they come first.
+fn prepend_ctes(sql: &str, ctes: &[String]) -> String {
+    if ctes.is_empty() {
+        return sql.to_string();
+    }
+    let ours = ctes.join(",\n");
+    match sql.strip_prefix("WITH ") {
+        Some(rest) => format!("WITH {ours},\n{rest}"),
+        None => format!("WITH {ours}\n{sql}"),
+    }
 }
 
 impl LoweredItems {
+    /// `sql`, an expansion of the lowered request, with the subqueries of its
+    /// `DIMENSIONS` items ahead of it as CTEs: merged into its own `WITH` when
+    /// it has one, so they come first.
+    #[must_use]
+    pub fn with_ctes(&self, sql: &str) -> String {
+        prepend_ctes(sql, &self.ctes)
+    }
+
+    /// [`with_ctes`](Self::with_ctes), with each CTE's body a placeholder
+    /// (`SELECT NULL`), for the shim's isolated bind (`fence`). A subquery of
+    /// an item is the caller's text, as one of `where_clause` is, and may read
+    /// the caller's CTEs and outer row (TECH-DEBT #107), which the isolated
+    /// bind does not have. That bind checks the members around it, which the
+    /// placeholder leaves as they are: a subquery an item can hold returns one
+    /// column (`IN`, `ANY`, a scalar subquery) or none that matters
+    /// (`EXISTS`).
+    #[must_use]
+    pub fn with_fenced_ctes(&self, sql: &str) -> String {
+        let placeholders: Vec<String> = self
+            .ctes
+            .iter()
+            .filter_map(|cte| cte.split_once(" AS ("))
+            .map(|(name, _)| format!("{name} AS (SELECT NULL)"))
+            .collect();
+        prepend_ctes(sql, &placeholders)
+    }
+
     /// `message` with each added member's name, quoted as the expansion's
     /// errors quote a member (`'__sv_expr_1'`), replaced by the item it
     /// stands for, so an error about an expression item names what was
@@ -149,6 +197,7 @@ pub fn lower_expression_items(
         added: Added::default(),
         taken: index.names.clone(),
         labels: Vec::new(),
+        ctes: Vec::new(),
     };
     for (group, list) in [
         (Group::Dimensions, &mut items.dimensions),
@@ -178,7 +227,12 @@ pub fn lower_expression_items(
             };
         }
     }
-    let Lowering { added, labels, .. } = lowering;
+    let Lowering {
+        added,
+        labels,
+        ctes,
+        ..
+    } = lowering;
     let def = (!labels.is_empty()).then(|| {
         let mut def = def.clone();
         def.dimensions.extend(added.dimensions);
@@ -186,7 +240,12 @@ pub fn lower_expression_items(
         def.metrics.extend(added.metrics);
         def
     });
-    Ok(LoweredItems { def, items, labels })
+    Ok(LoweredItems {
+        def,
+        items,
+        labels,
+        ctes,
+    })
 }
 
 /// The column name of a fact named in `DIMENSIONS`, or `None` for any other
@@ -371,6 +430,8 @@ struct Lowering<'d, 'i> {
     added: Added,
     taken: HashSet<String>,
     labels: Vec<(String, String)>,
+    /// The CTEs the subqueries of `DIMENSIONS` items became.
+    ctes: Vec<String>,
 }
 
 /// What one reference in an expression item names.
@@ -392,6 +453,18 @@ impl<'d> Lowering<'d, '_> {
     /// name.
     fn lower(&mut self, group: Group, text: &str) -> Result<String, ItemError> {
         check_one_expression(text)?;
+        let spans = subquery_spans(text);
+        if !spans.is_empty() && group != Group::Dimensions {
+            let kind = if group == Group::Metrics {
+                "METRICS"
+            } else {
+                "FACTS"
+            };
+            return Err(invalid(format!(
+                "'{text}' in {kind} holds a subquery; only a DIMENSIONS item or the WHERE \
+                 clause can"
+            )));
+        }
         check_calls(text)?;
         if group == Group::Metrics {
             return self.lower_metric(text);
@@ -402,6 +475,10 @@ impl<'d> Lowering<'d, '_> {
             "FACTS"
         };
         for head in scan_function_heads(text) {
+            // A subquery's calls are its own (Phase 8.2b).
+            if inside(&spans, head.start, head.end) {
+                continue;
+            }
             if call_is_windowed(text, &head) {
                 return Err(window_refused(text));
             }
@@ -417,6 +494,7 @@ impl<'d> Lowering<'d, '_> {
         let source_table = self.source_table(&table);
         let expr = format!("({expr})");
         if group == Group::Dimensions {
+            let expr = self.hoist_subqueries(&expr);
             self.added.dimensions.push(Dimension {
                 name: name.clone(),
                 expr,
@@ -537,8 +615,10 @@ impl<'d> Lowering<'d, '_> {
         let mut out = Splice::new(part);
         let mut table: Option<(String, String)> = None;
         let lambdas = lambda_scopes(part);
+        // A name inside a subquery is the subquery's own column (Phase 8.2b).
+        let spans = subquery_spans(part);
         for r in scan_references(part) {
-            if is_local_name(part, &r, &lambdas) {
+            if is_local_name(part, &r, &lambdas) || inside(&spans, r.start, r.end) {
                 continue;
             }
             let (member, member_table, field_at) = match self.resolve(&r, false)? {
@@ -714,6 +794,33 @@ impl<'d> Lowering<'d, '_> {
             .map(|t| t.alias.clone())
     }
 
+    /// `expr` with each subquery moved out into a CTE of the query
+    /// (`__sv_sqdN`, numbered across the request's items; the shim reads a
+    /// CTE named `__sv_sq...` as the caller's own text, which resolves in the
+    /// caller's query and may read the view itself), so that it is
+    /// uncorrelated, as in Snowflake and as the WHERE clause's subqueries are
+    /// (`expand::where_clause::hoist_subqueries`): a CTE ahead of the
+    /// expansion sees none of the query's tables, so a name the subquery's own
+    /// tables lack is "not found" rather than a raw column of the view.
+    /// `expr` has no comments and its brackets pair up
+    /// ([`check_one_expression`]).
+    fn hoist_subqueries(&mut self, expr: &str) -> String {
+        let mut out = String::with_capacity(expr.len());
+        let mut copied = 0;
+        for (start, end) in subquery_spans(expr) {
+            let name = format!("__sv_sqd{}", self.ctes.len());
+            self.ctes
+                .push(format!("{name} AS ({})", &expr[start + 1..end - 1]));
+            out.push_str(&expr[copied..start]);
+            out.push_str("(SELECT * FROM ");
+            out.push_str(&name);
+            out.push(')');
+            copied = end;
+        }
+        out.push_str(&expr[copied..]);
+        out
+    }
+
     /// A member name no declared or added member has.
     fn fresh_name(&mut self) -> String {
         let mut n = 1;
@@ -767,8 +874,8 @@ impl Member<'_> {
 }
 
 /// Refuse what cannot be one expression of a query's select list: a `;`, a
-/// top-level `,`, a bracket that does not pair up by kind, an unclosed quote,
-/// a parameter or a subquery.
+/// top-level `,`, a bracket that does not pair up by kind, an unclosed quote
+/// or a parameter (inside a subquery too).
 fn check_one_expression(text: &str) -> Result<(), ItemError> {
     if has_statement_separator(text) {
         return Err(invalid(format!(
@@ -824,12 +931,12 @@ fn check_one_expression(text: &str) -> Result<(), ItemError> {
              WHERE clause"
         )));
     }
-    if !subquery_spans(text).is_empty() {
-        return Err(invalid(format!(
-            "'{text}' holds a subquery; a query item cannot, only the WHERE clause can"
-        )));
-    }
     Ok(())
+}
+
+/// Whether `start..end` lies inside one of `spans`.
+fn inside(spans: &[(usize, usize)], start: usize, end: usize) -> bool {
+    spans.iter().any(|&(s, e)| start >= s && end <= e)
 }
 
 /// The SQL value functions `DuckDB` calls without parentheses, and the call
@@ -1148,7 +1255,11 @@ fn nulls_end(text: &str, from: usize) -> usize {
 /// call is refused with it; a method call on a lambda's parameter is kept.
 fn check_calls(text: &str) -> Result<(), ItemError> {
     let lambdas = lambda_scopes(text);
+    let spans = subquery_spans(text);
     for head in scan_function_heads(text) {
+        if inside(&spans, head.start, head.end) {
+            continue;
+        }
         let last = head.last_part_key();
         if last == "columns" {
             return Err(invalid(format!(
@@ -1903,11 +2014,136 @@ mod tests {
             ("upper((region)", "never closed"),
             ("region || 'x", "quote that is never closed"),
             ("region = $1", "parameter $1"),
-            ("region IN (SELECT 1)", "subquery"),
+            ("region IN (SELECT r FROM t WHERE k = $1)", "parameter $1"),
         ] {
             let msg = refused(&[item], &[], &[]);
             assert!(msg.contains(expected), "{item}: {msg}");
         }
+    }
+
+    // Phase 8.2b (Snowflake parity): a `DIMENSIONS` item may hold an
+    // uncorrelated subquery, as long as the expression around it reads a
+    // dimension or fact. Each subquery becomes a CTE ahead of the expansion,
+    // as the WHERE clause's do, so it cannot see the query's tables.
+
+    #[test]
+    fn a_subquery_in_a_dimension_item_becomes_a_cte() {
+        let lowered = lower(&["region IN (SELECT r FROM regions) AS known"], &[], &[]);
+        let d = added_dimension(&lowered);
+        assert_eq!(d.expr, "((upper(o.region)) IN (SELECT * FROM __sv_sqd0))");
+        assert_eq!(d.source_table.as_deref(), Some("o"));
+        assert_eq!(lowered.ctes, ["__sv_sqd0 AS (SELECT r FROM regions)"]);
+        assert_eq!(
+            lowered.with_ctes("SELECT 1"),
+            "WITH __sv_sqd0 AS (SELECT r FROM regions)\nSELECT 1"
+        );
+        assert_eq!(
+            lowered.with_fenced_ctes("SELECT 1"),
+            "WITH __sv_sqd0 AS (SELECT NULL)\nSELECT 1"
+        );
+        assert_eq!(
+            lowered.with_ctes("WITH __sv_sq0 AS (SELECT 2)\nSELECT 1"),
+            "WITH __sv_sqd0 AS (SELECT r FROM regions),\n__sv_sq0 AS (SELECT 2)\nSELECT 1"
+        );
+    }
+
+    #[test]
+    fn a_name_inside_a_dimension_subquery_is_the_subquerys_own() {
+        // `region`, `name` (a dimension on `c`) and `secret` (a private fact)
+        // inside the subquery are its own columns: none is substituted,
+        // refused or taken for the item's table.
+        let lowered = lower(
+            &["region IN (SELECT region FROM t WHERE name = secret AND nope > 0)"],
+            &[],
+            &[],
+        );
+        let d = added_dimension(&lowered);
+        assert_eq!(d.expr, "((upper(o.region)) IN (SELECT * FROM __sv_sqd0))");
+        assert_eq!(d.source_table.as_deref(), Some("o"));
+        assert_eq!(
+            lowered.ctes,
+            ["__sv_sqd0 AS (SELECT region FROM t WHERE name = secret AND nope > 0)"]
+        );
+    }
+
+    #[test]
+    fn an_aggregate_or_window_inside_a_dimension_subquery_is_the_subquerys_own() {
+        // A window outside the subquery is still the item's, and refused.
+        let msg = refused(
+            &["CASE WHEN name = (SELECT max(n) FROM t) THEN 1 ELSE row_number() OVER () END"],
+            &[],
+            &[],
+        );
+        assert!(msg.contains("window function"), "{msg}");
+        let lowered = lower(
+            &["name || (SELECT max(n) OVER () FROM t LIMIT 1)"],
+            &[],
+            &[],
+        );
+        let d = added_dimension(&lowered);
+        assert_eq!(d.expr, "((c.name) || (SELECT * FROM __sv_sqd0))");
+        assert_eq!(d.source_table.as_deref(), Some("c"));
+        assert_eq!(
+            lowered.ctes,
+            ["__sv_sqd0 AS (SELECT max(n) OVER () FROM t LIMIT 1)"]
+        );
+    }
+
+    #[test]
+    fn each_subquery_of_each_dimension_item_gets_its_own_cte() {
+        let lowered = lower(
+            &[
+                "region IN (SELECT r FROM a) OR region IN (SELECT r FROM b)",
+                "name || (FROM c SELECT max(n))",
+            ],
+            &[],
+            &[],
+        );
+        let added = &lowered.def.as_ref().unwrap().dimensions[def().dimensions.len()..];
+        let exprs: Vec<_> = added.iter().map(|d| d.expr.as_str()).collect();
+        assert_eq!(
+            exprs,
+            [
+                "((upper(o.region)) IN (SELECT * FROM __sv_sqd0) OR (upper(o.region)) IN \
+                 (SELECT * FROM __sv_sqd1))",
+                "((c.name) || (SELECT * FROM __sv_sqd2))",
+            ]
+        );
+        assert_eq!(
+            lowered.ctes,
+            [
+                "__sv_sqd0 AS (SELECT r FROM a)",
+                "__sv_sqd1 AS (SELECT r FROM b)",
+                "__sv_sqd2 AS (FROM c SELECT max(n))",
+            ]
+        );
+    }
+
+    #[test]
+    fn a_dimension_item_that_is_only_a_subquery_is_refused() {
+        // Snowflake: "Missing reference to a row-level expression".
+        for item in ["(SELECT max(r) FROM regions)", "1 + (SELECT name FROM t)"] {
+            let msg = refused(&[item], &[], &[]);
+            assert!(
+                msg.contains("refers to no dimension or fact"),
+                "{item}: {msg}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_subquery_in_a_facts_or_metrics_item_is_refused() {
+        // Snowflake: "Subqueries are not allowed in fact / metric expressions".
+        let msg = refused(&[], &[], &["amount * (SELECT 2)"]);
+        assert!(msg.contains("subquery") && msg.contains("FACTS"), "{msg}");
+        let msg = refused(&[], &["revenue / (SELECT count(*) FROM t)"], &[]);
+        assert!(msg.contains("subquery") && msg.contains("METRICS"), "{msg}");
+        let msg = refused(
+            &[],
+            &["sum(o.amount) FILTER (WHERE o.amount IN (SELECT 1))"],
+            &[],
+        );
+        assert!(msg.contains("subquery") && msg.contains("METRICS"), "{msg}");
     }
 
     #[test]

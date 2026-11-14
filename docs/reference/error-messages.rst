@@ -1347,7 +1347,9 @@ An :ref:`expression item <ref-sv-expression-items>` is checked against the rules
 
    '<expression>' holds a window function; a query item cannot, so declare a window metric in the semantic view
 
-   '<expression>' holds a subquery; a query item cannot, only the WHERE clause can
+   '<expression>' in FACTS holds a subquery; only a DIMENSIONS item or the WHERE clause can
+
+   '<expression>' in METRICS holds a subquery; only a DIMENSIONS item or the WHERE clause can
 
 **Cause and fix**, in the same order:
 
@@ -1358,7 +1360,8 @@ An :ref:`expression item <ref-sv-expression-items>` is checked against the rules
 - An aggregate over a metric, as in ``sum(revenue)``. A metric is already aggregated; use it as it is, or aggregate the fact it is built from.
 - An aggregate that names no member, such as ``count(*)``, has no table to be computed over. Declare it as a metric in the view (``o.order_count AS COUNT(*)``) and query that.
 - A window function. Declare a :ref:`window metric <howto-window-metrics>`.
-- A subquery. Filter with a subquery in ``WHERE`` instead, or declare a member over it.
+- A ``DIMENSIONS`` expression whose members all sit inside a subquery, such as ``(SELECT max(code) FROM codes)``, gets the "refers to no dimension or fact" error above. Use a dimension outside the subquery, as in ``region IN (SELECT code FROM codes)``.
+- A subquery in a ``FACTS`` or ``METRICS`` item. Move the comparison to a ``DIMENSIONS`` item or to ``WHERE``, or declare a member over the subquery.
 
 
 .. _ref-err-standard-sql:

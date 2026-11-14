@@ -1,0 +1,240 @@
+# name: test/sql/phase8_dimension_subqueries.test
+# description: A DIMENSIONS item may hold an uncorrelated subquery, as long as
+#   the expression around it reads a dimension or fact, as in Snowflake
+#   ("Subqueries in DIMENSIONS ad-hoc expressions"). The tables and views are
+#   the Snowflake docs' own; expected values follow from their rows.
+# group: [sql]
+
+require semantic_views
+
+statement ok
+CREATE TABLE t_orders(order_id INT, cust_id INT, amount INT);
+
+statement ok
+INSERT INTO t_orders VALUES (1, 101, 100), (2, 102, 200), (3, 103, 300), (4, 101, 120);
+
+statement ok
+CREATE TABLE t_customers(cust_id INT, region VARCHAR);
+
+statement ok
+INSERT INTO t_customers VALUES (100, 'NORTH'), (100, 'SOUTH'), (101, 'EAST'), (102, 'WEST');
+
+statement ok
+CREATE SEMANTIC VIEW sv_orders
+  TABLES (ord AS t_orders PRIMARY KEY (order_id))
+  FACTS (ord.f_amount AS amount)
+  DIMENSIONS (ord.d_cust_id AS cust_id, ord.d_ord_id AS order_id)
+  METRICS (ord.m_total AS SUM(amount));
+
+statement ok
+CREATE SEMANTIC VIEW sv_customers
+  TABLES (cust AS t_customers PRIMARY KEY (cust_id))
+  FACTS (cust.f_cust_id AS cust_id)
+  DIMENSIONS (cust.d_region AS region, cust.d_cust_id AS cust_id);
+
+# S1: group by whether the customer appears in the subquery's result.
+query TI
+SELECT * FROM SEMANTIC_VIEW(sv_orders
+  DIMENSIONS ord.d_cust_id IN (SELECT cust_id FROM t_customers)
+  METRICS ord.m_total) ORDER BY 1;
+----
+false	300
+true	420
+
+# S2: a CASE over the subquery.
+query II
+SELECT * FROM SEMANTIC_VIEW(sv_orders
+  DIMENSIONS CASE WHEN d_cust_id IN (SELECT cust_id FROM t_customers) THEN d_cust_id ELSE -1 END
+  METRICS m_total) ORDER BY 1;
+----
+-1	300
+101	220
+102	200
+
+# S3: arithmetic with a scalar subquery.
+query II
+SELECT * FROM SEMANTIC_VIEW(sv_orders
+  DIMENSIONS ord.d_cust_id + (SELECT MIN(cust_id) FROM t_customers) AS shifted
+  METRICS ord.m_total) ORDER BY 1;
+----
+201	220
+202	200
+203	300
+
+# S4: the column is named by its alias, or by the item as written.
+query T
+SELECT column_name FROM (DESCRIBE SELECT * FROM SEMANTIC_VIEW(sv_orders
+  DIMENSIONS ord.d_cust_id + (SELECT MIN(cust_id) FROM t_customers) AS shifted,
+             d_cust_id IN (SELECT cust_id FROM t_customers)
+  METRICS ord.m_total));
+----
+shifted
+d_cust_id IN (SELECT cust_id FROM t_customers)
+m_total
+
+# S5: a subquery over another semantic view.
+query TI
+SELECT * FROM SEMANTIC_VIEW(sv_orders
+  DIMENSIONS d_cust_id IN (SELECT * FROM SEMANTIC_VIEW(sv_customers
+                             DIMENSIONS cust.d_cust_id WHERE cust.d_region = 'EAST')) AS east
+  METRICS m_total) ORDER BY 1;
+----
+false	500
+true	220
+
+# S6: without metrics, one row per value.
+query T
+SELECT * FROM SEMANTIC_VIEW(sv_orders
+  DIMENSIONS d_cust_id IN (SELECT cust_id FROM t_customers) AS known) ORDER BY 1;
+----
+false
+true
+
+# S7: beside a subquery in the WHERE clause, each keeps its own.
+query TI
+SELECT * FROM SEMANTIC_VIEW(sv_orders
+  DIMENSIONS d_cust_id IN (SELECT cust_id FROM t_customers) AS known
+  METRICS m_total
+  WHERE d_cust_id <> (SELECT MAX(cust_id) FROM t_customers)) ORDER BY 1;
+----
+false	300
+true	220
+
+# S8: EXISTS, and two subqueries in one item.
+query TI
+SELECT * FROM SEMANTIC_VIEW(sv_orders
+  DIMENSIONS d_cust_id > 101 AND EXISTS (SELECT 1 FROM t_customers WHERE region = 'NORTH')
+             AND d_cust_id NOT IN (SELECT cust_id FROM t_customers WHERE region = 'WEST') AS k
+  METRICS m_total) ORDER BY 1;
+----
+false	420
+true	300
+
+# S9: the subquery is uncorrelated. `amount` is a column of the query's
+# `t_orders`, not of `t_customers`, so it is not found rather than read from
+# the outer row.
+statement error
+SELECT * FROM SEMANTIC_VIEW(sv_orders
+  DIMENSIONS d_cust_id IN (SELECT cust_id FROM t_customers WHERE amount > 150)
+  METRICS m_total);
+----
+Referenced column "amount" not found
+
+# S10: so is a reference to the outer query's dimension (Snowflake: correlated
+# subqueries are not supported).
+statement error
+SELECT * FROM SEMANTIC_VIEW(sv_orders
+  DIMENSIONS ord.d_cust_id IN (SELECT cust_id FROM t_customers WHERE cust_id = d_cust_id)
+  METRICS ord.m_total);
+----
+Referenced column "d_cust_id" not found
+
+# S11: a subquery alone reads no dimension or fact.
+statement error
+SELECT * FROM SEMANTIC_VIEW(sv_orders
+  DIMENSIONS (SELECT cust_id FROM t_customers LIMIT 1)
+  METRICS ord.m_total);
+----
+refers to no dimension or fact
+
+# S12: FACTS and METRICS items cannot hold a subquery.
+statement error
+SELECT * FROM SEMANTIC_VIEW(sv_orders
+  FACTS f_amount * (SELECT MAX(amount) FROM t_orders));
+----
+in FACTS holds a subquery
+
+statement error
+SELECT * FROM SEMANTIC_VIEW(sv_orders
+  METRICS m_total / (SELECT COUNT(*) FROM t_customers));
+----
+in METRICS holds a subquery
+
+# S13: the standard-SQL form, grouped by alias, ordinal or the expression.
+query TI
+SELECT d_cust_id IN (SELECT cust_id FROM t_customers) AS is_known_cust, AGG(m_total)
+  FROM sv_orders GROUP BY is_known_cust ORDER BY 1;
+----
+false	300
+true	420
+
+query TI
+SELECT d_cust_id IN (SELECT cust_id FROM t_customers), AGG(m_total)
+  FROM sv_orders GROUP BY 1 ORDER BY 1;
+----
+false	300
+true	420
+
+query II
+SELECT d_cust_id + (SELECT MIN(cust_id) FROM t_customers) AS shifted, AGG(m_total)
+  FROM sv_orders GROUP BY d_cust_id + (SELECT MIN(cust_id) FROM t_customers) ORDER BY 1;
+----
+201	220
+202	200
+203	300
+
+# S14: in the standard-SQL form too, the subquery is uncorrelated.
+statement error
+SELECT d_cust_id IN (SELECT cust_id FROM t_customers WHERE amount > 150) AS k, AGG(m_total)
+  FROM sv_orders GROUP BY k;
+----
+Referenced column "amount" not found
+
+# S15: an `AS` and commas inside the subquery are its own.
+query TII
+SELECT * FROM SEMANTIC_VIEW(sv_orders
+  DIMENSIONS d_cust_id IN (SELECT cust_id AS c FROM t_customers WHERE region IN ('EAST', 'WEST')) AS ew,
+             d_ord_id
+  METRICS m_total) ORDER BY 2;
+----
+true	1	100
+true	2	200
+false	3	300
+true	4	120
+
+# S16: the subquery is part of the caller's query, so it reads its CTEs.
+query TI
+WITH vip AS (SELECT 101 AS c)
+SELECT * FROM SEMANTIC_VIEW(sv_orders
+  DIMENSIONS d_cust_id IN (SELECT c FROM vip) AS is_vip
+  METRICS m_total) ORDER BY 1;
+----
+false	500
+true	220
+
+# S17: and it can read the view itself.
+query TI
+SELECT * FROM SEMANTIC_VIEW(sv_orders
+  DIMENSIONS d_cust_id IN (SELECT d_cust_id FROM SEMANTIC_VIEW(sv_orders
+                             DIMENSIONS d_cust_id METRICS m_total) WHERE m_total > 210) AS big
+  METRICS m_total) ORDER BY 1;
+----
+false	200
+true	520
+
+# S18: inside a LATERAL join, the subquery reads the caller's CTEs and the
+# outer row, as a subquery of the WHERE clause does.
+statement ok
+CREATE TABLE x_keys(k INT);
+
+statement ok
+INSERT INTO x_keys VALUES (101), (102);
+
+query ITI
+WITH vip AS (SELECT 101 AS c)
+SELECT x.k, l.* FROM x_keys x, LATERAL (SELECT * FROM SEMANTIC_VIEW(sv_orders
+  DIMENSIONS d_cust_id IN (SELECT c FROM vip) AS is_vip
+  METRICS m_total WHERE d_cust_id = x.k)) l ORDER BY 1, 2;
+----
+101	true	220
+102	false	200
+
+query ITI
+SELECT x.k, l.* FROM x_keys x, LATERAL (SELECT * FROM SEMANTIC_VIEW(sv_orders
+  DIMENSIONS d_cust_id IN (SELECT x.k) AS is_k
+  METRICS m_total)) l ORDER BY 1, 2;
+----
+101	false	500
+101	true	220
+102	false	520
+102	true	200

@@ -279,6 +279,13 @@ unsafe fn semantic_view_bind_body(
             .collect(),
     };
     let expanded_sql = expand(&view_name, def, &req)
+        .map(|sql| {
+            if fence {
+                lowered.with_fenced_ctes(&sql)
+            } else {
+                lowered.with_ctes(&sql)
+            }
+        })
         .map_err(|e| lowered.relabel(&QueryError::from(lowered.for_request(e)).to_string()))?;
 
     // Lay the columns out as the items ask (aliases, column_order).

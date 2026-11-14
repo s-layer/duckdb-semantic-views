@@ -370,10 +370,17 @@ SELECT * FROM SEMANTIC_VIEW(exi DIMENSIONS lower(region), lower(region) METRICS 
 ----
 two columns of the query are named 'lower(region)'
 
+# A subquery alone reads no member (Phase 8.2b: one inside an expression over
+# a dimension is allowed, phase8_dimension_subqueries.test).
 statement error
 SELECT * FROM semantic_view('exi', dimensions := ['(SELECT 1)'], metrics := ['revenue']);
 ----
-'(SELECT 1)' holds a subquery
+'(SELECT 1)' refers to no dimension or fact
+
+statement error
+SELECT * FROM semantic_view('exi', metrics := ['revenue + (SELECT 1)']);
+----
+'revenue + (SELECT 1)' in METRICS holds a subquery
 
 statement error
 SELECT * FROM semantic_view('exi', dimensions := ['lower(region), upper(region)'], metrics := ['revenue']);
