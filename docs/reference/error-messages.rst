@@ -673,7 +673,7 @@ Dimension reference to a table not reached by one path
    dimension '<name>' references itself through other dimensions' references; a
    dimension reference cannot form a cycle.
 
-**Cause:** A dimension is written as a dimension of another table (see :ref:`ref-create-dimension-references`), and that table is not one the dimension's own table references (it is a child table, or unrelated), or it is reached two ways, such as a role-played table, or the references lead back to the dimension.
+**Cause:** A dimension is written as a dimension of another table (see :ref:`dimension references <ref-create-dimension-references>`), and that table is not one the dimension's own table references (it is a child table, or unrelated), or it is reached two ways, such as a role-played table, or the references lead back to the dimension.
 
 **Fix:** Reference a dimension of a table the dimension's table references along one chain of relationships. For a child table's value, define a metric there instead; for a role-played table, define one dimension per role on the table that references it, each over a fact that names its role's relationship.
 

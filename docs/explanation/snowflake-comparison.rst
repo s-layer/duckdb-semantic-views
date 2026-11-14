@@ -56,7 +56,7 @@ Concept Mapping
      - ``DIMENSIONS`` clause
    * - A dimension written as another table's dimension
      - ``customer.d_region AS region.d_region_name``, in the DDL only
-     - The same form, in the DDL and in YAML (see :ref:`ref-create-dimension-references`)
+     - The same form, in the DDL and in YAML (see :ref:`dimension references <ref-create-dimension-references>`)
    * - Metrics (measures)
      - ``METRICS`` clause
      - ``METRICS`` clause
