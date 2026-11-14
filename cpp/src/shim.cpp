@@ -3575,6 +3575,7 @@ static unique_ptr<TableRef> sv_semantic_view_bind_replace(
     // Expand the request into one SELECT whose parse positions are the call's.
     // With `fence`, the predicate is one that names only where_clause's
     // members (`expand::where_fence`), for the isolated bind below.
+    bool has_item_subqueries = false;
     auto expand = [&](bool fence) {
         SvOwnedBuffer payload;
         char error_buf[1024];
@@ -3615,6 +3616,12 @@ static unique_ptr<TableRef> sv_semantic_view_bind_replace(
         std::string schema = sv_read_string(framed, payload.len, offset, "semantic_view");
         view_key = sv_read_string(framed, payload.len, offset, "semantic_view");
         std::string sql(framed + offset, payload.len - offset);
+        // A DIMENSIONS item's subquery is hoisted into a `__sv_sqdN` CTE
+        // (`LoweredItems::with_ctes`). A false positive from the caller's own
+        // text only costs the isolated bind a second expansion.
+        if (!fence && sql.find("__sv_sqd") != std::string::npos) {
+            has_item_subqueries = true;
+        }
         Parser parser = sv_compat::builtin_parser();
         try {
             parser.ParseQuery(sql);
@@ -3745,12 +3752,17 @@ static unique_ptr<TableRef> sv_semantic_view_bind_replace(
     // which costs as much as the first, is skipped.
     //
     // A subquery of a DIMENSIONS item is the caller's text too (Phase 8.2b),
-    // so with `fence` its CTE holds a placeholder (`LoweredItems::with_ctes`)
+    // so with `fence` its CTE holds a placeholder (`LoweredItems::with_fenced_ctes`)
     // and the isolated bind checks only the members around it. The fenced
-    // expansion is asked for even without a where_clause for that reason.
+    // expansion is asked for then, even without a where_clause; otherwise the
+    // expansion itself is bound again.
     if (input.binder && input.binder->HasEnclosingScope()) {
-        auto isolated = expand(true);
-        add_reading_mark(*isolated);
+        auto isolated = where_clause.empty() && !has_item_subqueries
+                            ? unique_ptr_cast<SQLStatement, SelectStatement>(select->Copy())
+                            : expand(true);
+        if (!where_clause.empty() || has_item_subqueries) {
+            add_reading_mark(*isolated);
+        }
         auto isolated_binder = Binder::CreateBinder(context);
         isolated_binder->Bind(static_cast<SQLStatement &>(*isolated));
     }

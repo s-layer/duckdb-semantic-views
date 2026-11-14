@@ -238,3 +238,76 @@ SELECT x.k, l.* FROM x_keys x, LATERAL (SELECT * FROM SEMANTIC_VIEW(sv_orders
 101	true	220
 102	false	520
 102	true	200
+
+# S19: only the subqueries written in the item are its own. A subquery in a
+# dimension's stored expression stays where the view put it: pinned to the
+# view's schema, not read from the caller's CTE of the same name...
+statement ok
+CREATE TABLE t_tiers(t INT);
+
+statement ok
+INSERT INTO t_tiers VALUES (1);
+
+statement ok
+CREATE SEMANTIC VIEW sv_tiered
+  TABLES (ord AS t_orders PRIMARY KEY (order_id))
+  DIMENSIONS (ord.tier AS (SELECT max(t) FROM t_tiers),
+              ord.n_same AS (SELECT count(*) FROM t_orders o2 WHERE o2.cust_id = ord.cust_id))
+  METRICS (ord.m_total AS SUM(amount));
+
+query II
+WITH t_tiers AS (SELECT 99 AS t)
+SELECT * FROM SEMANTIC_VIEW(sv_tiered DIMENSIONS tier + 0 METRICS m_total);
+----
+1	720
+
+# ...and correlated with its own table as the view wrote it.
+query TI
+SELECT * FROM SEMANTIC_VIEW(sv_tiered DIMENSIONS n_same > 1 AS repeat METRICS m_total) ORDER BY 1;
+----
+false	500
+true	220
+
+# Beside a subquery of the item's own.
+query TI
+SELECT * FROM SEMANTIC_VIEW(sv_tiered
+  DIMENSIONS n_same > 1 AND tier IN (SELECT t FROM t_tiers) AS k METRICS m_total) ORDER BY 1;
+----
+false	500
+true	220
+
+# S20: explain_semantic_view shows the hoisted subquery.
+query I
+SELECT count(*) FROM explain_semantic_view('sv_orders',
+  dimensions := ['d_cust_id IN (SELECT cust_id FROM t_customers) AS k'], metrics := ['m_total'])
+WHERE explain_output LIKE '%__sv_sqd0 AS (SELECT cust_id FROM t_customers)%';
+----
+1
+
+# S21: in a LATERAL join, subqueries of other types than the outer row's.
+statement ok
+CREATE TABLE t_dated(id INT, code VARCHAR, ts TIMESTAMP, amount INT);
+
+statement ok
+INSERT INTO t_dated VALUES (1, 'a', TIMESTAMP '2026-01-03', 10), (2, 'b', TIMESTAMP '2026-01-05', 20);
+
+statement ok
+CREATE TABLE t_codes(code VARCHAR, ts TIMESTAMP);
+
+statement ok
+INSERT INTO t_codes VALUES ('a', TIMESTAMP '2026-01-01');
+
+statement ok
+CREATE SEMANTIC VIEW sv_dated
+  TABLES (d AS t_dated PRIMARY KEY (id))
+  DIMENSIONS (d.code AS code, d.ts AS ts)
+  METRICS (d.total AS SUM(amount));
+
+query ITTI
+SELECT x.k, l.* FROM x_keys x, LATERAL (SELECT * FROM SEMANTIC_VIEW(sv_dated
+  DIMENSIONS code IN (SELECT code FROM t_codes) AS known,
+             ts - (SELECT max(ts) FROM t_codes) AS since
+  METRICS total)) l WHERE x.k = 101 ORDER BY 2;
+----
+101	false	4 days	20
+101	true	2 days	10

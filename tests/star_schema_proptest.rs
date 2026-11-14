@@ -124,8 +124,9 @@ struct Instance {
 /// `q`, reached only through `p`; `scat` is on `s`, one hop further.
 ///
 /// `sqtd` and `squcat` (Phase 8.2b) are expression items holding an
-/// uncorrelated subquery over `sq_keys`, on the child and the parent: an
-/// `IN` list with a NULL in it, and a scalar subquery.
+/// uncorrelated subquery over `sq_keys` (0, 2 and a NULL), on the child and
+/// the parent: an `IN` list without the NULL, so that `t.d` of 1 gives
+/// `false` beside `true` and a NULL group, and a scalar `max`, which skips it.
 const DIMS: [&str; 12] = [
     "td", "ucat", "uwd", "etd", "eucat", "uw1", "tv1", "pcat", "qcat", "scat", "sqtd", "squcat",
 ];
@@ -182,7 +183,7 @@ fn item_text(name: &str) -> String {
         "esw" => "max(uw1) AS esw",
         "edsv" => "sv + ct AS edsv",
         "esvf" => "sum(tv1) FILTER (WHERE td > 0) AS esvf",
-        "sqtd" => "td IN (SELECT k FROM sq_keys) AS sqtd",
+        "sqtd" => "td IN (SELECT k FROM sq_keys WHERE k IS NOT NULL) AS sqtd",
         "squcat" => "ucat + (SELECT max(k) FROM sq_keys) AS squcat",
         other => other,
     }
@@ -1051,7 +1052,7 @@ fn child_dim_item(name: &str) -> String {
         "etd" => "t.d * 2 + 1 AS etd".to_string(),
         "eucat" => "coalesce(u.ucat, -1) + (u.w + 1) AS eucat".to_string(),
         // Phase 8.2b: the subqueries, written out in place.
-        "sqtd" => "t.d IN (SELECT k FROM sq_keys) AS sqtd".to_string(),
+        "sqtd" => "t.d IN (SELECT k FROM sq_keys WHERE k IS NOT NULL) AS sqtd".to_string(),
         "squcat" => "u.ucat + (SELECT max(k) FROM sq_keys) AS squcat".to_string(),
         // Facts grouped on in DIMENSIONS, written out independently.
         "uw1" => "u.w + 1 AS uw1".to_string(),
@@ -1474,7 +1475,7 @@ proptest! {
     #[test]
     fn parent_dimensions_alone_list_their_own_rows(
         inst in arb_instance(),
-        sel_dims in prop::sample::subsequence(vec![1usize, 2, 4, 5], 1..=4),
+        sel_dims in prop::sample::subsequence(vec![1usize, 2, 4, 5, 11], 1..=5),
         where_pred in prop_oneof![
             1 => Just(None),
             2 => arb_pred().prop_filter("a filter on u", |p| !p.touches_child()).prop_map(Some),

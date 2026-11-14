@@ -489,12 +489,20 @@ impl<'d> Lowering<'d, '_> {
                 )));
             }
         }
-        let (expr, table) = self.row_level(text, kind, 0..text.len())?;
+        // Only the subqueries written in the item are hoisted, before its
+        // members are written out: a subquery in a dimension's stored
+        // expression stays where the view put it, pinned to the view's schema
+        // and correlated with its table as written.
+        let scanned = if group == Group::Dimensions {
+            self.hoist_subqueries(text)
+        } else {
+            text.to_string()
+        };
+        let (expr, table) = self.row_level(&scanned, text, kind, 0..scanned.len())?;
         let name = self.fresh_name();
         let source_table = self.source_table(&table);
         let expr = format!("({expr})");
         if group == Group::Dimensions {
-            let expr = self.hoist_subqueries(&expr);
             self.added.dimensions.push(Dimension {
                 name: name.clone(),
                 expr,
@@ -530,7 +538,7 @@ impl<'d> Lowering<'d, '_> {
         }
         let mut bases: Vec<String> = Vec::with_capacity(aggregates.len());
         for span in &aggregates {
-            let (expr, table) = self.row_level(text, AD_HOC_AGGREGATE, span.clone())?;
+            let (expr, table) = self.row_level(text, text, AD_HOC_AGGREGATE, span.clone())?;
             let name = self.fresh_name();
             self.added.metrics.push(Metric {
                 name: name.clone(),
@@ -603,11 +611,14 @@ impl<'d> Lowering<'d, '_> {
     }
 
     /// `text[span]` with each dimension written as its expression and each
-    /// fact as its qualified name, and the one table they belong to. `what`
-    /// names the expression in errors.
+    /// fact as its qualified name, and the one table they belong to. Errors
+    /// name the item as written, `item`, and the expression as `what`. `text`
+    /// can differ from `item` only in its subqueries (Phase 8.2b: a
+    /// `DIMENSIONS` item's are hoisted first), which are not scanned.
     fn row_level(
         &self,
         text: &str,
+        item: &str,
         what: &str,
         span: std::ops::Range<usize>,
     ) -> Result<(String, String), ItemError> {
@@ -627,12 +638,12 @@ impl<'d> Lowering<'d, '_> {
                 }
                 Resolved::Metric(m) => {
                     return Err(invalid(format!(
-                        "'{}' in '{text}' is a metric; {what} can only use dimensions and facts",
+                        "'{}' in '{item}' is a metric; {what} can only use dimensions and facts",
                         m.name
                     )));
                 }
                 Resolved::Unknown => {
-                    if let Some(call) = self.refuse_undeclared(part, &r, text)? {
+                    if let Some(call) = self.refuse_undeclared(part, &r, item)? {
                         out.replace(r.start..r.end, call);
                     }
                     continue;
@@ -641,7 +652,7 @@ impl<'d> Lowering<'d, '_> {
             match &table {
                 Some((t, first)) if *t != member_table => {
                     return Err(invalid(format!(
-                        "'{text}' uses '{first}' and '{}', which belong to different tables; \
+                        "'{item}' uses '{first}' and '{}', which belong to different tables; \
                          the dimensions and facts of {what} must belong to one table",
                         r.raw
                     )));
@@ -683,7 +694,7 @@ impl<'d> Lowering<'d, '_> {
                 ""
             };
             return Err(invalid(format!(
-                "'{text}' refers to no dimension or fact; {what} must use at least one{hint}"
+                "'{item}' refers to no dimension or fact; {what} must use at least one{hint}"
             )));
         };
         Ok((out.finish(), table))
@@ -2087,6 +2098,33 @@ mod tests {
             lowered.ctes,
             ["__sv_sqd0 AS (SELECT max(n) OVER () FROM t LIMIT 1)"]
         );
+    }
+
+    /// Review of #363: a subquery in a dimension's stored expression is the
+    /// view's, pinned to its schema and correlated with its table as written,
+    /// so only the item's own subqueries are hoisted.
+    #[test]
+    fn a_subquery_in_a_stored_dimension_stays_in_place() {
+        let mut def = def();
+        def.dimensions.push(dim(
+            "o",
+            "n_same",
+            "(SELECT count(*) FROM o2 WHERE o2.k = o.k)",
+        ));
+        let lowered = lower_expression_items(
+            "v",
+            &def,
+            items(&["n_same > 1 AND region IN (SELECT r FROM t)"], &[], &[]),
+            &Substitution::default(),
+        )
+        .unwrap();
+        let d = lowered.def.as_ref().unwrap().dimensions.last().unwrap();
+        assert_eq!(
+            d.expr,
+            "(((SELECT count(*) FROM o2 WHERE o2.k = o.k)) > 1 AND (upper(o.region)) IN \
+             (SELECT * FROM __sv_sqd0))"
+        );
+        assert_eq!(lowered.ctes, ["__sv_sqd0 AS (SELECT r FROM t)"]);
     }
 
     #[test]
