@@ -1703,6 +1703,35 @@ fn a_chain_is_followed_beside_a_shorter_path_that_fans_out() {
     check_listing(&case).unwrap();
 }
 
+/// A metric whose `USING` names one of two relationships to `t1` reads a
+/// dimension past `t1` along that relationship, however the relationships are
+/// declared: reversed, the bare join to `t1` followed the other one
+/// (found by `random_graphs_answer_by_their_paths_in_any_tables_order`).
+#[test]
+fn a_using_role_is_followed_past_the_role_played_table_in_any_relationship_order() {
+    let case = Case {
+        n: 5,
+        edges: vec![(1, 0), (2, 1), (3, 1), (3, 2), (4, 1), (4, 2)],
+        one_to_one: vec![false, true, false, false, false, false],
+        rows: vec![
+            vec![(Some(0), None, vec![])],
+            vec![(None, None, vec![None]), (None, None, vec![Some(0)])],
+            vec![(None, None, vec![None])],
+            vec![(None, None, vec![None, None])],
+            vec![(None, None, vec![None, None])],
+        ],
+        orders: [vec![0, 1, 2, 3, 4], vec![0, 1, 2, 3, 4]],
+        metric: Some(3),
+        dims: vec![0, 2],
+        filter: None,
+        doubled: Some(2),
+        using: Some(false),
+        twin: false,
+        asof: None,
+    };
+    check_case(&case).unwrap();
+}
+
 /// Phase 8.1: the ASOF relationship with its answer written out, so the
 /// generated ASOF cases are known to compare real matches, the boundary
 /// `vs = ts` included. `t1(f0, ts) REFERENCES t0(id, ASOF vs)`; `t0` rows

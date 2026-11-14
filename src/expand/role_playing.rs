@@ -1169,7 +1169,7 @@ pub(super) fn convergent_using_alias(
 /// spelling, which `scoped_join_alias` normalizes. By edge, so `dep` and
 /// `"dep"` are one role of a view declaring one of them, and two roles of a
 /// view stored before #249 that declares both (which was ambiguous then too).
-fn using_edges_to<'a>(
+pub(super) fn using_edges_to<'a>(
     def: &'a SemanticViewDefinition,
     table: &str,
     resolved_mets: &[&crate::model::Metric],

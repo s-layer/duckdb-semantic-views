@@ -1455,6 +1455,7 @@ fn render_plain_group(
             roles,
             &group.paths,
             &needs.scoped,
+            &using_of(def, &group_metrics(def, group)),
         ),
         def,
         "\n    LEFT JOIN ",
@@ -1637,6 +1638,7 @@ fn render_single_grain(
                 roles,
                 &group.paths,
                 &needs.scoped,
+                &using_of(def, &group_metrics(def, group)),
             ),
             inner: false,
         },
@@ -1774,6 +1776,7 @@ fn render_bridged_group(
             &group.roles,
             &group.paths,
             &met_needs.scoped,
+            &using_of(def, &group_metrics(def, group)),
         ),
         def,
         &format!("{lead}LEFT JOIN "),
@@ -1842,6 +1845,7 @@ fn bridged_pairs_query(
             &needs.bare,
             &group.roles,
             &group.paths,
+            &[],
             &[],
         ),
         def,
@@ -1980,6 +1984,7 @@ fn coalesced_key(groups: usize, d: usize) -> String {
 /// them. A bridged group's paths may fan it, but they are joined only inside
 /// [`render_bridged_group`]'s `SELECT DISTINCT` of (key, dimensions) pairs.
 #[allow(clippy::too_many_lines)]
+#[allow(clippy::too_many_arguments)]
 pub(super) fn anchor_joins<'a>(
     def: &'a SemanticViewDefinition,
     anchor: &str,
@@ -1988,6 +1993,7 @@ pub(super) fn anchor_joins<'a>(
     roles: &HashMap<String, String>,
     paths: &HashMap<String, Vec<String>>,
     scoped_facts: &[&'a Join],
+    using: &[String],
 ) -> Vec<ResolvedJoin<'a>> {
     let Some(graph) = GrainGraph::build(def) else {
         return Vec::new();
@@ -2059,7 +2065,11 @@ pub(super) fn anchor_joins<'a>(
             if !emitted.insert(to.clone()) {
                 continue;
             }
-            if let Some(join) = edge_between(def, from, to) {
+            // A bare hop to a table its parent references several ways (a
+            // role-played table on the way to a table past it that another
+            // path reaches too, so no role was resolved for it) is joined on
+            // the relationship the `USING` names, not the first-declared one.
+            if let Some(join) = using_edge_between(def, from, to, using) {
                 joins.push(ResolvedJoin {
                     emit_alias: to.clone(),
                     bare_alias: to.clone(),
@@ -2167,6 +2177,48 @@ fn dim_expr(
 /// Direction does not matter for emission: [`synthesize_on_clause`] names both
 /// sides explicitly, and the caller emits hops in path order so the other side
 /// is always already in scope.
+/// [`edge_between`], but where `from` references `to` by several
+/// relationships and `using` names exactly one of them, that one.
+fn using_edge_between<'a>(
+    def: &'a SemanticViewDefinition,
+    from: &str,
+    to: &str,
+    using: &[String],
+) -> Option<&'a Join> {
+    let named: Vec<&'a Join> = def
+        .joins
+        .iter()
+        .filter(|j| {
+            !j.fk_columns.is_empty()
+                && j.from_alias.eq_ignore_ascii_case(from)
+                && j.table.eq_ignore_ascii_case(to)
+                && using
+                    .iter()
+                    .any(|rel| crate::graph::RelNameMatch::new(&def.joins, rel).matches_join(j))
+        })
+        .collect();
+    match named.as_slice() {
+        [one] => Some(*one),
+        _ => edge_between(def, from, to),
+    }
+}
+
+/// The `USING` relationships of `metrics` and of every metric they are
+/// computed from.
+pub(super) fn using_of(def: &SemanticViewDefinition, metrics: &[&Metric]) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    for met in metrics {
+        for m in metrics_reached(def, met) {
+            for rel in &m.using_relationships {
+                if !out.contains(rel) {
+                    out.push(rel.clone());
+                }
+            }
+        }
+    }
+    out
+}
+
 fn edge_between<'a>(def: &'a SemanticViewDefinition, a: &str, b: &str) -> Option<&'a Join> {
     def.joins.iter().find(|j| {
         !j.fk_columns.is_empty() && {

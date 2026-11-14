@@ -391,6 +391,7 @@ fn push_snapshot_from<'a>(
                 &std::collections::HashMap::new(),
                 paths,
                 &needs.scoped,
+                &super::per_grain::using_of(def, resolved_mets),
             );
             joins.extend(chains);
             joins
