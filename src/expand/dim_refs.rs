@@ -56,30 +56,29 @@ pub(super) fn lower_dimension_references(
     targets.sort_unstable();
     targets.dedup();
     // A referenced dimension's key, qualified with its table, to its twin.
-    let replacements: HashMap<String, String> = targets
-        .iter()
-        .filter_map(|&j| {
-            let d = &def.dimensions[j];
-            d.source_table.as_deref().map(|t| {
-                (
-                    normalize_ident_part(&format!("{t}.{}", d.name)),
-                    format!("{}.{}", quote_ident(t), twin_name(def, j)),
-                )
-            })
+    let twin_ref = |j: usize| -> Option<(String, String)> {
+        let d = &def.dimensions[j];
+        d.source_table.as_deref().map(|t| {
+            (
+                normalize_ident_part(&format!("{t}.{}", d.name)),
+                format!("{}.{}", quote_ident(t), twin_name(def, j)),
+            )
         })
-        .collect();
-    let map: HashMap<String, &str> = replacements
-        .iter()
-        .map(|(k, v)| (k.clone(), v.as_str()))
-        .collect();
+    };
     let rewrite = |i: usize| -> String {
-        // Only a dimension found to reference another table's dimension is
-        // rewritten, so a chain naming its own table keeps its meaning.
-        if refs.iter().any(|r| r.dim == i) {
-            inline_references(&def.dimensions[i].expr, &map)
-        } else {
-            def.dimensions[i].expr.clone()
-        }
+        // Only the chains found to reference another table's dimension are
+        // rewritten, so a chain naming the dimension's own table keeps its
+        // meaning, even when some other dimension references that member.
+        let Some(r) = refs.iter().find(|r| r.dim == i) else {
+            return def.dimensions[i].expr.clone();
+        };
+        let replacements: Vec<(String, String)> =
+            r.targets.iter().filter_map(|&j| twin_ref(j)).collect();
+        let map: HashMap<String, &str> = replacements
+            .iter()
+            .map(|(k, v)| (k.clone(), v.as_str()))
+            .collect();
+        inline_references(&def.dimensions[i].expr, &map)
     };
     let mut out = def.clone();
     for &j in &targets {
@@ -160,6 +159,72 @@ mod tests {
             Some("customer")
         );
         assert_eq!(twin("__sv_dimref_0").access, AccessModifier::Private);
+    }
+
+    /// Review of #362: `seg` reads its own column and references `region.n`;
+    /// `c_desc` reads `seg`'s column beside the reference; `o_seg` references
+    /// `seg`.
+    fn own_table_def() -> SemanticViewDefinition {
+        let mut def = def();
+        def.dimensions = vec![
+            Dimension {
+                name: "n".into(),
+                expr: "region.name".into(),
+                source_table: Some("region".into()),
+                ..Default::default()
+            },
+            Dimension {
+                name: "seg".into(),
+                expr: "COALESCE(customer.seg, region.n)".into(),
+                source_table: Some("customer".into()),
+                ..Default::default()
+            },
+            Dimension {
+                name: "c_desc".into(),
+                expr: "customer.seg || '/' || region.n".into(),
+                source_table: Some("customer".into()),
+                ..Default::default()
+            },
+            Dimension {
+                name: "o_seg".into(),
+                expr: "customer.seg".into(),
+                source_table: Some("orders".into()),
+                ..Default::default()
+            },
+        ];
+        def
+    }
+
+    /// A chain naming the dimension's own table keeps its meaning, even when
+    /// another dimension references that member: no twin reads itself.
+    #[test]
+    fn an_own_table_chain_is_not_rewritten_to_a_twin() {
+        let def = own_table_def();
+        let out = lower_dimension_references(&def);
+        let twin = |n: &str| out.facts.iter().find(|f| f.name == n).expect(n).clone();
+        // `seg`'s own `customer.seg` is its column, not its own twin.
+        assert_eq!(
+            twin("__sv_dimref_1").expr,
+            "COALESCE(customer.seg, \"region\".__sv_dimref_0)"
+        );
+        assert_eq!(
+            out.dimensions[1].expr,
+            "COALESCE(customer.seg, \"region\".__sv_dimref_0)"
+        );
+        assert_eq!(out.dimensions[3].expr, "\"customer\".__sv_dimref_1");
+    }
+
+    /// A dimension's own-table chain does not change meaning because some
+    /// other dimension references that member.
+    #[test]
+    fn an_own_table_chain_does_not_drift_with_other_references() {
+        let def = own_table_def();
+        let out = lower_dimension_references(&def);
+        // `c_desc` reads the raw column whether or not `o_seg` exists.
+        assert_eq!(
+            out.dimensions[2].expr,
+            "customer.seg || '/' || \"region\".__sv_dimref_0"
+        );
     }
 
     #[test]

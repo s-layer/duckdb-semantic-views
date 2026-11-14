@@ -1329,6 +1329,13 @@ fn expand_unhoisted(
     let where_has_unqualified_member = resolved_where
         .as_ref()
         .is_some_and(|w| w.members.iter().any(|m| m.table.is_none()));
+    let member_routes: Option<Vec<(String, Option<String>)>> =
+        path_members.as_ref().map(|(_, members)| {
+            members
+                .iter()
+                .map(super::multi_path::Member::route)
+                .collect()
+        });
     let grain_plan = super::per_grain::plan(
         def,
         &resolved_dims,
@@ -1336,6 +1343,7 @@ fn expand_unhoisted(
         &resolved.exprs,
         &where_tables,
         where_has_unqualified_member,
+        member_routes.as_deref(),
     );
 
     // A path a metric's `USING` picks through a diamond is followed only by

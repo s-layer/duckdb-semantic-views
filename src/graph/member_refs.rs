@@ -357,6 +357,30 @@ mod tests {
         assert!(validate_member_references(&def2).is_err(), "fact");
     }
 
+    /// Phase 8.2 lets only a DIMENSION name another table's dimension: a fact
+    /// or metric naming one is still a foreign reference (review of #362).
+    #[test]
+    fn only_a_dimension_may_name_another_tables_dimension() {
+        let with = |f: fn(&mut SemanticViewDefinition)| {
+            let mut def = base_def();
+            def.dimensions = vec![dim("region_dim", "c.region", Some("c"))];
+            f(&mut def);
+            validate_member_references(&def)
+        };
+        assert!(
+            with(|d| d.dimensions.push(dim("d", "c.region_dim", Some("o")))).is_ok(),
+            "dimension"
+        );
+        assert!(
+            with(|d| d.facts = vec![fact("f", "c.region_dim", Some("o"))]).is_err(),
+            "fact"
+        );
+        assert!(
+            with(|d| d.metrics = vec![metric("m", "COUNT(c.region_dim)", Some("o"))]).is_err(),
+            "metric"
+        );
+    }
+
     /// Case and quoting follow `DuckDB`'s rule (CLAUDE.md): the qualifier matches
     /// its table however it is spelled, so a quoted or mixed-case reference is
     /// judged the same as a bare one.

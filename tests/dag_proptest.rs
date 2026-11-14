@@ -241,15 +241,19 @@ impl Case {
     }
 
     /// The requested dimensions a cross-table dimension reference can stand
-    /// in for (Phase 8.2): with a metric and no roles, ASOF or one-to-one
-    /// relationship in the graph, each dimension of another table the
-    /// metric's table reaches by one chain. A dimension `rg{k}` on the
-    /// metric's table, written `t{k}.g{k}`, must answer as `g{k}` does.
+    /// in for (Phase 8.2): with a metric, each dimension of another table the
+    /// metric's table reaches by one chain that crosses neither the doubled
+    /// (role) nor the ASOF relationship. A dimension `rg{k}` on a table of
+    /// that chain ([`Self::ref_host`]), written over `t{k}.g{k}`, must answer
+    /// as `g{k}` does. Not in a graph with a one-to-one relationship: CREATE
+    /// walks one backwards too (as Snowflake does, fixture 6), so a host can
+    /// reach `t{k}` by a second path the oracle's forward chains do not
+    /// count (X9 in `phase8_cross_table_dimension_refs.test` pins that refusal).
     fn ref_dims(&self) -> Vec<usize> {
         let Some(m) = self.metric else {
             return Vec::new();
         };
-        if self.doubled.is_some() || self.asof.is_some() || self.one_to_one.iter().any(|&o| o) {
+        if self.one_to_one.iter().any(|&o| o) {
             return Vec::new();
         }
         let mut ks: Vec<usize> = self.dims.clone();
@@ -257,8 +261,31 @@ impl Case {
         ks.sort_unstable();
         ks.dedup();
         ks.into_iter()
-            .filter(|&k| k != m && self.chains(m, k).len() == 1)
+            .filter(|&k| {
+                let chains = self.chains(m, k);
+                k != m
+                    && chains.len() == 1
+                    && !self.crosses_asof(&chains[0])
+                    && chains[0]
+                        .windows(2)
+                        .all(|w| self.pair() != Some((w[0], w[1])))
+            })
             .collect()
+    }
+
+    /// How [`Self::ref_dims`]' `k` is written: the table its reference
+    /// dimension `rg{k}` is declared on (one on the chain from the metric's
+    /// table, before `k`), and, for a reference to a reference, the table of
+    /// the intermediate dimension `rh{k}` that `rg{k}` names, which itself
+    /// references `t{k}.g{k}`. Varied over the case so every form occurs.
+    fn ref_host(&self, k: usize) -> (usize, Option<usize>) {
+        let m = self.metric.expect("a reference has a metric");
+        let chain = self.chains(m, k).remove(0);
+        let spin = k + self.n + self.dims.len();
+        if chain.len() >= 3 && spin % 2 == 0 {
+            return (chain[0], Some(chain[1]));
+        }
+        (chain[spin % (chain.len() - 1)], None)
     }
 
     fn members(&self) -> Vec<usize> {
@@ -598,18 +625,32 @@ fn request(case: &Case) -> QueryRequest {
     }
 }
 
-/// [`build_def`] with a reference dimension `rg{k}` on the metric's table for
-/// each of [`Case::ref_dims`], written as table `t{k}`'s dimension `g{k}`.
+/// [`build_def`] with a reference dimension `rg{k}` for each of
+/// [`Case::ref_dims`], on the table [`Case::ref_host`] picks: written as
+/// table `t{k}`'s dimension `g{k}` (alone, or inside an expression), or as
+/// the intermediate reference `rh{k}`.
 fn build_ref_def(case: &Case, order: &[usize], reverse: bool) -> SemanticViewDefinition {
     let mut def = build_def(case, order, reverse);
-    let m = case.metric.expect("a reference twin has a metric");
+    let dim = |name: String, expr: String, table: usize| Dimension {
+        name,
+        expr,
+        source_table: Some(format!("t{table}")),
+        ..Default::default()
+    };
     for k in case.ref_dims() {
-        def.dimensions.push(Dimension {
-            name: format!("rg{k}"),
-            expr: format!("t{k}.g{k}"),
-            source_table: Some(format!("t{m}")),
-            ..Default::default()
-        });
+        let target = if k % 2 == 0 {
+            format!("t{k}.g{k}")
+        } else {
+            format!("(t{k}.g{k} + 0)")
+        };
+        match case.ref_host(k) {
+            (host, Some(mid)) => {
+                def.dimensions.push(dim(format!("rh{k}"), target, mid));
+                def.dimensions
+                    .push(dim(format!("rg{k}"), format!("t{mid}.rh{k}"), host));
+            }
+            (host, None) => def.dimensions.push(dim(format!("rg{k}"), target, host)),
+        }
     }
     def
 }
@@ -1504,6 +1545,21 @@ fn generator_reaches_every_outcome() {
             {
                 *seen.entry("reference twin filtered").or_default() += 1;
             }
+            let m = case.metric.expect("ref_dims needs a metric");
+            for k in case.ref_dims() {
+                match case.ref_host(k) {
+                    (_, Some(_)) => *seen.entry("reference to a reference").or_default() += 1,
+                    (host, None) if host != m => {
+                        *seen
+                            .entry("reference on an intermediate table")
+                            .or_default() += 1;
+                    }
+                    _ => {}
+                }
+            }
+            if case.doubled.is_some() || case.asof.is_some() {
+                *seen.entry("reference beside a role or ASOF").or_default() += 1;
+            }
         }
         if case.twin() {
             let (a, _) = case
@@ -1582,6 +1638,9 @@ fn generator_reaches_every_outcome() {
     for key in [
         "reference twin answered",
         "reference twin filtered",
+        "reference to a reference",
+        "reference on an intermediate table",
+        "reference beside a role or ASOF",
         "asof chain answered",
         "asof dims answered",
         "asof meeting refused",

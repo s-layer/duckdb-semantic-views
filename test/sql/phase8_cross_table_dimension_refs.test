@@ -230,3 +230,104 @@ SELECT CAST(json_extract(definition, '$.schema_version') AS INTEGER)
 FROM semantic_layer._definitions WHERE name = 'xref_fact';
 ----
 1
+
+# R1 (review of #362): a chain naming the dimension's own table keeps its
+# meaning even when another dimension references that dimension. Dimension
+# `c_name` reads its own `c_name` column beside a reference; `o_label`
+# references the dimension. Lowering used to rewrite the column chain
+# `customer.c_name` into the dimension's own twin (a fact reading itself), and
+# the query failed to bind.
+statement ok
+CREATE SEMANTIC VIEW xref_own
+  TABLES (
+    region AS x_regions PRIMARY KEY (r_id),
+    nation AS x_nations PRIMARY KEY (n_id),
+    customer AS x_customers PRIMARY KEY (c_id),
+    orders AS x_orders PRIMARY KEY (o_id)
+  )
+  RELATIONSHIPS (
+    orders(c_id) REFERENCES customer,
+    customer(n_id) REFERENCES nation,
+    nation(r_id) REFERENCES region
+  )
+  DIMENSIONS (
+    region.d_region_name AS region.r_name,
+    customer.c_name AS COALESCE(customer.c_name, '') || '@' || COALESCE(region.d_region_name, '?'),
+    orders.o_label AS customer.c_name
+  )
+  METRICS (orders.revenue AS SUM(orders.amount));
+
+query TI
+SELECT * FROM SEMANTIC_VIEW(xref_own DIMENSIONS customer.c_name METRICS orders.revenue) ORDER BY 1;
+----
+Ann@EU	30
+Bob@US	5
+Cid@?	7
+
+query TI
+SELECT * FROM SEMANTIC_VIEW(xref_own DIMENSIONS orders.o_label METRICS orders.revenue) ORDER BY 1;
+----
+Ann@EU	30
+Bob@US	5
+Cid@?	7
+
+# R2 (review of #362): a reference reads its table along the referencing
+# dimension's own path, whatever path the metric takes there itself. Orders
+# reach regions through their customer and through their store (a diamond);
+# `d_customer_region` is the customer's region even for a metric whose
+# USING takes the store path, and is answered without a USING.
+statement ok
+CREATE TABLE x_stores (s_id INT, r_id INT);
+
+statement ok
+INSERT INTO x_stores VALUES (1, 2), (2, 1);
+
+statement ok
+CREATE TABLE x_orders2 (o_id INT, c_id INT, s_id INT, amount INT);
+
+statement ok
+INSERT INTO x_orders2 VALUES (1, 100, 1, 10), (2, 200, 1, 20), (3, 100, 2, 40);
+
+statement ok
+CREATE SEMANTIC VIEW xref_diamond
+  TABLES (
+    region AS x_regions PRIMARY KEY (r_id),
+    nation AS x_nations PRIMARY KEY (n_id),
+    customer AS x_customers PRIMARY KEY (c_id),
+    store AS x_stores PRIMARY KEY (s_id),
+    orders AS x_orders2 PRIMARY KEY (o_id)
+  )
+  RELATIONSHIPS (
+    order_customer AS orders(c_id) REFERENCES customer,
+    order_store AS orders(s_id) REFERENCES store,
+    customer_nation AS customer(n_id) REFERENCES nation,
+    nation_region AS nation(r_id) REFERENCES region,
+    store_region AS store(r_id) REFERENCES region
+  )
+  DIMENSIONS (
+    region.d_region_name AS region.r_name,
+    customer.d_customer_region AS region.d_region_name
+  )
+  METRICS (
+    orders.revenue AS SUM(orders.amount),
+    orders.rev_by_store USING (order_store) AS SUM(orders.amount)
+  );
+
+query TI
+SELECT * FROM SEMANTIC_VIEW(xref_diamond DIMENSIONS customer.d_customer_region METRICS orders.rev_by_store) ORDER BY 1;
+----
+EU	50
+US	20
+
+query TI
+SELECT * FROM SEMANTIC_VIEW(xref_diamond DIMENSIONS customer.d_customer_region METRICS orders.revenue) ORDER BY 1;
+----
+EU	50
+US	20
+
+# The store path's region beside the customer's: one join to regions cannot
+# follow both, so the query is refused rather than reading one of them.
+statement error
+SELECT * FROM SEMANTIC_VIEW(xref_diamond DIMENSIONS customer.d_customer_region, region.d_region_name METRICS orders.rev_by_store);
+----
+more than one path
