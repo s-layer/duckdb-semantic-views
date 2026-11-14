@@ -3069,8 +3069,8 @@ static void sv_relocate(QueryNode &node, QueryLocation location) {
 // were at CREATE.
 //
 // Left as written: a CTE name in scope, anything inside a hoisted where_clause
-// subquery (`__sv_sqN`, the caller's own text, which resolves in the caller's
-// query), an operator, a name already qualified with its catalog, and a name in
+// subquery or DIMENSIONS item subquery (`__sv_sqN`, `__sv_sqdN`, the caller's
+// own text, which resolves in the caller's query), an operator, a name already qualified with its catalog, and a name in
 // no catalog (a replacement scan such as a file path). A table name in no
 // catalog that the caller's query has a CTE for is refused, since the CTE would
 // be read. The rest of where_clause is spliced into the expansion, so a function
@@ -3575,6 +3575,7 @@ static unique_ptr<TableRef> sv_semantic_view_bind_replace(
     // Expand the request into one SELECT whose parse positions are the call's.
     // With `fence`, the predicate is one that names only where_clause's
     // members (`expand::where_fence`), for the isolated bind below.
+    bool has_item_subqueries = false;
     auto expand = [&](bool fence) {
         SvOwnedBuffer payload;
         char error_buf[1024];
@@ -3615,6 +3616,12 @@ static unique_ptr<TableRef> sv_semantic_view_bind_replace(
         std::string schema = sv_read_string(framed, payload.len, offset, "semantic_view");
         view_key = sv_read_string(framed, payload.len, offset, "semantic_view");
         std::string sql(framed + offset, payload.len - offset);
+        // A DIMENSIONS item's subquery is hoisted into a `__sv_sqdN` CTE
+        // (`LoweredItems::with_ctes`). A false positive from the caller's own
+        // text only costs the isolated bind a second expansion.
+        if (!fence && sql.find("__sv_sqd") != std::string::npos) {
+            has_item_subqueries = true;
+        }
         Parser parser = sv_compat::builtin_parser();
         try {
             parser.ParseQuery(sql);
@@ -3685,8 +3692,8 @@ static unique_ptr<TableRef> sv_semantic_view_bind_replace(
         // A CTE's body is bound by a binder from before it, so it sees only the
         // CTEs declared ahead of it. The mark goes right after the CTEs
         // where_clause's subqueries were hoisted into (`__sv_sqN`, which
-        // `with_ctes` puts first), so their bodies do not see it: where_clause
-        // may read the view itself. Every other CTE comes after it and sees
+        // `with_ctes` puts first, after the DIMENSIONS items' `__sv_sqdN`), so
+        // their bodies do not see it: where_clause may read the view itself. Every other CTE comes after it and sees
         // it: the expansion's own (`__sv_agg` for window metrics,
         // `__sv_snapshot` for semi-additive ones, `__sv_grain_N` for metrics
         // at several grains) hold its FROM, query-defined tables included.
@@ -3743,11 +3750,17 @@ static unique_ptr<TableRef> sv_semantic_view_bind_replace(
     // scopes, so with none (a top-level FROM, a join's left side, a CTE or a
     // subquery in FROM) the real bind is already isolated, and the second bind,
     // which costs as much as the first, is skipped.
+    //
+    // A subquery of a DIMENSIONS item is the caller's text too (Phase 8.2b),
+    // so with `fence` its CTE holds a placeholder (`LoweredItems::with_fenced_ctes`)
+    // and the isolated bind checks only the members around it. The fenced
+    // expansion is asked for then, even without a where_clause; otherwise the
+    // expansion itself is bound again.
     if (input.binder && input.binder->HasEnclosingScope()) {
-        auto isolated = where_clause.empty()
+        auto isolated = where_clause.empty() && !has_item_subqueries
                             ? unique_ptr_cast<SQLStatement, SelectStatement>(select->Copy())
                             : expand(true);
-        if (!where_clause.empty()) {
+        if (!where_clause.empty() || has_item_subqueries) {
             add_reading_mark(*isolated);
         }
         auto isolated_binder = Binder::CreateBinder(context);
@@ -4732,10 +4745,6 @@ private:
         if (!expr || expr->GetExpressionClass() == ExpressionClass::STAR) {
             return;
         }
-        if (expr->GetExpressionClass() == ExpressionClass::SUBQUERY) {
-            sv_std_children(*expr, [&](unique_ptr<ParsedExpression> &child) { Replace(child, clause); });
-            return;
-        }
         auto alias = expr->GetAlias();
         auto key = Key(*expr);
         for (idx_t i = 0; i < group_keys_.size(); i++) {
@@ -4748,6 +4757,13 @@ private:
                 expr->SetAlias(alias);
                 return;
             }
+        }
+        // A subquery is a group key itself (`d IN (SELECT ...)`, Phase 8.2b)
+        // or else only its left operand can be: what the subquery reads is
+        // its own.
+        if (expr->GetExpressionClass() == ExpressionClass::SUBQUERY) {
+            sv_std_children(*expr, [&](unique_ptr<ParsedExpression> &child) { Replace(child, clause); });
+            return;
         }
         if (expr->GetExpressionClass() == ExpressionClass::FUNCTION) {
             auto &f = expr->Cast<FunctionExpression>();

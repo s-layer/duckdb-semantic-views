@@ -313,6 +313,7 @@ unsafe fn explain_semantic_view_bind_body(
             .collect(),
     };
     let expanded_sql = expand(&view_name, def, &req)
+        .map(|sql| lowered.with_ctes(&sql))
         .map_err(|e| lowered.relabel(&QueryError::from(lowered.for_request(e)).to_string()))?;
     let column_names = crate::expand::output_column_names(&view_name, def, &req)
         .map_err(|e| lowered.relabel(&QueryError::from(lowered.for_request(e)).to_string()))?;
