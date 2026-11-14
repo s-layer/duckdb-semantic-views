@@ -31,7 +31,8 @@ use crate::model::SemanticViewDefinition;
 /// One dimension's references to other tables' dimensions.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct DimRefs {
-    /// The referencing dimension, an index into `def.dimensions`.
+    /// The referencing member, an index into `def.dimensions`, or into
+    /// `def.facts` from [`window_fact_references`].
     pub(crate) dim: usize,
     /// The referenced dimensions, indices into `def.dimensions`, in first
     /// appearance order, each once.
@@ -41,36 +42,59 @@ pub(crate) struct DimRefs {
 /// Every dimension that references another table's dimension, with what it
 /// references. Empty for a view with none (or with no tables).
 pub(crate) fn dimension_references(def: &SemanticViewDefinition) -> Vec<DimRefs> {
+    let exprs = def
+        .dimensions
+        .iter()
+        .map(|d| (d.source_table.as_deref(), d.expr.as_str()));
+    references_from(def, exprs)
+}
+
+/// Phase 8.3: every fact holding a window function that references another
+/// table's dimension (`SUM(revenue) OVER (PARTITION BY st.region)`, Snowflake
+/// fixture 11 W9), with what it references; `dim` is the fact's index into
+/// `def.facts`. Such a fact is computed over its table before the query
+/// (`expand::window_members`), so a parent's dimension is read as a
+/// dimension's reference is.
+pub(crate) fn window_fact_references(def: &SemanticViewDefinition) -> Vec<DimRefs> {
+    let exprs = def.facts.iter().map(|f| {
+        let expr = if crate::expr_tokens::has_window_call(&f.expr) {
+            f.expr.as_str()
+        } else {
+            ""
+        };
+        (f.source_table.as_deref(), expr)
+    });
+    references_from(def, exprs)
+}
+
+/// The references to other tables' dimensions in each of `exprs`, a member's
+/// table and expression, indexed in the order given.
+fn references_from<'a>(
+    def: &SemanticViewDefinition,
+    exprs: impl Iterator<Item = (Option<&'a str>, &'a str)>,
+) -> Vec<DimRefs> {
     let Some(base) = def.tables.first().map(|t| normalize_ident_part(&t.alias)) else {
         return Vec::new();
     };
-    let keys: Vec<Option<(String, String)>> = def
+    let keys: Vec<Option<String>> = def
         .dimensions
         .iter()
         .map(|d| {
-            d.source_table.as_deref().map(|t| {
-                let table = normalize_ident_part(t);
-                let key = normalize_ident_part(&format!("{t}.{}", d.name));
-                (table, key)
-            })
+            d.source_table
+                .as_deref()
+                .map(|t| normalize_ident_part(&format!("{t}.{}", d.name)))
         })
         .collect();
     let mut out = Vec::new();
-    for (i, d) in def.dimensions.iter().enumerate() {
-        let own = d
-            .source_table
-            .as_deref()
-            .map_or_else(|| base.clone(), normalize_ident_part);
+    for (i, (table, expr)) in exprs.enumerate() {
+        let own = table.map_or_else(|| base.clone(), normalize_ident_part);
         let mut targets = Vec::new();
-        for chain in scan_references(&d.expr) {
+        for chain in scan_references(expr) {
             if chain.is_bare() || chain.first_part_key() == own {
                 continue;
             }
             let key = chain.key();
-            let Some(j) = keys
-                .iter()
-                .position(|k| k.as_ref().is_some_and(|(_, k)| *k == key))
-            else {
+            let Some(j) = keys.iter().position(|k| k.as_deref() == Some(key.as_str())) else {
                 continue;
             };
             if !targets.contains(&j) {
@@ -111,7 +135,8 @@ fn visit(at: usize, refs: &[DimRefs], state: &mut [u8]) -> Option<usize> {
 /// docs), and a cycle of references.
 pub fn validate_dimension_references(def: &SemanticViewDefinition) -> Result<(), ParseError> {
     let refs = dimension_references(def);
-    if refs.is_empty() {
+    let fact_refs = window_fact_references(def);
+    if refs.is_empty() && fact_refs.is_empty() {
         return Ok(());
     }
     let base = def
@@ -119,9 +144,18 @@ pub fn validate_dimension_references(def: &SemanticViewDefinition) -> Result<(),
         .first()
         .map(|t| t.alias.clone())
         .unwrap_or_default();
-    for r in &refs {
-        let d = &def.dimensions[r.dim];
-        let own = d.source_table.clone().unwrap_or_else(|| base.clone());
+    let referrers = refs
+        .iter()
+        .map(|r| {
+            let d = &def.dimensions[r.dim];
+            ("dimension", d.source_table.as_ref(), &d.name, r)
+        })
+        .chain(fact_refs.iter().map(|r| {
+            let f = &def.facts[r.dim];
+            ("fact", f.source_table.as_ref(), &f.name, r)
+        }));
+    for (kind, own, name, r) in referrers {
+        let own = own.cloned().unwrap_or_else(|| base.clone());
         for &j in &r.targets {
             let target = &def.dimensions[j];
             let table = target.source_table.as_deref().unwrap_or_default();
@@ -129,23 +163,21 @@ pub fn validate_dimension_references(def: &SemanticViewDefinition) -> Result<(),
                 1 => {}
                 0 => {
                     return Err(ParseError::positionless(format!(
-                        "dimension '{own}.{name}' references dimension '{table}.{target}', but \
+                        "{kind} '{own}.{name}' references dimension '{table}.{target}', but \
                          table '{own}' does not reach table '{table}' along its relationships, so \
                          '{target}' has no single value per row of '{own}'. As in Snowflake, a \
-                         dimension can reference a dimension of a table it references, directly \
+                         {kind} can reference a dimension of a table it references, directly \
                          or through other tables, not of a table that references it.",
-                        name = d.name,
                         target = target.name,
                     )));
                 }
                 _ => {
                     return Err(ParseError::positionless(format!(
-                        "dimension '{own}.{name}' references dimension '{table}.{target}', but \
+                        "{kind} '{own}.{name}' references dimension '{table}.{target}', but \
                          table '{own}' reaches table '{table}' by more than one path (for \
                          example, as two roles), so which one is meant is not said. As in \
                          Snowflake, a dimension reference must reach its table by a single \
-                         path; define a dimension on '{own}' for each role instead.",
-                        name = d.name,
+                         path; define a {kind} on '{own}' for each role instead.",
                         target = target.name,
                     )));
                 }
@@ -266,6 +298,44 @@ mod tests {
         };
         let e = validate_dimension_references(&def).unwrap_err().message;
         assert!(e.contains("more than one path"), "{e}");
+    }
+
+    /// Phase 8.3: a window fact's references are found and checked as a
+    /// dimension's; a plain fact's chain is not a reference.
+    #[test]
+    fn a_window_facts_reference_is_found_and_checked() {
+        let fact = |table: &str, name: &str, expr: &str| crate::model::Fact {
+            name: name.to_string(),
+            expr: expr.to_string(),
+            source_table: Some(table.to_string()),
+            ..Default::default()
+        };
+        let mut def = chain(vec![dim("region", "r_name", "name")]);
+        def.facts = vec![
+            fact("customer", "plain", "region.r_name"),
+            fact(
+                "customer",
+                "n_in_region",
+                "COUNT(*) OVER (PARTITION BY region.r_name)",
+            ),
+        ];
+        assert_eq!(
+            window_fact_references(&def),
+            vec![DimRefs {
+                dim: 1,
+                targets: vec![0]
+            }]
+        );
+        validate_dimension_references(&def).expect("accepted");
+        def.dimensions.push(dim("customer", "c_name", "name"));
+        def.facts = vec![fact(
+            "region",
+            "rk",
+            "RANK() OVER (ORDER BY customer.c_name)",
+        )];
+        let e = validate_dimension_references(&def).unwrap_err().message;
+        assert!(e.starts_with("fact 'region.rk'"), "{e}");
+        assert!(e.contains("does not reach table 'customer'"), "{e}");
     }
 
     #[test]

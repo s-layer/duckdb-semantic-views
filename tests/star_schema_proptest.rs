@@ -127,9 +127,29 @@ struct Instance {
 /// uncorrelated subquery over `sq_keys` (0, 2 and a NULL), on the child and
 /// the parent: an `IN` list without the NULL, so that `t.d` of 1 gives
 /// `false` beside `true` and a NULL group, and a scalar `max`, which skips it.
-const DIMS: [&str; 12] = [
+///
+/// `wtd` and `wucat` (Phase 8.3) are declared dimensions holding a window
+/// function, on the child (`DENSE_RANK() OVER (ORDER BY t.d)`) and the parent
+/// (`COUNT(*) OVER (PARTITION BY u.ucat)`). Each is computed over every row of
+/// its table, before the predicate and the joins, which the oracle writes as a
+/// correlated count over the whole table ([`WTD_ORACLE`], [`WUCAT_ORACLE`]).
+const DIMS: [&str; 14] = [
     "td", "ucat", "uwd", "etd", "eucat", "uw1", "tv1", "pcat", "qcat", "scat", "sqtd", "squcat",
+    "wtd", "wucat",
 ];
+
+/// `wtd`, written out independently: one more than the number of distinct
+/// `d` below the row's, over the whole of `t`; a NULL `d` sorts last. A parent
+/// that no child row references (`u LEFT JOIN t` across the bridge, where a
+/// matched row's `fk` is the parent's id) has none.
+const WTD_ORACLE: &str = "(CASE WHEN t.fk IS NULL AND u.id IS NOT NULL THEN NULL \
+     WHEN t.d IS NULL THEN (SELECT count(DISTINCT t2.d) FROM t t2) + 1 \
+     ELSE (SELECT count(DISTINCT t2.d) FROM t t2 WHERE t2.d < t.d) + 1 END)";
+
+/// `wucat`, written out independently: the number of rows of `u` with the
+/// row's `ucat`, NULL for a child row that reaches no parent.
+const WUCAT_ORACLE: &str = "(CASE WHEN u.id IS NULL THEN NULL ELSE \
+     (SELECT count(*) FROM u u2 WHERE u2.ucat IS NOT DISTINCT FROM u.ucat) END)";
 
 /// Whether a dimension is on `p` or reached only through it, so its path comes
 /// from the metrics' `USING`.
@@ -158,8 +178,11 @@ fn is_role_dim(name: &str) -> bool {
 /// an aggregate with a `FILTER` clause, which belongs to its aggregate.
 ///
 /// `ct_p1`, `sv_p2` and `dp` (Phase 6.3) name their path to `p` ([`USING_METS`]).
-const METS: [&str; 12] = [
-    "sv", "ct", "sw", "svf", "dsv", "esv", "esw", "edsv", "esvf", "ct_p1", "sv_p2", "dp",
+///
+/// `swv` (Phase 8.3) aggregates the window fact `wv` (`SUM(t.v) OVER
+/// (PARTITION BY t.d)`), each row's partition total over the whole of `t`.
+const METS: [&str; 13] = [
+    "sv", "ct", "sw", "svf", "dsv", "esv", "esw", "edsv", "esvf", "ct_p1", "sv_p2", "dp", "swv",
 ];
 
 /// The metrics that name a path to the role-played `p`: `ct_p1` through `p1`,
@@ -197,7 +220,7 @@ fn is_parent_metric(name: &str) -> bool {
 
 /// Whether a dimension lives on the CHILD (`t`), below the parent's grain.
 fn is_child_dim(name: &str) -> bool {
-    matches!(name, "td" | "etd" | "tv1" | "sqtd")
+    matches!(name, "td" | "etd" | "tv1" | "sqtd" | "wtd")
 }
 
 /// Members a generated `where_clause` may name (PBT-6), and which side of the
@@ -224,6 +247,9 @@ enum WMember {
     /// declared table (`u`, safe) and `check_referenced_fact_fan_traps` is
     /// handed the queried members, never the predicate's.
     Fchain,
+    /// Phase 8.3: the child's window dimension `wtd`, computed over all of
+    /// `t` before the predicate filters it.
+    Wtd,
 }
 
 impl WMember {
@@ -235,6 +261,7 @@ impl WMember {
             WMember::Ftd => "ftd",
             WMember::Fucat => "fucat",
             WMember::Fchain => "fchain",
+            WMember::Wtd => "wtd",
         }
     }
 
@@ -248,6 +275,7 @@ impl WMember {
             // The fact written out independently, parenthesized at the
             // reference site exactly as the splice must parenthesize it.
             WMember::Fchain => "((t.v + 1) > 0)",
+            WMember::Wtd => WTD_ORACLE,
         }
     }
 
@@ -261,13 +289,16 @@ impl WMember {
     /// What matters is which tables the resolved predicate names, not where the
     /// member's name was written down — that mismatch is the whole bug.
     fn is_child_side(self) -> bool {
-        matches!(self, WMember::Td | WMember::Ftd | WMember::Fchain)
+        matches!(
+            self,
+            WMember::Td | WMember::Ftd | WMember::Fchain | WMember::Wtd
+        )
     }
 
     /// Whether the member is a bare column reference (so it can carry a
     /// comparison operator) as opposed to a self-contained boolean filter.
     fn is_comparable(self) -> bool {
-        matches!(self, WMember::Td | WMember::Ucat)
+        matches!(self, WMember::Td | WMember::Ucat | WMember::Wtd)
     }
 
     /// Whether the member reaches its tables through a FACT reference (EXP-27)
@@ -333,6 +364,15 @@ impl Pred {
         }
     }
 
+    /// Whether the predicate names `member` (generator-coverage guard).
+    fn mentions(&self, member: WMember) -> bool {
+        match self {
+            Pred::Cmp(m, _, _) | Pred::Filter(m) => *m == member,
+            Pred::And(a, b) | Pred::Or(a, b) => a.mentions(member) || b.mentions(member),
+            Pred::Not(a) => a.mentions(member),
+        }
+    }
+
     /// Whether any named member reaches its table through a fact chain
     /// (EXP-27) — the generator-coverage guard for the `Fchain` arm.
     fn references_fact_chain(&self) -> bool {
@@ -349,7 +389,7 @@ impl Pred {
 fn arb_pred() -> impl Strategy<Value = Pred> {
     let leaf = prop_oneof![
         3 => (
-            prop_oneof![Just(WMember::Td), Just(WMember::Ucat)],
+            prop_oneof![Just(WMember::Td), Just(WMember::Ucat), Just(WMember::Wtd)],
             prop_oneof![Just("<"), Just("<="), Just("="), Just("<>"), Just(">="), Just(">")],
             -1i64..=3,
         ).prop_map(|(m, op, k)| Pred::Cmp(m, op, k)),
@@ -810,6 +850,19 @@ fn build_def() -> SemanticViewDefinition {
             is_enum: false,
             sample_values: Vec::new(),
         },
+        // Phase 8.3: window dimensions on the child and the parent.
+        Dimension {
+            name: "wtd".to_string(),
+            expr: "DENSE_RANK() OVER (ORDER BY t.d)".to_string(),
+            source_table: Some("t".to_string()),
+            ..Default::default()
+        },
+        Dimension {
+            name: "wucat".to_string(),
+            expr: "COUNT(*) OVER (PARTITION BY u.ucat)".to_string(),
+            source_table: Some("u".to_string()),
+            ..Default::default()
+        },
     ];
     let using_metric = |name: &str, expr: &str, source: Option<&str>, using: &[&str]| Metric {
         name: name.to_string(),
@@ -842,6 +895,8 @@ fn build_def() -> SemanticViewDefinition {
         using_metric("ct_p1", "count(*)", Some("t"), &["t_p1"]),
         using_metric("sv_p2", "t.sv", Some("t"), &["t_p2"]),
         base_metric("dp", "ct_p1 + sv_p2", None),
+        // Phase 8.3: over the window fact `wv`.
+        base_metric("swv", "sum(t.wv)", Some("t")),
     ];
     let role = |name: &str, fk: &str| Join {
         from_alias: "t".to_string(),
@@ -924,6 +979,13 @@ fn build_def() -> SemanticViewDefinition {
                 access: AccessModifier::Public,
                 tags: Vec::new(),
                 sample_values: Vec::new(),
+            },
+            // Phase 8.3: a window fact, each row's total over its `d`.
+            Fact {
+                name: "wv".to_string(),
+                expr: "SUM(t.v) OVER (PARTITION BY t.d)".to_string(),
+                source_table: Some("t".to_string()),
+                ..Default::default()
             },
         ],
         materializations: vec![],
@@ -1054,6 +1116,9 @@ fn child_dim_item(name: &str) -> String {
         // Phase 8.2b: the subqueries, written out in place.
         "sqtd" => "t.d IN (SELECT k FROM sq_keys WHERE k IS NOT NULL) AS sqtd".to_string(),
         "squcat" => "u.ucat + (SELECT max(k) FROM sq_keys) AS squcat".to_string(),
+        // Phase 8.3: the windows, over the whole tables.
+        "wtd" => format!("{WTD_ORACLE} AS wtd"),
+        "wucat" => format!("{WUCAT_ORACLE} AS wucat"),
         // Facts grouped on in DIMENSIONS, written out independently.
         "uw1" => "u.w + 1 AS uw1".to_string(),
         "tv1" => "t.v + 1 AS tv1".to_string(),
@@ -1106,6 +1171,9 @@ fn child_grain_sql(case: &Case) -> String {
             "ct_p1" => "count(*) AS ct_p1".to_string(),
             "sv_p2" => "sum(t.v) AS sv_p2".to_string(),
             "dp" => "count(*) + sum(t.v) AS dp".to_string(),
+            // Phase 8.3: each row's partition total over the whole of `t`.
+            "swv" => "sum((SELECT sum(t2.v) FROM t t2 WHERE t2.d IS NOT DISTINCT FROM t.d)) AS swv"
+                .to_string(),
             other => unreachable!("unexpected child-grain metric {other}"),
         })
         .collect();
@@ -1218,6 +1286,7 @@ fn parent_dim_items(case: &Case) -> Vec<String> {
             "eucat" => Some("coalesce(u.ucat, -1) + (u.w + 1) AS eucat".to_string()),
             "uw1" => Some("u.w + 1 AS uw1".to_string()),
             "squcat" => Some("u.ucat + (SELECT max(k) FROM sq_keys) AS squcat".to_string()),
+            "wucat" => Some(format!("{WUCAT_ORACLE} AS wucat")),
             _ => None,
         })
         .collect()
@@ -1728,6 +1797,12 @@ fn generator_reaches_both_where_clause_branches() {
         "etd", "eucat", "esv", "esw", "edsv", "esvf", "uw1", "tv1", "sqtd", "squcat",
     ];
     let mut expression_oracled = [0usize; 10];
+    // Phase 8.3: each window member oracled, and oracled under a predicate,
+    // which the window must not see; and the window dimension in a predicate.
+    const WINDOW_MEMBERS: [&str; 3] = ["wtd", "wucat", "swv"];
+    let mut window_oracled = [0usize; 3];
+    let mut window_pred_oracled = [0usize; 3];
+    let mut wtd_in_pred_oracled = 0usize;
     let mut expression_bridged = 0usize;
     // Phase 6.3: `pcat` both refused and oracled, the oracled cases including
     // both paths at once and the metric-over-metric `sv_p2`.
@@ -1752,8 +1827,9 @@ fn generator_reaches_both_where_clause_branches() {
     let mut distinct: HashSet<String> = HashSet::new();
 
     // 600 draws since Phase 8.2b's two subquery dimensions widened the pool,
-    // which spreads the same draws over more dimension sets.
-    for _ in 0..600 {
+    // which spreads the same draws over more dimension sets, and 700 since
+    // Phase 8.3's window members widened it again.
+    for _ in 0..700 {
         let case = arb_case()
             .new_tree(&mut runner)
             .expect("strategy must produce a value")
@@ -1841,6 +1917,23 @@ fn generator_reaches_both_where_clause_branches() {
         }
         if oracled && has("esw") && selects_child_dim {
             expression_bridged += 1;
+        }
+        for (k, name) in WINDOW_MEMBERS.iter().enumerate() {
+            let picked = case.sel_dims.iter().any(|&i| DIMS[i] == *name) || has(name);
+            if picked && oracled {
+                window_oracled[k] += 1;
+                if case.where_pred.is_some() {
+                    window_pred_oracled[k] += 1;
+                }
+            }
+        }
+        if oracled
+            && case
+                .where_pred
+                .as_ref()
+                .is_some_and(|p| p.mentions(WMember::Wtd))
+        {
+            wtd_in_pred_oracled += 1;
         }
         match &case.where_pred {
             None => without_pred += 1,
@@ -1945,6 +2038,19 @@ fn generator_reaches_both_where_clause_branches() {
              TECH-DEBT #76 has no randomized coverage for it"
         );
     }
+    for (k, name) in WINDOW_MEMBERS.iter().enumerate() {
+        assert!(
+            window_oracled[k] > 0 && window_pred_oracled[k] > 0,
+            "the window member `{name}` was oracled {} times, {} of them under a \
+             predicate; Phase 8.3 has no randomized coverage for it",
+            window_oracled[k],
+            window_pred_oracled[k]
+        );
+    }
+    assert!(
+        wtd_in_pred_oracled > 0,
+        "the window dimension `wtd` never reached the oracle inside a predicate"
+    );
     assert!(
         expression_bridged > 0,
         "the parent-grain expression metric `esw` was never oracled with a child \

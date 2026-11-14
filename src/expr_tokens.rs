@@ -357,6 +357,19 @@ pub(crate) fn call_is_windowed(expr: &str, head: &IdentRef<'_>) -> bool {
     })
 }
 
+/// Whether `expr` calls a window function outside its subqueries (Phase 8.3):
+/// a fact or dimension holding one is computed over its whole table
+/// (`expand::window_members`). A window inside a subquery is the subquery's.
+pub(crate) fn has_window_call(expr: &str) -> bool {
+    let spans = subquery_spans(expr);
+    scan_function_heads(expr).into_iter().any(|head| {
+        !spans
+            .iter()
+            .any(|&(start, end)| start <= head.start && head.start < end)
+            && call_is_windowed(expr, &head)
+    })
+}
+
 /// The offset just past the call that `head` (from [`scan_function_heads`])
 /// opens: past its argument list, past an ordered-set aggregate's `WITHIN
 /// GROUP (ORDER BY …)` (where `percentile_cont` and `mode` take the value they

@@ -1,0 +1,385 @@
+# name: test/sql/phase8_window_members.test
+# description: A fact or dimension may hold a window function, as in Snowflake.
+#   Its value is computed over all the rows of its table, before the query's
+#   WHERE, and a metric may aggregate it, a query may group by or filter on
+#   it. Tables, views and expected values are the Phase 8 Snowflake fixture's
+#   (fixture 11, part W).
+# group: [sql]
+
+require semantic_views
+
+statement ok
+CREATE TABLE w_stores (store_id VARCHAR, region VARCHAR);
+
+statement ok
+CREATE TABLE w_sales (id INT, store_id VARCHAR, category VARCHAR, yr INT, units INT, revenue INT);
+
+statement ok
+INSERT INTO w_stores VALUES ('S1', 'EU'), ('S2', 'US');
+
+statement ok
+INSERT INTO w_sales VALUES (1, 'S1', 'A', 2024, 10, 100), (2, 'S1', 'A', 2024, 30, 300),
+  (3, 'S1', 'B', 2024, 20, 200), (4, 'S2', 'B', 2025, 40, 400), (5, 'S2', 'A', 2025, 50, 500);
+
+# W0: a metric over a window fact is accepted.
+statement ok
+CREATE SEMANTIC VIEW wdim_sv
+  TABLES (st AS w_stores PRIMARY KEY (store_id), sales AS w_sales PRIMARY KEY (id))
+  RELATIONSHIPS (sale_store AS sales (store_id) REFERENCES st)
+  FACTS (
+    sales.f_units AS units,
+    sales.total_units AS SUM(units) OVER (),
+    sales.revenue_by_category AS SUM(revenue) OVER (PARTITION BY category)
+  )
+  DIMENSIONS (
+    sales.d_id AS id,
+    sales.category AS category,
+    sales.yr AS yr,
+    st.region AS region,
+    sales.units_rank AS ROW_NUMBER() OVER (ORDER BY units),
+    sales.prev_category AS COALESCE(LAG(category, 1) OVER (ORDER BY id), 'none')
+  )
+  METRICS (
+    sales.rev_sum AS SUM(revenue),
+    sales.sum_cat_rev AS SUM(revenue_by_category),
+    sales.max_total_units AS MAX(total_units)
+  );
+
+# W1: window dimensions, one row each.
+query IIT
+SELECT * FROM SEMANTIC_VIEW(wdim_sv DIMENSIONS sales.d_id, sales.units_rank, sales.prev_category) ORDER BY 1;
+----
+1	1	none
+2	3	A
+3	2	A
+4	4	B
+5	5	B
+
+# W1f: window facts.
+query III
+SELECT * FROM SEMANTIC_VIEW(wdim_sv FACTS sales.f_units, sales.total_units, sales.revenue_by_category) ORDER BY 1;
+----
+10	150	900
+20	150	600
+30	150	900
+40	150	600
+50	150	900
+
+# W2: the WHERE runs after the window, so the ranks are the whole table's.
+query II
+SELECT * FROM SEMANTIC_VIEW(wdim_sv DIMENSIONS sales.d_id, sales.units_rank WHERE sales.category = 'A') ORDER BY 1;
+----
+1	1
+2	3
+5	5
+
+# W2f: the same for a window fact.
+query II
+SELECT * FROM SEMANTIC_VIEW(wdim_sv FACTS sales.f_units, sales.total_units WHERE sales.category = 'A') ORDER BY 1;
+----
+10	150
+30	150
+50	150
+
+# W2b: and for a WHERE on a parent's dimension.
+query II
+SELECT * FROM SEMANTIC_VIEW(wdim_sv DIMENSIONS sales.d_id, sales.units_rank WHERE st.region = 'US') ORDER BY 1;
+----
+4	4
+5	5
+
+# W3: grouped by a window dimension.
+query TI
+SELECT * FROM SEMANTIC_VIEW(wdim_sv DIMENSIONS sales.prev_category METRICS sales.rev_sum) ORDER BY 1;
+----
+A	500
+B	900
+none	100
+
+# W4: metrics over window facts.
+query TII
+SELECT * FROM SEMANTIC_VIEW(wdim_sv DIMENSIONS sales.category METRICS sales.sum_cat_rev, sales.max_total_units) ORDER BY 1;
+----
+A	2700	150
+B	1200	150
+
+# W4b: the window is computed on all rows, before the filter.
+query TII
+SELECT * FROM SEMANTIC_VIEW(wdim_sv DIMENSIONS sales.category METRICS sales.sum_cat_rev, sales.max_total_units WHERE sales.yr = 2024) ORDER BY 1;
+----
+A	1800	150
+B	600	150
+
+# W5: a window dimension grouped with a parent's dimension.
+query TII
+SELECT * FROM SEMANTIC_VIEW(wdim_sv DIMENSIONS st.region, sales.units_rank METRICS sales.rev_sum) ORDER BY 1, 2;
+----
+EU	1	100
+EU	2	200
+EU	3	300
+US	4	400
+US	5	500
+
+# W5b: filtering on a window dimension.
+query I
+SELECT * FROM SEMANTIC_VIEW(wdim_sv METRICS sales.rev_sum WHERE sales.units_rank <= 2);
+----
+300
+
+# W5c: and on a window fact.
+query I
+SELECT * FROM SEMANTIC_VIEW(wdim_sv METRICS sales.rev_sum WHERE sales.revenue_by_category > 600);
+----
+900
+
+# W6: a window dimension partitioned by a parent's dimension.
+statement ok
+CREATE SEMANTIC VIEW wdim_parent
+  TABLES (st AS w_stores PRIMARY KEY (store_id), sales AS w_sales PRIMARY KEY (id))
+  RELATIONSHIPS (sale_store AS sales (store_id) REFERENCES st)
+  DIMENSIONS (sales.d_id AS id, st.region AS region,
+              sales.region_rank AS ROW_NUMBER() OVER (PARTITION BY st.region ORDER BY units))
+  METRICS (sales.revenue AS SUM(revenue));
+
+query II
+SELECT * FROM SEMANTIC_VIEW(wdim_parent DIMENSIONS sales.d_id, sales.region_rank) ORDER BY 1;
+----
+1	1
+2	3
+3	2
+4	1
+5	2
+
+# W6b: still the whole table's, under a WHERE.
+query II
+SELECT * FROM SEMANTIC_VIEW(wdim_parent DIMENSIONS sales.d_id, sales.region_rank WHERE sales.d_id >= 2) ORDER BY 1;
+----
+2	3
+3	2
+4	1
+5	2
+
+query II
+SELECT * FROM SEMANTIC_VIEW(wdim_parent DIMENSIONS sales.region_rank METRICS sales.revenue) ORDER BY 1;
+----
+1	500
+2	700
+3	300
+
+# W7: a window dimension on the parent table, grouped from the child's metric.
+statement ok
+CREATE SEMANTIC VIEW wdim_on_parent
+  TABLES (st AS w_stores PRIMARY KEY (store_id), sales AS w_sales PRIMARY KEY (id))
+  RELATIONSHIPS (sale_store AS sales (store_id) REFERENCES st)
+  DIMENSIONS (st.store_rank AS ROW_NUMBER() OVER (ORDER BY store_id DESC))
+  METRICS (sales.revenue AS SUM(revenue));
+
+query II
+SELECT * FROM SEMANTIC_VIEW(wdim_on_parent DIMENSIONS st.store_rank METRICS sales.revenue) ORDER BY 1;
+----
+1	900
+2	600
+
+# W8: SHOW gives a window member's table and type.
+query TTT
+SELECT table_name, name, data_type FROM (SHOW SEMANTIC DIMENSIONS IN wdim_sv)
+WHERE name IN ('units_rank', 'prev_category') ORDER BY name;
+----
+w_sales	prev_category	VARCHAR
+w_sales	units_rank	BIGINT
+
+query TTT
+SELECT table_name, name, data_type FROM (SHOW SEMANTIC FACTS IN wdim_sv)
+WHERE name IN ('total_units', 'revenue_by_category') ORDER BY name;
+----
+w_sales	revenue_by_category	HUGEINT
+w_sales	total_units	HUGEINT
+
+query TTT
+SELECT table_name, name, data_type FROM (SHOW SEMANTIC METRICS IN wdim_sv)
+WHERE name IN ('sum_cat_rev', 'max_total_units') ORDER BY name;
+----
+w_sales	max_total_units	HUGEINT
+w_sales	sum_cat_rev	HUGEINT
+
+# W9: a window fact partitioned by a parent's dimension.
+statement ok
+CREATE SEMANTIC VIEW wdim_parent_fact
+  TABLES (st AS w_stores PRIMARY KEY (store_id), sales AS w_sales PRIMARY KEY (id))
+  RELATIONSHIPS (sale_store AS sales (store_id) REFERENCES st)
+  FACTS (sales.rev_by_region AS SUM(revenue) OVER (PARTITION BY st.region))
+  DIMENSIONS (sales.d_id AS id, st.region AS region)
+  METRICS (sales.rev_sum AS SUM(revenue), sales.max_region_rev AS MAX(rev_by_region));
+
+query I
+SELECT * FROM SEMANTIC_VIEW(wdim_parent_fact FACTS sales.rev_by_region) ORDER BY 1;
+----
+600
+600
+600
+900
+900
+
+query TI
+SELECT * FROM SEMANTIC_VIEW(wdim_parent_fact DIMENSIONS st.region METRICS sales.max_region_rev WHERE sales.d_id <> 4) ORDER BY 1;
+----
+EU	600
+US	900
+
+# X1: a fact over a window fact, and a window over a window fact.
+statement ok
+CREATE SEMANTIC VIEW wdim_layers
+  TABLES (st AS w_stores PRIMARY KEY (store_id), sales AS w_sales PRIMARY KEY (id))
+  RELATIONSHIPS (sale_store AS sales (store_id) REFERENCES st)
+  FACTS (
+    sales.total_units AS SUM(units) OVER (),
+    sales.unit_pct AS 100 * units // total_units,
+    sales.cat_rev AS SUM(revenue) OVER (PARTITION BY category)
+  )
+  DIMENSIONS (
+    sales.d_id AS id,
+    sales.cat_rev_rank AS DENSE_RANK() OVER (ORDER BY cat_rev DESC)
+  )
+  METRICS (sales.pct_sum AS SUM(unit_pct), sales.rev_sum AS SUM(revenue));
+
+query III
+SELECT * FROM SEMANTIC_VIEW(wdim_layers DIMENSIONS sales.d_id, sales.cat_rev_rank METRICS sales.pct_sum
+  WHERE sales.d_id IN (1, 4)) ORDER BY 1;
+----
+1	1	6
+4	2	26
+
+query II
+SELECT * FROM SEMANTIC_VIEW(wdim_layers DIMENSIONS sales.cat_rev_rank METRICS sales.rev_sum) ORDER BY 1;
+----
+1	900
+2	600
+
+# X2: a child's dimension that references a parent's window dimension.
+statement ok
+CREATE SEMANTIC VIEW wdim_ref
+  TABLES (st AS w_stores PRIMARY KEY (store_id), sales AS w_sales PRIMARY KEY (id))
+  RELATIONSHIPS (sale_store AS sales (store_id) REFERENCES st)
+  DIMENSIONS (st.store_rank AS ROW_NUMBER() OVER (ORDER BY store_id DESC),
+              sales.d_id AS id, sales.sale_store_rank AS st.store_rank)
+  METRICS (sales.revenue AS SUM(revenue));
+
+query II
+SELECT * FROM SEMANTIC_VIEW(wdim_ref DIMENSIONS sales.d_id, sales.sale_store_rank WHERE sales.d_id > 3) ORDER BY 1;
+----
+4	1
+5	1
+
+# X3: an ad-hoc item over a window dimension, and the standard-SQL form.
+query II
+SELECT * FROM SEMANTIC_VIEW(wdim_sv DIMENSIONS units_rank * 10 AS r10 METRICS rev_sum WHERE category = 'B') ORDER BY 1;
+----
+20	200
+40	400
+
+query TI
+SELECT prev_category, AGG(rev_sum) FROM wdim_sv WHERE yr = 2025 GROUP BY prev_category ORDER BY 1;
+----
+B	900
+
+# X4: a window member reads the whole table also from a query that uses no
+# window member of it (the table is read as written then).
+query I
+SELECT * FROM SEMANTIC_VIEW(wdim_sv METRICS rev_sum WHERE category = 'A');
+----
+900
+
+# X5: a window member cannot read a table that references its own: there is
+# no one value per row of its table to partition or order by.
+statement error
+CREATE SEMANTIC VIEW wdim_child_ref
+  TABLES (st AS w_stores PRIMARY KEY (store_id), sales AS w_sales PRIMARY KEY (id))
+  RELATIONSHIPS (sale_store AS sales (store_id) REFERENCES st)
+  FACTS (sales.f_units AS units, st.u_rank AS RANK() OVER (ORDER BY sales.f_units))
+  DIMENSIONS (st.region AS region);
+----
+does not reach table 'sales'
+
+# X6: a window dimension on a role-played table follows each metric's role,
+# and lists the whole table's ranks under a WHERE.
+statement ok
+CREATE TABLE x_airports (code VARCHAR, city VARCHAR);
+
+statement ok
+INSERT INTO x_airports VALUES ('A', 'x'), ('B', 'y'), ('C', 'x');
+
+statement ok
+CREATE TABLE x_flights (id INT, dep VARCHAR, arr VARCHAR, n INT);
+
+statement ok
+INSERT INTO x_flights VALUES (1, 'A', 'B', 10), (2, 'B', 'C', 20), (3, 'A', 'C', 30);
+
+statement ok
+CREATE SEMANTIC VIEW wdim_roles
+  TABLES (f AS x_flights PRIMARY KEY (id), a AS x_airports PRIMARY KEY (code))
+  RELATIONSHIPS (fd AS f (dep) REFERENCES a, fa AS f (arr) REFERENCES a)
+  DIMENSIONS (a.code_rank AS RANK() OVER (ORDER BY code DESC), a.city AS city, f.d_id AS id)
+  METRICS (f.dep_n USING (fd) AS SUM(n), f.arr_n USING (fa) AS SUM(n));
+
+query III
+SELECT * FROM SEMANTIC_VIEW(wdim_roles DIMENSIONS a.code_rank METRICS dep_n, arr_n) ORDER BY 1;
+----
+1	NULL	50
+2	20	10
+3	40	NULL
+
+query IT
+SELECT * FROM SEMANTIC_VIEW(wdim_roles DIMENSIONS a.code_rank, a.city WHERE a.city = 'x') ORDER BY 1;
+----
+1	x
+3	x
+
+# X7: over an inline-query table, the window reads the query's rows.
+statement ok
+CREATE SEMANTIC VIEW wdim_inline
+  TABLES (f AS (SELECT * FROM x_flights WHERE id < 3) PRIMARY KEY (id))
+  DIMENSIONS (f.r AS ROW_NUMBER() OVER (ORDER BY n DESC), f.d_id AS id)
+  METRICS (f.m AS SUM(n));
+
+query II
+SELECT * FROM SEMANTIC_VIEW(wdim_inline DIMENSIONS r METRICS m WHERE d_id = 1);
+----
+2	10
+
+# X8: a window dimension as a semi-additive metric's NON ADDITIVE BY and in a
+# window metric's ORDER BY, both over the whole table's values.
+statement ok
+CREATE SEMANTIC VIEW wdim_metrics
+  TABLES (f AS x_flights PRIMARY KEY (id))
+  DIMENSIONS (f.r AS ROW_NUMBER() OVER (ORDER BY n), f.d_id AS id)
+  METRICS (f.m AS SUM(n), f.last_n NON ADDITIVE BY (r) AS SUM(n), f.run AS SUM(m) OVER (ORDER BY r));
+
+query I
+SELECT * FROM SEMANTIC_VIEW(wdim_metrics METRICS last_n WHERE d_id <> 3);
+----
+20
+
+query II
+SELECT * FROM SEMANTIC_VIEW(wdim_metrics DIMENSIONS r METRICS run WHERE d_id <> 1) ORDER BY 1;
+----
+2	20
+3	50
+
+# X9: a window fact reads the query's variables.
+statement ok
+CREATE SEMANTIC VIEW wdim_vars
+  TABLES (f AS x_flights PRIMARY KEY (id))
+  VARIABLES (k INT DEFAULT 2)
+  FACTS (f.scaled_total AS SUM(n * k) OVER ())
+  DIMENSIONS (f.d_id AS id)
+  METRICS (f.m AS MAX(scaled_total));
+
+query I
+SELECT * FROM SEMANTIC_VIEW(wdim_vars METRICS m WHERE d_id = 1);
+----
+120
+
+query I
+SELECT * FROM SEMANTIC_VIEW(wdim_vars METRICS m WHERE d_id = 1 VARIABLES k = 10);
+----
+600

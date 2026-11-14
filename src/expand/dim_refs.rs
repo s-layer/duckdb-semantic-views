@@ -49,10 +49,16 @@ pub(super) fn lower_dimension_references(
     def: &SemanticViewDefinition,
 ) -> Cow<'_, SemanticViewDefinition> {
     let refs = crate::graph::dimension_references(def);
-    if refs.is_empty() {
+    // Phase 8.3: a fact holding a window function may reference one too.
+    let fact_refs = crate::graph::window_fact_references(def);
+    if refs.is_empty() && fact_refs.is_empty() {
         return Cow::Borrowed(def);
     }
-    let mut targets: Vec<usize> = refs.iter().flat_map(|r| r.targets.clone()).collect();
+    let mut targets: Vec<usize> = refs
+        .iter()
+        .chain(&fact_refs)
+        .flat_map(|r| r.targets.clone())
+        .collect();
     targets.sort_unstable();
     targets.dedup();
     // A referenced dimension's key, qualified with its table, to its twin.
@@ -94,6 +100,11 @@ pub(super) fn lower_dimension_references(
     }
     for r in &refs {
         out.dimensions[r.dim].expr = rewrite(r.dim);
+    }
+    for r in &fact_refs {
+        let map: HashMap<String, String> = r.targets.iter().filter_map(|&j| twin_ref(j)).collect();
+        let map: HashMap<String, &str> = map.iter().map(|(k, v)| (k.clone(), v.as_str())).collect();
+        out.facts[r.dim].expr = inline_references(&def.facts[r.dim].expr, &map);
     }
     Cow::Owned(out)
 }

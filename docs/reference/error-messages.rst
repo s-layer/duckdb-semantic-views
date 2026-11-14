@@ -677,6 +677,33 @@ Dimension reference to a table not reached by one path
 
 **Fix:** Reference a dimension of a table the dimension's table references along one chain of relationships. For a child table's value, define a metric there instead; for a role-played table, define one dimension per role on the table that references it, each over a fact that names its role's relationship.
 
+A fact holding a window function can reference another table's dimension too (``SUM(revenue) OVER (PARTITION BY st.region)``), and is refused the same way, with ``fact`` in place of ``dimension``.
+
+.. _ref-err-window-member:
+
+Window fact or dimension reading a table not reached by one path
+----------------------------------------------------------------
+
+.. versionadded:: 0.20.0
+
+.. code-block:: text
+
+   <kind> '<own>.<name>' holds a window function and reads table '<other>', but
+   table '<own>' does not reach table '<other>' along its relationships, so
+   '<other>' has no single value per row of '<own>'. A window <kind> can read a
+   table its own table references, directly or through other tables, not one
+   that references it.
+
+.. code-block:: text
+
+   <kind> '<own>.<name>' holds a window function and reads table '<other>', but
+   table '<own>' reaches table '<other>' by more than one path (for example, as
+   two roles), so which one is meant is not said.
+
+**Cause:** A fact or dimension holding a window function (see :ref:`window functions in facts and dimensions <ref-create-window-members>`) reads, directly or through a fact, a table its own table does not reach along foreign keys, such as a child table, or one it reaches two ways. Its window runs over one row per row of its own table, which such a table cannot give.
+
+**Fix:** Read only the member's own table and the tables it references along one chain. For a child table's value, aggregate it in a metric instead; for a role-played table, read a fact on the member's own table that names the role's column.
+
 .. _ref-err-bare-column:
 
 Unqualified column of another table
