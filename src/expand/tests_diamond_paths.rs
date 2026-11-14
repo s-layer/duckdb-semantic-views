@@ -768,6 +768,9 @@ fn diamond_with_references(order: &str) -> SemanticViewDefinition {
         .push(dim("cust_region", "r.region_name", "c"));
     def.dimensions
         .push(dim("cust_region_f", "r.region_fact", "c"));
+    // A reference to the reference, on orders: still the customer's region.
+    def.dimensions
+        .push(dim("order_cust_region", "c.cust_region", "o"));
     def.facts.push(Fact {
         name: "region_fact".to_string(),
         expr: "r.region_name".to_string(),
@@ -844,4 +847,33 @@ fn reference_beside_a_dimension_on_another_path_is_refused() {
             }
         }
     }
+}
+
+/// Review of #362, round 2: a reference to a reference through the diamond
+/// reads regions through customers, the table of the dimension that names
+/// them, not along the metric's `USING` path.
+#[test]
+fn reference_to_a_reference_reads_the_intermediate_tables_path() {
+    assert_reference_answer(
+        &req(&["order_cust_region"], &["rev_by_store"], None),
+        &[&["EU", "50"], &["US", "20"]],
+    );
+}
+
+/// The same with no `USING`: one chain through customers, so answered.
+#[test]
+fn reference_to_a_reference_without_using_is_answered() {
+    assert_reference_answer(
+        &req(&["order_cust_region"], &["revenue"], None),
+        &[&["EU", "50"], &["US", "20"]],
+    );
+}
+
+/// And as a filter.
+#[test]
+fn filter_on_a_reference_to_a_reference_reads_the_intermediate_tables_path() {
+    assert_reference_answer(
+        &req(&[], &["rev_by_store"], Some("o.order_cust_region = 'EU'")),
+        &[&["50"]],
+    );
 }

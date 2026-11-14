@@ -279,13 +279,6 @@ impl Member {
     }
 }
 
-/// The member on `table` a member declared on `own` reaches: through `own`
-/// when they differ.
-fn via_of(own: Option<&String>, table: &str) -> Option<String> {
-    own.map(|o| o.to_ascii_lowercase())
-        .filter(|o| !o.eq_ignore_ascii_case(table))
-}
-
 /// The members a query with metrics reaches from each metric's table: every
 /// dimension's table and the tables of the facts it is written over, and every
 /// `where_clause` member's table and fact tables.
@@ -304,12 +297,12 @@ pub(super) fn query_members(
                 via: None,
             });
         }
-        for table in super::facts::collect_referenced_fact_tables(&dim.expr, &def.facts) {
-            let table = table.to_ascii_lowercase();
+        let own = dim.source_table.as_deref();
+        for (table, via) in super::facts::collect_fact_routes(&dim.expr, own, &def.facts) {
             out.push(Member {
                 label: label.clone(),
-                via: via_of(dim.source_table.as_ref(), &table),
                 table,
+                via,
             });
         }
     }
@@ -322,12 +315,11 @@ pub(super) fn query_members(
                 via: None,
             });
         }
-        for table in &member.fact_tables {
-            let table = table.to_ascii_lowercase();
+        for (table, via) in &member.fact_routes {
             out.push(Member {
                 label: label.clone(),
-                via: via_of(member.table.as_ref(), &table),
-                table,
+                table: table.clone(),
+                via: via.clone(),
             });
         }
     }
@@ -351,18 +343,12 @@ fn na_dimension_members<'a>(
         super::resolution::find_dimension(def, &na.dimension)
             .into_iter()
             .flat_map(|dim| {
-                let own = dim.source_table.as_ref().map(|t| t.to_ascii_lowercase());
+                let own = dim.source_table.as_deref();
                 own.iter()
-                    .map(|t| (t.clone(), None))
-                    .chain(
-                        super::facts::collect_referenced_fact_tables(&dim.expr, &def.facts)
-                            .into_iter()
-                            .map(|t| {
-                                let t = t.to_ascii_lowercase();
-                                let via = via_of(own.as_ref(), &t);
-                                (t, via)
-                            }),
-                    )
+                    .map(|t| (t.to_ascii_lowercase(), None))
+                    .chain(super::facts::collect_fact_routes(
+                        &dim.expr, own, &def.facts,
+                    ))
                     .collect::<Vec<_>>()
             })
             .map(move |(table, via)| Member {

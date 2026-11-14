@@ -306,7 +306,8 @@ CREATE SEMANTIC VIEW xref_diamond
   )
   DIMENSIONS (
     region.d_region_name AS region.r_name,
-    customer.d_customer_region AS region.d_region_name
+    customer.d_customer_region AS region.d_region_name,
+    orders.d_order_region AS customer.d_customer_region
   )
   METRICS (
     orders.revenue AS SUM(orders.amount),
@@ -321,6 +322,13 @@ US	20
 
 query TI
 SELECT * FROM SEMANTIC_VIEW(xref_diamond DIMENSIONS customer.d_customer_region METRICS orders.revenue) ORDER BY 1;
+----
+EU	50
+US	20
+
+# A reference to the reference reads regions through customers too.
+query TI
+SELECT * FROM SEMANTIC_VIEW(xref_diamond DIMENSIONS orders.d_order_region METRICS orders.rev_by_store) ORDER BY 1;
 ----
 EU	50
 US	20
