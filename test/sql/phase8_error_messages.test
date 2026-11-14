@@ -1,0 +1,165 @@
+# name: test/sql/phase8_error_messages.test
+# description: Refusals name the cause that applies (v0.19.0 review O2 and the
+#   0.19.0 docs pass's error-text findings).
+# group: [sql]
+
+require semantic_views
+
+# --- A dimension on a table that references a role-played one ----------------
+# Flights reference airports twice (dep_a, arr_a); gates reference airports
+# once. A gate's terminal is below the airports, so a flights metric reaches it
+# across a role and then fans out from the airports to their gates, which no
+# USING fixes (Snowflake refuses a role followed by a fan-out too, fixture 9).
+
+statement ok
+CREATE TABLE em_airports (code VARCHAR, city VARCHAR);
+
+statement ok
+INSERT INTO em_airports VALUES ('A', 'x'), ('B', 'y');
+
+statement ok
+CREATE TABLE em_flights (fid INT, dep VARCHAR, arr VARCHAR, carrier VARCHAR);
+
+statement ok
+INSERT INTO em_flights VALUES (1, 'A', 'B', 'k'), (2, 'B', 'A', 'l');
+
+statement ok
+CREATE TABLE em_gates (gid INT, code VARCHAR, terminal VARCHAR);
+
+statement ok
+INSERT INTO em_gates VALUES (1, 'A', 'T1');
+
+# The airports' details reference them one-to-one: not below them.
+statement ok
+CREATE TABLE em_details (code VARCHAR, elev INT);
+
+statement ok
+INSERT INTO em_details VALUES ('A', 100), ('B', 200);
+
+statement ok
+CREATE SEMANTIC VIEW em_rp
+  TABLES (a AS em_airports PRIMARY KEY (code), f AS em_flights PRIMARY KEY (fid), g AS em_gates PRIMARY KEY (gid),
+    d AS em_details PRIMARY KEY (code))
+  RELATIONSHIPS (dep_a AS f (dep) REFERENCES a, arr_a AS f (arr) REFERENCES a, g_a AS g (code) REFERENCES a,
+    d_a AS d (code) REFERENCES a)
+  DIMENSIONS (f.carrier AS carrier, a.city AS city, g.terminal AS terminal, d.elev AS elev)
+  METRICS (a.airport_count AS COUNT(*), f.flights AS COUNT(*), f.dep_flights USING (dep_a) AS COUNT(*));
+
+# The airports' own metric by a gate's terminal is answered.
+query TI
+SELECT * FROM semantic_view('em_rp', dimensions := ['terminal'], metrics := ['airport_count']) ORDER BY 1;
+----
+T1	1
+NULL	1
+
+# Not "ambiguous ... name one of them in their USING": a USING does not help.
+statement error
+SELECT * FROM semantic_view('em_rp', dimensions := ['terminal'], metrics := ['dep_flights']);
+----
+fans out from table 'a' to table 'g'
+
+statement error
+SELECT * FROM semantic_view('em_rp', dimensions := ['terminal'], metrics := ['flights']);
+----
+fans out from table 'a' to table 'g'
+
+# A one-to-one detail of the airports is a role's to give: with one named it
+# is answered, and without one the message asks for it.
+query II
+SELECT * FROM semantic_view('em_rp', dimensions := ['elev'], metrics := ['dep_flights']) ORDER BY 1;
+----
+100	1
+200	1
+
+statement error
+SELECT * FROM semantic_view('em_rp', dimensions := ['elev'], metrics := ['flights']);
+----
+which is joined via multiple relationships: [arr_a, dep_a]. Query it with metrics that each name one of them in their USING
+
+# --- SHOW ... FOR METRIC around the roles (Snowflake fixture 13) -------------
+# Snowflake lists every dimension for every metric here, those every query of
+# the metric refuses included (v0.19.0 review O1 is parity), and so do we.
+
+query T
+SELECT string_agg(name, ',' ORDER BY name) FROM (SHOW SEMANTIC DIMENSIONS IN em_rp FOR METRIC flights);
+----
+carrier,city,elev,terminal
+
+query T
+SELECT string_agg(name, ',' ORDER BY name) FROM (SHOW SEMANTIC DIMENSIONS IN em_rp FOR METRIC dep_flights);
+----
+carrier,city,elev,terminal
+
+query T
+SELECT string_agg(name, ',' ORDER BY name) FROM (SHOW SEMANTIC DIMENSIONS IN em_rp FOR METRIC airport_count);
+----
+carrier,city,elev,terminal
+
+# The roles listed are the ones the flights metric could name: g_a is the
+# gates' relationship, which no flights USING can name.
+statement error
+SELECT * FROM semantic_view('em_rp', dimensions := ['city'], metrics := ['flights']);
+----
+reached via multiple relationships: [arr_a, dep_a]. Give
+
+# --- O2: a fan-out refused because another metric cannot count once ---------
+
+statement ok
+CREATE TABLE em_orders (oid INT, day INT, amount INT);
+
+statement ok
+INSERT INTO em_orders VALUES (1, 1, 10), (2, 2, 20);
+
+statement ok
+CREATE TABLE em_items (iid INT, oid INT, status VARCHAR);
+
+statement ok
+INSERT INTO em_items VALUES (1, 1, 'a'), (2, 1, 'b'), (3, 2, 'a');
+
+statement ok
+CREATE SEMANTIC VIEW em_fan
+  TABLES (o AS em_orders PRIMARY KEY (oid), li AS em_items PRIMARY KEY (iid))
+  RELATIONSHIPS (li_o AS li (oid) REFERENCES o)
+  DIMENSIONS (li.status AS status, o.day AS day)
+  METRICS (o.rev AS SUM(amount), o.last_rev NON ADDITIVE BY (day) AS SUM(amount));
+
+# On its own, rev is counted once per status.
+query TI
+SELECT * FROM semantic_view('em_fan', dimensions := ['status'], metrics := ['rev']) ORDER BY 1;
+----
+a	30
+b	10
+
+statement error
+SELECT * FROM semantic_view('em_fan', dimensions := ['status'], metrics := ['rev', 'last_rev']);
+----
+and metric 'last_rev' is semi-additive and its NON ADDITIVE BY dimension 'day' is not queried.
+
+# A metric table with no PRIMARY KEY (UNIQUE only) is named as the cause.
+statement ok
+CREATE SEMANTIC VIEW em_fan_nokey
+  TABLES (o AS em_orders UNIQUE (oid), li AS em_items PRIMARY KEY (iid))
+  RELATIONSHIPS (li_o AS li (oid) REFERENCES o)
+  DIMENSIONS (li.status AS status)
+  METRICS (o.rev AS SUM(amount), li.items AS COUNT(*));
+
+statement error
+SELECT * FROM semantic_view('em_fan_nokey', dimensions := ['status'], metrics := ['items', 'rev']);
+----
+metric 'rev' is on table 'o', and table 'o' has no PRIMARY KEY to count its rows by.
+
+# The note no longer lists a member that names no table, which CREATE
+# refuses, so no query can meet it: the note after the main sentence, pinned whole.
+statement error
+SELECT * FROM semantic_view('em_fan_nokey', dimensions := ['status'], metrics := ['rev']);
+----
+restructure the relationship. A fan-out like this one is counted once per group only when every metric in the query can be, and metric 'rev' is on table 'o', and table 'o' has no PRIMARY KEY to count its rows by.
+
+statement ok
+DROP SEMANTIC VIEW em_fan_nokey;
+
+statement ok
+DROP SEMANTIC VIEW em_fan;
+
+statement ok
+DROP SEMANTIC VIEW em_rp;

@@ -31,6 +31,15 @@
 //!    TRUE on, and takes the distinct groups. Each (home row, group) pair then
 //!    contributes once. The metrics are merged on the groups, a group one
 //!    metric lacks reading NULL for it, as Snowflake merges per-metric results.
+//!
+//! In about half the cases every member expression is written bare
+//! (`SUM(hv)`, not `SUM(h.hv)`; [`Case::bare`], Phase 8.1, closing the
+//! v0.19.0 review's coverage gap 2), with the tables' columns recorded as
+//! CREATE records them, and every table has a decoy column, holding
+//! [`DECOY`], of each member column it lacks. So the bare-column pass
+//! (TECH-DEBT #83) runs against the bridge's once-per-group plan and the
+//! dims-only meeting plan, and must read each column from its member's own
+//! table. The oracle is unchanged.
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -383,6 +392,9 @@ struct Case {
     /// then climbing too, so Snowflake answers from `h` with a metric on `z`
     /// alone (fixture 8's M2b, Phase 7 PR 4e).
     z_metric: bool,
+    /// Every member expression written bare, with `table_columns` recorded
+    /// ([`bare_twin`]).
+    bare: bool,
 }
 
 impl Case {
@@ -463,7 +475,7 @@ fn arb_case() -> impl Strategy<Value = Case> {
                 Just(salt),
             )
         })
-        .prop_map(|(inst, first, dims, mets, pred, _)| Case {
+        .prop_map(|(inst, first, dims, mets, pred, salt)| Case {
             inst,
             first,
             dims,
@@ -471,6 +483,7 @@ fn arb_case() -> impl Strategy<Value = Case> {
             pred,
             h_metrics: true,
             z_metric: false,
+            bare: salt % 2 == 0,
         })
 }
 
@@ -536,13 +549,68 @@ fn build_def(case: &Case) -> SemanticViewDefinition {
             ..Default::default()
         })
         .collect();
-    SemanticViewDefinition {
+    let def = SemanticViewDefinition {
         tables,
         dimensions,
         metrics,
         joins,
         ..Default::default()
+    };
+    if case.bare {
+        bare_twin(def)
+    } else {
+        def
     }
+}
+
+/// Each table's own columns, as [`make_db`] creates them before the decoys.
+const SCHEMA: [(&str, &[&str]); 7] = [
+    ("h", &["id", "fk_z", "hcat", "hv"]),
+    ("x", &["id", "fk_y", "xcat", "xv"]),
+    ("z", &["id", "zcat"]),
+    ("y", &["id", "ycat"]),
+    ("bt", &["hid", "xid", "rcat", "bv"]),
+    ("c", &["id", "hid", "ccat", "cv"]),
+    ("s", &["id", "hid", "scat"]),
+];
+
+/// The value of every decoy column: far from any generated value, so a bare
+/// column read from the wrong table shows in every sum and group.
+const DECOY: i64 = 1000;
+
+/// The member columns a table lacks, each of which it gets as a decoy.
+fn decoys(own: &[&str]) -> Vec<&'static str> {
+    let members = DIMS
+        .iter()
+        .map(|(_, _, col)| *col)
+        .chain(METS.iter().filter_map(|(_, _, col)| *col));
+    members.filter(|c| !own.contains(c)).collect()
+}
+
+/// TECH-DEBT #83: `def` with each member expression written bare (`SUM(hv)`,
+/// not `SUM(h.hv)`) and each table's columns recorded, decoys included, as
+/// CREATE records them. Each bare column must be read from its member's own
+/// table: every other table has a decoy of that name.
+fn bare_twin(mut def: SemanticViewDefinition) -> SemanticViewDefinition {
+    let strip = |e: &str| {
+        TABLES
+            .iter()
+            .fold(e.to_string(), |acc, t| acc.replace(&format!("{t}."), ""))
+    };
+    for d in &mut def.dimensions {
+        d.expr = strip(&d.expr);
+    }
+    for m in &mut def.metrics {
+        m.expr = strip(&m.expr);
+    }
+    def.table_columns = SCHEMA
+        .iter()
+        .map(|(t, own)| {
+            let all = own.iter().copied().chain(decoys(own));
+            ((*t).to_string(), all.map(str::to_string).collect())
+        })
+        .collect();
+    def
 }
 
 fn sql_cell(c: Cell) -> String {
@@ -608,14 +676,38 @@ fn make_db(inst: &Instance) -> duckdb::Connection {
             sql_cell(*cat)
         );
     }
+    // The decoys, after the rows, so every row holds `DECOY` in them.
+    for (t, own) in SCHEMA {
+        for d in decoys(own) {
+            sql += &format!("ALTER TABLE {t}_tbl ADD COLUMN {d} BIGINT DEFAULT {DECOY};");
+        }
+    }
     con.execute_batch(&sql).expect("data");
     con
 }
 
 fn run(con: &duckdb::Connection, sql: &str) -> Vec<Vec<Option<i128>>> {
-    let mut stmt = con
-        .prepare(sql)
-        .unwrap_or_else(|e| panic!("emitted SQL must bind: {e}\n{sql}"));
+    let mut stmt = match con.prepare(sql) {
+        Ok(stmt) => stmt,
+        // TECH-DEBT #84: DuckDB 1.4/1.5 raise this internal error while
+        // optimizing some GROUP BYs over a joined chain under a filter (here
+        // a bridge count beside a child sum filtered through `h` to `z`,
+        // `bare_bridge_and_child_metrics_under_a_filter_reaching_z`). It is
+        // an engine bug, not an answer, so the query is re-run with the pass
+        // that trips it switched off, which cannot change a result. Any other
+        // error still fails the case.
+        Err(e)
+            if e.to_string()
+                .contains("INTERNAL Error: Failed to bind column reference") =>
+        {
+            con.execute_batch("SET disabled_optimizers = 'compressed_materialization'")
+                .expect("disable compressed_materialization");
+            con.prepare(sql).unwrap_or_else(|e| {
+                panic!("emitted SQL must bind with compressed_materialization off: {e}\n{sql}")
+            })
+        }
+        Err(e) => panic!("emitted SQL must bind: {e}\n{sql}"),
+    };
     let mut rows: Vec<Vec<Option<i128>>> = stmt
         .query_map([], |r| {
             let n = r.as_ref().column_count();
@@ -862,17 +954,21 @@ fn arb_dims_only_case() -> impl Strategy<Value = Case> {
                 prop::option::weighted(0.4, arb_pred(n_dims)),
                 prop::bool::weighted(0.7),
                 prop::bool::weighted(0.4),
+                prop::bool::weighted(0.5),
             )
         })
-        .prop_map(|(inst, first, dims, pred, h_metrics, z_metric)| Case {
-            inst,
-            first,
-            dims,
-            mets: vec![],
-            pred,
-            h_metrics,
-            z_metric,
-        })
+        .prop_map(
+            |(inst, first, dims, pred, h_metrics, z_metric, bare)| Case {
+                inst,
+                first,
+                dims,
+                mets: vec![],
+                pred,
+                h_metrics,
+                z_metric,
+                bare,
+            },
+        )
 }
 
 /// The members a dims-only case names: its dimensions and its filter's.
@@ -1000,6 +1096,7 @@ fn pinned_once_per_group() {
         pred: None,
         h_metrics: true,
         z_metric: false,
+        bare: false,
     };
     assert_eq!(
         oracle(&case.inst, &case),
@@ -1026,9 +1123,21 @@ fn generator_reaches_bridged_refused_and_filtered_cases() {
     // keyless bridge's refusal.
     let (mut straight_down, mut two_fans, mut sibling, mut no_key) = (0, 0, 0, 0);
     let mut firsts: BTreeSet<&str> = BTreeSet::new();
+    // Phase 8.1: bare-column cases answered across the bridge or a fan-out.
+    let mut bare_fanned = 0;
     for _ in 0..2000 {
         let case = arb_case().new_tree(&mut runner).unwrap().current();
         firsts.insert(case.first);
+        if case.bare
+            && case.answerable()
+            && case.mets.iter().any(|m| {
+                case.dims
+                    .iter()
+                    .any(|d| !up(METS[*m].1).contains(&DIMS[*d].1))
+            })
+        {
+            bare_fanned += 1;
+        }
         let by = |home: &str, tables: &[&str]| {
             case.mets.iter().any(|m| METS[*m].1 == home)
                 && case.dims.iter().any(|d| tables.contains(&DIMS[*d].1))
@@ -1098,4 +1207,60 @@ fn generator_reaches_bridged_refused_and_filtered_cases() {
         "{straight_down} {two_fans} {sibling} {no_key}"
     );
     assert_eq!(firsts.len(), 4, "{firsts:?}");
+    assert!(
+        bare_fanned >= 100,
+        "bare-column fanned cases: {bare_fanned}"
+    );
+}
+
+/// Found by the bridge property in Phase 8.1's run: a bridge count and a
+/// child sum by `hcat` and `rcat`, filtered on `rcat`, `hcat` and `zcat`.
+/// The emitted SQL is correct (DuckDB 2.0 runs it), but the test harness's
+/// DuckDB 1.5 raises TECH-DEBT #84's internal bind error on it, written bare
+/// or not; `run` retries it with `compressed_materialization` off.
+#[test]
+fn bare_bridge_and_child_metrics_under_a_filter_reaching_z() {
+    let inst = Instance {
+        h: vec![(Some(9), Some(0), Some(4)), (Some(0), Some(1), Some(18))],
+        x: vec![
+            (Some(0), Some(1), Some(16)),
+            (Some(0), None, Some(1)),
+            (Some(1), None, None),
+            (Some(1), Some(2), Some(6)),
+        ],
+        z: vec![Some(1), Some(1)],
+        y: vec![Some(2), None, Some(1)],
+        bt: vec![
+            (Some(1), Some(2), Some(2), Some(18)),
+            (Some(1), None, Some(1), Some(5)),
+            (Some(1), Some(11), Some(0), Some(15)),
+            (Some(0), Some(0), None, Some(5)),
+            (Some(0), Some(11), Some(1), Some(2)),
+            (Some(9), Some(0), Some(1), Some(16)),
+            (Some(1), Some(0), Some(1), None),
+            (None, Some(2), Some(0), None),
+        ],
+        c: vec![(Some(1), Some(0), Some(9)), (Some(1), Some(2), Some(17))],
+        s: vec![(Some(0), Some(1))],
+    };
+    let pred = Pred::And(
+        Box::new(Pred::Or(
+            Box::new(Pred::Eq(2, 0)),
+            Box::new(Pred::In(0, 0, 0)),
+        )),
+        Box::new(Pred::Eq(3, 0)),
+    );
+    for bare in [false, true] {
+        let case = Case {
+            inst: inst.clone(),
+            first: "x",
+            dims: vec![0, 2],
+            mets: vec![3, 5],
+            pred: Some(pred.clone()),
+            h_metrics: true,
+            z_metric: false,
+            bare,
+        };
+        check(&case).unwrap_or_else(|e| panic!("bare={bare}: {e}"));
+    }
 }

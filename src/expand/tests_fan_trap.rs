@@ -307,6 +307,7 @@ fn fan_trap_error_message_format() {
             dimension_table: "li".to_string(),
             relationship_name: "li_to_order".to_string(),
             counts_once: false,
+            once_blocker: None,
         }),
     };
     let msg = format!("{err}");
@@ -381,6 +382,7 @@ fn cyclic_relationships_are_rejected_by_expand() {
                 cardinality: Cardinality::ManyToOne,
                 asof: None,
                 range_end: None,
+                generated_name: false,
             },
             Join {
                 from_alias: "b".to_string(),
@@ -391,6 +393,7 @@ fn cyclic_relationships_are_rejected_by_expand() {
                 cardinality: Cardinality::ManyToOne,
                 asof: None,
                 range_end: None,
+                generated_name: false,
             },
         ],
         ..Default::default()
@@ -1189,4 +1192,127 @@ fn referenced_fact_fan_trap_window_inner_metric_is_fenced() {
 #[test]
 fn referenced_fact_fan_trap_derived_metric_is_fenced() {
     expect_referenced_fact_fan_trap(&window_over_fanning_fact_def(), "li_qty_twice", "li_qty");
+}
+
+/// v0.19.0 review O2: a fan-out refused only because another metric in the
+/// query cannot count once (an active semi-additive one) names that metric
+/// and its reason, not the first metric of the query.
+#[test]
+fn a_refusal_caused_by_an_active_snapshot_names_it() {
+    let mut def = fan_trap_three_table_def();
+    def.metrics.push(Metric {
+        name: "last_orders".to_string(),
+        expr: "SUM(o.amount)".to_string(),
+        source_table: Some("o".to_string()),
+        non_additive_by: vec![crate::model::NonAdditiveDim {
+            dimension: "region".to_string(),
+            ..Default::default()
+        }],
+        ..Default::default()
+    });
+    let req = QueryRequest {
+        where_clause: None,
+        facts: vec![],
+        dimensions: vec![DimensionName::new("status")],
+        metrics: vec![
+            MetricName::new("order_count"),
+            MetricName::new("last_orders"),
+        ],
+    };
+    // Each on its own: order_count is counted once per status.
+    let alone = QueryRequest {
+        metrics: vec![MetricName::new("order_count")],
+        ..req.clone()
+    };
+    assert!(expand("sales", &def, &alone).is_ok());
+    let err = expand("sales", &def, &req)
+        .expect_err("refused")
+        .to_string();
+    assert!(err.contains("metric 'last_orders'"), "{err}");
+    assert!(err.contains("NON ADDITIVE BY"), "{err}");
+    assert!(err.contains("'region'"), "{err}");
+    assert!(!err.contains("metric 'order_count'"), "{err}");
+}
+
+/// O2's other cause: a metric on a table with no PRIMARY KEY blocks the
+/// once-per-group plan for the query, and the refusal names it.
+#[test]
+fn a_refusal_caused_by_a_keyless_metric_table_names_it() {
+    let mut def = fan_trap_three_table_def();
+    def.tables[0].pk_columns.clear();
+    def.metrics.push(Metric {
+        name: "customer_count".to_string(),
+        expr: "COUNT(*)".to_string(),
+        source_table: Some("c".to_string()),
+        ..Default::default()
+    });
+    let req = QueryRequest {
+        where_clause: None,
+        facts: vec![],
+        dimensions: vec![DimensionName::new("status")],
+        metrics: vec![
+            MetricName::new("customer_count"),
+            MetricName::new("order_count"),
+        ],
+    };
+    let err = expand("sales", &def, &req)
+        .expect_err("refused")
+        .to_string();
+    assert!(err.contains("metric 'order_count'"), "{err}");
+    assert!(err.contains("table 'o' has no PRIMARY KEY"), "{err}");
+}
+
+/// The docs pass's error-text finding: the counts-once note listed "a query
+/// with a dimension or filter that names no table", which DDL and YAML both
+/// refuse at CREATE, so no reader can meet it.
+#[test]
+fn the_counts_once_note_lists_no_unreachable_cause() {
+    let mut def = fan_trap_three_table_def();
+    def.tables[0].pk_columns.clear();
+    let req = QueryRequest {
+        where_clause: None,
+        facts: vec![],
+        dimensions: vec![DimensionName::new("status")],
+        metrics: vec![MetricName::new("order_count")],
+    };
+    let err = expand("sales", &def, &req)
+        .expect_err("refused")
+        .to_string();
+    assert!(!err.contains("names no"), "{err}");
+}
+
+/// PR #358 review: an active snapshot whose own rows do not fan out does not
+/// stop the once-per-group plan, so the refusal blames the metric that does:
+/// here the order count on a keyless `o`, not the line items' snapshot.
+#[test]
+fn a_snapshot_that_does_not_fan_out_is_not_blamed() {
+    let mut def = fan_trap_three_table_def();
+    def.tables[0].pk_columns.clear();
+    def.metrics.push(Metric {
+        name: "last_revenue".to_string(),
+        expr: "SUM(li.extended_price)".to_string(),
+        source_table: Some("li".to_string()),
+        non_additive_by: vec![crate::model::NonAdditiveDim {
+            dimension: "region".to_string(),
+            ..Default::default()
+        }],
+        ..Default::default()
+    });
+    let req = QueryRequest {
+        where_clause: None,
+        facts: vec![],
+        dimensions: vec![DimensionName::new("status")],
+        metrics: vec![
+            MetricName::new("last_revenue"),
+            MetricName::new("order_count"),
+        ],
+    };
+    let err = expand("sales", &def, &req)
+        .expect_err("refused")
+        .to_string();
+    assert!(err.contains("table 'o' has no PRIMARY KEY"), "{err}");
+    assert!(
+        !err.contains("metric 'last_revenue' is semi-additive"),
+        "{err}"
+    );
 }

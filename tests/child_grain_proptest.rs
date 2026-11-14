@@ -776,6 +776,7 @@ fn build_def() -> SemanticViewDefinition {
             cardinality: Cardinality::ManyToOne,
             asof: None,
             range_end: None,
+            generated_name: false,
         },
         Join {
             from_alias: "lid".to_string(),
@@ -786,6 +787,7 @@ fn build_def() -> SemanticViewDefinition {
             cardinality: Cardinality::ManyToOne,
             asof: None,
             range_end: None,
+            generated_name: false,
         },
     ];
     SemanticViewDefinition {

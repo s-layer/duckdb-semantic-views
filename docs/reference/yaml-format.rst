@@ -708,9 +708,9 @@ Each entry in the ``joins`` list declares a FK/PK relationship between tables. T
      - The end column of a :ref:`range relationship <ref-create-range-relationships>`, whose start column is its one ``ref_columns`` entry (``REFERENCES p(BETWEEN start_ts AND end_ts EXCLUSIVE)`` is ``ref_columns: [start_ts]`` and ``range_end: end_ts``). Omitted for any other relationship. *(Added in 0.19.0.)*
    * - ``name``
      - string
-     - Yes
-     -
-     - Relationship name, referenced by ``using_relationships`` for role-playing dimensions. Must be unique among the view's relationships, compared the way DuckDB compares identifiers (``r``, ``R`` and ``"r"`` are one name).
+     - No
+     - generated
+     - Relationship name, referenced by ``using_relationships`` for role-playing dimensions. Must be unique among the view's relationships, compared the way DuckDB compares identifiers (``r``, ``R`` and ``"r"`` are one name). A relationship without one gets a generated ``SYS_RELATIONSHIP_<id>`` name, as in the DDL form, and the export leaves it out again. *(Optional since 0.20.0.)*
    * - ``cardinality``
      - string
      - No

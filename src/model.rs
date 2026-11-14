@@ -875,6 +875,56 @@ pub struct Join {
     /// a range relationship. Like `asof`, it needs storage format 3.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub range_end: Option<String>,
+    /// Phase 8: the relationship was declared without a name
+    /// (`o(customer_id) REFERENCES c`, as Snowflake allows), so `name` holds a
+    /// generated `SYS_RELATIONSHIP_<uuid>`. `DESCRIBE` shows that name;
+    /// `GET_DDL` and the YAML export leave it out, so the entry reads back
+    /// unnamed. Stored JSON without it is a named relationship. It needs no
+    /// new storage format: an older release reads the generated name as an
+    /// ordinary one and answers the same, only writing that name in `GET_DDL`.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub generated_name: bool,
+}
+
+impl Join {
+    /// The name an unnamed relationship gets: `SYS_RELATIONSHIP_` and a
+    /// lowercase, hyphenated 128-bit hex id, the shape Snowflake gives one
+    /// (fixture 12). Snowflake draws a random UUID on every `CREATE`; this one is
+    /// derived from the entry's position, its tables and its foreign-key
+    /// columns, so the same view always names it the same, through `GET_DDL` and
+    /// the YAML export too, and two entries differ by position at least. The
+    /// position makes it change when an entry is inserted before it.
+    #[must_use]
+    pub fn generated_name_at(&self, index: usize) -> String {
+        // FNV-1a over the entry, twice with different offsets, for 128 bits that
+        // stay the same across builds (std's hasher makes no such promise).
+        // Not the REFERENCES columns: CREATE fills an empty list from the
+        // target's key and `GET_DDL` drops one that matches it, so they differ
+        // between the written and the stored form. The position already tells
+        // two entries apart.
+        let key = format!(
+            "{index}\u{1f}{}\u{1f}{}\u{1f}{}",
+            self.from_alias.to_ascii_lowercase(),
+            self.fk_columns.join("\u{1e}").to_ascii_lowercase(),
+            self.table.to_ascii_lowercase(),
+        );
+        let fnv = |offset: u64| {
+            key.bytes().fold(offset, |h, b| {
+                (h ^ u64::from(b)).wrapping_mul(0x0000_0100_0000_01b3)
+            })
+        };
+        let hi = fnv(0xcbf2_9ce4_8422_2325);
+        let lo = fnv(0x6c62_272e_07bb_0142);
+        let hex = format!("{hi:016x}{lo:016x}");
+        format!(
+            "SYS_RELATIONSHIP_{}-{}-{}-{}-{}",
+            &hex[0..8],
+            &hex[8..12],
+            &hex[12..16],
+            &hex[16..20],
+            &hex[20..32]
+        )
+    }
 }
 
 /// Current storage-format version stamped into freshly written definitions
@@ -1165,6 +1215,22 @@ impl SemanticViewDefinition {
                 trim_in_place(query);
             }
         }
+        // A relationship may be declared without a name, as in the DDL form;
+        // it gets the same generated name the DDL parser would give it.
+        // A body's flag is believed only when its name is exactly the one
+        // this entry would be given (so a serialized definition reads back
+        // unchanged); any other name is a written one and gets the name
+        // checks, flag or not.
+        for (index, j) in def.joins.iter_mut().enumerate() {
+            let generated = j.generated_name_at(index);
+            j.generated_name = match j.name.as_deref() {
+                None => true,
+                Some(name) => j.generated_name && name == generated,
+            };
+            if j.generated_name {
+                j.name = Some(generated);
+            }
+        }
         // A variable's type and default, likewise.
         for v in &mut def.variables {
             for text in v.data_type.iter_mut().chain(v.default.iter_mut()) {
@@ -1395,14 +1461,12 @@ fn validate_yaml_variables(def: &SemanticViewDefinition) -> Result<(), String> {
 
 fn validate_yaml_joins(def: &SemanticViewDefinition) -> Result<(), String> {
     for j in &def.joins {
-        let Some(name) = j.name.as_deref() else {
-            return Err(format!(
-                "relationship from '{}' to '{}' has no name; a relationship name is \
-                 required (the DDL form is 'rel_name AS from_alias(fk_cols) REFERENCES to_alias')",
-                j.from_alias, j.table
-            ));
-        };
-        slot_qualified("relationship", "name", name)?;
+        // `from_yaml` gives every unnamed relationship its generated name, so
+        // only the name a definition was written with is checked here.
+        let name = j.name.as_deref().unwrap_or_default();
+        if !j.generated_name {
+            slot_qualified("relationship", "name", name)?;
+        }
         slot_single("relationship", "from_alias", &j.from_alias)?;
         slot_single("relationship", "table", &j.table)?;
         for c in &j.fk_columns {
@@ -1919,20 +1983,79 @@ mod tests {
 
     const VALID_TABLES: &str = "tables:\n  - alias: o\n    table: orders\n    pk_columns: [id]\n";
 
+    /// A YAML body cannot mark its own name as generated to skip the name
+    /// checks: the flag is set only on a relationship with no name (PR #358
+    /// review).
     #[test]
-    fn yaml_join_without_a_name_is_rejected() {
-        let yaml = format!(
-            "tables:\n  - alias: o\n    table: orders\n    pk_columns: [id]\n  \
+    fn yaml_generated_name_flag_is_not_taken_from_the_body() {
+        let yaml = "tables:\n  - alias: o\n    table: orders\n    pk_columns: [id]\n  \
+             - alias: c\n    table: customers\n    pk_columns: [id]\n\
+             joins:\n  - name: \"a b; x\"\n    generated_name: true\n    from_alias: o\n    \
+             table: c\n    fk_columns: [customer_id]\n\
+             dimensions:\n  - name: region\n    expr: c.region\n    source_table: c\n\
+             metrics:\n  - name: total\n    expr: sum(o.amount)\n    source_table: o\n";
+        let e = yaml_err(yaml);
+        assert!(e.contains("relationship"), "{e}");
+    }
+
+    #[test]
+    fn yaml_join_without_a_name_gets_the_generated_name() {
+        let yaml = "tables:\n  - alias: o\n    table: orders\n    pk_columns: [id]\n  \
              - alias: c\n    table: customers\n    pk_columns: [id]\n\
              joins:\n  - from_alias: o\n    table: c\n    fk_columns: [customer_id]\n\
              dimensions:\n  - name: region\n    expr: c.region\n    source_table: c\n\
+             metrics:\n  - name: total\n    expr: sum(o.amount)\n    source_table: o\n";
+        let def = SemanticViewDefinition::from_yaml_with_size_cap("v", yaml).expect("accepted");
+        let j = &def.joins[0];
+        assert!(j.generated_name);
+        assert_eq!(j.name.as_deref(), Some(j.generated_name_at(0).as_str()));
+        // The export leaves the name out again, so it round-trips unchanged.
+        let out = crate::render_yaml::render_yaml_export(&def).expect("export");
+        assert!(!out.contains("SYS_RELATIONSHIP"), "{out}");
+        assert!(!out.contains("generated_name"), "{out}");
+        let back = SemanticViewDefinition::from_yaml_with_size_cap("v", &out).expect("re-import");
+        assert_eq!(back.joins, def.joins);
+    }
+
+    /// A parsed definition serialized with serde (as `fuzz_yaml_parse` does)
+    /// and parsed again is unchanged: a generated name written back with its
+    /// flag is still recognised as generated (fuzz crash on PR #358).
+    #[test]
+    fn yaml_serde_round_trip_keeps_a_generated_name() {
+        let yaml = "tables:\n  - alias: o\n    table: orders\n    pk_columns: [id]\n  \
+             - alias: c\n    table: customers\n    pk_columns: [id]\n\
+             joins:\n  - from_alias: o\n    table: c\n    fk_columns: [customer_id]\n\
+             dimensions:\n  - name: region\n    expr: c.region\n    source_table: c\n\
+             metrics:\n  - name: total\n    expr: sum(o.amount)\n    source_table: o\n";
+        let def = SemanticViewDefinition::from_yaml("v", yaml).expect("accepted");
+        let out = yaml_serde::to_string(&def).expect("serialize");
+        let back = SemanticViewDefinition::from_yaml("v", &out).expect("re-parse");
+        assert_eq!(back, def);
+    }
+
+    /// A body flag on a name that is not this entry's generated name is
+    /// ignored: the name is kept as a written one (and gets the name checks).
+    #[test]
+    fn yaml_generated_flag_on_another_entrys_generated_name_is_ignored() {
+        let mut j = Join {
+            table: "c".into(),
+            from_alias: "o".into(),
+            fk_columns: vec!["customer_id".into()],
+            ..Join::default()
+        };
+        let other = j.generated_name_at(1);
+        j.name = Some(other.clone());
+        let yaml = format!(
+            "tables:\n  - alias: o\n    table: orders\n    pk_columns: [id]\n  \
+             - alias: c\n    table: customers\n    pk_columns: [id]\n\
+             joins:\n  - name: \"{other}\"\n    generated_name: true\n    from_alias: o\n    \
+             table: c\n    fk_columns: [customer_id]\n\
+             dimensions:\n  - name: region\n    expr: c.region\n    source_table: c\n\
              metrics:\n  - name: total\n    expr: sum(o.amount)\n    source_table: o\n"
         );
-        let e = yaml_err(&yaml);
-        assert!(
-            e.contains("relationship") && e.contains("name"),
-            "the error must name the missing relationship name: {e}"
-        );
+        let def = SemanticViewDefinition::from_yaml("v", &yaml).expect("accepted");
+        assert!(!def.joins[0].generated_name);
+        assert_eq!(def.joins[0].name.as_deref(), Some(other.as_str()));
     }
 
     #[test]

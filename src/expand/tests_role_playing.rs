@@ -187,7 +187,9 @@ fn descendant_of_role_playing_table_without_a_path_errors_ambiguous() {
             dimension_table,
             role_playing_table,
             available_relationships,
+            fans_out,
         } => {
+            assert!(!fans_out, "regions are above the airports");
             assert_eq!(view_name, "test_flights");
             assert_eq!(dimension_name, "region_name");
             assert_eq!(dimension_table, "r");

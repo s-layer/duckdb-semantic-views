@@ -1492,7 +1492,7 @@ Fan trap detected
 - the hop crosses one of a role-played table's relationships back toward the table that holds them, such as an airport count by a flight's carrier (the message calls this a role-played table);
 - the one-to-many hop walks an ASOF or range relationship backwards, from the referenced table to the referencing one, which Snowflake refuses for ASOF too.
 
-In the first three cases the message ends with a sentence listing them.
+In the first three cases the message ends with a sentence saying why the fan-out could not be counted once. When another metric in the query whose rows fan out too is the reason, the error is reported for that metric and the sentence names it and its cause, for example ``... only when every metric in the query can be, and metric 'last_rev' is semi-additive and its NON ADDITIVE BY dimension 'day' is not queried.`` Each of the other metrics is answered on its own.
 
 **Fix:** Declare a ``PRIMARY KEY`` on the metric's table when that is the cause. Otherwise see :ref:`howto-fan-traps`: remove the problematic dimension, use a metric from the same table as the dimension, or restructure the view.
 
@@ -1546,7 +1546,29 @@ A dimension on a table reached only *through* the role-playing table, such as
    that each name one of them in their USING (a metric on '<rp_table>' itself
    cannot), ...
 
-It has the same causes and fixes. The dimension takes its path from the
+When the dimension's table itself references the role-playing table, such as
+``gates`` that reference ``airports``, it is below that table rather than
+reached through it: a flights metric would cross one of the airports' roles and
+then fan out from the airports to their gates, which no ``USING`` changes, and
+Snowflake refuses it too. That case reads:
+
+.. code-block:: text
+
+   semantic view '<view>': dimension '<dim>' cannot be grouped by here -- its
+   table '<table>' references the role-playing table '<rp_table>', so a metric
+   that reaches '<rp_table>' across one of its relationships [<rel1>, <rel2>]
+   then fans out from table '<rp_table>' to table '<table>', which no USING
+   changes ...
+
+Query it with metrics on either of those two tables, which reach it without
+crossing a role.
+
+The relationships each message lists are the roles: those of a table that
+references the role-playing table more than once. A relationship from a table
+that references it once (the gates' own) is not one a ``USING`` can pick, so it
+is left out.
+
+The first form has the same causes and fixes as above. The dimension takes its path from the
 metrics, so a query with no metrics, or with a metric declared on the
 role-playing table (whose ``USING`` cannot start there), has no path to give
 it. When every metric names a path, the region follows it: ``departures`` by
@@ -1808,10 +1830,11 @@ Table reached by more than one path
    semantic view '<view>': metric '<metric>' reaches table '<table>' along the
    path its USING names (o -> s -> r), which this query cannot follow: only the
    plan that computes each metric at its own grain follows a USING path, and
-   this query does not fit that plan (for example, it also holds a member
-   declared on no table). Query the metric with fewer members
+   this query does not fit that plan (a member that names no table, which only
+   a view stored before every member had to name one can hold). Query the
+   metric with fewer members
 
-**Cause:** Only part of the query planner follows a path a ``USING`` picks through a diamond. A dimension or filter member declared on no table sends the query elsewhere, where it would follow the path declared first. When the query also has a dimension or filter below the metric's grain, it is reported as a fan trap instead, since the plan that would count each row once per group declined the query too.
+**Cause:** Only part of the query planner follows a path a ``USING`` picks through a diamond. A dimension or filter member declared on no table sends the query elsewhere, where it would follow the path declared first. ``CREATE`` and ``FROM YAML`` require a table on every member, so only a view stored by an earlier release can hold such a member; re-create it to name one. When the query also has a dimension or filter below the metric's grain, it is reported as a fan trap instead, since the plan that would count each row once per group declined the query too.
 
 **Fix:** Query the ``USING`` metric without the members the message names.
 

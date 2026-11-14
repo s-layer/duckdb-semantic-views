@@ -186,7 +186,7 @@ CREATE SEMANTIC VIEW p7f_nv_nopk AS
 statement error
 SELECT * FROM SEMANTIC_VIEW(p7f_nv_nopk DIMENSIONS kind METRICS total_qty);
 ----
-a metric table with no PRIMARY KEY
+has no PRIMARY KEY to count its rows by
 
 # Without the fan-out the same view answers.
 query I

@@ -340,7 +340,9 @@ fn emit_relationships(out: &mut String, def: &SemanticViewDefinition) {
     out.push_str("RELATIONSHIPS (\n");
     for (i, join) in def.joins.iter().enumerate() {
         out.push_str("    ");
-        if let Some(ref rel_name) = join.name {
+        // An unnamed relationship reads back unnamed, as Snowflake writes it;
+        // its generated name is regenerated the same way.
+        if let Some(rel_name) = join.name.as_ref().filter(|_| !join.generated_name) {
             // The entry is split at its first `AS`, so a name that is itself
             // `AS` (storable bare only from YAML) would leave no name. Any other
             // name, a dotted one included, is emitted as stored.
@@ -349,8 +351,8 @@ fn emit_relationships(out: &mut String, def: &SemanticViewDefinition) {
             } else {
                 out.push_str(rel_name);
             }
+            out.push_str(" AS ");
         }
-        out.push_str(" AS ");
         out.push_str(&emit_alias(&join.from_alias));
         out.push('(');
         out.push_str(&emit_column_list(&join.fk_columns));
@@ -2322,5 +2324,32 @@ mod tests {
             let ddl = render_create_ddl("v", &minimal_def()).unwrap();
             assert!(!ddl.contains("TAG"), "{ddl}");
         }
+    }
+
+    /// Render is idempotent on a parsed expression that ends in a dot and a
+    /// whitespace character `trim` drops but the annotation scanner did not
+    /// skip (a vertical tab): `x.<VT> WITH TAG (...)` once parsed to `x.`
+    /// with the tag, and `x. WITH TAG` then read `WITH` as a column of `x`
+    /// (fuzz_render_roundtrip, PR #358).
+    #[test]
+    fn a_dot_before_a_vertical_tab_and_an_annotation_renders_idempotently() {
+        use crate::body_parser::parse_keyword_body;
+        let render_body = |body: &str| {
+            let kb = parse_keyword_body(body, 0).expect("parse");
+            let ddl = render_create_ddl("rt", &kb.into_definition()).expect("render");
+            let as_pos = ddl.find(" AS\n").expect("AS");
+            format!("AS {}", &ddl[as_pos + 4..])
+        };
+        let drifted: Vec<&str> = ["\u{b}", "\u{c}", "\u{2003}"]
+            .into_iter()
+            .filter(|ws| {
+                let body = format!(
+                    "AS\nTABLES (\n    a AS (\u{1})\n)\nDIMENSIONS (\n    a.d AS x.{ws} WITH TAG (t = '')\n)\n"
+                );
+                let first = render_body(&body);
+                first != render_body(&first)
+            })
+            .collect();
+        assert!(drifted.is_empty(), "render drifted after {drifted:?}");
     }
 }

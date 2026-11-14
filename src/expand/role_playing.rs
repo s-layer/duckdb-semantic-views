@@ -31,6 +31,35 @@ pub(super) fn relationships_to_table(
     names
 }
 
+/// The relationships into `rp` that are its roles: those of a table that
+/// references `rp` more than once, sorted. A relationship from a table that
+/// references it once (gates to their airport) is no role a `USING` can pick,
+/// so a message offering the roles leaves it out. All of them when no table
+/// references `rp` twice.
+fn roles_of(def: &SemanticViewDefinition, rp: &str) -> Vec<String> {
+    let rp = rp.to_ascii_lowercase();
+    let into: Vec<&crate::model::Join> = def
+        .joins
+        .iter()
+        .filter(|j| !j.fk_columns.is_empty() && j.table.to_ascii_lowercase() == rp)
+        .collect();
+    let mut names: Vec<String> = into
+        .iter()
+        .filter(|j| {
+            into.iter()
+                .filter(|k| k.from_alias.eq_ignore_ascii_case(&j.from_alias))
+                .count()
+                > 1
+        })
+        .filter_map(|j| j.name.clone())
+        .collect();
+    if names.is_empty() {
+        return relationships_to_table(def, &rp);
+    }
+    names.sort_unstable();
+    names
+}
+
 /// Is `target_alias` a genuinely *role-playing* target — i.e. does any single
 /// source table declare two or more named relationships to it (e.g.
 /// `orders(dep_code) REFERENCES airports` + `orders(arr_code) REFERENCES
@@ -1029,13 +1058,22 @@ pub(super) fn find_using_context(
                     return Ok(Some(scoped_join_alias(&dim_table_lower, rel)));
                 }
             }
-            let available_relationships = relationships_to_table(def, &rp);
+            // A table that itself references the role-played one (a gate of
+            // an airport), other than one-to-one (the airports' details, which
+            // `role_path` follows), is below it: reaching it crosses a role and
+            // then fans out, which no USING mends (Snowflake refuses a role
+            // followed by a fan-out, fixture 9).
+            let fans_out = role_path(def, &rp, &dim_table_lower).is_none()
+                && crate::graph::RelationshipGraph::from_definition(def)
+                    .is_ok_and(|g| graph_chain_reaches(&g, &dim_table_lower, &rp));
+            let available_relationships = roles_of(def, &rp);
             return Err(ExpandError::AmbiguousDescendantPath {
                 view_name: view_name.to_string(),
                 dimension_name: dim.name.clone(),
                 dimension_table: dim_table_lower,
                 role_playing_table: rp,
                 available_relationships,
+                fans_out,
             });
         }
         return Ok(None); // Single or no relationship -> unambiguous, use bare alias
@@ -1062,8 +1100,8 @@ pub(super) fn find_using_context(
         return Err(ExpandError::AmbiguousPath {
             view_name: view_name.to_string(),
             dimension_name: dim.name.clone(),
-            dimension_table: dim_table_lower,
-            available_relationships: rels,
+            dimension_table: dim_table_lower.clone(),
+            available_relationships: roles_of(def, &dim_table_lower),
         });
     };
     // Otherwise look for USING context.
@@ -1081,8 +1119,8 @@ pub(super) fn find_using_context(
         return Err(ExpandError::AmbiguousPath {
             view_name: view_name.to_string(),
             dimension_name: dim.name.clone(),
-            dimension_table: dim_table_lower,
-            available_relationships: rels,
+            dimension_table: dim_table_lower.clone(),
+            available_relationships: roles_of(def, &dim_table_lower),
         });
     }
 
@@ -1096,8 +1134,8 @@ pub(super) fn find_using_context(
         Err(ExpandError::AmbiguousPath {
             view_name: view_name.to_string(),
             dimension_name: dim.name.clone(),
-            dimension_table: dim_table_lower,
-            available_relationships: rels,
+            dimension_table: dim_table_lower.clone(),
+            available_relationships: roles_of(def, &dim_table_lower),
         })
     }
 }

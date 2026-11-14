@@ -906,7 +906,105 @@ pub(crate) fn lambda_scopes(text: &str) -> Vec<LambdaScope> {
             }
         }
     }
+    out.extend(comprehension_scopes(text, &refs));
     out
+}
+
+/// The list comprehensions in `text` (`[x * 2 FOR x IN xs IF x > 1]`), each
+/// as the scopes of its `FOR <name> IN` variable: the element expression
+/// and the `FOR <name>`, from the `[` to the `IN`, and the `IF` condition,
+/// from the `IF` to the `]`. The `IN <source>` between them is outside it, as in `DuckDB`'s rewrite
+/// to `list_transform(list_filter(src, x -> c), x -> e)`.
+fn comprehension_scopes(text: &str, refs: &[IdentRef<'_>]) -> Vec<LambdaScope> {
+    /// An open bracket: its kind and position, and for a `[` holding a
+    /// comprehension, the variable, where its `IN` starts, and where its
+    /// `IF` starts if it has one.
+    struct Open {
+        kind: u8,
+        start: usize,
+        comp: Option<(String, usize, Option<usize>)>,
+    }
+    let bytes = text.as_bytes();
+    let mut quotes = crate::util::QuoteState::default();
+    let mut open: Vec<Open> = Vec::new();
+    let mut out = Vec::new();
+    let mut i = 0;
+    while i < bytes.len() {
+        let (next, live) = quotes.step(bytes, i);
+        if live {
+            match bytes[i] {
+                b @ (b'(' | b'[' | b'{') => open.push(Open {
+                    kind: b,
+                    start: i,
+                    comp: None,
+                }),
+                b')' | b']' | b'}' => {
+                    if let Some(Open {
+                        kind: b'[',
+                        start,
+                        comp: Some((var, in_at, if_at)),
+                    }) = open.pop()
+                    {
+                        out.push(LambdaScope {
+                            params: vec![var.clone()],
+                            span: start..in_at,
+                        });
+                        if let Some(if_at) = if_at {
+                            out.push(LambdaScope {
+                                params: vec![var],
+                                span: if_at..i + 1,
+                            });
+                        }
+                    }
+                }
+                _ => {
+                    if let Some(Open {
+                        kind: b'[', comp, ..
+                    }) = open.last_mut()
+                    {
+                        match comp {
+                            None => {
+                                if let Some(name) = comprehension_variable(text, refs, i) {
+                                    // The scope runs to the `IN`, so it holds
+                                    // the variable's own `FOR <name>`.
+                                    let in_at = refs
+                                        .iter()
+                                        .find(|r| r.start > i && r.raw.eq_ignore_ascii_case("in"))
+                                        .map_or(i, |r| r.start);
+                                    *comp = Some((name, in_at, None));
+                                }
+                            }
+                            Some((_, _, if_at @ None)) => {
+                                let is_if = refs
+                                    .iter()
+                                    .any(|r| r.start == i && r.raw.eq_ignore_ascii_case("if"));
+                                if is_if {
+                                    *if_at = Some(i);
+                                }
+                            }
+                            Some(_) => {}
+                        }
+                    }
+                }
+            }
+        }
+        i = next;
+    }
+    out
+}
+
+/// The variable of a comprehension's `FOR <name> IN` starting at byte `at`
+/// of `text`, if a bare `FOR` starts there.
+fn comprehension_variable(text: &str, refs: &[IdentRef<'_>], at: usize) -> Option<String> {
+    let kw = refs.iter().find(|r| r.start == at)?;
+    if !kw.raw.eq_ignore_ascii_case("for") {
+        return None;
+    }
+    let from = skip_spaces(text.as_bytes(), kw.end);
+    let var = refs.iter().find(|r| r.start == from && r.is_bare())?;
+    word_after(text, var.end)
+        .eq_ignore_ascii_case("in")
+        .then(|| var.key())
 }
 
 /// Whether the name or call head `r` starts with a parameter of a lambda it
@@ -1020,6 +1118,27 @@ pub(crate) fn is_not_a_column(text: &str, r: &IdentRef<'_>) -> bool {
         })
         || ((word == "first" || word == "last")
             && word_before(text, r.start).eq_ignore_ascii_case("nulls"))
+        || (word == "within" && word_after(text, r.end).eq_ignore_ascii_case("group"))
+        || ((word == "ignore" || word == "respect")
+            && word_after(text, r.end).eq_ignore_ascii_case("nulls")
+            && !matches!(
+                word_after(text, nulls_end(text, r.end))
+                    .to_ascii_lowercase()
+                    .as_str(),
+                "first" | "last"
+            ))
+}
+
+/// The byte just past the word that follows byte `from` of `text`
+/// (spaces skipped), or `from` when no word follows.
+fn nulls_end(text: &str, from: usize) -> usize {
+    let bytes = text.as_bytes();
+    let start = skip_spaces(bytes, from);
+    let len = text[start..]
+        .bytes()
+        .take_while(|b| b.is_ascii_alphanumeric() || *b == b'_')
+        .count();
+    start + len
 }
 
 /// Refuse the calls in `text` that read columns other than through the names

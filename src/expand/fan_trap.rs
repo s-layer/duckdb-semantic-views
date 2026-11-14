@@ -85,7 +85,8 @@ pub(super) fn check_fan_traps(
     // only when no fan-out that is never counted once (across an ASOF or range
     // hop walked backwards) is refused too. That one blocks the query whatever
     // the plan does, and the counts-once note would name the wrong fix.
-    let mut bridge_trap: Option<ExpandError> = None;
+    // Each counts-once trap with the metric it names, in query order.
+    let mut bridge_traps: Vec<(&Metric, FanTrapError)> = Vec::new();
     for met in resolved_mets {
         // EXP-8: a base metric with no source table and no base-metric
         // references has an empty grain set but sits at the root grain — the
@@ -122,30 +123,58 @@ pub(super) fn check_fan_traps(
                     continue;
                 }
                 if let Some(rel_name) = fanning_edge_on_path(&path, &card_map) {
-                    let trap = ExpandError::FanTrap {
-                        detail: Box::new(FanTrapError {
-                            view_name: view_name.to_string(),
-                            metric_name: met.name.clone(),
-                            metric_table: met
-                                .source_table
-                                .clone()
-                                .unwrap_or_else(|| met_table.clone()),
-                            dimension_name: dim.name.clone(),
-                            dimension_table: dim_table_raw.clone(),
-                            relationship_name: rel_name,
-                            counts_once,
-                        }),
+                    let trap = FanTrapError {
+                        view_name: view_name.to_string(),
+                        metric_name: met.name.clone(),
+                        metric_table: met
+                            .source_table
+                            .clone()
+                            .unwrap_or_else(|| met_table.clone()),
+                        dimension_name: dim.name.clone(),
+                        dimension_table: dim_table_raw.clone(),
+                        relationship_name: rel_name,
+                        counts_once,
+                        once_blocker: None,
                     };
                     if !counts_once {
-                        return Err(trap);
+                        return Err(ExpandError::FanTrap {
+                            detail: Box::new(trap),
+                        });
                     }
-                    bridge_trap.get_or_insert(trap);
+                    bridge_traps.push((met, trap));
                 }
             }
         }
     }
-    if let Some(trap) = bridge_trap {
-        return Err(trap);
+    if !bridge_traps.is_empty() {
+        // v0.19.0 review O2: report the metric that keeps the query from being
+        // counted once per group, with its reason, when one does.
+        let queried: HashSet<String> = resolved_dims
+            .iter()
+            .map(|d| crate::ident::normalize_ident_part(&d.name))
+            .collect();
+        // Only a metric whose own rows fan out can stop the plan (an active
+        // snapshot on a table that does not fan out is answered beside it):
+        // an active snapshot first, then a keyless table.
+        let fans = |m: &Metric| bridge_traps.iter().any(|(t, _)| std::ptr::eq(*t, m));
+        let fanning: Vec<&Metric> = resolved_mets.iter().copied().filter(|m| fans(m)).collect();
+        let blocker = fanning
+            .iter()
+            .find_map(|m| once_blocker(def, m, &queried, false).map(|why| (*m, why)))
+            .or_else(|| {
+                fanning
+                    .iter()
+                    .find_map(|m| once_blocker(def, m, &queried, true).map(|why| (*m, why)))
+            });
+        let at = blocker
+            .as_ref()
+            .and_then(|(m, _)| bridge_traps.iter().position(|(t, _)| std::ptr::eq(*t, *m)))
+            .unwrap_or(0);
+        let mut trap = bridge_traps.swap_remove(at).1;
+        trap.once_blocker = blocker.map(|(_, why)| why);
+        return Err(ExpandError::FanTrap {
+            detail: Box::new(trap),
+        });
     }
 
     // EXP-9 (code-review 2026-08-03): the loop above pairs each metric with the
@@ -197,6 +226,7 @@ pub(super) fn check_fan_traps(
                         dimension_table: na.source_table_raw,
                         relationship_name: rel_name,
                         counts_once: fan_out_counts_once(&path, &card_map, &temporal),
+                        once_blocker: None,
                     }),
                 });
             }
@@ -564,6 +594,66 @@ pub(super) fn metric_answers_fan_outs(
                     def.tables
                         .iter()
                         .any(|tr| tr.alias.eq_ignore_ascii_case(t) && !tr.pk_columns.is_empty())
+                })
+        })
+}
+
+/// Why `met` (or a metric it is derived from) cannot be counted once per
+/// group in a query grouped by the dimensions `queried` (normalized names),
+/// as a clause naming that metric: an active semi-additive metric, or (with
+/// `keyless`) one on a table with no PRIMARY KEY. `None` when nothing about
+/// its metrics stops it ([`metric_answers_fan_outs`]'s own rules, per metric).
+fn once_blocker(
+    def: &SemanticViewDefinition,
+    met: &Metric,
+    queried: &HashSet<String>,
+    keyless: bool,
+) -> Option<String> {
+    let names: HashSet<String> = if met.source_table.is_some() {
+        HashSet::from([crate::ident::normalize_ident_part(&met.name)])
+    } else {
+        super::facts::collect_transitive_metric_names(met, &def.metrics)
+    };
+    def.metrics
+        .iter()
+        .filter(|m| names.contains(&crate::ident::normalize_ident_part(&m.name)))
+        .find_map(|m| {
+            let unqueried: Vec<&str> = m
+                .non_additive_by
+                .iter()
+                .filter(|na| {
+                    !queried.contains(&super::semi_additive::na_dim_match_key(def, &na.dimension))
+                })
+                .map(|na| na.dimension.as_str())
+                .collect();
+            if !unqueried.is_empty() {
+                return Some(format!(
+                    "metric '{}' is semi-additive and its NON ADDITIVE BY dimension {} not \
+                     queried",
+                    m.name,
+                    match unqueried.as_slice() {
+                        [one] => format!("'{one}' is"),
+                        many => format!(
+                            "{} are",
+                            many.iter()
+                                .map(|d| format!("'{d}'"))
+                                .collect::<Vec<_>>()
+                                .join(", ")
+                        ),
+                    }
+                ));
+            }
+            let table = m.source_table.as_deref().filter(|_| keyless)?;
+            def.tables
+                .iter()
+                .find(|t| t.alias.eq_ignore_ascii_case(table))
+                .filter(|t| t.pk_columns.is_empty())
+                .map(|t| {
+                    format!(
+                        "metric '{}' is on table '{}', and table '{}' has no PRIMARY KEY to count \
+                         its rows by",
+                        m.name, t.alias, t.alias
+                    )
                 })
         })
 }

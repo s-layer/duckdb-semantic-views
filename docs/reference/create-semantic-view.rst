@@ -33,9 +33,9 @@ Syntax
        [, ... ]
    )
    [ RELATIONSHIPS (
-       <rel_name> AS <from_alias>( <fk_column> [, <fk_column> ...] )
+       [ <rel_name> AS ] <from_alias>( <fk_column> [, <fk_column> ...] )
            REFERENCES <to_alias> [( [ ASOF ] <ref_column> [, [ ASOF ] <ref_column> ...] )]
-     | <rel_name> AS <from_alias>( <fk_column> )
+     | [ <rel_name> AS ] <from_alias>( <fk_column> )
            REFERENCES <to_alias>( BETWEEN <start_column> AND <end_column> EXCLUSIVE )
        [, ... ]
    ) ]
@@ -513,7 +513,7 @@ Declares FK/PK join paths between tables. Each entry names a relationship, speci
 
 **Parameters:**
 
-- ``<rel_name>``, a unique name identifying this relationship. It may be a quoted identifier (``"Dep Airport"``), including one with spaces or an embedded ``""``.
+- ``<rel_name>``, optional, a unique name identifying this relationship. It may be a quoted identifier (``"Dep Airport"``), including one with spaces or an embedded ``""``. A relationship declared without one, as in ``orders(customer_id) REFERENCES customers``, gets a generated name of the form ``SYS_RELATIONSHIP_<id>``, as in Snowflake, which ``DESCRIBE SEMANTIC VIEW`` shows. Snowflake draws a new random id on every ``CREATE``; here the id comes from the entry's position, tables and columns, so re-creating the same view, or re-creating it from its ``GET_DDL`` or YAML export, gives the same name; declaring a relationship before it changes the name. ``GET_DDL`` and the YAML export leave a generated name out. A metric's ``USING`` cannot name a generated name (``relationship '...' in USING clause of metric '...' was declared without a name``): name the relationship when a metric's ``USING`` needs to pick it. *(Added in 0.20.0.)*
 - ``<from_alias>``, the table alias containing the FK columns.
 - ``(<fk_column>, ...)``, one or more FK column names on the "from" table.
 - ``REFERENCES <to_alias> [(<ref_column>, ...)]``, the target table alias. Optionally specify which columns on the target table to join against. If omitted, the target's ``PRIMARY KEY`` columns are used. The JOIN ON clause is synthesized as ``from_alias.fk_column = to_alias.ref_column``.
@@ -565,7 +565,7 @@ Each event takes the period with ``start_ts <= event_ts`` and ``event_ts < end_t
 
 - The relationship has one foreign-key column, and the ``REFERENCES`` list is the one ``BETWEEN`` item. Only half-open ranges (``EXCLUSIVE``) are accepted, and the start and end must be two different columns.
 - The target must declare a ``DISTINCT RANGE`` constraint on the same two columns, in the same order, and, like any relationship target, a ``PRIMARY KEY`` or ``UNIQUE`` key. ``CREATE`` checks that the three columns compare.
-- The data is not checked for overlapping periods, as in Snowflake. An event that falls in two periods is counted under each of them when grouped by the period, and once in a total that does not use the period table. A query that does join it, for a filter on a period dimension say, meets the event once per period.
+- The data is not checked for overlapping periods, as in Snowflake. An event that falls in two periods is counted under each of them when grouped by the period, and once in a total that does not use the period table. A query that does join it, for a filter on a period dimension say, meets the event once per period. Snowflake gives the same answers, also when two overlapping periods share a label: grouped by that label or filtered on it, an event in both counts twice.
 - A range relationship is always many-to-one, since many rows can fall in the same period. A metric on the target is computed over the target's own rows, and grouping it by a dimension of the "from" table is refused as a :ref:`fan trap <howto-fan-traps>`.
 - ``DESCRIBE`` writes the range in ``REF_KEY`` as ``{"start_column":"<start>","end_column":"<end>","type":"RANGE"}`` and shows the table's constraint as a ``CONSTRAINT`` row, ``GET_DDL`` writes both back, and the YAML export writes the end column as ``range_end`` and the constraint under ``distinct_ranges``. A release of the extension older than 0.19.0 cannot read a view with a range relationship or a ``DISTINCT RANGE`` constraint.
 
@@ -797,7 +797,7 @@ Declares named grouping expressions available for queries.
 
 .. note::
 
-   **Column qualification in expressions.** The ``<alias>.<dim_name>`` on the left of ``AS`` (the logical name) must always carry its table-alias prefix. Column references *inside the expression* on the right of ``AS`` may be either qualified (``o.region``) or unqualified (``region``). As in Snowflake, an unqualified column is a column of the member's own table: ``ap.airport_count AS COUNT(code)`` counts the airports' ``code`` in every query, even one that also joins another table with a ``code`` column. The same rule applies to ``METRICS`` and ``FACTS`` expressions. An unqualified column that belongs only to *another* table is refused at ``CREATE`` (:ref:`ref-err-bare-column`); to use it, define a fact on that table and reference the fact. An unqualified name that is a variable, a fact, or (in a metric, outside an aggregate call) another metric on the same table is that member, not a column, except that a fact on *another* table does not take over a column of the member's own table: beside ``c.amount AS c.credit``, ``o.rev AS SUM(amount)`` sums ``o.amount``; write ``c.amount`` to name the fact. A member's own name in its own expression is its column: ``li.qty AS qty`` and ``o.amount AS SUM(amount)`` read ``li.qty`` and ``o.amount``. Re-creating a view made by an earlier release unchanged, with ``CREATE OR ALTER``, keeps its materializations.
+   **Column qualification in expressions.** The ``<alias>.<dim_name>`` on the left of ``AS`` (the logical name) must always carry its table-alias prefix. Column references *inside the expression* on the right of ``AS`` may be either qualified (``o.region``) or unqualified (``region``). As in Snowflake, an unqualified column is a column of the member's own table: ``ap.airport_count AS COUNT(code)`` counts the airports' ``code`` in every query, even one that also joins another table with a ``code`` column. The same rule applies to ``METRICS`` and ``FACTS`` expressions. An unqualified column that belongs only to *another* table is refused at ``CREATE`` (:ref:`ref-err-bare-column`); to use it, define a fact on that table and reference the fact. An unqualified name that is a variable, a fact, or (in a metric, outside an aggregate call) another metric on the same table is that member, not a column, except that a fact on *another* table does not take over a column of the member's own table: beside ``c.amount AS c.credit``, ``o.rev AS SUM(amount)`` sums ``o.amount``; write ``c.amount`` to name the fact. A member's own name in its own expression is its column: ``li.qty AS qty`` and ``o.amount AS SUM(amount)`` read ``li.qty`` and ``o.amount``. A field or method read off an own column follows the same rule: ``s.a``, ``m.day`` and ``txt.upper()`` read the member's own ``s``, ``m`` and ``txt``, unless ``s``, ``m`` or ``txt`` is a table alias of the view, in which case the name is that table's column, as in DuckDB. Re-creating a view made by an earlier release unchanged, with ``CREATE OR ALTER``, keeps its materializations.
 
    .. versionchanged:: 0.19.0
 

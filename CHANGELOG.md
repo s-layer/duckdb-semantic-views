@@ -9,7 +9,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-_No unreleased changes yet._
+### Added
+
+- A relationship's name is optional, as in Snowflake: `RELATIONSHIPS (orders(customer_id) REFERENCES customers)` is accepted, in the DDL and in YAML. The relationship gets a generated name, `SYS_RELATIONSHIP_` followed by an id, which `DESCRIBE SEMANTIC VIEW` shows. Snowflake draws a new random id on every `CREATE`; here the id comes from the entry's position, tables and columns, so re-creating the view, also from its `GET_DDL` or YAML export, keeps it. `GET_DDL` and the YAML export leave the generated name out. A metric's `USING` cannot name a generated name, which changes when a relationship is declared before it; name the relationship instead.
+
+### Fixed
+
+- A member expression whose bare columns sit beside `WITHIN GROUP`, `IGNORE NULLS` or `RESPECT NULLS`, or that uses a list comprehension (`[x * 2 FOR x IN tags]`), failed at `CREATE` or at query time: the keyword or the comprehension's variable was read as a column. A field or method of a column of the member's own table written bare (`addr.city`, `name.upper()`) was refused as ambiguous when another table had a column of that name; it reads the member's own table.
+- The fan trap error for a query that can't count a fan-out once per group names the metric that stops it and why (a semi-additive metric whose `NON ADDITIVE BY` dimension is not queried, or a metric on a table with no `PRIMARY KEY`), where it used to name whichever metric was checked first.
+- The error for a dimension on a table that references a role-played table, grouped by a metric that reaches that table across one of its roles, says the query fans out from the role-played table, and lists only that table's roles.
 
 ## [0.19.0] - 2026-11-12
 

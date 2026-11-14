@@ -43,8 +43,8 @@ Concept Mapping
      - ``<alias> AS ( <query> )`` in ``TABLES``
      - The same form (see :ref:`howto-query-tables`)
    * - Relationships
-     - ``RELATIONSHIPS`` clause with FK REFERENCES
-     - ``RELATIONSHIPS`` clause with FK REFERENCES
+     - ``RELATIONSHIPS`` clause with FK REFERENCES; the ``<name> AS`` is optional
+     - The same clause, with the name optional too. An unnamed relationship's generated ``SYS_RELATIONSHIP_<id>`` name is the same each time the view is created, where Snowflake draws a random one
    * - Point-in-time and period joins
      - ``ASOF`` on a referenced column; ``REFERENCES t (BETWEEN start AND end EXCLUSIVE)`` with a ``DISTINCT RANGE`` constraint
      - The same forms (see :ref:`howto-asof-range`)

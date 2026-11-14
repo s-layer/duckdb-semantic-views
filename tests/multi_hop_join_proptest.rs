@@ -611,6 +611,7 @@ fn build_def_shaped(hop: Hop, diamond: bool, w_first: bool) -> SemanticViewDefin
                 cardinality: Cardinality::ManyToOne,
                 asof: None,
                 range_end: Some("re".to_string()),
+                generated_name: false,
             }
         } else if asof {
             Join {
@@ -622,6 +623,7 @@ fn build_def_shaped(hop: Hop, diamond: bool, w_first: bool) -> SemanticViewDefin
                 cardinality: Cardinality::ManyToOne,
                 asof: Some(1),
                 range_end: None,
+                generated_name: false,
             }
         } else {
             Join {
@@ -633,6 +635,7 @@ fn build_def_shaped(hop: Hop, diamond: bool, w_first: bool) -> SemanticViewDefin
                 cardinality: Cardinality::ManyToOne,
                 asof: None,
                 range_end: None,
+                generated_name: false,
             }
         },
         Join {
@@ -644,6 +647,7 @@ fn build_def_shaped(hop: Hop, diamond: bool, w_first: bool) -> SemanticViewDefin
             cardinality: Cardinality::ManyToOne,
             asof: None,
             range_end: None,
+            generated_name: false,
         },
     ];
     if diamond {
@@ -659,6 +663,7 @@ fn build_def_shaped(hop: Hop, diamond: bool, w_first: bool) -> SemanticViewDefin
                 cardinality: Cardinality::ManyToOne,
                 asof: None,
                 range_end: None,
+                generated_name: false,
             });
         }
     }

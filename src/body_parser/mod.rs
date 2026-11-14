@@ -2925,6 +2925,63 @@ mod tests {
         );
     }
 
+    #[test]
+    fn unnamed_relationship_gets_a_stable_generated_name() {
+        // Snowflake accepts `from(cols) REFERENCES to` with no `name AS`
+        // (fixture 12) and names the relationship SYS_RELATIONSHIP_<id>.
+        let body = "o(customer_id) REFERENCES c, li(order_id) REFERENCES o, \
+                    named AS li(product_id) REFERENCES p";
+        let joins = parse_relationships_clause(body, 0).unwrap();
+        assert_eq!(joins.len(), 3);
+        let (a, b) = (&joins[0], &joins[1]);
+        assert_eq!((a.from_alias.as_str(), a.table.as_str()), ("o", "c"));
+        assert_eq!(a.fk_columns, vec!["customer_id".to_string()]);
+        assert!(a.generated_name && b.generated_name && !joins[2].generated_name);
+        let name = a.name.as_deref().unwrap();
+        assert!(name.starts_with("SYS_RELATIONSHIP_"), "{name}");
+        assert_eq!(name.len(), "SYS_RELATIONSHIP_".len() + 36, "{name}");
+        assert_ne!(a.name, b.name);
+        assert_eq!(joins[2].name.as_deref(), Some("named"));
+        // The same text always gives the same name.
+        let again = parse_relationships_clause(body, 0).unwrap();
+        assert_eq!(again[0].name, a.name);
+        assert_eq!(again[1].name, b.name);
+        // Two identical unnamed entries differ by position.
+        let twins = parse_relationships_clause(
+            "o(customer_id) REFERENCES c, o(customer_id) REFERENCES c",
+            0,
+        )
+        .unwrap();
+        assert_ne!(twins[0].name, twins[1].name);
+    }
+
+    /// The generated name survives `GET_DDL` (which drops a REFERENCES list
+    /// that matches the primary key) and the YAML export (which writes the
+    /// list the CREATE inferred): it does not depend on the REFERENCES
+    /// columns (PR #358 review).
+    #[test]
+    fn a_generated_name_does_not_depend_on_the_references_columns() {
+        let bare = parse_relationships_clause("o(cid) REFERENCES c", 0).unwrap();
+        let listed = parse_relationships_clause("o(cid) REFERENCES c(cid)", 0).unwrap();
+        assert_eq!(bare[0].name, listed[0].name);
+        let mut inferred = bare[0].clone();
+        inferred.ref_columns = vec!["cid".to_string()];
+        assert_eq!(Some(inferred.generated_name_at(0)), bare[0].name);
+    }
+
+    #[test]
+    fn unnamed_range_and_asof_relationships_parse() {
+        let joins = parse_relationships_clause(
+            "o(ts) REFERENCES p(BETWEEN s AND e EXCLUSIVE), \
+             o(k, t) REFERENCES q(k, ASOF t)",
+            0,
+        )
+        .unwrap();
+        assert!(joins.iter().all(|j| j.generated_name));
+        assert_eq!(joins[0].range_end.as_deref(), Some("e"));
+        assert_eq!(joins[1].asof, Some(1));
+    }
+
     // -----------------------------------------------------------------------
     // Phase 33: Cardinality keyword rejection + REFERENCES(cols) + UNIQUE tests
     // -----------------------------------------------------------------------

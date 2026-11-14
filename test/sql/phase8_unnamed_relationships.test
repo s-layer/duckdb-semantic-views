@@ -1,0 +1,183 @@
+# name: test/sql/phase8_unnamed_relationships.test
+# description: A relationship's name is optional, as in Snowflake (fixture 12):
+#   an unnamed one gets a generated SYS_RELATIONSHIP_<uuid> name, which DESCRIBE
+#   shows and GET_DDL and the YAML export leave out.
+# group: [sql]
+
+require semantic_views
+
+statement ok
+CREATE TABLE ur_customers (customer_id INT, region VARCHAR);
+
+statement ok
+CREATE TABLE ur_orders (order_id INT, customer_id INT, alt_customer_id INT, amount DECIMAL(10, 2));
+
+statement ok
+INSERT INTO ur_customers VALUES (1, 'North'), (2, 'South');
+
+statement ok
+INSERT INTO ur_orders VALUES (10, 1, 2, 100), (11, 2, 1, 50);
+
+# U1: the docs' own form, `orders(customer_id) REFERENCES customers`.
+statement ok
+CREATE SEMANTIC VIEW ur_u1
+  TABLES (customers AS ur_customers PRIMARY KEY (customer_id), orders AS ur_orders PRIMARY KEY (order_id))
+  RELATIONSHIPS (orders(customer_id) REFERENCES customers)
+  DIMENSIONS (customers.region AS region)
+  METRICS (orders.total AS SUM(amount));
+
+query TR
+SELECT * FROM SEMANTIC_VIEW(ur_u1 DIMENSIONS customers.region METRICS orders.total) ORDER BY 1;
+----
+North	100.00
+South	50.00
+
+# DESCRIBE names it SYS_RELATIONSHIP_<uuid>, lowercase and hyphenated.
+query TTTT
+SELECT regexp_matches(object_name, '^SYS_RELATIONSHIP_[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'),
+       parent_entity, property, property_value
+FROM describe_semantic_view('ur_u1') WHERE object_kind = 'RELATIONSHIP' ORDER BY property;
+----
+true	ur_orders	FOREIGN_KEY	["customer_id"]
+true	ur_orders	REF_KEY	["customer_id"]
+true	ur_orders	REF_TABLE	ur_customers
+true	ur_orders	TABLE	ur_orders
+
+# GET_DDL leaves it unnamed, and its output re-creates the view.
+query I
+SELECT contains(GET_DDL('SEMANTIC_VIEW', 'ur_u1'), 'SYS_RELATIONSHIP');
+----
+false
+
+query I
+SELECT contains(GET_DDL('SEMANTIC_VIEW', 'ur_u1'), '    orders(customer_id) REFERENCES customers');
+----
+true
+
+query I
+SELECT contains(read_yaml_from_semantic_view('ur_u1'), 'SYS_RELATIONSHIP');
+----
+false
+
+# U2: a named and an unnamed relationship side by side; the named one keeps its
+# name, and two relationships from orders to customers are two roles.
+statement ok
+CREATE SEMANTIC VIEW ur_u2
+  TABLES (customers AS ur_customers PRIMARY KEY (customer_id), orders AS ur_orders PRIMARY KEY (order_id))
+  RELATIONSHIPS (orders(customer_id) REFERENCES customers, alt AS orders(alt_customer_id) REFERENCES customers)
+  DIMENSIONS (customers.region AS region)
+  METRICS (orders.total AS SUM(amount), orders.alt_total USING (alt) AS SUM(amount));
+
+query T
+SELECT count(DISTINCT object_name) FILTER (WHERE object_name LIKE 'SYS_RELATIONSHIP_%') || ' ' ||
+       count(DISTINCT object_name) FILTER (WHERE object_name = 'alt')
+FROM describe_semantic_view('ur_u2') WHERE object_kind = 'RELATIONSHIP';
+----
+1 1
+
+query TR
+SELECT * FROM SEMANTIC_VIEW(ur_u2 DIMENSIONS customers.region METRICS orders.alt_total) ORDER BY 1;
+----
+North	50.00
+South	100.00
+
+query I
+SELECT contains(GET_DDL('SEMANTIC_VIEW', 'ur_u2'), 'alt AS orders(alt_customer_id) REFERENCES customers');
+----
+true
+
+# U3: two unnamed relationships between the same pair are accepted, each with
+# its own name. With no USING able to name either, grouping across them is
+# refused (Snowflake: 010246 multi-path).
+statement ok
+CREATE SEMANTIC VIEW ur_u3
+  TABLES (customers AS ur_customers PRIMARY KEY (customer_id), orders AS ur_orders PRIMARY KEY (order_id))
+  RELATIONSHIPS (orders(customer_id) REFERENCES customers, orders(alt_customer_id) REFERENCES customers)
+  DIMENSIONS (customers.region AS region)
+  METRICS (orders.total AS SUM(amount));
+
+query I
+SELECT count(DISTINCT object_name) FROM describe_semantic_view('ur_u3')
+WHERE object_kind = 'RELATIONSHIP' AND object_name LIKE 'SYS_RELATIONSHIP_%';
+----
+2
+
+statement error
+SELECT * FROM SEMANTIC_VIEW(ur_u3 DIMENSIONS customers.region METRICS orders.total);
+----
+is ambiguous
+
+# The generated name does not change when the view is created again.
+statement ok
+CREATE TABLE ur_names AS SELECT DISTINCT object_name FROM describe_semantic_view('ur_u1') WHERE object_kind = 'RELATIONSHIP';
+
+statement ok
+CREATE OR REPLACE SEMANTIC VIEW ur_u1
+  TABLES (customers AS ur_customers PRIMARY KEY (customer_id), orders AS ur_orders PRIMARY KEY (order_id))
+  RELATIONSHIPS (orders(customer_id) REFERENCES customers)
+  DIMENSIONS (customers.region AS region)
+  METRICS (orders.total AS SUM(amount));
+
+query I
+SELECT count(*) FROM ur_names JOIN (SELECT DISTINCT object_name FROM describe_semantic_view('ur_u1') WHERE object_kind = 'RELATIONSHIP') USING (object_name);
+----
+1
+
+# A REFERENCES list that matches the key does not change the generated name,
+# so a view re-created from GET_DDL (which drops the list) or from the YAML
+# export (which writes the inferred one) keeps it.
+statement ok
+CREATE SEMANTIC VIEW ur_u1_listed
+  TABLES (customers AS ur_customers PRIMARY KEY (customer_id), orders AS ur_orders PRIMARY KEY (order_id))
+  RELATIONSHIPS (orders(customer_id) REFERENCES customers(customer_id))
+  DIMENSIONS (customers.region AS region)
+  METRICS (orders.total AS SUM(amount));
+
+query I
+SELECT count(*) FROM ur_names JOIN (SELECT DISTINCT object_name FROM describe_semantic_view('ur_u1_listed') WHERE object_kind = 'RELATIONSHIP') USING (object_name);
+----
+1
+
+statement ok
+CREATE SEMANTIC VIEW ur_u1_yaml FROM YAML $$
+tables:
+  - alias: customers
+    table: ur_customers
+    pk_columns: [customer_id]
+  - alias: orders
+    table: ur_orders
+    pk_columns: [order_id]
+joins:
+  - from_alias: orders
+    table: customers
+    fk_columns: [customer_id]
+    ref_columns: [customer_id]
+dimensions:
+  - name: region
+    expr: customers.region
+    source_table: customers
+metrics:
+  - name: total
+    expr: SUM(amount)
+    source_table: orders
+$$;
+
+query I
+SELECT count(*) FROM ur_names JOIN (SELECT DISTINCT object_name FROM describe_semantic_view('ur_u1_yaml') WHERE object_kind = 'RELATIONSHIP') USING (object_name);
+----
+1
+
+statement ok
+DROP SEMANTIC VIEW ur_u1_yaml;
+
+statement ok
+DROP SEMANTIC VIEW ur_u1_listed;
+
+statement ok
+DROP SEMANTIC VIEW ur_u3;
+
+statement ok
+DROP SEMANTIC VIEW ur_u2;
+
+statement ok
+DROP SEMANTIC VIEW ur_u1;

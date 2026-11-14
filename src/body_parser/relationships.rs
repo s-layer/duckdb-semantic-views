@@ -2,7 +2,7 @@
 //!
 //! §6.1 (phase 2, code-review 2026-07-11): migrated onto the shared
 //! [`Cursor`]/lexer. The grammar is
-//! `rel_name AS from_alias(fk_cols) REFERENCES to_alias[(ref_cols)]`; parsing
+//! `[rel_name AS] from_alias(fk_cols) REFERENCES to_alias[(ref_cols)]`; parsing
 //! it through tokens fixes the non-quote-aware `after_as.find('(')` (P-11 — a
 //! quoted `from_alias` containing `(` mis-split) and closes the silent-discard
 //! gap between the FK list and `REFERENCES` (text there was dropped, the P-1
@@ -29,16 +29,19 @@ pub(crate) fn parse_relationships_clause(
     let entries = split_at_depth0_commas(body)?;
     let mut result = Vec::new();
 
-    for (entry_start, entry) in entries {
+    for (index, (entry_start, entry)) in entries.into_iter().enumerate() {
         let entry_offset = base_offset + entry_start;
-        let join = parse_single_relationship_entry(entry, entry_offset)?;
+        let mut join = parse_single_relationship_entry(entry, entry_offset)?;
+        if join.generated_name {
+            join.name = Some(join.generated_name_at(index));
+        }
         result.push(join);
     }
 
     Ok(result)
 }
 
-/// Parse one RELATIONSHIPS entry: `rel_name AS from_alias(fk_cols) REFERENCES to_alias[(ref_cols)]`
+/// Parse one RELATIONSHIPS entry: `[rel_name AS] from_alias(fk_cols) REFERENCES to_alias[(ref_cols)]`
 ///
 /// Phase 33: Cardinality keywords (MANY TO ONE, etc.) are no longer accepted.
 /// Cardinality is inferred from PK/UNIQUE constraints at parse time.
@@ -50,13 +53,13 @@ fn parse_single_relationship_entry(entry: &str, entry_offset: usize) -> Result<J
     // `rel_name AS ...` — the relationship name is everything before the first
     // `AS` keyword token (quote-aware: an `AS` inside a quoted name is not a
     // keyword). No `AS` at all ⇒ the whole entry is malformed.
+    // No `AS` at all: an unnamed relationship (`from_alias(fk_cols)
+    // REFERENCES to_alias`), as Snowflake allows. It is named in messages by
+    // its entry and gets a generated name once parsed.
     let Some(as_tok) = cur.find_kw("AS") else {
-        return Err(cur.err(
-            0,
-            format!(
-                "Missing relationship name: expected 'rel_name AS from_alias(fk_cols) REFERENCES to_alias', got '{entry}'.",
-            ),
-        ));
+        let mut join = parse_relationship_body(&mut cur, entry, entry, entry_offset)?;
+        join.generated_name = true;
+        return Ok(join);
     };
     let rel_name = entry[..as_tok.start].trim();
     if rel_name.is_empty() {
@@ -76,10 +79,23 @@ fn parse_single_relationship_entry(entry: &str, entry_offset: usize) -> Result<J
     }
     let after_as = entry[as_tok.end..].trim_start();
     cur.advance_past_byte(as_tok.end);
+    let mut join = parse_relationship_body(&mut cur, rel_name, after_as, entry_offset)?;
+    join.name = Some(rel_name.to_string());
+    Ok(join)
+}
 
-    let from_alias = take_from_alias(&mut cur, rel_name, after_as)?;
+/// The part of a relationship entry after its `name AS`, or all of an unnamed
+/// one: `from_alias(fk_cols) REFERENCES to_alias[(ref_cols)]`. `rel_name`
+/// names it in errors. The returned join has no name.
+fn parse_relationship_body(
+    cur: &mut Cursor,
+    rel_name: &str,
+    after_as: &str,
+    entry_offset: usize,
+) -> Result<Join, ParseError> {
+    let from_alias = take_from_alias(cur, rel_name, after_as)?;
     let fk_columns = take_columns(
-        &mut cur,
+        cur,
         entry_offset,
         format!("Unclosed '(' in FK column list for relationship '{rel_name}'."),
     )?;
@@ -114,7 +130,7 @@ fn parse_single_relationship_entry(entry: &str, entry_offset: usize) -> Result<J
     };
     let mut ref_columns = if cur.peek_is_symbol(b'(') {
         take_columns(
-            &mut cur,
+            cur,
             entry_offset,
             format!("Unclosed '(' in REFERENCES column list for relationship '{rel_name}'."),
         )?
@@ -156,10 +172,11 @@ fn parse_single_relationship_entry(entry: &str, entry_offset: usize) -> Result<J
         from_alias: from_alias.to_string(),
         fk_columns,
         ref_columns,
-        name: Some(rel_name.to_string()),
+        name: None,
         cardinality: Cardinality::default(), // will be set by inference
         asof,
         range_end,
+        generated_name: false,
     })
 }
 
