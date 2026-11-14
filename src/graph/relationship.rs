@@ -291,7 +291,12 @@ fn validate_fk_references(def: &SemanticViewDefinition) -> Result<(), String> {
             check_range_reference(def, join, end)?;
             continue;
         }
-        if join.fk_columns.is_empty() || join.ref_columns.is_empty() {
+        // Phase 8.4: a many-to-many relationship references columns that
+        // are no key, by definition.
+        if join.fk_columns.is_empty()
+            || join.ref_columns.is_empty()
+            || join.cardinality == crate::model::Cardinality::ManyToMany
+        {
             continue;
         }
         let to_alias_lower = join.table.to_ascii_lowercase();

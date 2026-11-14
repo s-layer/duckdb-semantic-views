@@ -526,11 +526,23 @@ pub(super) fn two_undirected_paths_over(
 
 /// A path over relationships in either direction, as `c <- o -> s`: `->` where
 /// a table references the next, `<-` where the next references it.
+///
+/// A many-to-many relationship's key table (Phase 8.4) is not named: the step
+/// across it is `o <-[rel]-> p`, after the relationship.
 fn render_undirected(def: &SemanticViewDefinition, path: &[String]) -> String {
     let mut s = path.first().cloned().unwrap_or_default();
     for step in path.windows(2) {
-        let forward = referenced(def, &step[0]).contains(&step[1]);
-        s.push_str(if forward { " -> " } else { " <- " });
+        if super::many_to_many::is_key_table(def, &step[1]) {
+            let rel = super::many_to_many::relationship_of(def, &step[1]);
+            s.push_str(" <-[");
+            s.push_str(&rel);
+            s.push_str("]-> ");
+            continue;
+        }
+        if !super::many_to_many::is_key_table(def, &step[0]) {
+            let forward = referenced(def, &step[0]).contains(&step[1]);
+            s.push_str(if forward { " -> " } else { " <- " });
+        }
         s.push_str(&step[1]);
     }
     s

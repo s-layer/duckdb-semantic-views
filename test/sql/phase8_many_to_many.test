@@ -1,0 +1,315 @@
+# Phase 8.4: direct many-to-many relationships, as in Snowflake.
+#
+# A relationship whose referenced columns are not the referenced table's
+# PRIMARY KEY or a UNIQUE key is many-to-many: each order matches every
+# promotions row with its code. The data and the expected answers are
+# Snowflake's documented example and the Phase 8 fixture (fixture 11, part M,
+# run on Snowflake 2026-11-13): promotion P has three rows, two of them for the
+# same channel; order 4 has a code no promotion has, and order 5 a customer no
+# customer table row has.
+
+require semantic_views
+
+statement ok
+CREATE TABLE m_orders (order_id INTEGER, customer_id INTEGER, promo_code VARCHAR, amount DECIMAL(10,2));
+
+statement ok
+CREATE TABLE m_promotions (promo_code VARCHAR, channel VARCHAR, region VARCHAR);
+
+statement ok
+CREATE TABLE m_customers (customer_id INTEGER, segment VARCHAR);
+
+statement ok
+CREATE TABLE m_regions (region VARCHAR, manager VARCHAR);
+
+statement ok
+INSERT INTO m_orders VALUES (1, 1, 'P', 100), (2, 2, 'P', 200), (3, 1, 'Q', 50),
+  (4, 2, 'NONE', 999), (5, 99, 'Q', 75);
+
+statement ok
+INSERT INTO m_promotions VALUES ('P', 'Web', 'East'), ('P', 'Web', 'East'),
+  ('P', 'Email', 'East'), ('Q', 'Web', 'West');
+
+statement ok
+INSERT INTO m_customers VALUES (1, 'Enterprise'), (2, 'SMB');
+
+statement ok
+INSERT INTO m_regions VALUES ('East', 'Ann'), ('West', 'Ben');
+
+# M0: the documented view, with a promotions metric, a COUNT DISTINCT metric
+# and a table past promotions. `promotions` declares no key.
+statement ok
+CREATE SEMANTIC VIEW m2m_sv
+  TABLES (
+    orders AS m_orders PRIMARY KEY (order_id),
+    promotions AS m_promotions,
+    customers AS m_customers PRIMARY KEY (customer_id),
+    regions AS m_regions PRIMARY KEY (region)
+  )
+  RELATIONSHIPS (
+    orders_to_promotions AS orders (promo_code) REFERENCES promotions (promo_code),
+    orders_to_customers AS orders (customer_id) REFERENCES customers,
+    promotions_to_regions AS promotions (region) REFERENCES regions
+  )
+  FACTS (orders.order_amount AS amount)
+  DIMENSIONS (
+    orders.promo_code AS promo_code,
+    promotions.channel AS channel,
+    promotions.region AS region,
+    customers.segment AS segment,
+    regions.manager AS manager
+  )
+  METRICS (
+    orders.total_amount AS SUM(amount),
+    orders.order_count AS COUNT(order_id),
+    orders.distinct_customers AS COUNT(DISTINCT customer_id),
+    promotions.promo_rows AS COUNT(*)
+  );
+
+# M1: each order counts once per channel it matches (orders 1 and 2 match two
+# Web rows); order 4 matches no promotion.
+query TRI
+SELECT * FROM SEMANTIC_VIEW(m2m_sv DIMENSIONS promotions.channel METRICS orders.total_amount, orders.order_count) ORDER BY 1 NULLS LAST;
+----
+Email	300.00	2
+Web	425.00	4
+NULL	999.00	1
+
+# M2: a filter on the far side, not grouped by: order 1 matches three East rows
+# and counts once.
+query TRI
+SELECT * FROM SEMANTIC_VIEW(m2m_sv DIMENSIONS customers.segment METRICS orders.total_amount, orders.order_count WHERE promotions.region = 'East') ORDER BY 1 NULLS LAST;
+----
+Enterprise	100.00	1
+SMB	200.00	1
+
+# M3: beside a many-to-one dimension, unmatched rows keep a NULL.
+query TTRI
+SELECT * FROM SEMANTIC_VIEW(m2m_sv DIMENSIONS promotions.channel, customers.segment METRICS orders.total_amount, orders.order_count) ORDER BY 1 NULLS LAST, 2 NULLS LAST;
+----
+Email	Enterprise	100.00	1
+Email	SMB	200.00	1
+Web	Enterprise	150.00	2
+Web	SMB	200.00	1
+Web	NULL	75.00	1
+NULL	SMB	999.00	1
+
+# M4: dimensions only: the combinations that occur together, inner-joined.
+query TT
+SELECT * FROM SEMANTIC_VIEW(m2m_sv DIMENSIONS orders.promo_code, promotions.channel) ORDER BY 1, 2;
+----
+P	Email
+P	Web
+Q	Web
+
+# M4b: a far-side table only in the WHERE clause of a dimensions-only query.
+query T
+SELECT * FROM SEMANTIC_VIEW(m2m_sv DIMENSIONS orders.promo_code WHERE promotions.channel = 'Email');
+----
+P
+
+# M4c: two tables reached from the two sides, inner-joined (the documented
+# rule; not in the fixture): order 5 reaches no customer.
+query TT
+SELECT * FROM SEMANTIC_VIEW(m2m_sv DIMENSIONS customers.segment, promotions.channel) ORDER BY 1, 2;
+----
+Enterprise	Email
+Enterprise	Web
+SMB	Email
+SMB	Web
+
+# M5: facts only: one row per matching combination, every join inner (order 4
+# matches no promotion, order 5 no customer), not deduplicated.
+query RTT
+SELECT * FROM SEMANTIC_VIEW(m2m_sv FACTS orders.order_amount, promotions.channel, customers.segment) ORDER BY 1, 2, 3;
+----
+50.00	Web	Enterprise
+100.00	Email	Enterprise
+100.00	Web	Enterprise
+100.00	Web	Enterprise
+200.00	Email	SMB
+200.00	Web	SMB
+200.00	Web	SMB
+
+# M5b: facts only, the far side only in the WHERE clause: one row per order
+# that passes the filter (the documented rule; not in the fixture).
+query TR
+SELECT * FROM SEMANTIC_VIEW(m2m_sv FACTS orders.promo_code, orders.order_amount WHERE promotions.channel = 'Web') ORDER BY 2;
+----
+Q	50.00
+Q	75.00
+P	100.00
+P	200.00
+
+# M6: without a far-side member the metric is the plain total.
+query RI
+SELECT * FROM SEMANTIC_VIEW(m2m_sv METRICS orders.total_amount, orders.order_count);
+----
+1424.00	5
+
+# M7b: a metric on the keyless table, with no dimension across the relationship.
+query I
+SELECT * FROM SEMANTIC_VIEW(m2m_sv METRICS promotions.promo_rows);
+----
+4
+
+# M8: a table past the far side, many-to-one from it.
+query TRI
+SELECT * FROM SEMANTIC_VIEW(m2m_sv DIMENSIONS regions.manager METRICS orders.total_amount, orders.order_count) ORDER BY 1 NULLS LAST;
+----
+Ann	300.00	2
+Ben	125.00	2
+NULL	999.00	1
+
+# M9: COUNT(DISTINCT) is deduplicated the same way.
+query TI
+SELECT * FROM SEMANTIC_VIEW(m2m_sv DIMENSIONS promotions.channel METRICS orders.distinct_customers) ORDER BY 1 NULLS LAST;
+----
+Email	2
+Web	3
+NULL	1
+
+# M10: filtered on the far side only.
+query RI
+SELECT * FROM SEMANTIC_VIEW(m2m_sv METRICS orders.total_amount, orders.order_count WHERE promotions.channel = 'Web' AND promotions.region = 'East');
+----
+300.00	2
+
+# M11: the standard-SQL form.
+query TR
+SELECT promotions.channel, AGG(orders.total_amount) FROM m2m_sv GROUP BY promotions.channel ORDER BY 1 NULLS LAST;
+----
+Email	300.00
+Web	425.00
+NULL	999.00
+
+# M12c: every dimension is listed for an orders metric.
+query T
+SELECT name FROM (SHOW SEMANTIC DIMENSIONS IN m2m_sv FOR METRIC total_amount) ORDER BY 1;
+----
+channel
+manager
+promo_code
+region
+segment
+
+# M13: referenced columns that are not the key of a table that has one.
+statement ok
+CREATE TABLE m_promotions_k AS
+  SELECT ROW_NUMBER() OVER (ORDER BY promo_code, channel) AS promo_id, * FROM m_promotions;
+
+statement ok
+CREATE SEMANTIC VIEW m2m_keyed
+  TABLES (orders AS m_orders PRIMARY KEY (order_id), promotions AS m_promotions_k PRIMARY KEY (promo_id))
+  RELATIONSHIPS (orders_to_promotions AS orders (promo_code) REFERENCES promotions (promo_code))
+  DIMENSIONS (promotions.channel AS channel)
+  METRICS (orders.total_amount AS SUM(amount));
+
+query TR
+SELECT * FROM SEMANTIC_VIEW(m2m_keyed DIMENSIONS promotions.channel METRICS orders.total_amount) ORDER BY 1 NULLS LAST;
+----
+Email	300.00
+Web	425.00
+NULL	999.00
+
+# M7: a metric on the keyless table, grouped across the relationship: refused,
+# as Snowflake refuses it (010933), whose rows it could not count once.
+statement error
+SELECT * FROM SEMANTIC_VIEW(m2m_sv DIMENSIONS customers.segment METRICS promotions.promo_rows);
+----
+metric 'promo_rows' cannot be grouped or filtered by dimension 'segment' across many-to-many relationship 'orders_to_promotions'
+
+# M7c: by a dimension of the referencing table itself.
+statement error
+SELECT * FROM SEMANTIC_VIEW(m2m_sv DIMENSIONS orders.promo_code METRICS promotions.promo_rows);
+----
+table 'promotions' has no PRIMARY KEY
+
+# M14: the referencing table declares no key: CREATE accepts the view, and a
+# metric across the relationship is refused (010933).
+statement ok
+CREATE SEMANTIC VIEW m2m_nokey
+  TABLES (orders AS m_orders, promotions AS m_promotions)
+  RELATIONSHIPS (orders_to_promotions AS orders (promo_code) REFERENCES promotions (promo_code))
+  FACTS (orders.order_amount AS amount)
+  DIMENSIONS (promotions.channel AS channel)
+  METRICS (orders.total_amount AS SUM(amount));
+
+statement error
+SELECT * FROM SEMANTIC_VIEW(m2m_nokey DIMENSIONS promotions.channel METRICS orders.total_amount);
+----
+metric 'total_amount' cannot be grouped or filtered by dimension 'channel' across many-to-many relationship 'orders_to_promotions': each row of table 'orders' is counted once per value it matches, by its key, and table 'orders' has no PRIMARY KEY
+
+# M14b: without a member across it, the metric is answered.
+query R
+SELECT * FROM SEMANTIC_VIEW(m2m_nokey METRICS orders.total_amount);
+----
+1424.00
+
+# M14c: a fact query filtered across it returns each order once, by its key.
+statement error
+SELECT * FROM SEMANTIC_VIEW(m2m_nokey FACTS orders.order_amount WHERE promotions.channel = 'Web');
+----
+a FACTS query of table 'orders' cannot be grouped or filtered by table 'promotions' across many-to-many relationship 'orders_to_promotions'
+
+# M15: two many-to-many relationships between the same tables: CREATE accepts
+# the view, and a USING cannot choose between them (Snowflake's 000002,
+# "Multi-path in many-to-many relationship").
+statement ok
+CREATE TABLE m_orders2 AS
+  SELECT *, CASE WHEN order_id = 3 THEN 'P' ELSE promo_code END AS alt_code FROM m_orders;
+
+statement ok
+CREATE SEMANTIC VIEW m2m_using
+  TABLES (orders AS m_orders2 PRIMARY KEY (order_id), promotions AS m_promotions)
+  RELATIONSHIPS (
+    by_code AS orders (promo_code) REFERENCES promotions (promo_code),
+    by_alt AS orders (alt_code) REFERENCES promotions (promo_code)
+  )
+  DIMENSIONS (promotions.channel AS channel)
+  METRICS (
+    orders.total_by_code USING (by_code) AS SUM(amount),
+    orders.total_by_alt USING (by_alt) AS SUM(amount)
+  );
+
+statement error
+SELECT * FROM SEMANTIC_VIEW(m2m_using DIMENSIONS promotions.channel METRICS orders.total_by_code);
+----
+by more than one path across a many-to-many relationship: orders <-[by_alt]-> promotions, orders <-[by_code]-> promotions
+
+# M17: a window metric ordered by a dimension across the relationship is
+# refused at CREATE (Snowflake's 010227).
+statement error
+CREATE SEMANTIC VIEW m2m_window
+  TABLES (orders AS m_orders PRIMARY KEY (order_id), promotions AS m_promotions)
+  RELATIONSHIPS (orders_to_promotions AS orders (promo_code) REFERENCES promotions (promo_code))
+  DIMENSIONS (promotions.channel AS channel)
+  METRICS (
+    orders.total_amount AS SUM(amount),
+    orders.running AS SUM(total_amount) OVER (ORDER BY promotions.channel)
+  );
+----
+names dimension 'promotions.channel' of table 'promotions'
+
+# M18: so is a dimension referencing a dimension across it (Snowflake's
+# 010227 for the same reason).
+statement error
+CREATE SEMANTIC VIEW m2m_dimref
+  TABLES (orders AS m_orders PRIMARY KEY (order_id), promotions AS m_promotions)
+  RELATIONSHIPS (orders_to_promotions AS orders (promo_code) REFERENCES promotions (promo_code))
+  DIMENSIONS (promotions.channel AS channel, orders.ch AS promotions.channel)
+  METRICS (orders.total_amount AS SUM(amount));
+----
+dimension 'orders.ch' references dimension 'promotions.channel', but table 'orders' does not reach table 'promotions'
+
+# M19: DESCRIBE and GET_DDL show the relationship as written; the key table is
+# the expansion's own.
+query T
+SELECT count(*) FROM (DESCRIBE SEMANTIC VIEW m2m_sv) WHERE object_name LIKE '%__sv_m2m%' OR property_value LIKE '%__sv_m2m%';
+----
+0
+
+query T
+SELECT GET_DDL('SEMANTIC_VIEW', 'm2m_keyed') LIKE '%orders_to_promotions AS orders(promo_code) REFERENCES promotions(promo_code)%';
+----
+true

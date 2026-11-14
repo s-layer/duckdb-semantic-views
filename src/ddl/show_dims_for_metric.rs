@@ -141,7 +141,10 @@ unsafe fn show_dims_for_metric(
         // Built only to surface a malformed graph as an error, as before.
         RelationshipGraph::from_definition(&def).map_err(|e| format!("graph error: {e}"))?;
     }
-    let mut rows: Vec<(Vec<String>, bool)> = crate::expand::dimensions_for_metric(&def, met)
+    // Phase 8.4: a many-to-many relationship is walked as the query walks it,
+    // through its table of keys, which fans out from the key to the far side.
+    let bridged = crate::expand::lower_many_to_many(&def);
+    let mut rows: Vec<(Vec<String>, bool)> = crate::expand::dimensions_for_metric(&bridged, met)
         .into_iter()
         .map(|d| {
             let table_name = d

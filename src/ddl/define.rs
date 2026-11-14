@@ -82,7 +82,9 @@ pub fn enrich_definition_for_create(
     //          `validate_fk_references`. The D-06 message is more
     //          actionable because it names the fix verbatim.)
     for join in &def.joins {
-        if join.fk_columns.is_empty() {
+        // Phase 8.4: a many-to-many relationship names the referenced
+        // columns, which need not be a key.
+        if join.fk_columns.is_empty() || join.cardinality == crate::model::Cardinality::ManyToMany {
             continue;
         }
         let to_alias_lower = join.table.to_ascii_lowercase();
@@ -141,29 +143,35 @@ pub fn enrich_definition_for_create(
     //    collisions -- within a kind or across kinds, case-insensitive --
     //    are rejected at define time. Read paths keep first-match behavior
     //    for legacy catalog rows that predate this check.
-    crate::graph::validate_name_uniqueness(&def)?;
-    crate::graph::validate_graph(&def)?;
-    crate::graph::validate_facts(&def)?;
-    crate::graph::validate_derived_metrics(&def)?;
-    crate::graph::validate_using_relationships(&def)?;
+    // Phase 8.4: the checks see each many-to-many relationship as the query
+    // reads it, through its table of keys (`expand::lower_many_to_many`), so a
+    // check that walks the relationships finds no step across one: a dimension
+    // reference or a window member across it is refused, as in Snowflake.
+    let bridged = crate::expand::lower_many_to_many(&def);
+    let checked = &*bridged;
+    crate::graph::validate_name_uniqueness(checked)?;
+    crate::graph::validate_graph(checked)?;
+    crate::graph::validate_facts(checked)?;
+    crate::graph::validate_derived_metrics(checked)?;
+    crate::graph::validate_using_relationships(checked)?;
     // Phase 7 PR 5: a window clause names only dimensions of related tables
     // (Snowflake's 010211, fixture 3 N0).
-    crate::graph::validate_window_dimensions(&def)?;
+    crate::graph::validate_window_dimensions(checked)?;
     // Phase 6.3: a metric over a same-table metric names a plain one, acyclically.
-    crate::graph::validate_same_table_metric_refs(&def)?;
+    crate::graph::validate_same_table_metric_refs(checked)?;
     // TECH-DEBT #52 (PAR-3): last of the graph checks, because it needs the
     // fact and metric name sets the earlier ones validated -- a member
     // expression may legitimately reference those across tables, and only a
     // RAW column of another table is out of scope.
-    crate::graph::validate_member_references(&def)?;
+    crate::graph::validate_member_references(checked)?;
     // Phase 8.2: a dimension references only a dimension of a table it
     // reaches by one path (Snowflake's 010214, 010227).
-    crate::graph::validate_dimension_references(&def)?;
+    crate::graph::validate_dimension_references(checked)?;
     // Phase 8.3: a window fact or dimension reads only tables its own table
     // reaches by one path, so its window runs over one row per row of it.
-    crate::expand::validate_window_members(&def)?;
+    crate::expand::validate_window_members(checked)?;
     // TECH-DEBT #95: no aggregate in a dimension, no parameter in any member.
-    crate::graph::validate_member_expressions(&def)?;
+    crate::graph::validate_member_expressions(checked)?;
 
     // 4. Serialize. Metadata (created_on, database_name, schema_name) is
     //    populated by SQL inside the rewritten INSERT — not here. Column

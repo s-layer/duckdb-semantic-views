@@ -84,6 +84,22 @@ pub(crate) fn infer_cardinality(
             });
         }
 
+        // Phase 8.4: referenced columns that are not a key of the referenced
+        // table make the relationship many-to-many, as Snowflake reads it (a
+        // direct many-to-many relationship): each referencing row can match
+        // many referenced rows. An ASOF or range relationship's referenced
+        // columns must still be a key (`graph::validate_fk_references`).
+        if let Some(t) = target {
+            if join.asof.is_none()
+                && join.range_end.is_none()
+                && !join.ref_columns.is_empty()
+                && !references_a_key(t, &join.ref_columns)
+            {
+                join.cardinality = Cardinality::ManyToMany;
+                continue;
+            }
+        }
+
         // Step 3: Infer cardinality from FK-side constraints (CARD-04)
         if let Some(source) = source {
             let fk_set: HashSet<String> = join
@@ -129,6 +145,17 @@ pub(crate) fn infer_cardinality(
     Ok(())
 }
 
+/// Whether `columns` are, as a set, the PRIMARY KEY or a UNIQUE key of
+/// `table`, compared as `graph::validate_fk_references` compares them.
+pub(crate) fn references_a_key(table: &TableRef, columns: &[String]) -> bool {
+    let set = |cols: &[String]| -> HashSet<String> {
+        cols.iter().map(|c| c.to_ascii_lowercase()).collect()
+    };
+    let wanted = set(columns);
+    (!table.pk_columns.is_empty() && set(&table.pk_columns) == wanted)
+        || table.unique_constraints.iter().any(|uc| set(uc) == wanted)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -169,5 +196,59 @@ mod tests {
             Cardinality::OneToOne,
             "control: no ASOF"
         );
+    }
+
+    /// Phase 8.4: referenced columns that are not a key of the referenced
+    /// table make the relationship many-to-many; a PRIMARY KEY or UNIQUE key,
+    /// in any order and case, does not; an ASOF relationship never is.
+    #[test]
+    fn referenced_columns_that_are_no_key_are_many_to_many() {
+        let tables = vec![
+            TableRef {
+                alias: "o".into(),
+                table: "orders".into(),
+                pk_columns: vec!["id".into()],
+                ..Default::default()
+            },
+            TableRef {
+                alias: "p".into(),
+                table: "promotions".into(),
+                pk_columns: vec!["pid".into()],
+                unique_constraints: vec![vec!["code".into(), "region".into()]],
+                ..Default::default()
+            },
+        ];
+        let join = |refs: &[&str]| Join {
+            from_alias: "o".into(),
+            table: "p".into(),
+            fk_columns: refs.iter().map(|c| format!("o_{c}")).collect(),
+            ref_columns: refs.iter().map(|c| (*c).to_string()).collect(),
+            ..Default::default()
+        };
+        let mut joins = vec![
+            join(&["code"]),
+            join(&["PID"]),
+            join(&["Region", "code"]),
+            Join {
+                asof: Some(0),
+                ..join(&["code"])
+            },
+        ];
+        infer_cardinality(&tables, &mut joins).unwrap();
+        let got: Vec<Cardinality> = joins.iter().map(|j| j.cardinality).collect();
+        assert_eq!(
+            got,
+            vec![
+                Cardinality::ManyToMany,
+                Cardinality::ManyToOne,
+                Cardinality::ManyToOne,
+                Cardinality::ManyToOne,
+            ]
+        );
+        assert!(references_a_key(
+            &tables[1],
+            &["region".into(), "CODE".into()]
+        ));
+        assert!(!references_a_key(&tables[1], &["code".into()]));
     }
 }
