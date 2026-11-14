@@ -715,7 +715,7 @@ Each entry in the ``joins`` list declares a FK/PK relationship between tables. T
      - string
      - No
      - ``ManyToOne``
-     - ``ManyToOne`` or ``OneToOne``. Used for fan trap detection.
+     - ``ManyToOne``, ``OneToOne`` or ``ManyToMany``. Inferred again at ``CREATE``. Used for fan trap detection and for :ref:`direct many-to-many relationships <ref-create-direct-many-to-many>`.
 
 .. code-block:: yaml
 

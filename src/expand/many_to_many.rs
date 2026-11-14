@@ -31,18 +31,39 @@ use crate::model::{Cardinality, Join, Metric, SemanticViewDefinition, TableRef};
 
 use super::types::ExpandError;
 
-use super::resolution::{quote_ident, quote_stored_ident, table_source};
+use super::resolution::{quote_stored_ident, table_source};
 
 /// The prefix of the alias a many-to-many relationship's key table takes.
 const KEY_TABLE_PREFIX: &str = "__sv_m2m_";
 
-/// Whether `alias` names a key table [`lower_many_to_many`] added.
+/// The suffix of the name of the relationship from a many-to-many
+/// relationship's referenced table to its key table.
+const BACK_SUFFIX: &str = " (many-to-many)";
+
+/// The column a stored key column names: `"Promo Code"` is `Promo Code`.
+fn column_name(stored: &str) -> String {
+    match crate::ident::parse_qualified_identifier(stored) {
+        Ok(mut parts) if parts.len() == 1 => parts.pop().unwrap_or_default(),
+        _ => stored.to_string(),
+    }
+}
+
+/// Whether `alias` names a key table [`lower_many_to_many`] added: one the
+/// referenced table references by the generated relationship it names
+/// `<relationship> (many-to-many)`. A declared relationship with a generated
+/// name is always named `SYS_RELATIONSHIP_<id>` (`Join::generated_name`), so
+/// a table the view declares, whatever its alias, is never one.
 pub(crate) fn is_key_table(def: &SemanticViewDefinition, alias: &str) -> bool {
     normalize_ident_part(alias).starts_with(KEY_TABLE_PREFIX)
         && def
             .tables
             .iter()
             .any(|t| ident_matches(&t.alias, alias) && t.definition.is_some())
+        && def.joins.iter().any(|j| {
+            j.generated_name
+                && ident_matches(&j.table, alias)
+                && j.name.as_deref().is_some_and(|n| n.ends_with(BACK_SUFFIX))
+        })
 }
 
 /// Whether `def` holds a key table [`lower_many_to_many`] added.
@@ -97,17 +118,19 @@ pub fn lower_many_to_many(def: &SemanticViewDefinition) -> Cow<'_, SemanticViewD
         // Named after the relationship, so a message that names the hop from
         // the key table to the referenced table names the relationship.
         let mut ref_name = format!(
-            "{} (many-to-many)",
+            "{}{BACK_SUFFIX}",
             join.name.as_deref().unwrap_or(&join.table)
         );
         while taken(&ref_name, &out) {
-            ref_name.push('_');
+            let at = ref_name.len() - BACK_SUFFIX.len();
+            ref_name.insert(at, '_');
         }
         let target_alias = quote_stored_ident(&target.alias);
+        // Key columns are stored as written, quotes included.
         let columns: Vec<String> = join
             .ref_columns
             .iter()
-            .map(|c| format!("{target_alias}.{}", quote_ident(c)))
+            .map(|c| format!("{target_alias}.{}", quote_stored_ident(c)))
             .collect();
         let not_null: Vec<String> = columns.iter().map(|c| format!("{c} IS NOT NULL")).collect();
         let query = format!(
@@ -124,8 +147,9 @@ pub fn lower_many_to_many(def: &SemanticViewDefinition) -> Cow<'_, SemanticViewD
             ..TableRef::default()
         });
         if !out.table_columns.is_empty() {
-            out.table_columns
-                .insert(alias.clone(), join.ref_columns.clone());
+            // `table_columns` holds column names, not stored identifiers.
+            let names = join.ref_columns.iter().map(|c| column_name(c)).collect();
+            out.table_columns.insert(alias.clone(), names);
         }
         out.joins[i].table.clone_from(&alias);
         out.joins[i].cardinality = Cardinality::ManyToOne;
@@ -301,6 +325,50 @@ mod tests {
         assert_eq!(crossed(&out, &path(&["orders", "customers"])), None);
         assert!(has_key_table(&out));
         assert!(!has_key_table(&d));
+    }
+
+    #[test]
+    fn a_declared_table_with_the_prefix_is_no_key_table() {
+        let mut d = def();
+        d.joins[0].cardinality = Cardinality::ManyToOne;
+        d.tables.push(TableRef {
+            alias: "__sv_m2m_x".into(),
+            definition: Some("SELECT 1 AS k".into()),
+            pk_columns: vec!["k".into()],
+            ..Default::default()
+        });
+        d.joins.push(Join {
+            from_alias: "orders".into(),
+            table: "__sv_m2m_x".into(),
+            fk_columns: vec!["k".into()],
+            ref_columns: vec!["k".into()],
+            name: Some(Join::default().generated_name_at(1)),
+            generated_name: true,
+            ..Default::default()
+        });
+        assert!(!is_key_table(&d, "__sv_m2m_x"));
+        assert!(!has_key_table(&d));
+    }
+
+    #[test]
+    fn quoted_key_columns_are_read_as_the_columns_they_name() {
+        let mut d = def();
+        d.joins[0].fk_columns = vec!["\"Promo Code\"".into()];
+        d.joins[0].ref_columns = vec!["\"Promo Code\"".into()];
+        d.table_columns
+            .insert("promotions".into(), vec!["Promo Code".into()]);
+        let out = lower_many_to_many(&d);
+        assert_eq!(
+            out.tables[2].definition.as_deref(),
+            Some(
+                "SELECT DISTINCT \"promotions\".\"Promo Code\" FROM \"m_promotions\" AS \
+                 \"promotions\" WHERE \"promotions\".\"Promo Code\" IS NOT NULL"
+            )
+        );
+        assert_eq!(
+            out.table_columns["__sv_m2m_0"],
+            vec!["Promo Code".to_string()]
+        );
     }
 
     #[test]

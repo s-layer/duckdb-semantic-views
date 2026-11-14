@@ -3453,6 +3453,39 @@ metrics:
         assert_eq!(def.required_schema_version(), 1);
     }
 
+    /// Phase 8.4: so does a many-to-many relationship: a format-3 reader
+    /// cannot read its cardinality.
+    #[test]
+    fn required_schema_version_is_four_with_a_many_to_many_relationship() {
+        let yaml = "
+tables:
+  - alias: o
+    table: orders
+    pk_columns: [id]
+  - alias: p
+    table: promotions
+joins:
+  - name: op
+    from_alias: o
+    table: p
+    fk_columns: [code]
+    ref_columns: [code]
+    cardinality: ManyToMany
+dimensions:
+  - name: region
+    expr: o.region
+    source_table: o
+metrics:
+  - name: total
+    expr: SUM(o.amount)
+    source_table: o
+";
+        let mut def = format_test_def(yaml);
+        assert_eq!(def.required_schema_version(), 4);
+        def.joins[0].cardinality = Cardinality::ManyToOne;
+        assert_eq!(def.required_schema_version(), 1);
+    }
+
     /// Phase 8.3: so does a window fact written over another table's
     /// dimension; a plain fact holds no reference.
     #[test]

@@ -26,6 +26,13 @@ pub(crate) fn infer_cardinality(
     relationships: &mut [Join],
 ) -> Result<(), ParseError> {
     for join in relationships.iter_mut() {
+        // Many-to-many is only ever inferred below, never taken as given: a
+        // definition that arrives already marked (a YAML import, or a stored
+        // view re-enriched) is read again, so a relationship with no referenced
+        // columns to a keyless target still meets the D-06 error.
+        if join.cardinality == Cardinality::ManyToMany {
+            join.cardinality = Cardinality::ManyToOne;
+        }
         if join.fk_columns.is_empty() {
             continue;
         }
@@ -105,14 +112,14 @@ pub(crate) fn infer_cardinality(
             let fk_set: HashSet<String> = join
                 .fk_columns
                 .iter()
-                .map(|c| c.to_ascii_lowercase())
+                .map(|c| crate::ident::normalize_ident_part(c))
                 .collect();
 
             // Check against source PK
             let pk_set: HashSet<String> = source
                 .pk_columns
                 .iter()
-                .map(|c| c.to_ascii_lowercase())
+                .map(|c| crate::ident::normalize_ident_part(c))
                 .collect();
 
             if !pk_set.is_empty() && fk_set == pk_set {
@@ -120,8 +127,10 @@ pub(crate) fn infer_cardinality(
             } else {
                 // Check against source UNIQUE constraints
                 let matches_unique = source.unique_constraints.iter().any(|uc| {
-                    let uc_set: HashSet<String> =
-                        uc.iter().map(|c| c.to_ascii_lowercase()).collect();
+                    let uc_set: HashSet<String> = uc
+                        .iter()
+                        .map(|c| crate::ident::normalize_ident_part(c))
+                        .collect();
                     fk_set == uc_set
                 });
                 join.cardinality = if matches_unique {
@@ -146,10 +155,13 @@ pub(crate) fn infer_cardinality(
 }
 
 /// Whether `columns` are, as a set, the PRIMARY KEY or a UNIQUE key of
-/// `table`, compared as `graph::validate_fk_references` compares them.
+/// `table`, each column matched the way identifiers match (`ident::ident_matches`).
 pub(crate) fn references_a_key(table: &TableRef, columns: &[String]) -> bool {
+    // As DuckDB matches identifiers: `id`, `ID` and `"ID"` are one column.
     let set = |cols: &[String]| -> HashSet<String> {
-        cols.iter().map(|c| c.to_ascii_lowercase()).collect()
+        cols.iter()
+            .map(|c| crate::ident::normalize_ident_part(c))
+            .collect()
     };
     let wanted = set(columns);
     (!table.pk_columns.is_empty() && set(&table.pk_columns) == wanted)
@@ -250,5 +262,41 @@ mod tests {
             &["region".into(), "CODE".into()]
         ));
         assert!(!references_a_key(&tables[1], &["code".into()]));
+    }
+
+    /// A relationship already marked many-to-many is inferred again: with no
+    /// referenced columns to a keyless target it is no longer many-to-many, so
+    /// `CREATE`'s D-06 check sees it.
+    #[test]
+    fn a_stale_many_to_many_mark_is_inferred_again() {
+        let tables = vec![
+            TableRef {
+                alias: "o".into(),
+                table: "orders".into(),
+                ..Default::default()
+            },
+            TableRef {
+                alias: "p".into(),
+                table: "promotions".into(),
+                ..Default::default()
+            },
+        ];
+        let mut joins = vec![Join {
+            from_alias: "o".into(),
+            table: "p".into(),
+            fk_columns: vec!["code".into()],
+            cardinality: Cardinality::ManyToMany,
+            ..Default::default()
+        }];
+        infer_cardinality(&tables, &mut joins).unwrap();
+        assert_eq!(joins[0].cardinality, Cardinality::ManyToOne);
+        assert!(joins[0].ref_columns.is_empty());
+        joins[0].ref_columns = vec!["code".into()];
+        infer_cardinality(&tables, &mut joins).unwrap();
+        assert_eq!(
+            joins[0].cardinality,
+            Cardinality::ManyToMany,
+            "control: explicit non-key columns"
+        );
     }
 }

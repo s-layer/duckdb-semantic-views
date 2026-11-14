@@ -95,3 +95,20 @@ query I
 SELECT count(*) FROM list_semantic_views() WHERE name = 'v_good'
 ----
 1
+
+# B4: an ASOF relationship naming columns of a target with no PRIMARY KEY or
+# UNIQUE declared still gets the D-06 error: its referenced columns must be a
+# key, so it is never many-to-many.
+statement ok
+CREATE TABLE p65_addr (cust_id INTEGER, start_date DATE, city VARCHAR);
+
+statement ok
+CREATE TABLE p65_ord2 (order_id INTEGER, cust_id INTEGER, order_date DATE);
+
+statement error
+CREATE SEMANTIC VIEW v_bad_asof
+  TABLES (o AS p65_ord2 PRIMARY KEY (order_id), a AS p65_addr)
+  RELATIONSHIPS (r AS o (cust_id, order_date) REFERENCES a (cust_id, ASOF start_date))
+  DIMENSIONS (a.city AS city);
+----
+has no PRIMARY KEY declared but is referenced by FK in

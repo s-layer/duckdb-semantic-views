@@ -4,7 +4,8 @@
 //! `o` row matches every `p` row with its code (Snowflake's direct
 //! many-to-many relationship). Each side has a many-to-one parent: `o.fk_c ->
 //! c.id` and `p.fk_r -> r.id`. The base table is drawn from all four, and `p`
-//! has a PRIMARY KEY (`pid`) in about half the cases.
+//! has a PRIMARY KEY (`pid`) in about half the cases, `o` (`id`) in about three
+//! quarters.
 //!
 //! The data holds NULL codes (which match nothing), codes no `p` row has, `p`
 //! rows with a code no `o` row has, several `p` rows per code (duplicates
@@ -257,6 +258,8 @@ enum Kind {
 struct Case {
     inst: Instance,
     first: &'static str,
+    /// Whether `o` declares its PRIMARY KEY (`p` holds none either way).
+    o_keyed: bool,
     p_keyed: bool,
     kind: Kind,
     pred: Option<Pred>,
@@ -317,12 +320,22 @@ impl Case {
                 let mut members: BTreeSet<&str> = dims.iter().map(|d| DIMS[*d].1).collect();
                 members.extend(self.pred_tables());
                 mets.iter().all(|m| {
+                    // A metric grouped or filtered across the relationship
+                    // counts its table's rows by their key.
                     let home = METS[*m].1;
-                    self.p_keyed || near_o(home) || members.iter().all(|t| !near_o(t))
+                    if near_o(home) {
+                        self.o_keyed || members.iter().all(|t| near_o(t))
+                    } else {
+                        self.p_keyed || members.iter().all(|t| !near_o(t))
+                    }
                 })
             }
             Kind::DimsOnly(_) => true,
-            Kind::Facts(_) => self.semi_join_grain() != Some("p") || self.p_keyed,
+            Kind::Facts(_) => match self.semi_join_grain() {
+                Some("o") => self.o_keyed,
+                Some("p") => self.p_keyed,
+                _ => true,
+            },
         }
     }
 }
@@ -507,13 +520,13 @@ fn arb_case() -> impl Strategy<Value = Case> {
     (
         arb_instance(),
         prop::sample::select(TABLES.to_vec()),
-        any::<bool>(),
+        (prop::bool::weighted(0.75), any::<bool>()),
         kind_and_pred,
     )
-        .prop_map(|(inst, first, p_keyed, (kind, pred))| (inst, first, p_keyed, kind, pred))
-        .prop_map(|(inst, first, p_keyed, kind, pred)| Case {
+        .prop_map(|(inst, first, (o_keyed, p_keyed), (kind, pred))| Case {
             inst,
             first,
+            o_keyed,
             p_keyed,
             kind,
             pred,
@@ -533,31 +546,34 @@ fn arb_semi_join_case() -> impl Strategy<Value = Case> {
     (
         arb_instance(),
         prop::sample::select(TABLES.to_vec()),
-        any::<bool>(),
+        (prop::bool::weighted(0.75), any::<bool>()),
         any::<bool>(),
         prop::sample::subsequence(vec![0usize, 1, 2], 1..=2),
         0i64..3,
         any::<bool>(),
     )
-        .prop_map(move |(inst, first, p_keyed, near, picks, k, is_null)| {
-            let (items, far_dims) = if near {
-                (&near_items, [1usize, 3])
-            } else {
-                (&far_items, [0usize, 2])
-            };
-            let d = far_dims[usize::try_from(k).unwrap_or(0) % 2];
-            Case {
-                inst,
-                first,
-                p_keyed,
-                kind: Kind::Facts(picks.iter().map(|i| items[*i]).collect()),
-                pred: Some(if is_null {
-                    Pred::IsNull(d)
+        .prop_map(
+            move |(inst, first, (o_keyed, p_keyed), near, picks, k, is_null)| {
+                let (items, far_dims) = if near {
+                    (&near_items, [1usize, 3])
                 } else {
-                    Pred::In(d, k, (k + 1) % 3)
-                }),
-            }
-        })
+                    (&far_items, [0usize, 2])
+                };
+                let d = far_dims[usize::try_from(k).unwrap_or(0) % 2];
+                Case {
+                    inst,
+                    first,
+                    o_keyed,
+                    p_keyed,
+                    kind: Kind::Facts(picks.iter().map(|i| items[*i]).collect()),
+                    pred: Some(if is_null {
+                        Pred::IsNull(d)
+                    } else {
+                        Pred::In(d, k, (k + 1) % 3)
+                    }),
+                }
+            },
+        )
 }
 
 fn table_ref(alias: &str, pk: &[&str]) -> TableRef {
@@ -588,6 +604,7 @@ fn build_def(case: &Case) -> SemanticViewDefinition {
         .map(|t| {
             let pk: &[&str] = match *t {
                 "p" if case.p_keyed => &["pid"],
+                "o" if !case.o_keyed => &[],
                 "p" => &[],
                 _ => &["id"],
             };

@@ -313,3 +313,72 @@ query T
 SELECT GET_DDL('SEMANTIC_VIEW', 'm2m_keyed') LIKE '%orders_to_promotions AS orders(promo_code) REFERENCES promotions(promo_code)%';
 ----
 true
+
+# M20: quoted key columns. The referenced columns and the referencing table's
+# key are stored quoted, and are read as the columns they name.
+statement ok
+CREATE TABLE m_orders_q AS SELECT order_id AS "Order Id", promo_code AS "Promo Code", amount FROM m_orders;
+
+statement ok
+CREATE TABLE m_promotions_q AS SELECT promo_code AS "Promo Code", channel FROM m_promotions;
+
+statement ok
+CREATE SEMANTIC VIEW m2m_quoted
+  TABLES (orders AS m_orders_q PRIMARY KEY ("Order Id"), promotions AS m_promotions_q)
+  RELATIONSHIPS (orders_to_promotions AS orders ("Promo Code") REFERENCES promotions ("Promo Code"))
+  FACTS (orders.order_amount AS amount)
+  DIMENSIONS (promotions.channel AS channel)
+  METRICS (orders.total_amount AS SUM(amount));
+
+query TR
+SELECT * FROM SEMANTIC_VIEW(m2m_quoted DIMENSIONS promotions.channel METRICS orders.total_amount) ORDER BY 1 NULLS LAST;
+----
+Email	300.00
+Web	425.00
+NULL	999.00
+
+# M20b: a FACTS query filtered across it, read by the quoted key.
+query R
+SELECT * FROM SEMANTIC_VIEW(m2m_quoted FACTS orders.order_amount WHERE promotions.channel = 'Email') ORDER BY 1;
+----
+100.00
+200.00
+
+# M21: a table referencing itself many-to-many is refused, as any
+# self-reference is.
+statement error
+CREATE SEMANTIC VIEW m2m_self
+  TABLES (orders AS m_orders PRIMARY KEY (order_id))
+  RELATIONSHIPS (r AS orders (promo_code) REFERENCES orders (promo_code))
+  METRICS (orders.total_amount AS SUM(amount));
+----
+cannot reference itself
+
+# M22: a cycle through a many-to-many relationship is refused.
+statement error
+CREATE SEMANTIC VIEW m2m_cycle
+  TABLES (orders AS m_orders PRIMARY KEY (order_id), promotions AS m_promotions_k PRIMARY KEY (promo_id))
+  RELATIONSHIPS (
+    orders_to_promotions AS orders (promo_code) REFERENCES promotions (promo_code),
+    promotions_to_orders AS promotions (promo_id) REFERENCES orders
+  )
+  METRICS (orders.total_amount AS SUM(amount));
+----
+cycle detected
+
+# M23: a key column written in another case or quoting is the same column,
+# as in DuckDB: the relationship is many-to-one, not many-to-many, so a
+# dimension may reference a dimension across it.
+statement ok
+CREATE SEMANTIC VIEW m2m_case
+  TABLES (orders AS m_orders PRIMARY KEY (order_id), customers AS m_customers PRIMARY KEY (customer_id))
+  RELATIONSHIPS (orders_to_customers AS orders (customer_id) REFERENCES customers ("CUSTOMER_ID"))
+  DIMENSIONS (customers.segment AS segment, orders.o_segment AS customers.segment)
+  METRICS (orders.total_amount AS SUM(amount));
+
+query TR
+SELECT * FROM SEMANTIC_VIEW(m2m_case DIMENSIONS orders.o_segment METRICS orders.total_amount) ORDER BY 1 NULLS LAST;
+----
+Enterprise	150.00
+SMB	1199.00
+NULL	75.00

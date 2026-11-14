@@ -1126,7 +1126,7 @@ fn render_facts_across(
             let key: Vec<String> = table
                 .pk_columns
                 .iter()
-                .map(|c| format!("{alias}.{}", super::resolution::quote_ident(c)))
+                .map(|c| format!("{alias}.{}", quote_stored_ident(c)))
                 .collect();
             // The rows that pass: the keys of the grain's rows among the
             // matching combinations, read from the key table as `Meet` reads
