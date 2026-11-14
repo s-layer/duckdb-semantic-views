@@ -1,0 +1,356 @@
+# name: test/sql/phase8_cross_table_dimension_refs.test
+# description: A dimension may be written as a related table's dimension
+#   (`customer.d_customer_region AS region.d_region_name`), as in Snowflake's
+#   DDL (Phase 8 fixture 11, X0-X10). Expected values are Snowflake's answers.
+# group: [sql]
+
+require semantic_views
+
+statement ok
+CREATE TABLE x_regions (r_id INT, r_name VARCHAR);
+
+statement ok
+CREATE TABLE x_nations (n_id INT, n_name VARCHAR, r_id INT);
+
+statement ok
+CREATE TABLE x_customers (c_id INT, c_name VARCHAR, n_id INT);
+
+statement ok
+CREATE TABLE x_orders (o_id INT, c_id INT, amount INT);
+
+statement ok
+INSERT INTO x_regions VALUES (1, 'EU'), (2, 'US');
+
+statement ok
+INSERT INTO x_nations VALUES (10, 'FR', 1), (20, 'US', 2);
+
+statement ok
+INSERT INTO x_customers VALUES (100, 'Ann', 10), (200, 'Bob', 20), (300, 'Cid', NULL);
+
+statement ok
+INSERT INTO x_orders VALUES (1, 100, 10), (2, 100, 20), (3, 200, 5), (4, 300, 7);
+
+# X0: the docs' pattern, one and two hops, and a reference to a reference.
+statement ok
+CREATE SEMANTIC VIEW xref_sv
+  TABLES (
+    region AS x_regions PRIMARY KEY (r_id),
+    nation AS x_nations PRIMARY KEY (n_id),
+    customer AS x_customers PRIMARY KEY (c_id),
+    orders AS x_orders PRIMARY KEY (o_id)
+  )
+  RELATIONSHIPS (
+    nation_region AS nation (r_id) REFERENCES region,
+    customer_nation AS customer (n_id) REFERENCES nation,
+    order_customer AS orders (c_id) REFERENCES customer
+  )
+  DIMENSIONS (
+    region.d_region_name AS r_name,
+    nation.d_nation_name AS n_name,
+    customer.d_customer_name AS c_name,
+    customer.d_customer_region AS region.d_region_name,
+    customer.d_customer_nation AS nation.d_nation_name,
+    orders.d_order_region AS customer.d_customer_region
+  )
+  METRICS (orders.revenue AS SUM(amount), customer.customer_count AS COUNT(c_id));
+
+# X1: two hops, beside metrics of two tables.
+query TII
+SELECT * FROM SEMANTIC_VIEW(xref_sv DIMENSIONS customer.d_customer_region METRICS orders.revenue, customer.customer_count) ORDER BY 1 NULLS LAST;
+----
+EU	30	1
+US	5	1
+NULL	7	1
+
+# X1b: one hop.
+query TI
+SELECT * FROM SEMANTIC_VIEW(xref_sv DIMENSIONS customer.d_customer_nation METRICS orders.revenue) ORDER BY 1 NULLS LAST;
+----
+FR	30
+US	5
+NULL	7
+
+# X2: the reference beside its target.
+query TTI
+SELECT * FROM SEMANTIC_VIEW(xref_sv DIMENSIONS customer.d_customer_region, region.d_region_name METRICS orders.revenue) ORDER BY 1 NULLS LAST;
+----
+EU	EU	30
+US	US	5
+NULL	NULL	7
+
+# X3: a reference to a reference, on orders.
+query TI
+SELECT * FROM SEMANTIC_VIEW(xref_sv DIMENSIONS orders.d_order_region METRICS orders.revenue) ORDER BY 1 NULLS LAST;
+----
+EU	30
+US	5
+NULL	7
+
+# X4: dimensions only, on the referencing table.
+query TT
+SELECT * FROM SEMANTIC_VIEW(xref_sv DIMENSIONS customer.d_customer_name, customer.d_customer_region) ORDER BY 1;
+----
+Ann	EU
+Bob	US
+Cid	NULL
+
+# X5: filtered on the reference.
+query I
+SELECT * FROM SEMANTIC_VIEW(xref_sv METRICS orders.revenue WHERE customer.d_customer_region = 'EU');
+----
+30
+
+# X6: DESCRIBE shows the reference as written.
+query T
+SELECT property_value FROM describe_semantic_view('xref_sv')
+WHERE object_kind = 'DIMENSION' AND object_name = 'd_customer_region' AND property = 'EXPRESSION';
+----
+region.d_region_name
+
+# X6b: and so does GET_DDL.
+query I
+SELECT contains(GET_DDL('SEMANTIC_VIEW', 'xref_sv'), 'd_customer_region AS region.d_region_name');
+----
+true
+
+# X7: a reference inside an expression.
+statement ok
+CREATE SEMANTIC VIEW xref_expr
+  TABLES (region AS x_regions PRIMARY KEY (r_id), nation AS x_nations PRIMARY KEY (n_id))
+  RELATIONSHIPS (nation_region AS nation (r_id) REFERENCES region)
+  DIMENSIONS (region.d_region_name AS r_name, nation.d_region_lower AS LOWER(region.d_region_name))
+  METRICS (nation.nation_count AS COUNT(n_id));
+
+query TI
+SELECT * FROM SEMANTIC_VIEW(xref_expr DIMENSIONS nation.d_region_lower METRICS nation.nation_count) ORDER BY 1 NULLS LAST;
+----
+eu	1
+us	1
+
+# X8: a reference to a child table's dimension is refused (Snowflake 010214).
+statement error
+CREATE SEMANTIC VIEW xref_child
+  TABLES (region AS x_regions PRIMARY KEY (r_id), nation AS x_nations PRIMARY KEY (n_id))
+  RELATIONSHIPS (nation_region AS nation (r_id) REFERENCES region)
+  DIMENSIONS (nation.d_nation_name AS n_name, region.d_any_nation AS nation.d_nation_name)
+  METRICS (nation.nation_count AS COUNT(n_id));
+----
+does not reach table 'nation'
+
+# X9: a reference into a table reached two ways is refused (Snowflake 010227).
+statement ok
+CREATE TABLE x_flights (f_id INT, dep_n INT, arr_n INT);
+
+statement error
+CREATE SEMANTIC VIEW xref_roles
+  TABLES (nation AS x_nations PRIMARY KEY (n_id), f AS x_flights PRIMARY KEY (f_id))
+  RELATIONSHIPS (dep AS f (dep_n) REFERENCES nation, arr AS f (arr_n) REFERENCES nation)
+  DIMENSIONS (nation.d_nation_name AS n_name, f.d_where AS nation.d_nation_name)
+  METRICS (f.flight_count AS COUNT(f_id));
+----
+by more than one path
+
+# X10: a dimension referencing a related table's fact keeps working.
+statement ok
+CREATE SEMANTIC VIEW xref_fact
+  TABLES (region AS x_regions PRIMARY KEY (r_id), nation AS x_nations PRIMARY KEY (n_id))
+  RELATIONSHIPS (nation_region AS nation (r_id) REFERENCES region)
+  FACTS (region.f_rid AS r_id)
+  DIMENSIONS (nation.d_rid AS region.f_rid)
+  METRICS (nation.nation_count AS COUNT(n_id));
+
+query II
+SELECT * FROM SEMANTIC_VIEW(xref_fact DIMENSIONS nation.d_rid METRICS nation.nation_count) ORDER BY 1;
+----
+1	1
+2	1
+
+# X11: SHOW SEMANTIC DIMENSIONS FOR METRIC lists the reference with a metric
+# of its own table and of a table that references it.
+query T
+SELECT name FROM (SHOW SEMANTIC DIMENSIONS IN xref_sv FOR METRIC revenue) WHERE name LIKE '%region%' ORDER BY 1;
+----
+d_customer_region
+d_order_region
+d_region_name
+
+# X12: the YAML export keeps the reference, and the view re-imports from it.
+statement ok
+CREATE SEMANTIC VIEW xref_yaml FROM YAML $$
+tables:
+  - alias: region
+    table: x_regions
+    pk_columns: [r_id]
+  - alias: customer
+    table: x_customers
+    pk_columns: [c_id]
+  - alias: nation
+    table: x_nations
+    pk_columns: [n_id]
+joins:
+  - name: customer_nation
+    from_alias: customer
+    table: nation
+    fk_columns: [n_id]
+  - name: nation_region
+    from_alias: nation
+    table: region
+    fk_columns: [r_id]
+dimensions:
+  - name: d_region_name
+    expr: r_name
+    source_table: region
+  - name: d_customer_region
+    expr: region.d_region_name
+    source_table: customer
+metrics:
+  - name: customer_count
+    expr: COUNT(c_id)
+    source_table: customer
+$$;
+
+query TI
+SELECT * FROM SEMANTIC_VIEW(xref_yaml DIMENSIONS customer.d_customer_region METRICS customer.customer_count) ORDER BY 1 NULLS LAST;
+----
+EU	1
+US	1
+NULL	1
+
+# A view with a dimension reference is stored in format 4, which 0.19.0
+# (format 3) refuses by name instead of reading the reference as a column.
+query I
+SELECT CAST(json_extract(definition, '$.schema_version') AS INTEGER)
+FROM semantic_layer._definitions WHERE name = 'xref_sv';
+----
+4
+
+# A view without one keeps its lower format.
+query I
+SELECT CAST(json_extract(definition, '$.schema_version') AS INTEGER)
+FROM semantic_layer._definitions WHERE name = 'xref_fact';
+----
+1
+
+# R1 (review of #362): a chain naming the dimension's own table keeps its
+# meaning even when another dimension references that dimension. Dimension
+# `c_name` reads its own `c_name` column beside a reference; `o_label`
+# references the dimension. Lowering used to rewrite the column chain
+# `customer.c_name` into the dimension's own twin (a fact reading itself), and
+# the query failed to bind.
+statement ok
+CREATE SEMANTIC VIEW xref_own
+  TABLES (
+    region AS x_regions PRIMARY KEY (r_id),
+    nation AS x_nations PRIMARY KEY (n_id),
+    customer AS x_customers PRIMARY KEY (c_id),
+    orders AS x_orders PRIMARY KEY (o_id)
+  )
+  RELATIONSHIPS (
+    orders(c_id) REFERENCES customer,
+    customer(n_id) REFERENCES nation,
+    nation(r_id) REFERENCES region
+  )
+  DIMENSIONS (
+    region.d_region_name AS region.r_name,
+    customer.c_name AS COALESCE(customer.c_name, '') || '@' || COALESCE(region.d_region_name, '?'),
+    orders.o_label AS customer.c_name
+  )
+  METRICS (orders.revenue AS SUM(orders.amount));
+
+query TI
+SELECT * FROM SEMANTIC_VIEW(xref_own DIMENSIONS customer.c_name METRICS orders.revenue) ORDER BY 1;
+----
+Ann@EU	30
+Bob@US	5
+Cid@?	7
+
+query TI
+SELECT * FROM SEMANTIC_VIEW(xref_own DIMENSIONS orders.o_label METRICS orders.revenue) ORDER BY 1;
+----
+Ann@EU	30
+Bob@US	5
+Cid@?	7
+
+# R2 (review of #362): a reference reads its table along the referencing
+# dimension's own path, whatever path the metric takes there itself. Orders
+# reach regions through their customer and through their store (a diamond);
+# `d_customer_region` is the customer's region even for a metric whose
+# USING takes the store path, and is answered without a USING.
+statement ok
+CREATE TABLE x_stores (s_id INT, r_id INT);
+
+statement ok
+INSERT INTO x_stores VALUES (1, 2), (2, 1);
+
+statement ok
+CREATE TABLE x_orders2 (o_id INT, c_id INT, s_id INT, amount INT);
+
+statement ok
+INSERT INTO x_orders2 VALUES (1, 100, 1, 10), (2, 200, 1, 20), (3, 100, 2, 40);
+
+statement ok
+CREATE SEMANTIC VIEW xref_diamond
+  TABLES (
+    region AS x_regions PRIMARY KEY (r_id),
+    nation AS x_nations PRIMARY KEY (n_id),
+    customer AS x_customers PRIMARY KEY (c_id),
+    store AS x_stores PRIMARY KEY (s_id),
+    orders AS x_orders2 PRIMARY KEY (o_id)
+  )
+  RELATIONSHIPS (
+    order_customer AS orders(c_id) REFERENCES customer,
+    order_store AS orders(s_id) REFERENCES store,
+    customer_nation AS customer(n_id) REFERENCES nation,
+    nation_region AS nation(r_id) REFERENCES region,
+    store_region AS store(r_id) REFERENCES region
+  )
+  DIMENSIONS (
+    region.d_region_name AS region.r_name,
+    customer.d_customer_region AS region.d_region_name,
+    orders.d_order_region AS customer.d_customer_region,
+    store.d_store_region AS region.d_region_name,
+    orders.d_any_region AS COALESCE(customer.d_customer_region, store.d_store_region)
+  )
+  METRICS (
+    orders.revenue AS SUM(orders.amount),
+    orders.rev_by_store USING (order_store) AS SUM(orders.amount)
+  );
+
+query TI
+SELECT * FROM SEMANTIC_VIEW(xref_diamond DIMENSIONS customer.d_customer_region METRICS orders.rev_by_store) ORDER BY 1;
+----
+EU	50
+US	20
+
+query TI
+SELECT * FROM SEMANTIC_VIEW(xref_diamond DIMENSIONS customer.d_customer_region METRICS orders.revenue) ORDER BY 1;
+----
+EU	50
+US	20
+
+# A reference to the reference reads regions through customers too.
+query TI
+SELECT * FROM SEMANTIC_VIEW(xref_diamond DIMENSIONS orders.d_order_region METRICS orders.rev_by_store) ORDER BY 1;
+----
+EU	50
+US	20
+
+# The store path's region beside the customer's: one join to regions cannot
+# follow both, so the query is refused rather than reading one of them.
+statement error
+SELECT * FROM SEMANTIC_VIEW(xref_diamond DIMENSIONS customer.d_customer_region, region.d_region_name METRICS orders.rev_by_store);
+----
+more than one path
+
+# One dimension reading regions through customers and through stores needs
+# both paths at once: refused, with or without a USING, rather than reading
+# the store's region through the customer join.
+statement error
+SELECT * FROM SEMANTIC_VIEW(xref_diamond DIMENSIONS orders.d_any_region METRICS orders.rev_by_store);
+----
+more than one path
+
+statement error
+SELECT * FROM SEMANTIC_VIEW(xref_diamond DIMENSIONS orders.d_any_region METRICS orders.revenue);
+----
+more than one path

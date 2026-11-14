@@ -73,6 +73,9 @@ pub(super) struct WhereMember {
     /// them — and a join that fans relative to a metric's grain inflates that
     /// metric, which is what EXP-27 was.
     pub(super) fact_tables: Vec<String>,
+    /// `fact_tables`, each with the table it is read through
+    /// ([`facts::collect_fact_routes`](super::facts::collect_fact_routes)).
+    pub(super) fact_routes: Vec<(String, Option<String>)>,
 }
 
 /// The member lookup tables a predicate is resolved against.
@@ -87,6 +90,8 @@ struct MemberMaps<'a> {
     member_tables: HashMap<String, Option<&'a str>>,
     /// Member name key -> tables reached THROUGH its fact references (EXP-23).
     member_fact_tables: HashMap<String, Vec<String>>,
+    /// The same tables, each with the table it is read through.
+    member_fact_routes: HashMap<String, Vec<(String, Option<String>)>>,
     /// PRIVATE facts, kept out of the lookup so a reference is rejected by name
     /// rather than leaking the member (EXP-13).
     private_facts: HashMap<String, &'a str>,
@@ -104,6 +109,7 @@ fn build_member_maps<'a>(
     // this, a predicate member whose expression reaches a fact on another table
     // splices in that table's columns while the query never joins it.
     let mut member_fact_tables: HashMap<String, Vec<String>> = HashMap::new();
+    let mut member_fact_routes: HashMap<String, Vec<(String, Option<String>)>> = HashMap::new();
     for dim in &def.dimensions {
         // Dimensions are never PRIVATE — `PRIVATE` on a dimension is rejected at
         // CREATE (`body_parser::entries`), which is why `sql_gen`'s `Resolvable`
@@ -123,6 +129,14 @@ fn build_member_maps<'a>(
             member_fact_tables.insert(
                 key.clone(),
                 super::facts::collect_referenced_fact_tables(&dim.expr, &def.facts),
+            );
+            member_fact_routes.insert(
+                key.clone(),
+                super::facts::collect_fact_routes(
+                    &dim.expr,
+                    dim.source_table.as_deref(),
+                    &def.facts,
+                ),
             );
             member_tables.insert(key, dim.source_table.as_deref());
         }
@@ -155,6 +169,13 @@ fn build_member_maps<'a>(
             member_fact_tables.entry(key.clone()).or_insert_with(|| {
                 super::facts::collect_referenced_fact_tables(&fact.expr, &def.facts)
             });
+            member_fact_routes.entry(key.clone()).or_insert_with(|| {
+                super::facts::collect_fact_routes(
+                    &fact.expr,
+                    fact.source_table.as_deref(),
+                    &def.facts,
+                )
+            });
             member_tables
                 .entry(key)
                 .or_insert(fact.source_table.as_deref());
@@ -164,6 +185,7 @@ fn build_member_maps<'a>(
         dim_exprs,
         member_tables,
         member_fact_tables,
+        member_fact_routes,
         private_facts,
     }
 }
@@ -239,6 +261,7 @@ pub(super) fn resolve_where_clause(
         dim_exprs,
         member_tables,
         member_fact_tables,
+        member_fact_routes,
         private_facts,
     } = build_member_maps(def, &keys_for);
     let mut metric_names: HashMap<String, &str> = HashMap::new();
@@ -282,6 +305,7 @@ pub(super) fn resolve_where_clause(
                     name: r.raw.to_string(),
                     table: table.map(str::to_ascii_lowercase),
                     fact_tables: reached,
+                    fact_routes: member_fact_routes.get(&key).cloned().unwrap_or_default(),
                 });
             }
             continue;

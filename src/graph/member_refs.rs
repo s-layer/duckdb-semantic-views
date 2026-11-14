@@ -74,6 +74,18 @@ pub fn validate_member_references(def: &SemanticViewDefinition) -> Result<(), Pa
         }
     }
 
+    // Phase 8.2: the keys a dimension's expression may also name, another
+    // table's dimension (`region.d_region_name`).
+    let dimension_keys: HashSet<String> = def
+        .dimensions
+        .iter()
+        .filter_map(|d| {
+            d.source_table
+                .as_ref()
+                .map(|src| normalize_ident_part(&format!("{src}.{}", d.name)))
+        })
+        .collect();
+
     // (kind, name, source_table, the texts to check) for every member that
     // carries one. A window metric is emitted from its `WindowSpec` alone
     // (`expand::window`), so its texts are the inner metric, the function's
@@ -129,6 +141,11 @@ pub fn validate_member_references(def: &SemanticViewDefinition) -> Result<(), Pa
             }
             if member_keys.contains(&chain.key()) {
                 continue; // A declared fact or metric, own-qualified: the legal cross-table form.
+            }
+            if kind == "dimension" && dimension_keys.contains(&chain.key()) {
+                // Phase 8.2: a dimension may reference a related table's
+                // dimension (`graph::dim_refs` checks which ones).
+                continue;
             }
             return Err(ParseError::positionless(format!(
                 "semantic view: {kind} '{name}' references '{raw}', a column of \
@@ -338,6 +355,30 @@ mod tests {
         let mut def2 = base_def();
         def2.facts = vec![fact("f", "o.amount * c.rate", Some("o"))];
         assert!(validate_member_references(&def2).is_err(), "fact");
+    }
+
+    /// Phase 8.2 lets only a DIMENSION name another table's dimension: a fact
+    /// or metric naming one is still a foreign reference (review of #362).
+    #[test]
+    fn only_a_dimension_may_name_another_tables_dimension() {
+        let with = |f: fn(&mut SemanticViewDefinition)| {
+            let mut def = base_def();
+            def.dimensions = vec![dim("region_dim", "c.region", Some("c"))];
+            f(&mut def);
+            validate_member_references(&def)
+        };
+        assert!(
+            with(|d| d.dimensions.push(dim("d", "c.region_dim", Some("o")))).is_ok(),
+            "dimension"
+        );
+        assert!(
+            with(|d| d.facts = vec![fact("f", "c.region_dim", Some("o"))]).is_err(),
+            "fact"
+        );
+        assert!(
+            with(|d| d.metrics = vec![metric("m", "COUNT(c.region_dim)", Some("o"))]).is_err(),
+            "metric"
+        );
     }
 
     /// Case and quoting follow `DuckDB`'s rule (CLAUDE.md): the qualifier matches

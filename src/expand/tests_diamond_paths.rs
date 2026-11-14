@@ -756,3 +756,157 @@ fn na_dimension_across_a_many_to_many_lists_only_itself() {
         .collect();
     assert!(!listed.contains(&"g0"), "listed {listed:?}");
 }
+
+/// `diamond(order)` plus `cust_region`, a dimension on customers that
+/// references the region's dimension (Phase 8.2), and `cust_region_f`, one
+/// written over a fact on regions (the older form). Both read a customer's
+/// region along `c -> r`, whichever path the metric takes to regions itself:
+/// by customer region o1 EU, o2 US, o3 EU (EU 50, US 20).
+fn diamond_with_references(order: &str) -> SemanticViewDefinition {
+    let mut def = diamond(order);
+    def.dimensions
+        .push(dim("cust_region", "r.region_name", "c"));
+    def.dimensions
+        .push(dim("cust_region_f", "r.region_fact", "c"));
+    // A reference to the reference, on orders: still the customer's region.
+    def.dimensions
+        .push(dim("order_cust_region", "c.cust_region", "o"));
+    // The store's region by reference, and one dimension reading both.
+    def.dimensions
+        .push(dim("store_region", "r.region_name", "s"));
+    def.dimensions.push(dim(
+        "any_region",
+        "COALESCE(c.cust_region, s.store_region)",
+        "o",
+    ));
+    def.facts.push(Fact {
+        name: "region_fact".to_string(),
+        expr: "r.region_name".to_string(),
+        source_table: Some("r".to_string()),
+        ..Default::default()
+    });
+    def
+}
+
+fn assert_reference_answer(request: &QueryRequest, expected: &[&[&str]]) {
+    for order in ORDERS {
+        let sql = expand("dv", &diamond_with_references(order), request)
+            .unwrap_or_else(|e| panic!("TABLES order {order}: {e}"));
+        assert_eq!(rows(&sql), table_of(expected), "TABLES order {order}");
+    }
+}
+
+/// Review of #362: a reference dimension on customers, queried with a metric
+/// whose `USING` takes the store path, still reads the customer's region.
+#[test]
+fn reference_dimension_reads_its_own_tables_path_beside_another_using() {
+    assert_reference_answer(
+        &req(&["cust_region"], &["rev_by_store"], None),
+        &[&["EU", "50"], &["US", "20"]],
+    );
+}
+
+/// With no `USING`, the reference has one path from customers, so it is
+/// answered rather than refused as two paths from orders.
+#[test]
+fn reference_dimension_without_using_reads_its_own_tables_path() {
+    assert_reference_answer(
+        &req(&["cust_region"], &["revenue"], None),
+        &[&["EU", "50"], &["US", "20"]],
+    );
+}
+
+/// A filter on the reference dimension follows the same path.
+#[test]
+fn filter_on_a_reference_dimension_reads_its_own_tables_path() {
+    assert_reference_answer(
+        &req(&[], &["rev_by_store"], Some("c.cust_region = 'EU'")),
+        &[&["50"]],
+    );
+}
+
+/// The older form, a customer dimension over a region fact, the same way.
+#[test]
+fn dimension_over_a_related_fact_reads_its_own_tables_path() {
+    assert_reference_answer(
+        &req(&["cust_region_f"], &["rev_by_store"], None),
+        &[&["EU", "50"], &["US", "20"]],
+    );
+}
+
+/// Regions through customers for the reference and through stores for the
+/// metric's own dimension, in one query: one join to regions cannot be both,
+/// so the query is refused naming both paths rather than reading one.
+#[test]
+fn reference_beside_a_dimension_on_another_path_is_refused() {
+    let request = req(&["cust_region", "region_name"], &["rev_by_store"], None);
+    for order in ORDERS {
+        match expand("dv", &diamond_with_references(order), &request) {
+            Ok(sql) => panic!(
+                "TABLES order {order}: expected a refusal, got rows {:?}\nSQL:\n{sql}",
+                rows(&sql)
+            ),
+            Err(e) => {
+                let msg = e.to_string();
+                assert!(
+                    msg.contains("o -> c -> r") && msg.contains("o -> s -> r"),
+                    "TABLES order {order}: expected both paths named, got: {msg}"
+                );
+            }
+        }
+    }
+}
+
+/// Review of #362, round 2: a reference to a reference through the diamond
+/// reads regions through customers, the table of the dimension that names
+/// them, not along the metric's `USING` path.
+#[test]
+fn reference_to_a_reference_reads_the_intermediate_tables_path() {
+    assert_reference_answer(
+        &req(&["order_cust_region"], &["rev_by_store"], None),
+        &[&["EU", "50"], &["US", "20"]],
+    );
+}
+
+/// The same with no `USING`: one chain through customers, so answered.
+#[test]
+fn reference_to_a_reference_without_using_is_answered() {
+    assert_reference_answer(
+        &req(&["order_cust_region"], &["revenue"], None),
+        &[&["EU", "50"], &["US", "20"]],
+    );
+}
+
+/// And as a filter.
+#[test]
+fn filter_on_a_reference_to_a_reference_reads_the_intermediate_tables_path() {
+    assert_reference_answer(
+        &req(&[], &["rev_by_store"], Some("o.order_cust_region = 'EU'")),
+        &[&["50"]],
+    );
+}
+
+/// Review of #362, round 3: one dimension reading regions through customers
+/// and through stores needs both paths to regions, which one join cannot
+/// follow: refused naming both, with or without a `USING`.
+#[test]
+fn one_dimension_reaching_a_table_two_ways_is_refused() {
+    for metric in ["rev_by_store", "revenue"] {
+        let request = req(&["any_region"], &[metric], None);
+        for order in ORDERS {
+            match expand("dv", &diamond_with_references(order), &request) {
+                Ok(sql) => panic!(
+                    "{metric}, TABLES order {order}: expected a refusal, got rows {:?}\nSQL:\n{sql}",
+                    rows(&sql)
+                ),
+                Err(e) => {
+                    let msg = e.to_string();
+                    assert!(
+                        msg.contains("o -> c -> r") && msg.contains("o -> s -> r"),
+                        "{metric}, TABLES order {order}: expected both paths named, got: {msg}"
+                    );
+                }
+            }
+        }
+    }
+}

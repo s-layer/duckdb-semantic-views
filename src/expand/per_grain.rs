@@ -257,7 +257,7 @@ struct Group {
     /// Lowercased table -> the path `[anchor, …, table]` this group's metrics
     /// reach it by, for each table the anchor reaches by several paths through
     /// different tables (a diamond) of which their `USING` picks one
-    /// ([`multi_path::pinned_path`](super::multi_path::pinned_path)). Empty
+    /// (`multi_path::pinned_route`). Empty
     /// when the query reaches no such table. Metrics that pick different
     /// paths are separate groups, outer-merged like different roles.
     paths: HashMap<String, Vec<String>>,
@@ -393,7 +393,7 @@ fn partition_metrics(
     resolved_exprs: &HashMap<String, String>,
     root: &str,
     role_dims: &[&Dimension],
-    member_tables: &[String],
+    member_tables: &[(String, Option<String>)],
 ) -> Option<(Partition, Vec<Output>)> {
     let mut partition = Partition::new();
     let mut outputs: Vec<Output> = Vec::with_capacity(resolved_mets.len());
@@ -454,6 +454,7 @@ pub(super) fn plan(
     resolved_exprs: &HashMap<String, String>,
     where_tables: &[String],
     where_has_unqualified_member: bool,
+    member_routes: Option<&[(String, Option<String>)]>,
 ) -> Option<Plan> {
     if def.joins.is_empty() || resolved_mets.is_empty() {
         return None; // Single-table view, or a dimensions-only query.
@@ -479,9 +480,17 @@ pub(super) fn plan(
     // Every table a grain CTE joins for a member: the dimensions', the facts
     // their expressions reach, and the `where_clause` members'. A metric's
     // path to each is pinned where the metric's `USING` picks one of several.
-    let member_tables: Vec<String> = touched_tables(def, resolved_dims, &[], where_tables, false)
-        .into_iter()
-        .collect();
+    // Each with the table it is read through, for a fact a member on another
+    // table is written over (`multi_path::Member::via`).
+    let member_tables: Vec<(String, Option<String>)> = member_routes.map_or_else(
+        || {
+            touched_tables(def, resolved_dims, &[], where_tables, false)
+                .into_iter()
+                .map(|t| (t, None))
+                .collect()
+        },
+        <[_]>::to_vec,
+    );
     // The queried dimensions, and a stand-in for each `where_clause` table a
     // metric reads on its role (TECH-DEBT #111): each group's roles are
     // resolved over both, so one filter beside two roles is read along each.
@@ -647,7 +656,7 @@ fn is_snapshot_group(
 fn decompose(
     def: &SemanticViewDefinition,
     resolved_dims: &[&Dimension],
-    member_tables: &[String],
+    member_tables: &[(String, Option<String>)],
     met: &Metric,
     resolved_exprs: &HashMap<String, String>,
     partition: &mut Partition,
@@ -857,7 +866,7 @@ fn metric_paths(
     def: &SemanticViewDefinition,
     met: &Metric,
     root: &str,
-    member_tables: &[String],
+    member_tables: &[(String, Option<String>)],
 ) -> Option<HashMap<String, Vec<String>>> {
     let mut agreed: Option<HashMap<String, Vec<String>>> = None;
     for (component, home) in super::multi_path::base_components(def, met, root) {

@@ -159,19 +159,73 @@ fn admitted_paths(
 /// `[home, …, to]`. `None` when `to` is reached one way or none (the usual
 /// join walk finds it) or several ways the `USING` does not choose between
 /// (refused by [`check_metric_paths`]).
-pub(super) fn pinned_path(
+#[cfg(test)]
+fn pinned_path(
     def: &SemanticViewDefinition,
     home: &str,
     to: &str,
     using: &[String],
 ) -> Option<Vec<String>> {
+    pinned_route(def, home, to, None, using)
+}
+
+/// [`pinned_path`] for a member reached `via` another table (see
+/// [`Member::via`]): the one path through `via` when `to` is reached from
+/// `home` several ways and that path is the only one through `via`.
+fn pinned_route(
+    def: &SemanticViewDefinition,
+    home: &str,
+    to: &str,
+    via: Option<&str>,
+    using: &[String],
+) -> Option<Vec<String>> {
     if admitted_paths(def, home, to, &[]).len() < 2 {
         return None;
     }
-    match admitted_paths(def, home, to, using).as_slice() {
+    match member_paths(def, home, to, via, using).as_slice() {
         [one] => Some(one.clone()),
         _ => None,
     }
+}
+
+/// The paths a metric on `home` with `using` follows to a member on `to`
+/// reached `via` another table: its paths to `via`, each continued by
+/// `via`'s chains to `to`. A dimension on `via` written over a fact on `to`
+/// (or referencing a dimension there, Phase 8.2) has one value per row of
+/// `via`, read along `via`'s own path, whichever path the metric would take to
+/// `to` by itself. Without `via`, or when `home` does not reach `via` along
+/// foreign keys, the metric's own paths to `to` ([`admitted_paths`]).
+fn member_paths(
+    def: &SemanticViewDefinition,
+    home: &str,
+    to: &str,
+    via: Option<&str>,
+    using: &[String],
+) -> Vec<Vec<String>> {
+    let home = home.to_ascii_lowercase();
+    let to = to.to_ascii_lowercase();
+    let Some(via) = via
+        .map(str::to_ascii_lowercase)
+        .filter(|v| *v != to && *v != home)
+    else {
+        return admitted_paths(def, &home, &to, using);
+    };
+    let ups = admitted_paths(def, &home, &via, using);
+    if ups.is_empty() {
+        return admitted_paths(def, &home, &to, using);
+    }
+    let downs = paths_from(def, &via, &to, PATHS_PER_STEP);
+    let mut out: Vec<Vec<String>> = Vec::new();
+    for up in &ups {
+        for down in &downs {
+            let mut path = up.clone();
+            path.extend(down.iter().skip(1).cloned());
+            if !out.contains(&path) {
+                out.push(path);
+            }
+        }
+    }
+    out
 }
 
 /// The metrics `met` is computed from, each with the table its rows are read
@@ -211,6 +265,18 @@ pub(super) fn base_components<'a>(
 pub(super) struct Member {
     pub(super) label: String,
     pub(super) table: String,
+    /// The table the member's value is read through, when it is a fact (or a
+    /// referenced dimension's twin) that a member on another table is written
+    /// over: that member's own table. A metric reaches `table` along this
+    /// table's path ([`member_paths`]).
+    pub(super) via: Option<String>,
+}
+
+impl Member {
+    /// The member's table and the table it is read through.
+    pub(super) fn route(&self) -> (String, Option<String>) {
+        (self.table.clone(), self.via.clone())
+    }
 }
 
 /// The members a query with metrics reaches from each metric's table: every
@@ -224,26 +290,36 @@ pub(super) fn query_members(
     let mut out: Vec<Member> = Vec::new();
     for dim in resolved_dims {
         let label = format!("dimension '{}'", dim.name);
-        let tables =
-            dim.source_table
-                .iter()
-                .cloned()
-                .chain(super::facts::collect_referenced_fact_tables(
-                    &dim.expr, &def.facts,
-                ));
-        for table in tables {
+        if let Some(t) = &dim.source_table {
             out.push(Member {
                 label: label.clone(),
-                table: table.to_ascii_lowercase(),
+                table: t.to_ascii_lowercase(),
+                via: None,
+            });
+        }
+        let own = dim.source_table.as_deref();
+        for (table, via) in super::facts::collect_fact_routes(&dim.expr, own, &def.facts) {
+            out.push(Member {
+                label: label.clone(),
+                table,
+                via,
             });
         }
     }
     for member in where_members {
         let label = format!("filter member '{}'", member.name);
-        for table in member.table.iter().chain(member.fact_tables.iter()) {
+        if let Some(t) = &member.table {
             out.push(Member {
                 label: label.clone(),
-                table: table.to_ascii_lowercase(),
+                table: t.to_ascii_lowercase(),
+                via: None,
+            });
+        }
+        for (table, via) in &member.fact_routes {
+            out.push(Member {
+                label: label.clone(),
+                table: table.clone(),
+                via: via.clone(),
             });
         }
     }
@@ -267,17 +343,18 @@ fn na_dimension_members<'a>(
         super::resolution::find_dimension(def, &na.dimension)
             .into_iter()
             .flat_map(|dim| {
-                dim.source_table
-                    .iter()
-                    .cloned()
-                    .chain(super::facts::collect_referenced_fact_tables(
-                        &dim.expr, &def.facts,
+                let own = dim.source_table.as_deref();
+                own.iter()
+                    .map(|t| (t.to_ascii_lowercase(), None))
+                    .chain(super::facts::collect_fact_routes(
+                        &dim.expr, own, &def.facts,
                     ))
                     .collect::<Vec<_>>()
             })
-            .map(move |table| Member {
+            .map(move |(table, via)| Member {
                 label: label.clone(),
-                table: table.to_ascii_lowercase(),
+                table,
+                via,
             })
     })
 }
@@ -293,7 +370,13 @@ pub(super) fn na_dimension_reached_two_ways(
     home: &str,
 ) -> bool {
     na_dimension_members(def, component).any(|m| {
-        let paths = admitted_paths(def, home, &m.table, &component.using_relationships);
+        let paths = member_paths(
+            def,
+            home,
+            &m.table,
+            m.via.as_deref(),
+            &component.using_relationships,
+        );
         paths.len() > 1
             || (paths.is_empty()
                 && m.table != home
@@ -308,17 +391,24 @@ pub(super) fn component_paths(
     def: &SemanticViewDefinition,
     component: &Metric,
     home: &str,
-    member_tables: &[String],
+    member_routes: &[(String, Option<String>)],
 ) -> HashMap<String, Vec<String>> {
     let fact_tables = super::facts::collect_referenced_fact_tables(&component.expr, &def.facts);
-    member_tables
+    member_routes
         .iter()
         .cloned()
-        .chain(fact_tables)
-        .chain(na_dimension_members(def, component).map(|m| m.table))
-        .filter_map(|t| {
+        .chain(fact_tables.into_iter().map(|t| (t, None)))
+        .chain(na_dimension_members(def, component).map(|m| m.route()))
+        .filter_map(|(t, via)| {
             let t = t.to_ascii_lowercase();
-            pinned_path(def, home, &t, &component.using_relationships).map(|p| (t, p))
+            pinned_route(
+                def,
+                home,
+                &t,
+                via.as_deref(),
+                &component.using_relationships,
+            )
+            .map(|p| (t, p))
         })
         .collect()
 }
@@ -528,19 +618,52 @@ pub(super) fn check_metric_paths(
             let fact_members = fact_tables.into_iter().map(|t| Member {
                 label: format!("a fact metric '{}' is written over", component.name),
                 table: t.to_ascii_lowercase(),
+                via: None,
             });
             let reached: Vec<Member> = members
                 .iter()
                 .map(|m| Member {
                     label: m.label.clone(),
                     table: m.table.clone(),
+                    via: m.via.clone(),
                 })
                 .chain(fact_members)
                 .chain(na_dimension_members(def, component))
                 .collect();
+            // The one path each member's table is reached by, for a table
+            // reached several ways: one join to it cannot follow two.
+            let mut chosen: HashMap<String, Vec<String>> = HashMap::new();
             for member in &reached {
-                let paths =
-                    admitted_paths(def, &home, &member.table, &component.using_relationships);
+                let paths = member_paths(
+                    def,
+                    &home,
+                    &member.table,
+                    member.via.as_deref(),
+                    &component.using_relationships,
+                );
+                if let [one] = paths.as_slice() {
+                    if admitted_paths(def, &home, &member.table, &[]).len() > 1 {
+                        match chosen.get(&member.table) {
+                            Some(other) if other != one => {
+                                return Err(ExpandError::MultiPath {
+                                    detail: Box::new(MultiPathError {
+                                        view_name: view_name.to_string(),
+                                        member: member.label.clone(),
+                                        member_table: member.table.clone(),
+                                        from_table: home,
+                                        reader: format!("metric '{}'", met.name),
+                                        paths: render(&[other.clone(), one.clone()]),
+                                        many_to_many: false,
+                                    }),
+                                });
+                            }
+                            Some(_) => {}
+                            None => {
+                                chosen.insert(member.table.clone(), one.clone());
+                            }
+                        }
+                    }
+                }
                 if paths.len() > 1 {
                     return Err(ExpandError::MultiPath {
                         detail: Box::new(MultiPathError {
@@ -586,7 +709,7 @@ pub(super) fn first_pinned(
     resolved_mets: &[&Metric],
     members: &[Member],
 ) -> Option<(String, String, String)> {
-    let tables: Vec<String> = members.iter().map(|m| m.table.clone()).collect();
+    let tables: Vec<(String, Option<String>)> = members.iter().map(Member::route).collect();
     for met in resolved_mets {
         for (component, home) in base_components(def, met, root) {
             let mut paths: Vec<(String, Vec<String>)> =

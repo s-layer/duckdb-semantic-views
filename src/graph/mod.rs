@@ -2,6 +2,7 @@
 
 mod cardinality;
 mod derived_metrics;
+mod dim_refs;
 mod facts;
 mod member_exprs;
 mod member_refs;
@@ -19,6 +20,8 @@ mod test_helpers;
 pub(crate) use cardinality::infer_cardinality;
 pub(crate) use derived_metrics::aggregate_name;
 pub use derived_metrics::{contains_aggregate_function, validate_derived_metrics};
+pub(crate) use dim_refs::dimension_references;
+pub use dim_refs::validate_dimension_references;
 pub use facts::{find_fact_references, validate_facts};
 pub use member_exprs::validate_member_expressions;
 pub use member_refs::validate_member_references;

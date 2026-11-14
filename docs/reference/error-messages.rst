@@ -645,6 +645,38 @@ The same message is raised for a dimension or metric expression, with ``fact`` r
 
 **Fix:** Define a fact on the other table and reference that fact by name. See :ref:`howto-facts`.
 
+.. _ref-err-dimension-reference:
+
+Dimension reference to a table not reached by one path
+------------------------------------------------------
+
+.. versionadded:: 0.20.0
+
+.. code-block:: text
+
+   dimension '<own>.<name>' references dimension '<table>.<target>', but table
+   '<own>' does not reach table '<table>' along its relationships, so '<target>'
+   has no single value per row of '<own>'. As in Snowflake, a dimension can
+   reference a dimension of a table it references, directly or through other
+   tables, not of a table that references it.
+
+.. code-block:: text
+
+   dimension '<own>.<name>' references dimension '<table>.<target>', but table
+   '<own>' reaches table '<table>' by more than one path (for example, as two
+   roles), so which one is meant is not said. As in Snowflake, a dimension
+   reference must reach its table by a single path; define a dimension on
+   '<own>' for each role instead.
+
+.. code-block:: text
+
+   dimension '<name>' references itself through other dimensions' references; a
+   dimension reference cannot form a cycle.
+
+**Cause:** A dimension is written as a dimension of another table (see :ref:`dimension references <ref-create-dimension-references>`), and that table is not one the dimension's own table references (it is a child table, or unrelated), or it is reached two ways, such as a role-played table, or the references lead back to the dimension.
+
+**Fix:** Reference a dimension of a table the dimension's table references along one chain of relationships. For a child table's value, define a metric there instead; for a role-played table, define one dimension per role on the table that references it, each over a fact that names its role's relationship.
+
 .. _ref-err-bare-column:
 
 Unqualified column of another table

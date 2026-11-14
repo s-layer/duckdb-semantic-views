@@ -208,6 +208,49 @@ pub(super) fn inline_dimension_facts(expr: &str, facts: &[Fact]) -> String {
     inline_facts(expr, facts, &topo)
 }
 
+/// The tables [`collect_referenced_facts`] reaches from `expr`, a member's
+/// expression on table `own`, each with the table it is read through: the
+/// table of the member or fact whose expression names the fact that reaches
+/// it, when that table differs (`None` otherwise). A dimension on `orders`
+/// over a customer fact that names a region fact reaches `customer` through
+/// `orders` and `region` through `customer` (`multi_path::Member::via`).
+///
+/// One entry per distinct (table, through) pair: a table reached through two
+/// tables (`COALESCE(customer.region_ref, store.region_ref)`) is listed for
+/// each, so the multi-path check sees that one join cannot serve both.
+pub(super) fn collect_fact_routes(
+    expr: &str,
+    own: Option<&str>,
+    facts: &[Fact],
+) -> Vec<(String, Option<String>)> {
+    // (fact, the table whose expression names it): a fact named from two
+    // tables is walked from each.
+    let mut seen: HashSet<(String, Option<String>)> = HashSet::new();
+    let mut reached: Vec<(String, Option<String>)> = Vec::new();
+    let mut pending: Vec<(String, Option<String>)> =
+        vec![(expr.to_string(), own.map(str::to_ascii_lowercase))];
+    while let Some((current, referrer)) = pending.pop() {
+        for fact in facts {
+            let key = (fact.name.to_ascii_lowercase(), referrer.clone());
+            if seen.contains(&key)
+                || !references_ref(&current, &fact.name, fact.source_table.as_deref())
+            {
+                continue;
+            }
+            seen.insert(key);
+            let alias = fact.source_table.as_ref().map(|s| s.to_ascii_lowercase());
+            if let Some(alias) = &alias {
+                let route = (alias.clone(), referrer.clone().filter(|r| r != alias));
+                if !reached.contains(&route) {
+                    reached.push(route);
+                }
+            }
+            pending.push((fact.expr.clone(), alias.or_else(|| referrer.clone())));
+        }
+    }
+    reached
+}
+
 /// The reached tables alone — [`collect_referenced_facts`] without the names,
 /// for the join resolver, which only needs to know what to join.
 pub(super) fn collect_referenced_fact_tables(expr: &str, facts: &[Fact]) -> Vec<String> {
