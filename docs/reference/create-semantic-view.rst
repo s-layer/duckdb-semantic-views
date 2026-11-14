@@ -516,7 +516,7 @@ Declares FK/PK join paths between tables. Each entry names a relationship, speci
 - ``<rel_name>``, optional, a unique name identifying this relationship. It may be a quoted identifier (``"Dep Airport"``), including one with spaces or an embedded ``""``. A relationship declared without one, as in ``orders(customer_id) REFERENCES customers``, gets a generated name of the form ``SYS_RELATIONSHIP_<id>``, as in Snowflake, which ``DESCRIBE SEMANTIC VIEW`` shows. Snowflake draws a new random id on every ``CREATE``; here the id comes from the entry's position, tables and columns, so re-creating the same view, or re-creating it from its ``GET_DDL`` or YAML export, gives the same name; declaring a relationship before it changes the name. ``GET_DDL`` and the YAML export leave a generated name out. A metric's ``USING`` cannot name a generated name (``relationship '...' in USING clause of metric '...' was declared without a name``): name the relationship when a metric's ``USING`` needs to pick it. *(Added in 0.20.0.)*
 - ``<from_alias>``, the table alias containing the FK columns.
 - ``(<fk_column>, ...)``, one or more FK column names on the "from" table.
-- ``REFERENCES <to_alias> [(<ref_column>, ...)]``, the target table alias. Optionally specify which columns on the target table to join against. If omitted, the target's ``PRIMARY KEY`` columns are used. The JOIN ON clause is synthesized as ``from_alias.fk_column = to_alias.ref_column``.
+- ``REFERENCES <to_alias> [(<ref_column>, ...)]``, the target table alias. Optionally specify which columns on the target table to join against. If omitted, the target's ``PRIMARY KEY`` columns are used. The JOIN ON clause is synthesized as ``from_alias.fk_column = to_alias.ref_column``. Columns that are not the target's ``PRIMARY KEY`` or a ``UNIQUE`` key make the relationship :ref:`many-to-many <ref-create-direct-many-to-many>`.
 
 **ASOF relationships:**
 
@@ -600,11 +600,42 @@ A metric on books can then be grouped or filtered by an author dimension, and th
 - Two bridges between the same two tables are accepted, but a query that crosses from one side to the other is refused, as in Snowflake: each row is paired with the other side through either bridge, and ``USING`` cannot pick one, since a metric's ``USING`` must name a relationship from the metric's own table. So is a query by a dimension on one bridge when the other side is reached through both. A query on one side, or a metric on a bridge by the other side, is answered. See :ref:`the error <err-multi-path>`.
 - A query with only dimensions on the two sides lists the pairs the bridge holds, as in Snowflake: ``DIMENSIONS b.title, a.country`` reads ``book_authors`` and joins up to both, so an author with no book and a book with no author are not listed. A dimension on one table alone, such as ``b.title``, lists all of that table's values (see :ref:`Dimensions only <ref-sv-modes>`).
 
+.. _ref-create-direct-many-to-many:
+
+**Direct many-to-many relationships:**
+
+.. versionadded:: 0.20.0
+
+A relationship whose referenced columns are not the target's ``PRIMARY KEY`` or a ``UNIQUE`` key is many-to-many, as in Snowflake: each row of the "from" table matches every target row with its values. With several promotions rows per code, ``orders(promo_code) REFERENCES promotions(promo_code)`` matches each order with every promotion of its code. The target needs no key at all.
+
+.. code-block:: sql
+
+   TABLES (
+       orders     AS m_orders PRIMARY KEY (order_id),
+       promotions AS m_promotions
+   )
+   RELATIONSHIPS (
+       orders_to_promotions AS orders(promo_code) REFERENCES promotions(promo_code)
+   )
+
+The answers are Snowflake's:
+
+- A metric grouped by a dimension across the relationship counts each row of its table once for each value it matches. An order whose code has two ``Web`` rows and an ``Email`` row counts once under ``Web`` and once under ``Email``, so the groups can add up to more than the total. An order whose code no promotion has, or whose code is ``NULL``, counts in the ``NULL`` group: a ``NULL`` matches nothing, on either side. With no dimension across it the total is the orders' own.
+- A filter across it keeps a row when any row it matches passes, and counts it once.
+- A query with only dimensions lists the combinations that occur together, every join inner: an order that matches no promotion, or reaches no customer when a customer dimension is queried, is not listed.
+- A ``FACTS`` query returns one row per combination of matching rows, not deduplicated, every join inner. When the other side is only in the ``WHERE`` clause, it returns one row for each row of the queried table that passes the filter.
+- ``SHOW SEMANTIC DIMENSIONS ... FOR METRIC`` lists the dimensions across it for a metric on a table with a ``PRIMARY KEY``.
+- The metric's table needs a ``PRIMARY KEY`` to count its rows once by, and so does a ``FACTS`` query's table when the other side is only in the filter. Without one the query is refused (:ref:`ref-err-many-to-many-key`), as in Snowflake (010933); a metric on the keyless ``promotions`` grouped by a customer dimension is refused, and one with no dimension across the relationship is answered.
+- Two many-to-many relationships between the same tables are accepted, and a query across them is refused, as in Snowflake (000002, :ref:`err-multi-path`).
+- ``CREATE`` refuses a dimension that references a dimension across it, and a window metric, fact or dimension whose window names one, as Snowflake does (010227): an order has no single channel.
+- ``DESCRIBE``, ``GET_DDL`` and the YAML export show the relationship as written. A view with one is stored in format 4, which 0.19.0 and older refuse to read.
+
 **Cardinality inference:**
 
 The extension infers cardinality from the "from" table's constraints:
 
 - If the FK columns match a ``PRIMARY KEY`` or ``UNIQUE`` constraint on the "from" table, the relationship is **one-to-one**, unless it is ``ASOF`` or a range relationship.
+- If the referenced columns are not the target's ``PRIMARY KEY`` or a ``UNIQUE`` key, the relationship is **many-to-many** (see above), unless it is ``ASOF`` or a range relationship, whose referenced columns must be a key.
 - Otherwise, the relationship is **many-to-one** (the default).
 
 Cardinality is used for :ref:`fan trap detection <howto-fan-traps>`.
