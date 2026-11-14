@@ -22,6 +22,7 @@ mod where_clause;
 #[cfg_attr(not(feature = "extension"), allow(dead_code))]
 pub(crate) mod wildcard;
 mod window;
+mod window_members;
 
 #[cfg(test)]
 mod test_helpers;
@@ -138,3 +139,5 @@ pub(crate) use where_clause::PARAM_FUNCTION;
 // Read-side member-type probe (TECH-DEBT #51, `query::member_types`).
 pub(crate) use facts::collect_derived_metric_source_tables;
 pub(crate) use window::window_required_dimensions;
+// The CREATE check of window facts and dimensions (`ddl::define`).
+pub use window_members::validate_window_members;

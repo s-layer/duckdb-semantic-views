@@ -1006,6 +1006,10 @@ pub fn expand(
     // through a private fact twin on that table (`dim_refs`).
     let lowered = super::dim_refs::lower_dimension_references(def);
     let def = &*lowered;
+    // Phase 8.3: a window fact or dimension is read as a column its table's
+    // derived table computes over all the table's rows (`window_members`).
+    let windowed = super::window_members::lower_window_members(def, req);
+    let def = &*windowed;
     // Phase 6.3: a metric written over a same-table metric carries that
     // metric's aggregate from here on, so every later step sees what it
     // computes (`graph::same_table_metrics`).
