@@ -164,21 +164,25 @@ pub fn lower_lod(def: &SemanticViewDefinition) -> Cow<'_, SemanticViewDefinition
 
 /// `def` as a query with no dimensions reads its LOD expressions, or `None`
 /// when it has none: the steps `expand` takes ahead of [`lower_lod_at`]
-/// that its spliced member expressions need (bare columns qualified,
-/// dimension references lowered), then [`lower_lod`]. Used to type and bind
-/// an `INCLUDE` or `EXCLUDE` fact, which no query can name in `FACTS`
+/// (many-to-many relationships bridged, bare columns qualified, dimension
+/// references and window members lowered, each window member read as a query
+/// naming every fact would read it), then [`lower_lod`]. Used to type and
+/// bind an `INCLUDE` or `EXCLUDE` fact, which no query can name in `FACTS`
 /// (v0.20.0 review F2).
 #[must_use]
 pub fn lod_lowered_for_probe(def: &SemanticViewDefinition) -> Option<SemanticViewDefinition> {
     if !has_lod(def) {
         return None;
     }
-    let qualified = super::bare_columns::qualify_bare_columns(def);
+    let bridged = super::many_to_many::lower_many_to_many(def);
+    let qualified = super::bare_columns::qualify_bare_columns(&bridged);
     let refs = super::dim_refs::lower_dimension_references(&qualified);
-    match lower_lod(&refs) {
-        Cow::Owned(lowered) => Some(lowered),
-        Cow::Borrowed(_) => None,
-    }
+    let every_fact = super::types::QueryRequest {
+        facts: refs.facts.iter().map(|f| f.name.as_str().into()).collect(),
+        ..super::types::QueryRequest::default()
+    };
+    let windowed = super::window_members::lower_window_members(&refs, &every_fact);
+    Some(lower_lod(&windowed).into_owned())
 }
 
 /// What an `INCLUDE` or `EXCLUDE` expression's grain depends on in a query

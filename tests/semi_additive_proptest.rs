@@ -223,12 +223,17 @@ const UNITS: [&str; 3] = ["week", "month", "quarter"];
 const DAY_BUCKETS: [[u8; 5]; 3] = [[0, 0, 1, 2, 3], [0, 0, 0, 1, 3], [0, 0, 0, 0, 1]];
 
 /// Queryable dimensions and the single semi-additive metric, by stable name.
-const DIMS: [&str; 3] = ["ent", "ts", "tsk"];
+const DIMS: [&str; 4] = ["ent", "ts", "tsk", "rts"];
 const METS: [&str; 1] = ["bal"];
 /// Index of the `ts` dimension within `DIMS`.
 const TS_DIM: usize = 1;
 /// Index of the `date_trunc` key dimension `tsk` within `DIMS`.
 const TSK_DIM: usize = 2;
+/// Index of `rts` within `DIMS`: `ts` read through a dimension reference to
+/// table `p`'s dimension `pts` (Phase 8.2), so its snapshot joins `p`
+/// (v0.20.0 review F3). Each row of `s` has its own row in `p`, so `rts`
+/// equals `ts` and the oracle reads `s.ts`.
+const RTS_DIM: usize = 3;
 
 /// Which dimension the metric is `NON ADDITIVE BY`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -237,6 +242,8 @@ enum NaKey {
     Ts,
     /// The expression key `tsk = date_trunc('<unit>', s.d)`.
     Trunc,
+    /// The dimension reference `rts = p.pts`.
+    Ref,
 }
 
 impl NaKey {
@@ -245,6 +252,7 @@ impl NaKey {
         match self {
             NaKey::Ts => TS_DIM,
             NaKey::Trunc => TSK_DIM,
+            NaKey::Ref => RTS_DIM,
         }
     }
 }
@@ -291,7 +299,7 @@ fn arb_instance() -> impl Strategy<Value = Instance> {
 
 fn arb_case() -> impl Strategy<Value = Case> {
     let order = prop_oneof![Just(SortOrder::Asc), Just(SortOrder::Desc)];
-    let na = prop_oneof![Just(NaKey::Ts), Just(NaKey::Trunc)];
+    let na = prop_oneof![Just(NaKey::Ts), Just(NaKey::Trunc), Just(NaKey::Ref)];
     let unit = prop::sample::select(UNITS.to_vec());
     (arb_instance(), order, na, unit).prop_flat_map(|(inst, order, na, unit)| {
         let dim_sel =
@@ -342,6 +350,13 @@ fn build_def(order: SortOrder, na: NaKey, unit: &str) -> SemanticViewDefinition 
         tags: Vec::new(),
         distinct_ranges: vec![],
     }];
+    let mut tables = tables;
+    tables.push(TableRef {
+        alias: "p".to_string(),
+        table: "p".to_string(),
+        pk_columns: vec!["rid".to_string()],
+        ..TableRef::default()
+    });
     let dimensions = vec![
         Dimension {
             cortex_search_service: None,
@@ -376,6 +391,32 @@ fn build_def(order: SortOrder, na: NaKey, unit: &str) -> SemanticViewDefinition 
             name: "tsk".to_string(),
             expr: tsk_expr(unit),
             source_table: Some("s".to_string()),
+            output_type: None,
+            comment: None,
+            synonyms: vec![],
+            is_filter: false,
+            tags: Vec::new(),
+        },
+        Dimension {
+            cortex_search_service: None,
+            is_enum: false,
+            sample_values: Vec::new(),
+            name: "rts".to_string(),
+            expr: "p.pts".to_string(),
+            source_table: Some("s".to_string()),
+            output_type: None,
+            comment: None,
+            synonyms: vec![],
+            is_filter: false,
+            tags: Vec::new(),
+        },
+        Dimension {
+            cortex_search_service: None,
+            is_enum: false,
+            sample_values: Vec::new(),
+            name: "pts".to_string(),
+            expr: "p.ts".to_string(),
+            source_table: Some("p".to_string()),
             output_type: None,
             comment: None,
             synonyms: vec![],
@@ -443,7 +484,15 @@ fn build_def(order: SortOrder, na: NaKey, unit: &str) -> SemanticViewDefinition 
         tables,
         dimensions,
         metrics,
-        joins: vec![],
+        joins: vec![Join {
+            name: Some("s_p".to_string()),
+            from_alias: "s".to_string(),
+            table: "p".to_string(),
+            fk_columns: vec!["rid".to_string()],
+            ref_columns: vec!["rid".to_string()],
+            cardinality: Cardinality::ManyToOne,
+            ..Join::default()
+        }],
         // PIN: a snapshot is an aggregate shape; FACTS returns unaggregated rows and cannot express NON ADDITIVE BY. TECH-DEBT #66
         facts: vec![],
         materializations: vec![],
@@ -461,8 +510,10 @@ fn build_def(order: SortOrder, na: NaKey, unit: &str) -> SemanticViewDefinition 
 /// Create the physical table and insert the generated rows.
 fn make_db(inst: &Instance) -> duckdb::Connection {
     let conn = duckdb::Connection::open_in_memory().expect("in-memory DuckDB");
-    conn.execute_batch("CREATE TABLE s (entity INTEGER, ts INTEGER, balance INTEGER, d DATE);")
-        .expect("create table");
+    conn.execute_batch(
+        "CREATE TABLE s (entity INTEGER, ts INTEGER, balance INTEGER, d DATE, rid INTEGER);",
+    )
+    .expect("create table");
     let cell = |c: &Option<i64>| c.map_or_else(|| "NULL".to_string(), |v| v.to_string());
     let day = |c: &Option<usize>| {
         c.map_or_else(
@@ -474,11 +525,16 @@ fn make_db(inst: &Instance) -> duckdb::Connection {
         let values: Vec<String> = inst
             .rows
             .iter()
-            .map(|(e, t, b, d)| format!("({},{},{},{})", cell(e), cell(t), cell(b), day(d)))
+            .enumerate()
+            .map(|(i, (e, t, b, d))| {
+                format!("({},{},{},{},{i})", cell(e), cell(t), cell(b), day(d))
+            })
             .collect();
         conn.execute_batch(&format!("INSERT INTO s VALUES {};", values.join(",")))
             .expect("insert rows");
     }
+    conn.execute_batch("CREATE TABLE p AS SELECT rid, ts FROM s;")
+        .expect("create p");
     conn
 }
 
@@ -488,6 +544,7 @@ fn dim_raw(i: usize, unit: &str) -> String {
         "ent" => "s.entity".to_string(),
         "ts" => "s.ts".to_string(),
         "tsk" => tsk_expr(unit),
+        "rts" => "s.ts".to_string(),
         other => unreachable!("unexpected dim {other}"),
     }
 }
@@ -776,6 +833,7 @@ fn generator_reaches_every_expression_key() {
     let mut merged_active = [0usize; UNITS.len()];
     let mut ts_partitions_tsk = 0usize;
     let mut tsk_partitions_ts = 0usize;
+    let mut ref_active = 0usize;
 
     for _ in 0..400 {
         let case = arb_case()
@@ -808,6 +866,9 @@ fn generator_reaches_every_expression_key() {
             NaKey::Ts if !na_queried && case.sel_dims.contains(&TSK_DIM) => {
                 ts_partitions_tsk += 1;
             }
+            NaKey::Ref if !na_queried => {
+                ref_active += 1;
+            }
             _ => {}
         }
     }
@@ -827,6 +888,10 @@ fn generator_reaches_every_expression_key() {
     assert!(
         ts_partitions_tsk > 0,
         "no snapshot on ts was partitioned by tsk"
+    );
+    assert!(
+        ref_active > 0,
+        "no active snapshot was keyed by the dimension reference rts"
     );
 }
 

@@ -354,6 +354,26 @@ CREATE SEMANTIC VIEW sales_bad_incl
 ----
 fact 'bad_incl' does not bind
 
+# L24g: an INCLUDE fact over a window fact binds at CREATE, as a query reads
+# it: the window fact first, as its table's column (v0.20.0 #371 review).
+# Orders 101..112 are rows 1..12, so the customers sum 10, 11, 24 and 10, and
+# orders 111 and 112, with no customer row, 23.
+statement ok
+CREATE SEMANTIC VIEW sales_win_incl
+  TABLES (customers AS customers PRIMARY KEY (customer_id), orders AS orders PRIMARY KEY (order_id))
+  RELATIONSHIPS (orders(customer_id) REFERENCES customers)
+  FACTS (orders.rn AS ROW_NUMBER() OVER (ORDER BY order_id),
+    rn_incl AS SUM(orders.rn) INCLUDE DIMENSIONS (customers.customer_id))
+  DIMENSIONS (customers.customer_id AS customer_id, customers.region AS region)
+  METRICS (avg_rn AS AVG(rn_incl));
+
+query TR
+SELECT * FROM SEMANTIC_VIEW(sales_win_incl DIMENSIONS customers.region METRICS avg_rn) ORDER BY 1 NULLS LAST;
+----
+North	10.5
+South	17.0
+NULL	23.0
+
 # Q1 (not in the fixtures, which have no table below orders): an INCLUDE
 # metric grouped by a table its home doesn't reference, a child of orders, has
 # no single grain to compute at, and is refused. Snowflake's answer is not

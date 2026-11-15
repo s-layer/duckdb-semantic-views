@@ -988,30 +988,37 @@ fn collect_na_dim_source_tables(
             let Some(dim) = super::resolution::find_dimension(def, &nd.dimension) else {
                 continue;
             };
-            let mut push = |t: &str| {
+            for t in na_dim_join_tables(def, dim) {
                 let alias = t.to_ascii_lowercase();
                 if !sources.contains(&alias) {
                     sources.push(alias);
                 }
-            };
-            if let Some(ref st) = dim.source_table {
-                push(st);
-            }
-            // A dimension written as another table's dimension (Phase 8.2)
-            // reads that table, and the tables its facts read, in its
-            // expression: join them too, or the ORDER BY names a table the
-            // snapshot never joined (v0.20.0 review F3).
-            let own = dim
-                .source_table
-                .as_deref()
-                .or_else(|| def.tables.first().map(|t| t.alias.as_str()))
-                .unwrap_or_default();
-            for (_, to) in super::window_members::hops(def, own, own, &dim.expr) {
-                push(&to);
             }
         }
     }
     sources
+}
+
+/// The tables the snapshot joins for NA dimension `dim`: its own table, and
+/// each table its expression reaches through the facts it reads. A dimension
+/// written as another table's dimension (Phase 8.2) reads that table, so the
+/// snapshot's ORDER BY names it (v0.20.0 review F3). [`na_dim_fence_members`]
+/// pairs the same tables with the metrics, so a table reached across a
+/// fan-out is refused (EXP-9) rather than joined.
+fn na_dim_join_tables(def: &SemanticViewDefinition, dim: &crate::model::Dimension) -> Vec<String> {
+    let base = def
+        .tables
+        .first()
+        .map(|t| t.alias.as_str())
+        .unwrap_or_default();
+    let own = dim.source_table.as_deref().unwrap_or(base);
+    let mut out: Vec<String> = dim.source_table.iter().cloned().collect();
+    for (_, to) in super::window_members::hops(def, base, own, &dim.expr) {
+        if !out.iter().any(|t| t.eq_ignore_ascii_case(&to)) {
+            out.push(to);
+        }
+    }
+    out
 }
 
 /// The source tables of a query's active NA dimensions, for the anchor decision
@@ -1076,16 +1083,16 @@ pub(super) fn na_dim_fence_members(
             let Some(dim) = super::resolution::find_dimension(def, &nd.dimension) else {
                 continue;
             };
-            let Some(ref st) = dim.source_table else {
-                continue; // Base-table NA dim: nothing extra is joined.
-            };
-            for &met_idx in &group.metric_indices {
-                members.push(NaFenceMember {
-                    metric_idx: met_idx,
-                    dim_name: dim.name.clone(),
-                    source_table_raw: st.clone(),
-                    source_table_key: st.to_ascii_lowercase(),
-                });
+            // A base-table NA dim with no reference joins nothing extra.
+            for st in na_dim_join_tables(def, dim) {
+                for &met_idx in &group.metric_indices {
+                    members.push(NaFenceMember {
+                        metric_idx: met_idx,
+                        dim_name: dim.name.clone(),
+                        source_table_key: st.to_ascii_lowercase(),
+                        source_table_raw: st.clone(),
+                    });
+                }
             }
         }
     }
