@@ -328,7 +328,8 @@ DROP SEMANTIC VIEW sales_ok7;
 
 # Q1 (not in the fixtures, which have no table below orders): an INCLUDE
 # metric grouped by a table its home doesn't reference, a child of orders, has
-# no single grain to compute at, and is refused.
+# no single grain to compute at, and is refused. Snowflake's answer is not
+# known yet: TECH-DEBT #115.
 statement ok
 CREATE TABLE order_returns (return_id INTEGER, order_id INTEGER, reason VARCHAR);
 

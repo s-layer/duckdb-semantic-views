@@ -767,7 +767,7 @@ pub(super) fn query_grain(
     }
     Ok(QueryGrain {
         dims,
-        filter: req.where_clause.clone(),
+        filter: req.where_clause.clone().filter(|w| !w.trim().is_empty()),
         filter_tables,
     })
 }
@@ -817,7 +817,7 @@ pub fn lod_grain_allows(def: &SemanticViewDefinition, metric: &str, dim: &str) -
             continue;
         }
         let Some(t) = def.dimensions[d].source_table.as_deref() else {
-            return false;
+            continue;
         };
         let reached = ident_matches(t, &res.home)
             || crate::graph::chain_paths(def, &res.home, t, &|_| true).len() == 1;
@@ -978,6 +978,50 @@ mod tests {
             }],
             ..Default::default()
         }
+    }
+
+    fn include_def() -> SemanticViewDefinition {
+        let mut d = def();
+        d.metrics[0].expr =
+            "AVG(SUM(orders.order_amount) INCLUDE DIMENSIONS (customers.customer_id))".into();
+        d
+    }
+
+    /// A blank `where_clause` is no filter: the hidden table of an INCLUDE
+    /// expression gets no bare `WHERE` (review of #369; `expand_unhoisted`
+    /// already skipped a blank predicate, as `fuzz_where_predicate` found).
+    #[test]
+    fn a_blank_where_clause_adds_no_filter_to_an_include_table() {
+        let d = include_def();
+        for blank in ["", "  ", "\n\t"] {
+            let req = super::super::types::QueryRequest {
+                where_clause: Some(blank.to_string()),
+                facts: vec![],
+                dimensions: vec![super::super::types::DimensionName::new("customer_id")],
+                metrics: vec![super::super::types::MetricName::new("share")],
+            };
+            let sql = crate::expand::expand("v", &d, &req).unwrap();
+            let no_space: String = sql.split_whitespace().collect::<Vec<_>>().join(" ");
+            assert!(
+                !no_space.contains("WHERE GROUP BY") && !no_space.contains("WHERE )"),
+                "{blank:?} gave a bare WHERE:\n{sql}"
+            );
+        }
+    }
+
+    /// `SHOW SEMANTIC DIMENSIONS ... FOR METRIC` lists a dimension with no
+    /// `source_table` for an INCLUDE metric, as a query grouped by it is not
+    /// refused for its table either (review of #369).
+    #[test]
+    fn a_dimension_with_no_table_is_listed_for_an_include_metric() {
+        let mut d = include_def();
+        d.dimensions.push(Dimension {
+            name: "seg".into(),
+            expr: "customers.segment".into(),
+            ..Default::default()
+        });
+        assert!(lod_grain_allows(&d, "share", "seg"));
+        assert!(lod_grain_allows(&d, "share", "customer_id"));
     }
 
     /// Two inline LOD expressions in one metric each get a relationship of
