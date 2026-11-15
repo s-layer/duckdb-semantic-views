@@ -1160,23 +1160,17 @@ pub(crate) fn lod_clauses(expr: &str) -> Vec<LodClause> {
         let open = skip_whitespace_and_comments(bytes, head.end);
         let end = skip_balanced(bytes, open, b'(', b')');
         let inner = expr.get(open + 1..end.saturating_sub(1)).unwrap_or("");
-        // Split as every DDL list is (`body_parser::scan`). A stray comma,
-        // trailing ones included, leaves an empty entry, which
-        // `graph::lod::resolve_lod` refuses.
+        // Split as every DDL list is (`body_parser::scan`): one trailing comma
+        // is tolerated, and a leading or interior stray comma leaves an empty
+        // entry, which `graph::lod::resolve_lod` refuses.
         let entries = if inner.trim().is_empty() {
             Vec::new()
         } else {
             match crate::body_parser::scan::split_at_depth0_commas(inner) {
-                Ok(parts) => {
-                    let mut v: Vec<String> = parts
-                        .into_iter()
-                        .map(|(_, e)| e.trim().to_string())
-                        .collect();
-                    if inner.trim_end().ends_with(',') {
-                        v.push(String::new());
-                    }
-                    v
-                }
+                Ok(parts) => parts
+                    .into_iter()
+                    .map(|(_, e)| e.trim().to_string())
+                    .collect(),
                 Err(_) => vec![String::new()],
             }
         };
@@ -2170,6 +2164,16 @@ mod tests {
         let empty = lod_clauses("SUM(o.x) fixed dimensions ( )");
         assert_eq!(empty[0].entries, Vec::<String>::new());
         assert!(lod_clauses("o.fixed DIMENSIONS (x)").is_empty());
+        // One trailing comma is tolerated, as in every DDL list; an interior
+        // stray comma leaves an empty entry.
+        assert_eq!(
+            lod_clauses("SUM(o.x) FIXED DIMENSIONS (c.id, c.r,)")[0].entries,
+            vec!["c.id", "c.r"]
+        );
+        assert_eq!(
+            lod_clauses("SUM(o.x) FIXED DIMENSIONS (c.id,, c.r)")[0].entries,
+            vec![String::new()]
+        );
         assert_eq!(
             lod_clauses("SUM(x) EXCLUDE DIMENSIONS (o.c)")[0].kind,
             LodKind::Exclude

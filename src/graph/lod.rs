@@ -929,7 +929,7 @@ mod tests {
                 "has an empty entry in FIXED DIMENSIONS",
             ),
             (
-                refusal(", r AS SUM(orders.order_amount) FIXED DIMENSIONS (customers.region,)", "", ""),
+                refusal(", r AS SUM(orders.order_amount) FIXED DIMENSIONS (,customers.region)", "", ""),
                 "has an empty entry in FIXED DIMENSIONS",
             ),
         ];

@@ -659,16 +659,29 @@ CREATE SEMANTIC VIEW sales_bad
 ----
 fact 'x' holds an LOD expression inside a larger expression
 
-# L24k: a stray comma in FIXED DIMENSIONS, as in any DDL list.
+# L24k: a stray comma in FIXED DIMENSIONS is refused, as in any DDL list; one
+# trailing comma is tolerated, as in any DDL list (L24l).
 statement error
 CREATE SEMANTIC VIEW sales_bad
+  TABLES (customers AS customers PRIMARY KEY (customer_id), orders AS orders)
+  RELATIONSHIPS (orders(customer_id) REFERENCES customers)
+  FACTS (x AS COUNT(orders.order_id) FIXED DIMENSIONS (customers.region,,orders.order_id))
+  DIMENSIONS (customers.region AS region, orders.order_id AS order_id)
+  METRICS (m AS AVG(x));
+----
+has an empty entry in FIXED DIMENSIONS
+
+# L24l: one trailing comma in FIXED DIMENSIONS is tolerated.
+statement ok
+CREATE SEMANTIC VIEW sales_trailing
   TABLES (customers AS customers PRIMARY KEY (customer_id), orders AS orders)
   RELATIONSHIPS (orders(customer_id) REFERENCES customers)
   FACTS (x AS COUNT(orders.order_id) FIXED DIMENSIONS (customers.region,))
   DIMENSIONS (customers.region AS region, orders.order_id AS order_id)
   METRICS (m AS AVG(x));
-----
-has an empty entry in FIXED DIMENSIONS
+
+statement ok
+DROP SEMANTIC VIEW sales_trailing;
 
 # L24h: INCLUDE and EXCLUDE DIMENSIONS are not supported yet (TECH-DEBT #113,
 # Phase 8.5b).
