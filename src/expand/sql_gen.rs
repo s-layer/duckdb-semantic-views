@@ -946,6 +946,7 @@ fn expand_facts(
             &std::collections::HashMap::new(),
             &std::collections::HashMap::new(),
             &[],
+            &[],
         );
         return Ok(SelectSpec {
             where_clause: resolved_where.map(|rw| rw.sql),
@@ -1072,7 +1073,7 @@ fn render_facts_across(
         std::collections::HashMap::new(),
     );
     let joins_from = |anchor: &str, extra: &[String]| {
-        super::per_grain::anchor_joins(def, anchor, dims, extra, &roles, &paths, &[])
+        super::per_grain::anchor_joins(def, anchor, dims, extra, &roles, &paths, &[], &[])
     };
     match across {
         FactsAcross::Meet(key_table) => {
@@ -1442,6 +1443,7 @@ fn expand_unhoisted(
                     &extra,
                     &std::collections::HashMap::new(),
                     &std::collections::HashMap::new(),
+                    &[],
                     &[],
                 );
                 let items = resolved_dims
@@ -1858,6 +1860,7 @@ fn expand_unhoisted(
             Some(anchor) => super::semi_additive::SnapshotFrom::Grain {
                 anchor,
                 paths: &no_paths,
+                using: &[],
             },
             None => super::semi_additive::SnapshotFrom::Base {
                 where_scopes: &where_scopes,

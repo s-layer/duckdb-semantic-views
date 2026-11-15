@@ -189,6 +189,9 @@ pub(super) enum SnapshotFrom<'a> {
     Grain {
         anchor: &'a str,
         paths: &'a HashMap<String, Vec<String>>,
+        /// The group's [`Group::using`](super::per_grain): the relationship
+        /// each hop on `paths` taken by several is joined on.
+        using: &'a [String],
     },
 }
 
@@ -379,7 +382,11 @@ fn push_snapshot_from<'a>(
         // `snapshot_cte_anchor` withhold the scoped-alias rescue here.
         // A table the anchor reaches by several paths is joined along the one
         // the group's `USING` picked (`paths`), as a plain grain CTE joins it.
-        SnapshotFrom::Grain { anchor, paths } => {
+        SnapshotFrom::Grain {
+            anchor,
+            paths,
+            using,
+        } => {
             let mut needs =
                 super::per_grain::anchor_needs(def, resolved_mets, &dims, &na_dim_sources);
             let chains = push_scoped_na_joins(def, na_groups, &mut needs.scoped);
@@ -391,6 +398,7 @@ fn push_snapshot_from<'a>(
                 &std::collections::HashMap::new(),
                 paths,
                 &needs.scoped,
+                using,
             );
             joins.extend(chains);
             joins

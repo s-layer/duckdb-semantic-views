@@ -261,6 +261,12 @@ struct Group {
     /// when the query reaches no such table. Metrics that pick different
     /// paths are separate groups, outer-merged like different roles.
     paths: HashMap<String, Vec<String>>,
+    /// The relationships this group's metrics' `USING` names for a hop on one
+    /// of `paths` that the parent takes by several relationships (a role-played
+    /// table on the way to a table past it that a second path reaches too, so
+    /// `roles` holds no role for it): the hop is joined on that relationship
+    /// ([`hop_using`]). Metrics naming different ones are separate groups.
+    using: Vec<String>,
     /// Aggregate expressions, in emission order. The `i`th is aliased
     /// [`metric_column(i)`](metric_column).
     exprs: Vec<String>,
@@ -331,11 +337,13 @@ fn group_key(
     anchor: &str,
     roles: &HashMap<String, String>,
     paths: &HashMap<String, Vec<String>>,
+    using: &[String],
 ) -> String {
     let mut scoped: Vec<String> = roles
         .iter()
         .map(|(table, rel)| super::join_resolver::scoped_join_alias(table, rel))
         .chain(paths.values().map(|path| path.join("\u{1}")))
+        .chain(using.iter().map(|rel| format!("\u{2}{rel}")))
         .collect();
     scoped.sort();
     let mut key = anchor.to_string();
@@ -361,17 +369,19 @@ impl Partition {
         anchor: &str,
         roles: &HashMap<String, String>,
         paths: &HashMap<String, Vec<String>>,
+        using: &[String],
         expr: String,
         metric_name: String,
     ) -> (usize, usize) {
         let group = *self
             .index
-            .entry(group_key(anchor, roles, paths))
+            .entry(group_key(anchor, roles, paths, using))
             .or_insert_with(|| {
                 self.groups.push(Group {
                     anchor: anchor.to_string(),
                     roles: roles.clone(),
                     paths: paths.clone(),
+                    using: using.to_vec(),
                     exprs: Vec::new(),
                     metric_names: Vec::new(),
                     bridge_key: None,
@@ -412,8 +422,11 @@ fn partition_metrics(
         // Likewise a derived metric whose components follow different paths
         // to a table reached several ways.
         let paths = metric_paths(def, met, root, member_tables);
-        match (grains.len(), roles, paths) {
-            (1, Some(roles), Some(paths)) => {
+        // And one whose components name different relationships for a hop
+        // its path takes by several.
+        let using = paths.as_ref().and_then(|p| hop_using(def, met, p));
+        match (grains.len(), roles, paths, using) {
+            (1, Some(roles), Some(paths), Some(using)) => {
                 let expr = resolved_exprs
                     .get(&crate::ident::normalize_ident_part(&met.name))
                     .cloned()
@@ -422,6 +435,7 @@ fn partition_metrics(
                     &grains[0],
                     &roles,
                     &paths,
+                    &using,
                     expr,
                     crate::ident::normalize_ident_part(&met.name),
                 );
@@ -702,7 +716,8 @@ fn decompose(
         let paths = super::multi_path::component_paths(def, base, &home, member_tables);
         // A component always has an empty `non_additive_by` (rejected above), so a
         // decomposed derived metric never lands in a snapshot group.
-        let (group, column) = partition.push(&home, &roles, &paths, expr, name.clone());
+        let using = hop_using(def, base, &paths)?;
+        let (group, column) = partition.push(&home, &roles, &paths, &using, expr, name.clone());
         let reference = column_ref(group, &metric_column(column));
         // A base metric may be referenced bare (`revenue`) or qualified by its
         // own source table (`o.revenue`) — the same two spellings
@@ -1455,6 +1470,7 @@ fn render_plain_group(
             roles,
             &group.paths,
             &needs.scoped,
+            &group.using,
         ),
         def,
         "\n    LEFT JOIN ",
@@ -1520,6 +1536,7 @@ fn render_snapshot_group(
         &super::semi_additive::SnapshotFrom::Grain {
             anchor: &group.anchor,
             paths: &group.paths,
+            using: &group.using,
         },
     )?;
 
@@ -1637,6 +1654,7 @@ fn render_single_grain(
                 roles,
                 &group.paths,
                 &needs.scoped,
+                &group.using,
             ),
             inner: false,
         },
@@ -1774,6 +1792,7 @@ fn render_bridged_group(
             &group.roles,
             &group.paths,
             &met_needs.scoped,
+            &group.using,
         ),
         def,
         &format!("{lead}LEFT JOIN "),
@@ -1842,6 +1861,7 @@ fn bridged_pairs_query(
             &needs.bare,
             &group.roles,
             &group.paths,
+            &[],
             &[],
         ),
         def,
@@ -1980,6 +2000,7 @@ fn coalesced_key(groups: usize, d: usize) -> String {
 /// them. A bridged group's paths may fan it, but they are joined only inside
 /// [`render_bridged_group`]'s `SELECT DISTINCT` of (key, dimensions) pairs.
 #[allow(clippy::too_many_lines)]
+#[allow(clippy::too_many_arguments)]
 pub(super) fn anchor_joins<'a>(
     def: &'a SemanticViewDefinition,
     anchor: &str,
@@ -1988,6 +2009,7 @@ pub(super) fn anchor_joins<'a>(
     roles: &HashMap<String, String>,
     paths: &HashMap<String, Vec<String>>,
     scoped_facts: &[&'a Join],
+    using: &[String],
 ) -> Vec<ResolvedJoin<'a>> {
     let Some(graph) = GrainGraph::build(def) else {
         return Vec::new();
@@ -2059,7 +2081,11 @@ pub(super) fn anchor_joins<'a>(
             if !emitted.insert(to.clone()) {
                 continue;
             }
-            if let Some(join) = edge_between(def, from, to) {
+            // A bare hop to a table its parent references several ways (a
+            // role-played table on the way to a table past it that another
+            // path reaches too, so no role was resolved for it) is joined on
+            // the relationship the `USING` names, not the first-declared one.
+            if let Some(join) = using_edge_between(def, from, to, using) {
                 joins.push(ResolvedJoin {
                     emit_alias: to.clone(),
                     bare_alias: to.clone(),
@@ -2160,6 +2186,85 @@ fn dim_expr(
         ),
         None => expr,
     }
+}
+
+/// [`edge_between`], but where `from` references `to` by several
+/// relationships and `using` names exactly one of them, that one.
+fn using_edge_between<'a>(
+    def: &'a SemanticViewDefinition,
+    from: &str,
+    to: &str,
+    using: &[String],
+) -> Option<&'a Join> {
+    let named: Vec<&'a Join> = def
+        .joins
+        .iter()
+        .filter(|j| {
+            !j.fk_columns.is_empty()
+                && j.from_alias.eq_ignore_ascii_case(from)
+                && j.table.eq_ignore_ascii_case(to)
+                && using
+                    .iter()
+                    .any(|rel| crate::graph::RelNameMatch::new(&def.joins, rel).matches_join(j))
+        })
+        .collect();
+    match named.as_slice() {
+        [one] => Some(*one),
+        _ => edge_between(def, from, to),
+    }
+}
+
+/// The relationships `met`'s `USING` (through every metric it is computed
+/// from) names for the hops on `paths` that the parent takes by several
+/// relationships, normalized and sorted: what [`anchor_joins`] joins those
+/// hops on. `None` when it names more than one for one hop, so no one join
+/// serves all its components.
+fn hop_using(
+    def: &SemanticViewDefinition,
+    met: &Metric,
+    paths: &HashMap<String, Vec<String>>,
+) -> Option<Vec<String>> {
+    let reached = metrics_reached(def, met);
+    let mut out: Vec<String> = Vec::new();
+    for path in paths.values() {
+        for pair in path.windows(2) {
+            let parallel: Vec<&Join> = def
+                .joins
+                .iter()
+                .filter(|j| {
+                    !j.fk_columns.is_empty()
+                        && j.from_alias.eq_ignore_ascii_case(&pair[0])
+                        && j.table.eq_ignore_ascii_case(&pair[1])
+                })
+                .collect();
+            if parallel.len() < 2 {
+                continue;
+            }
+            let mut named: Vec<&Join> = Vec::new();
+            for m in &reached {
+                for rel in &m.using_relationships {
+                    let matcher = crate::graph::RelNameMatch::new(&def.joins, rel);
+                    for j in &parallel {
+                        if matcher.matches_join(j) && !named.iter().any(|n| std::ptr::eq(*n, *j)) {
+                            named.push(j);
+                        }
+                    }
+                }
+            }
+            match named.as_slice() {
+                [] => {}
+                [one] => {
+                    let name = crate::ident::normalize_ident_part(one.name.as_deref()?);
+                    if !out.contains(&name) {
+                        out.push(name);
+                    }
+                }
+                _ => return None,
+            }
+        }
+    }
+    out.sort();
+    Some(out)
 }
 
 /// The relationship edge connecting two adjacent tables, in either direction.
