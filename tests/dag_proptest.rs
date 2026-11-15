@@ -933,7 +933,14 @@ fn expect(case: &Case) -> Expect {
                     }
                 }
                 1 => {}
-                _ if across > 0 => refusals.extend(["ambiguous", "more than one path"]),
+                // A chain that fans out past the role-played table is
+                // refused as a role followed by a fan-out, which no USING
+                // changes (`AmbiguousDescendantPath { fans_out: true }`).
+                _ if across > 0 => refusals.extend([
+                    "ambiguous",
+                    "more than one path",
+                    "cannot be grouped by here",
+                ]),
                 _ => refusals.push("more than one path"),
             }
         }
@@ -1726,6 +1733,35 @@ fn a_using_role_is_followed_past_the_role_played_table_in_any_relationship_order
         filter: None,
         doubled: Some(2),
         using: Some(false),
+        twin: false,
+        asof: None,
+    };
+    check_case(&case).unwrap();
+}
+
+/// CI's coverage run, 2026-11-15: a metric on `t3`, which reaches `t0` by
+/// two roles, grouped by `t2` below `t0` (a fan-out) and filtered on `t0`.
+/// The role followed by a fan-out is refused with its own message
+/// (`AmbiguousDescendantPath { fans_out: true }`), which the oracle did not
+/// list beside "ambiguous" for a member reached more than once across roles.
+#[test]
+fn a_role_then_a_fan_out_is_refused_beside_a_filter_on_the_role_played_table() {
+    let case = Case {
+        n: 4,
+        edges: vec![(1, 0), (2, 1), (3, 0)],
+        one_to_one: vec![false, false, false],
+        rows: vec![
+            vec![(None, None, vec![])],
+            vec![(None, None, vec![None])],
+            vec![(None, None, vec![None])],
+            vec![(None, None, vec![None])],
+        ],
+        orders: [vec![0, 1, 2, 3], vec![0, 1, 2, 3]],
+        metric: Some(3),
+        dims: vec![2],
+        filter: Some((0, 0)),
+        doubled: Some(2),
+        using: None,
         twin: false,
         asof: None,
     };
