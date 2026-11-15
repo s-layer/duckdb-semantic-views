@@ -873,7 +873,13 @@ A query filtered on ``sales.category = 'A'`` still gets each sale's rank among a
 
 .. versionadded:: 0.20.0
 
-As in Snowflake, a fact, a dimension or an aggregate call in a metric can be an aggregate computed at a fixed grain: an aggregate over the view's facts and dimensions, followed by ``FIXED DIMENSIONS (...)`` and the dimensions or facts it is computed at, each written as ``<table>.<name>``. ``FIXED DIMENSIONS ()`` is the grand total. An LOD fact or dimension has no table prefix, and neither does a metric that reads one:
+As in Snowflake, a fact, a dimension or an aggregate call in a metric can be an aggregate computed at another grain: an aggregate over the view's facts and dimensions, followed by ``FIXED``, ``INCLUDE`` or ``EXCLUDE DIMENSIONS (...)`` and the dimensions or facts it names, each written as ``<table>.<name>``:
+
+- ``FIXED DIMENSIONS (d, ...)`` computes it at those dimensions, whatever the query groups by. ``FIXED DIMENSIONS ()`` is the grand total.
+- ``INCLUDE DIMENSIONS (d, ...)`` computes it at the query's dimensions plus those.
+- ``EXCLUDE DIMENSIONS (d, ...)`` computes it at the query's dimensions minus those. One the query doesn't group by has no effect.
+
+An LOD fact or dimension has no table prefix, and neither does a metric that reads one:
 
 .. code-block:: sql
 
@@ -887,18 +893,21 @@ As in Snowflake, a fact, a dimension or an aggregate call in a metric can be an 
    METRICS (
        avg_orders_per_customer AS AVG(orders_per_customer),
        pct_of_total            AS SUM(orders.order_amount) / AVG(grand_total_revenue),
-       avg_orders_inline       AS AVG(COUNT(orders.order_id) FIXED DIMENSIONS (customers.customer_id))
+       avg_orders_inline       AS AVG(COUNT(orders.order_id) FIXED DIMENSIONS (customers.customer_id)),
+       avg_customer_revenue    AS AVG(SUM(orders.order_amount) INCLUDE DIMENSIONS (customers.customer_id)),
+       pct_of_region_revenue   AS SUM(orders.order_amount) / AVG(SUM(orders.order_amount) EXCLUDE DIMENSIONS (orders.category))
    )
 
 The answers are Snowflake's:
 
-- The value is computed over every row of the table it aggregates, with the tables it references left-joined, before the query's ``WHERE``. A filter decides which rows are left, not what the value counts.
+- A ``FIXED`` value is computed over every row of the table it aggregates, with the tables it references left-joined, before the query's ``WHERE``. A filter decides which rows are left, not what the value counts.
+- An ``INCLUDE`` or ``EXCLUDE`` value is computed over the rows the query's ``WHERE`` keeps. A query can read one only in ``METRICS``, inside an aggregate: not in ``DIMENSIONS``, ``FACTS`` or ``WHERE``. Beside one, a query can't group by an expression item or group or filter by an LOD dimension, and it can group and filter only by tables the aggregated table reaches along foreign keys by one path (:ref:`ref-err-lod-query`). An ``EXCLUDE`` value is listed for every group a query of its dimensions lists, also one with no rows of the aggregated table.
 - A metric over an LOD fact counts each fixed-grain value once per group: an average of ``orders_per_customer`` by region averages the region's customers, each once. Grouped by an order dimension, each customer counts once in each group its orders are in. An aggregate call that reads an LOD expression reads only it, with constants and variables; other calls of the same metric read the tables' facts and dimensions, as ``SUM(orders.order_amount)`` in ``pct_of_total``.
 - A query can group and filter by an LOD dimension, and aggregate an LOD fact in an expression item (``METRICS AVG(orders_per_customer)``). Alone in ``FACTS``, an LOD fact returns one row per fixed-grain value; beside a fact or dimension of the table it aggregates, one row per row of that table.
 - ``SHOW SEMANTIC DIMENSIONS ... FOR METRIC`` lists for a metric over an LOD expression every dimension it can be grouped by.
 - A ``NULL`` fixed-dimension value is one value, where Snowflake reads the LOD value as ``NULL`` in some queries (see :ref:`howto-lod-nulls`).
 
-``CREATE`` refuses, as Snowflake does (:ref:`ref-err-lod-rule`): a member with a table prefix that holds or reads an LOD expression; an LOD expression that reads another, that is not one aggregate over facts and dimensions, or whose ``FIXED DIMENSIONS`` list an expression, an LOD expression or a name the view doesn't define; a metric that reads an LOD expression outside an aggregate call, two in one call, or another member in the same call; an LOD expression whose table doesn't reference the tables its ``FIXED DIMENSIONS`` read, or reaches one by more than one path; and a materialization covering an LOD expression or a metric that reads one. A query that reads an LOD expression across a :ref:`direct many-to-many relationship <ref-create-direct-many-to-many>` is refused (:ref:`ref-err-lod-many-to-many`, Snowflake's 010959). ``INCLUDE DIMENSIONS`` and ``EXCLUDE DIMENSIONS`` are refused for now. ``DESCRIBE`` shows an LOD fact or dimension with no table, its aggregate as its ``EXPRESSION`` and its dimensions in a ``FIXED_DIMENSIONS`` row; ``GET_DDL`` and the YAML export write it as written. A view with one is stored in format 4, which 0.19.0 and older refuse to read. See :ref:`howto-lod`.
+``CREATE`` refuses, as Snowflake does (:ref:`ref-err-lod-rule`): a member with a table prefix that holds or reads an LOD expression; an LOD expression that reads another, that is not one aggregate over facts and dimensions, or whose ``FIXED``, ``INCLUDE`` or ``EXCLUDE DIMENSIONS`` list an expression, an LOD expression or a name the view doesn't define; a metric that reads an LOD expression outside an aggregate call, two in one call, or another member in the same call; an LOD expression whose table doesn't reference the tables its dimensions read, or reaches one by more than one path; and a materialization covering an LOD expression or a metric that reads one. A query that reads an LOD expression across a :ref:`direct many-to-many relationship <ref-create-direct-many-to-many>` is refused (:ref:`ref-err-lod-many-to-many`, Snowflake's 010959). ``DESCRIBE`` shows an LOD fact or dimension with no table, its aggregate as its ``EXPRESSION`` and its dimensions in a ``FIXED_DIMENSIONS``, ``INCLUDE_DIMENSIONS`` or ``EXCLUDE_DIMENSIONS`` row; ``GET_DDL`` and the YAML export write it as written. A view with one is stored in format 4, which 0.19.0 and older refuse to read. See :ref:`howto-lod`.
 
 .. note::
 

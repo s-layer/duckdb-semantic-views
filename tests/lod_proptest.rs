@@ -1,4 +1,5 @@
-//! Differential proptest for **LOD expressions, `FIXED DIMENSIONS`** (Phase 8.5a).
+//! Differential proptest for **LOD expressions**: `FIXED DIMENSIONS` (Phase
+//! 8.5a) and `INCLUDE` / `EXCLUDE DIMENSIONS` (Phase 8.5b).
 //!
 //! Shape: `o(fk_c) REFERENCES c(id)`, many-to-one. `o` holds the value `ov`
 //! and the dimension `ocat`, `c` the dimensions `ccat` and `cid` (its id).
@@ -25,6 +26,23 @@
 //! - A NULL fixed-dimension value is one value, as `GROUP BY` makes it: the
 //!   orders with no customer share one value. Snowflake gives those NULL; the
 //!   divergence is documented in `docs/how-to/lod-expressions.rst`.
+//!
+//! A third LOD expression, the fact `lie`, is an aggregate of `o.ov` with
+//! `INCLUDE` or `EXCLUDE DIMENSIONS` on any subset of the three dimensions,
+//! read by `m_ie` (an outer aggregate of `lie`), `m_ie_inl` (the same written
+//! inline) and `m_ie_mix` (`SUM(o.ov) - MAX(lie)`). Its grain is the query's
+//! dimensions with its own (`INCLUDE`) or without them (`EXCLUDE`), and it is
+//! computed over the orders the filter keeps (fixture 11 L5-L11, 11b E1-E6):
+//!
+//! - an `INCLUDE` tuple's value counts once per group of the orders it
+//!   covers, as a `FIXED` one does;
+//! - an `EXCLUDE` value is that of the group's coarser tuple, for every group
+//!   the query answers: the groups of its other metrics and of the orders,
+//!   and those a query of its dimensions and filter with no metrics lists
+//!   whose coarser tuple has orders (11b E5: a customer with no orders shows
+//!   the region's total, and the orders with no customer row their NULL
+//!   region's);
+//! - a query grouped or filtered by `ld` is refused beside one.
 //!
 //! Queries are metrics (grouped by any of the dimensions and `ld`),
 //! dimensions only, and facts (`lf` alone, one row per fixed-grain value; or
@@ -87,11 +105,19 @@ impl Agg {
     }
 }
 
-/// An LOD expression: `<agg>(o.ov) FIXED DIMENSIONS (<dims>)`.
+/// An LOD expression: `<agg>(o.ov) <kind> DIMENSIONS (<dims>)`.
 #[derive(Debug, Clone)]
 struct Lod {
     agg: Agg,
     fixed: Vec<usize>,
+    kind: LodKind,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum LodKind {
+    Fixed,
+    Include,
+    Exclude,
 }
 
 impl Lod {
@@ -101,8 +127,13 @@ impl Lod {
             .iter()
             .map(|d| format!("{}.{}", DIMS[*d].1, DIMS[*d].0))
             .collect();
+        let kind = match self.kind {
+            LodKind::Fixed => "FIXED",
+            LodKind::Include => "INCLUDE",
+            LodKind::Exclude => "EXCLUDE",
+        };
         format!(
-            "{}(o.ov) FIXED DIMENSIONS ({})",
+            "{}(o.ov) {kind} DIMENSIONS ({})",
             self.agg.sql(),
             dims.join(", ")
         )
@@ -173,7 +204,14 @@ impl Pred {
 /// The metrics, by index.
 /// `m_two` reads two inline LOD expressions, `lf`'s and `ld`'s:
 /// `MAX(<lf>) - MIN(<ld>)`.
-const METS: [&str; 5] = ["sum_ov", "m_lod", "m_inl", "m_mix", "m_two"];
+const METS: [&str; 8] = [
+    "sum_ov", "m_lod", "m_inl", "m_mix", "m_two", "m_ie", "m_ie_inl", "m_ie_mix",
+];
+
+/// Whether metric `m` reads the INCLUDE or EXCLUDE expression `lie`.
+fn reads_ie(m: usize) -> bool {
+    METS[m].starts_with("m_ie")
+}
 
 /// A fact-list item.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -197,7 +235,10 @@ struct Case {
     inst: Instance,
     lf: Lod,
     ld: Lod,
-    /// The outer aggregate of `m_lod` and `m_inl`.
+    /// `lie`, INCLUDE or EXCLUDE.
+    lie: Lod,
+    /// The outer aggregate of `m_lod` and `m_inl`, and of `m_ie` and
+    /// `m_ie_inl`.
     outer: Agg,
     kind: Kind,
     pred: Option<Pred>,
@@ -287,6 +328,10 @@ impl Case {
     /// dimensions or `ld` (each LOD expression its own fixed-grain table) is
     /// refused, as rows of two tables neither of which reaches the other.
     fn answerable(&self) -> bool {
+        if let Kind::Metrics(_, mets) = &self.kind {
+            let by_ld = self.all_dims().contains(&LD);
+            return !(by_ld && mets.iter().any(|m| reads_ie(*m)));
+        }
         let Kind::Facts(items) = &self.kind else {
             return true;
         };
@@ -376,18 +421,181 @@ fn oracle_metric(
     }
 }
 
+/// The groups a query of `dims` and the case's filter with no metrics lists:
+/// the customers, with orders or not, when every member is a customer's;
+/// otherwise the orders.
+fn listed(case: &Case, rows: &[Vec<Option<i128>>], dims: &[usize]) -> BTreeSet<Vec<Option<i128>>> {
+    let inst = &case.inst;
+    let mut members = case
+        .pred
+        .as_ref()
+        .map(|p| {
+            let mut out = BTreeSet::new();
+            p.dims(&mut out);
+            out
+        })
+        .unwrap_or_default();
+    members.extend(dims.iter().copied());
+    let on_c = members.iter().all(|d| *d < LD && DIMS[*d].1 == "c");
+    if on_c {
+        (0..inst.c.len())
+            .map(|c| vec![None, inst.c[c].map(i128::from), Some(c as i128), None])
+            .filter(|r| case.passes(r))
+            .map(|r| dims.iter().map(|d| r[*d]).collect())
+            .collect()
+    } else {
+        rows.iter()
+            .filter(|r| case.passes(r))
+            .map(|r| dims.iter().map(|d| r[*d]).collect())
+            .collect()
+    }
+}
+
+/// `lie`'s grain in a query grouped by `dims`: the dimensions its tuples
+/// hold.
+fn ie_grain(case: &Case, dims: &[usize]) -> Vec<usize> {
+    let mut grain: BTreeSet<usize> = dims.iter().copied().collect();
+    match case.lie.kind {
+        LodKind::Include => grain.extend(case.lie.fixed.iter().copied()),
+        _ => {
+            for d in &case.lie.fixed {
+                grain.remove(d);
+            }
+        }
+    }
+    grain.into_iter().collect()
+}
+
+/// `lie`'s value per tuple of its grain, over the orders the filter keeps,
+/// with the orders each covers.
+fn ie_values(
+    case: &Case,
+    rows: &[Vec<Option<i128>>],
+    grain: &[usize],
+) -> BTreeMap<Vec<Option<i128>>, (Option<i128>, Vec<usize>)> {
+    let mut members: BTreeMap<Vec<Option<i128>>, Vec<usize>> = BTreeMap::new();
+    for (i, r) in rows.iter().enumerate() {
+        if case.passes(r) {
+            members
+                .entry(grain.iter().map(|d| r[*d]).collect())
+                .or_default()
+                .push(i);
+        }
+    }
+    members
+        .into_iter()
+        .map(|(k, orders)| {
+            let v = case
+                .lie
+                .agg
+                .apply(orders.iter().map(|i| case.inst.o[*i].2.map(i128::from)));
+            (k, (v, orders))
+        })
+        .collect()
+}
+
+/// An outer aggregate of `lie` (`agg`) per group: an INCLUDE tuple counted
+/// once per group of the orders it covers; for EXCLUDE, the value of each
+/// group's coarser tuple, over `groups`.
+fn oracle_ie(
+    case: &Case,
+    rows: &[Vec<Option<i128>>],
+    dims: &[usize],
+    agg: Agg,
+    groups: &BTreeSet<Vec<Option<i128>>>,
+) -> BTreeMap<Vec<Option<i128>>, Option<i128>> {
+    let grain = ie_grain(case, dims);
+    let values = ie_values(case, rows, &grain);
+    if case.lie.kind == LodKind::Include {
+        let entities: Vec<(Option<i128>, Vec<usize>)> = values.into_values().collect();
+        return once_per_group(rows, case, dims, agg, &entities);
+    }
+    groups
+        .iter()
+        .map(|g| {
+            let k: Vec<Option<i128>> = grain
+                .iter()
+                .map(|d| g[dims.iter().position(|x| x == d).expect("in the grain")])
+                .collect();
+            let v = values.get(&k).and_then(|(v, _)| *v);
+            (g.clone(), agg.apply(std::iter::once(v)))
+        })
+        .collect()
+}
+
 /// The whole expected result, sorted.
 fn oracle(case: &Case) -> Vec<Vec<Option<i128>>> {
     let inst = &case.inst;
     let rows = case.rows();
     let mut out: Vec<Vec<Option<i128>>> = match &case.kind {
         Kind::Metrics(dims, mets) => {
-            let per: Vec<_> = mets
+            let exclude = case.lie.kind == LodKind::Exclude;
+            // Every metric's groups but the EXCLUDE parts', which take each
+            // group's value; those add the listed groups.
+            let mut per: Vec<Option<BTreeMap<Vec<Option<i128>>, Option<i128>>>> = Vec::new();
+            let mut groups: BTreeSet<Vec<Option<i128>>> = BTreeSet::new();
+            for m in mets {
+                let p = match METS[*m] {
+                    "m_ie" | "m_ie_inl" if exclude => None,
+                    "m_ie" | "m_ie_inl" => Some(oracle_ie(case, &rows, dims, case.outer, &groups)),
+                    "m_ie_mix" => Some(once_per_group(
+                        &rows,
+                        case,
+                        dims,
+                        Agg::Sum,
+                        &(0..inst.o.len())
+                            .map(|i| (inst.o[i].2.map(i128::from), vec![i]))
+                            .collect::<Vec<_>>(),
+                    )),
+                    _ => Some(oracle_metric(case, &rows, dims, *m)),
+                };
+                if let Some(p) = &p {
+                    groups.extend(p.keys().cloned());
+                }
+                if reads_ie(*m) && exclude {
+                    // The listed groups whose coarser tuple has orders.
+                    let grain = ie_grain(case, dims);
+                    let values = ie_values(case, &rows, &grain);
+                    groups.extend(listed(case, &rows, dims).into_iter().filter(|g| {
+                        let k: Vec<Option<i128>> = grain
+                            .iter()
+                            .map(|d| g[dims.iter().position(|x| x == d).expect("in the grain")])
+                            .collect();
+                        values.contains_key(&k)
+                    }));
+                    groups.extend(
+                        rows.iter()
+                            .filter(|r| case.passes(r))
+                            .map(|r| dims.iter().map(|d| r[*d]).collect()),
+                    );
+                }
+                per.push(p);
+            }
+            if dims.is_empty() {
+                groups.insert(vec![]);
+            }
+            let ex = |agg: Agg| oracle_ie(case, &rows, dims, agg, &groups);
+            let per: Vec<BTreeMap<Vec<Option<i128>>, Option<i128>>> = mets
                 .iter()
-                .map(|m| oracle_metric(case, &rows, dims, *m))
+                .zip(per)
+                .map(|(m, p)| match (METS[*m], p) {
+                    ("m_ie_mix", Some(sum)) => {
+                        let max = if exclude {
+                            ex(Agg::Max)
+                        } else {
+                            oracle_ie(case, &rows, dims, Agg::Max, &groups)
+                        };
+                        sum.into_iter()
+                            .map(|(g, x)| {
+                                let y = max.get(&g).copied().flatten();
+                                (g, x.zip(y).map(|(x, y)| x - y))
+                            })
+                            .collect()
+                    }
+                    (_, Some(p)) => p,
+                    (_, None) => ex(case.outer),
+                })
                 .collect();
-            let groups: BTreeSet<Vec<Option<i128>>> =
-                per.iter().flat_map(|p| p.keys().cloned()).collect();
             groups
                 .into_iter()
                 .map(|g| {
@@ -479,7 +687,28 @@ fn arb_lod() -> impl Strategy<Value = Lod> {
         arb_agg(),
         prop::sample::subsequence((0..DIMS.len()).collect::<Vec<usize>>(), 0..=3),
     )
-        .prop_map(|(agg, fixed)| Lod { agg, fixed })
+        .prop_map(|(agg, fixed)| Lod {
+            agg,
+            fixed,
+            kind: LodKind::Fixed,
+        })
+}
+
+fn arb_ie() -> impl Strategy<Value = Lod> {
+    (
+        arb_agg(),
+        prop::sample::subsequence((0..DIMS.len()).collect::<Vec<usize>>(), 0..=2),
+        any::<bool>(),
+    )
+        .prop_map(|(agg, fixed, include)| Lod {
+            agg,
+            fixed,
+            kind: if include {
+                LodKind::Include
+            } else {
+                LodKind::Exclude
+            },
+        })
 }
 
 fn arb_pred() -> impl Strategy<Value = Pred> {
@@ -507,7 +736,7 @@ fn arb_kind() -> impl Strategy<Value = Kind> {
     prop_oneof![
         4 => (
             dims(0..=2),
-            prop::sample::subsequence((0..METS.len()).collect::<Vec<usize>>(), 1..=2),
+            prop::sample::subsequence((0..METS.len()).collect::<Vec<usize>>(), 1..=3),
         )
             .prop_map(|(d, m)| Kind::Metrics(d, m)),
         1 => dims(1..=3).prop_map(Kind::DimsOnly),
@@ -524,13 +753,14 @@ fn arb_case() -> impl Strategy<Value = Case> {
         arb_instance(),
         arb_lod(),
         arb_lod(),
+        arb_ie(),
         arb_agg(),
         arb_kind(),
         prop::option::of(arb_pred()),
         any::<bool>(),
         any::<bool>(),
     )
-        .prop_map(|(inst, lf, ld, outer, kind, pred, o_first, o_keyed)| {
+        .prop_map(|(inst, lf, ld, lie, outer, kind, pred, o_first, o_keyed)| {
             // `lf` alone in FACTS is one row per fixed-grain value: no filter.
             let pred = if matches!(&kind, Kind::Facts(i) if i.len() == 1) {
                 None
@@ -541,6 +771,7 @@ fn arb_case() -> impl Strategy<Value = Case> {
                 inst,
                 lf,
                 ld,
+                lie,
                 outer,
                 kind,
                 pred,
@@ -607,6 +838,9 @@ fn build_def(case: &Case) -> SemanticViewDefinition {
                 format!("MAX({}) - MIN({})", case.lf.sql(), case.ld.sql()),
                 None,
             ),
+            metric("m_ie", format!("{outer}(lie)"), None),
+            metric("m_ie_inl", format!("{outer}({})", case.lie.sql()), None),
+            metric("m_ie_mix", "SUM(o.ov) - MAX(lie)".to_string(), None),
         ],
         facts: vec![
             Fact {
@@ -618,6 +852,12 @@ fn build_def(case: &Case) -> SemanticViewDefinition {
             Fact {
                 name: "lf".to_string(),
                 expr: case.lf.sql(),
+                source_table: None,
+                ..Default::default()
+            },
+            Fact {
+                name: "lie".to_string(),
+                expr: case.lie.sql(),
                 source_table: None,
                 ..Default::default()
             },
@@ -727,7 +967,7 @@ proptest! {
     #![proptest_config(ProptestConfig::with_cases(512))]
 
     #[test]
-    fn fixed_lod_matches_snowflakes_rules(case in arb_case()) {
+    fn lod_matches_snowflakes_rules(case in arb_case()) {
         check(&case)?;
     }
 }
@@ -746,12 +986,32 @@ fn every_kind_is_reached() {
     );
     let strategy = arb_case();
     let mut seen: BTreeMap<&str, usize> = BTreeMap::new();
-    for _ in 0..600 {
+    for _ in 0..1500 {
         let case = strategy.new_tree(&mut runner).expect("case").current();
         let outcome = check(&case).expect("the property holds");
         let label = match &case.kind {
+            Kind::Metrics(..) if outcome.is_none() => "ie refused",
             _ if outcome.is_none() => "refused",
             _ if outcome == Some(0) => "empty",
+            Kind::Metrics(d, m)
+                if !d.is_empty()
+                    && case.pred.is_some()
+                    && m.iter().any(|m| reads_ie(*m))
+                    && case.lie.kind == LodKind::Include =>
+            {
+                "include grouped, filtered"
+            }
+            Kind::Metrics(d, m)
+                if !d.is_empty()
+                    && case.pred.is_some()
+                    && m.iter().any(|m| reads_ie(*m))
+                    && case.lie.kind == LodKind::Exclude =>
+            {
+                "exclude grouped, filtered"
+            }
+            Kind::Metrics(d, m) if !d.is_empty() && m.iter().any(|m| reads_ie(*m)) => {
+                "include or exclude grouped"
+            }
             Kind::Metrics(d, m) if d.contains(&LD) && m.iter().any(|m| *m != 0) => {
                 "lod metric by ld"
             }
@@ -768,6 +1028,10 @@ fn every_kind_is_reached() {
         *seen.entry(label).or_default() += 1;
     }
     for label in [
+        "include grouped, filtered",
+        "exclude grouped, filtered",
+        "include or exclude grouped",
+        "ie refused",
         "lod metric by ld",
         "lod metric grouped",
         "metric filtered",

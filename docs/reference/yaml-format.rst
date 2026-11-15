@@ -370,7 +370,7 @@ Each entry in the ``dimensions`` list declares a named grouping expression.
      - string
      - No
      - null
-     - Table alias this dimension comes from. Used for join dependency resolution. Must be an alias declared in ``tables`` (any case), also in a single-table view. Write it unquoted: a quoted alias such as ``'"O"'`` is accepted only in a single-table view (a known limitation). An :ref:`LOD dimension <ref-create-lod>` has none, and its ``expr`` holds the whole LOD expression, ``FIXED DIMENSIONS (...)`` included.
+     - Table alias this dimension comes from. Used for join dependency resolution. Must be an alias declared in ``tables`` (any case), also in a single-table view. Write it unquoted: a quoted alias such as ``'"O"'`` is accepted only in a single-table view (a known limitation). An :ref:`LOD dimension <ref-create-lod>` has none, and its ``expr`` holds the whole LOD expression, its ``FIXED``, ``INCLUDE`` or ``EXCLUDE DIMENSIONS (...)`` included.
    * - ``output_type``
      - string
      - No
@@ -602,7 +602,7 @@ Each entry in the ``facts`` list declares a named row-level expression. Facts ca
      - string
      - Yes
      -
-     - Row-level SQL expression. Must not contain aggregate functions, except in an :ref:`LOD fact <ref-create-lod>`, whose ``expr`` holds the whole LOD expression, ``FIXED DIMENSIONS (...)`` included.
+     - Row-level SQL expression. Must not contain aggregate functions, except in an :ref:`LOD fact <ref-create-lod>`, whose ``expr`` holds the whole LOD expression, its ``FIXED``, ``INCLUDE`` or ``EXCLUDE DIMENSIONS (...)`` included.
    * - ``source_table``
      - string
      - No
