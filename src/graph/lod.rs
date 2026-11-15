@@ -260,9 +260,11 @@ pub(crate) fn metric_parts(
                 clause.kind.keyword()
             ));
         };
-        let (_, call_close, open) = calls[c];
+        let (_, _, open) = calls[c];
+        // The argument list's own `)`: a `FILTER (...)` may follow it.
+        let args_close = crate::expr_tokens::closing_paren(expr, open);
         if enclosing_paren(expr, clause.start) != Some(open)
-            || expr[clause.end..call_close.saturating_sub(1)].trim() != ""
+            || expr[clause.end..args_close.saturating_sub(1)].trim() != ""
         {
             return Err(format!(
                 "metric '{name}': an inline LOD expression must be the whole argument of its \
@@ -527,6 +529,12 @@ pub(crate) fn resolve_lod(def: &SemanticViewDefinition, lod: &Lod) -> Result<Res
     let mut keys = Vec::new();
     let mut key_tables: Vec<String> = Vec::new();
     for entry in &lod.entries {
+        if entry.is_empty() {
+            return Err(format!(
+                "{what} has an empty entry in {} DIMENSIONS: a stray ','. Remove the extra comma.",
+                lod.kind.keyword()
+            ));
+        }
         let refs = scan_references(entry);
         let whole = refs.len() == 1
             && refs[0].raw == entry.as_str()
@@ -626,6 +634,29 @@ fn single_aggregate(what: &str) -> String {
 /// A [`ParseError`] naming the member and the rule.
 pub fn validate_lod(def: &SemanticViewDefinition) -> Result<(), ParseError> {
     let err = ParseError::positionless;
+    // An unprefixed fact or dimension whose LOD clause sits inside a larger
+    // expression: the parser took it as an LOD member, but it is none.
+    let unprefixed = def
+        .facts
+        .iter()
+        .filter(|f| f.source_table.is_none())
+        .map(|f| ("fact", &f.name, &f.expr))
+        .chain(
+            def.dimensions
+                .iter()
+                .filter(|d| d.source_table.is_none())
+                .map(|d| ("dimension", &d.name, &d.expr)),
+        );
+    for (kind, name, expr) in unprefixed {
+        if member_lod(expr).is_none() && !lod_clauses(expr).is_empty() {
+            return Err(err(format!(
+                "{kind} '{name}' holds an LOD expression inside a larger expression. An LOD \
+                 {kind} is one aggregate followed by its DIMENSIONS clause, as in \
+                 COUNT(orders.order_id) FIXED DIMENSIONS (customers.customer_id); compute \
+                 the rest in a metric."
+            )));
+        }
+    }
     // A table prefix on an LOD fact or dimension.
     let prefixed = def
         .facts
@@ -760,8 +791,8 @@ mod tests {
 
     fn refusal(facts: &str, dims: &str, metrics: &str) -> String {
         validate_lod(&parsed(facts, dims, metrics))
-            .expect_err("refused")
-            .message
+            .err()
+            .map_or_else(|| "<accepted>".to_string(), |e| e.message)
     }
 
     /// An LOD fact or dimension parses without a table prefix, stored as
@@ -885,10 +916,30 @@ mod tests {
                 ),
                 "lists LOD expression 'd3' in FIXED DIMENSIONS",
             ),
+            (
+                refusal(", x AS SUM(orders.order_amount) + (COUNT(orders.order_id) FIXED DIMENSIONS ())", "", ""),
+                "fact 'x' holds an LOD expression inside a larger expression",
+            ),
+            (
+                refusal("", ", x AS (COUNT(orders.order_id) FIXED DIMENSIONS ())", ""),
+                "dimension 'x' holds an LOD expression inside a larger expression",
+            ),
+            (
+                refusal(", r AS SUM(orders.order_amount) FIXED DIMENSIONS (customers.region,,orders.category)", "", ""),
+                "has an empty entry in FIXED DIMENSIONS",
+            ),
+            (
+                refusal(", r AS SUM(orders.order_amount) FIXED DIMENSIONS (customers.region,)", "", ""),
+                "has an empty entry in FIXED DIMENSIONS",
+            ),
         ];
-        for (got, want) in cases {
-            assert!(got.contains(want), "{want:?} not in {got:?}");
-        }
+        // Each case reports on its own, so one red doesn't hide another.
+        let wrong: Vec<String> = cases
+            .iter()
+            .filter(|(got, want)| !got.contains(want))
+            .map(|(got, want)| format!("{want:?} not in {got:?}"))
+            .collect();
+        assert!(wrong.is_empty(), "{wrong:#?}");
     }
 
     /// Constants, keywords and variables sit beside an LOD expression in its
@@ -901,6 +952,29 @@ mod tests {
             ", x AS AVG(CASE WHEN opc > 1 THEN opc + 1.5 ELSE NULL END)",
         );
         validate_lod(&def).unwrap();
+    }
+
+    /// An inline LOD expression's call can carry a `FILTER`, as a named one's
+    /// can (review of #368: it was refused as not the whole argument).
+    #[test]
+    fn an_inline_lod_call_can_carry_a_filter() {
+        let def = parsed(
+            "",
+            "",
+            ", x AS AVG(COUNT(orders.order_id) FIXED DIMENSIONS (customers.customer_id)) FILTER (WHERE true)",
+        );
+        validate_lod(&def).unwrap();
+        let lowered = crate::expand::lower_lod(&def);
+        let hidden = lowered
+            .metrics
+            .iter()
+            .find(|m| m.name.starts_with("__sv_lodm"))
+            .unwrap();
+        assert!(
+            hidden.expr.ends_with("FILTER (WHERE true)"),
+            "{}",
+            hidden.expr
+        );
     }
 
     #[test]

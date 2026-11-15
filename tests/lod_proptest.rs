@@ -10,7 +10,8 @@
 //! LOD fact `lf`, read by the metrics `m_lod` (an outer aggregate of `lf`),
 //! `m_inl` (the same outer aggregate of the same expression written inline)
 //! and `m_mix` (`SUM(o.ov) - MAX(lf)`). The other is the LOD dimension `ld`,
-//! which queries group and filter by.
+//! which queries group and filter by. `m_two` writes both inline in one
+//! metric, `MAX(<lf>) - MIN(<ld>)`.
 //!
 //! The oracle is computed in Rust from the rows, never in SQL. Snowflake's
 //! documented rules (fixture 11):
@@ -170,7 +171,9 @@ impl Pred {
 }
 
 /// The metrics, by index.
-const METS: [&str; 4] = ["sum_ov", "m_lod", "m_inl", "m_mix"];
+/// `m_two` reads two inline LOD expressions, `lf`'s and `ld`'s:
+/// `MAX(<lf>) - MIN(<ld>)`.
+const METS: [&str; 5] = ["sum_ov", "m_lod", "m_inl", "m_mix", "m_two"];
 
 /// A fact-list item.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -342,20 +345,34 @@ fn oracle_metric(
             (v, covers)
         })
         .collect();
+    let ld_keys = keys(inst, &case.ld);
+    let ld: Vec<(Option<i128>, Vec<usize>)> = lod_values(inst, &case.ld)
+        .into_iter()
+        .map(|(k, v)| {
+            let covers = (0..inst.o.len()).filter(|i| ld_keys[*i] == k).collect();
+            (v, covers)
+        })
+        .collect();
+    let minus = |a: BTreeMap<Vec<Option<i128>>, Option<i128>>,
+                 b: BTreeMap<Vec<Option<i128>>, Option<i128>>| {
+        a.into_iter()
+            .map(|(g, x)| {
+                let y = b.get(&g).copied().flatten();
+                (g, x.zip(y).map(|(x, y)| x - y))
+            })
+            .collect()
+    };
     match METS[m] {
         "sum_ov" => once_per_group(rows, case, dims, Agg::Sum, &orders),
+        "m_two" => minus(
+            once_per_group(rows, case, dims, Agg::Max, &lf),
+            once_per_group(rows, case, dims, Agg::Min, &ld),
+        ),
         "m_lod" | "m_inl" => once_per_group(rows, case, dims, case.outer, &lf),
-        _ => {
-            let plain = once_per_group(rows, case, dims, Agg::Sum, &orders);
-            let max = once_per_group(rows, case, dims, Agg::Max, &lf);
-            plain
-                .into_iter()
-                .map(|(g, a)| {
-                    let b = max.get(&g).copied().flatten();
-                    (g, a.zip(b).map(|(a, b)| a - b))
-                })
-                .collect()
-        }
+        _ => minus(
+            once_per_group(rows, case, dims, Agg::Sum, &orders),
+            once_per_group(rows, case, dims, Agg::Max, &lf),
+        ),
     }
 }
 
@@ -585,6 +602,11 @@ fn build_def(case: &Case) -> SemanticViewDefinition {
             metric("m_lod", format!("{outer}(lf)"), None),
             metric("m_inl", format!("{outer}({})", case.lf.sql()), None),
             metric("m_mix", "SUM(o.ov) - MAX(lf)".to_string(), None),
+            metric(
+                "m_two",
+                format!("MAX({}) - MIN({})", case.lf.sql(), case.ld.sql()),
+                None,
+            ),
         ],
         facts: vec![
             Fact {

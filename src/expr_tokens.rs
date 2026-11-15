@@ -499,6 +499,11 @@ fn skip_type(bytes: &[u8], start: usize) -> usize {
     }
 }
 
+/// Offset just past the `)` that closes the `(` at `expr[open]`.
+pub(crate) fn closing_paren(expr: &str, open: usize) -> usize {
+    skip_balanced(expr.as_bytes(), open, b'(', b')')
+}
+
 /// Offset just past the bracket that closes the `open` at `bytes[i]`, skipping
 /// literal, quoted-identifier and comment content and nested pairs. Saturates
 /// at `len`.
@@ -1155,11 +1160,26 @@ pub(crate) fn lod_clauses(expr: &str) -> Vec<LodClause> {
         let open = skip_whitespace_and_comments(bytes, head.end);
         let end = skip_balanced(bytes, open, b'(', b')');
         let inner = expr.get(open + 1..end.saturating_sub(1)).unwrap_or("");
-        let entries = depth0_comma_split(inner)
-            .into_iter()
-            .map(|e| e.trim().to_string())
-            .filter(|e| !e.is_empty())
-            .collect();
+        // Split as every DDL list is (`body_parser::scan`). A stray comma,
+        // trailing ones included, leaves an empty entry, which
+        // `graph::lod::resolve_lod` refuses.
+        let entries = if inner.trim().is_empty() {
+            Vec::new()
+        } else {
+            match crate::body_parser::scan::split_at_depth0_commas(inner) {
+                Ok(parts) => {
+                    let mut v: Vec<String> = parts
+                        .into_iter()
+                        .map(|(_, e)| e.trim().to_string())
+                        .collect();
+                    if inner.trim_end().ends_with(',') {
+                        v.push(String::new());
+                    }
+                    v
+                }
+                Err(_) => vec![String::new()],
+            }
+        };
         out.push(LodClause {
             kind,
             start: word_start,
@@ -1168,37 +1188,6 @@ pub(crate) fn lod_clauses(expr: &str) -> Vec<LodClause> {
         });
     }
     out
-}
-
-/// `text` split at its commas outside brackets, literals and quoted names.
-fn depth0_comma_split(text: &str) -> Vec<&str> {
-    let bytes = text.as_bytes();
-    let mut parts = Vec::new();
-    let mut depth = 0usize;
-    let mut from = 0;
-    let mut i = 0;
-    while i < bytes.len() {
-        match bytes[i] {
-            b'\'' => {
-                i = skip_single_quoted(bytes, i);
-                continue;
-            }
-            b'"' => {
-                i = skip_quoted_part(bytes, i);
-                continue;
-            }
-            b'(' | b'[' | b'{' => depth += 1,
-            b')' | b']' | b'}' => depth = depth.saturating_sub(1),
-            b',' if depth == 0 => {
-                parts.push(&text[from..i]);
-                from = i + 1;
-            }
-            _ => {}
-        }
-        i += 1;
-    }
-    parts.push(&text[from..]);
-    parts
 }
 
 /// The offset of the `(` that most closely encloses `pos` in `expr`, outside

@@ -237,8 +237,20 @@ pub fn lower_lod(def: &SemanticViewDefinition) -> Cow<'_, SemanticViewDefinition
             out.table_columns
                 .insert(alias.clone(), vec![key.clone(), VALUE_COLUMN.to_string()]);
         }
+        // One relationship name per LOD expression, also for a metric with
+        // several inline ones, unique beside the view's own names.
+        let mut rel = format!("{name} (level of detail)");
+        let mut nth = 1;
+        while out
+            .joins
+            .iter()
+            .any(|j| j.name.as_deref().is_some_and(|n| ident_matches(n, &rel)))
+        {
+            nth += 1;
+            rel = format!("{name} (level of detail {nth})");
+        }
         out.joins.push(Join {
-            name: Some(format!("{name} (level of detail)")),
+            name: Some(rel),
             from_alias: home.alias.clone(),
             table: alias.clone(),
             fk_columns: vec![key.clone()],
@@ -567,6 +579,29 @@ mod tests {
             }],
             ..Default::default()
         }
+    }
+
+    /// Two inline LOD expressions in one metric each get a relationship of
+    /// their own name, so the lowered copy passes `validate_graph` (review of
+    /// #368: both were named `<metric> (level of detail)`).
+    #[test]
+    fn two_inline_lods_in_one_metric_get_distinct_relationships() {
+        let mut d = def();
+        d.metrics[0].expr = "AVG(COUNT(orders.order_id) FIXED DIMENSIONS (customers.customer_id)) \
+             / AVG(SUM(orders.order_amount) FIXED DIMENSIONS ())"
+            .into();
+        let out = lower_lod(&d);
+        let names: Vec<&str> = out.joins.iter().filter_map(|j| j.name.as_deref()).collect();
+        assert_eq!(
+            names,
+            vec![
+                "oc",
+                "opc (level of detail)",
+                "share (level of detail)",
+                "share (level of detail 2)"
+            ]
+        );
+        crate::graph::validate_graph(&out).unwrap();
     }
 
     /// Each LOD expression gets a hidden table keyed on its fixed dimensions,

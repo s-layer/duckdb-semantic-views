@@ -341,6 +341,112 @@ SELECT * FROM SEMANTIC_VIEW(sales_multi FACTS rev_by_region_cat);
 ----
 private
 
+# L30b: nor in an ad-hoc aggregate.
+statement error
+SELECT * FROM SEMANTIC_VIEW(sales_multi METRICS MAX(rev_by_region_cat));
+----
+private
+
+# L31: two inline LOD expressions in one metric, and an inline one under
+# FILTER. North: Alice's 4 orders less North's 6;
+# South: Carol's 3 less South's 4.
+statement ok
+CREATE SEMANTIC VIEW sales_two_m
+  TABLES (c AS customers PRIMARY KEY (customer_id), o AS orders)
+  RELATIONSHIPS (o(customer_id) REFERENCES c)
+  DIMENSIONS (c.customer_id AS customer_id, c.region AS region, o.order_id AS order_id)
+  METRICS (
+    spread AS MAX(COUNT(o.order_id) FIXED DIMENSIONS (c.customer_id)) - MIN(COUNT(o.order_id) FIXED DIMENSIONS (c.region))
+  );
+
+query TI
+SELECT * FROM SEMANTIC_VIEW(sales_two_m DIMENSIONS c.region METRICS spread) ORDER BY 1;
+----
+North	-2
+South	-1
+
+statement ok
+CREATE SEMANTIC VIEW sales_two_f
+  TABLES (c AS customers PRIMARY KEY (customer_id), o AS orders)
+  RELATIONSHIPS (o(customer_id) REFERENCES c)
+  DIMENSIONS (c.customer_id AS customer_id, c.region AS region, o.order_id AS order_id)
+  METRICS (busy AS AVG(COUNT(o.order_id) FIXED DIMENSIONS (c.customer_id)) FILTER (WHERE true));
+
+query TR
+SELECT * FROM SEMANTIC_VIEW(sales_two_f DIMENSIONS c.region METRICS busy) ORDER BY 1;
+----
+North	3.0
+South	2.0
+
+# The same view with aliases other than the table names, and LOD members.
+statement ok
+CREATE SEMANTIC VIEW sales_two
+  TABLES (c AS customers PRIMARY KEY (customer_id), o AS orders)
+  RELATIONSHIPS (o(customer_id) REFERENCES c)
+  FACTS (o.order_amount AS amount, opc AS COUNT(o.order_id) FIXED DIMENSIONS (c.customer_id))
+  DIMENSIONS (c.customer_id AS customer_id, c.region AS region, o.order_id AS order_id,
+    obr AS COUNT(o.order_id) FIXED DIMENSIONS (c.region))
+  METRICS (avg_opc AS AVG(opc));
+
+# L31b: DESCRIBE names the fixed dimensions' table as its TABLE rows do.
+query TTT
+SELECT object_name, property, property_value FROM (DESCRIBE SEMANTIC VIEW sales_two)
+WHERE object_name IN ('obr', 'region') AND property IN ('TABLE', 'FIXED_DIMENSIONS') ORDER BY 1, 2;
+----
+obr	FIXED_DIMENSIONS	[["customers","region"]]
+region	TABLE	customers
+
+# L31c: an ad-hoc LOD metric reads only the view's members.
+statement error
+SELECT * FROM SEMANTIC_VIEW(sales_two METRICS MAX(opc) + SUM(o.undeclared));
+----
+is not a dimension, fact or metric
+
+# L31d: the YAML export writes an LOD member with no source_table, and CREATE
+# FROM YAML reads it back.
+query T
+SELECT READ_YAML_FROM_SEMANTIC_VIEW('sales_two') LIKE '%name: obr%expr: COUNT(o.order_id) FIXED DIMENSIONS (c.region)%source_table: null%';
+----
+true
+
+statement ok
+CREATE SEMANTIC VIEW sales_yaml FROM YAML $$
+tables:
+- alias: c
+  table: customers
+  pk_columns: [customer_id]
+- alias: o
+  table: orders
+joins:
+- table: c
+  from_alias: o
+  fk_columns: [customer_id]
+facts:
+- name: opc
+  expr: COUNT(o.order_id) FIXED DIMENSIONS (c.customer_id)
+dimensions:
+- name: customer_id
+  expr: customer_id
+  source_table: c
+- name: region
+  expr: region
+  source_table: c
+- name: order_id
+  expr: order_id
+  source_table: o
+- name: obr
+  expr: COUNT(o.order_id) FIXED DIMENSIONS (c.region)
+metrics:
+- name: avg_opc
+  expr: AVG(opc)
+$$;
+
+query TIR
+SELECT * FROM SEMANTIC_VIEW(sales_yaml DIMENSIONS c.region, obr METRICS avg_opc) ORDER BY 1;
+----
+North	6	3.0
+South	4	2.0
+
 # Edge data (fixture 11b): Eve (North) has no orders; order 111 has no customer,
 # and order 112 a customer no customers row has.
 statement ok
@@ -396,7 +502,7 @@ NULL	2.0
 
 # E4: the grand total counts every order (2220). Snowflake gives the NULL region
 # NULL here, and 2 in E1 for the same rows; we give its share, 120 / 2220
-# (docs/how-to/lod-expressions.rst, "NULL fixed-grain values").
+# (TECH-DEBT #114, an accepted divergence).
 query TRR
 SELECT region, total_revenue, round(pct_of_total, 4) FROM SEMANTIC_VIEW(sales_edge DIMENSIONS customers.region METRICS orders.total_revenue, pct_of_total) ORDER BY 1 NULLS LAST;
 ----
@@ -415,7 +521,8 @@ SELECT * FROM SEMANTIC_VIEW(sales_edge FACTS orders_per_customer) ORDER BY 1;
 4
 
 # E8: beside an order fact, one row per order. The orders with no customer row
-# carry the NULL customer's count, 2, where Snowflake gives NULL (as E4).
+# carry the NULL customer's count, 2, where Snowflake gives NULL (as E4,
+# TECH-DEBT #114).
 query IRII
 SELECT order_id, order_amount, orders_per_customer, grand_total_revenue FROM SEMANTIC_VIEW(sales_edge FACTS orders.order_id, orders.order_amount, orders_per_customer, grand_total_revenue) WHERE order_id >= 110 ORDER BY 1;
 ----
@@ -540,6 +647,28 @@ CREATE SEMANTIC VIEW sales_bad
   METRICS (avg_cpc AS AVG(cpc));
 ----
 which are not related along foreign keys
+
+# L24j: an LOD clause inside a larger expression is no LOD fact.
+statement error
+CREATE SEMANTIC VIEW sales_bad
+  TABLES (customers AS customers PRIMARY KEY (customer_id), orders AS orders)
+  RELATIONSHIPS (orders(customer_id) REFERENCES customers)
+  FACTS (orders.order_amount AS amount, x AS SUM(orders.order_amount) + (COUNT(orders.order_id) FIXED DIMENSIONS ()))
+  DIMENSIONS (customers.region AS region)
+  METRICS (m AS AVG(x));
+----
+fact 'x' holds an LOD expression inside a larger expression
+
+# L24k: a stray comma in FIXED DIMENSIONS, as in any DDL list.
+statement error
+CREATE SEMANTIC VIEW sales_bad
+  TABLES (customers AS customers PRIMARY KEY (customer_id), orders AS orders)
+  RELATIONSHIPS (orders(customer_id) REFERENCES customers)
+  FACTS (x AS COUNT(orders.order_id) FIXED DIMENSIONS (customers.region,))
+  DIMENSIONS (customers.region AS region, orders.order_id AS order_id)
+  METRICS (m AS AVG(x));
+----
+has an empty entry in FIXED DIMENSIONS
 
 # L24h: INCLUDE and EXCLUDE DIMENSIONS are not supported yet (TECH-DEBT #113,
 # Phase 8.5b).

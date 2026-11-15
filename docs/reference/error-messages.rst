@@ -1774,7 +1774,8 @@ LOD expression rules
 
 - A fact, dimension or metric with a table prefix cannot hold or read an LOD expression (Snowflake's 010946): ``... has a table prefix and reads LOD expression '<name>'``.
 - An LOD expression is one aggregate over facts and dimensions (010943): ``... must be a single aggregate over facts or dimensions``, or ``... reads '<name>', which is no fact or dimension of the view``.
-- An LOD expression cannot read another (010952), and ``FIXED DIMENSIONS`` cannot list one (010945) or an expression (000002).
+- An LOD fact or dimension is the aggregate and its clause, nothing around them: ``... holds an LOD expression inside a larger expression``.
+- An LOD expression cannot read another (010952), and ``FIXED DIMENSIONS`` cannot list one (010945), an expression (000002), or an empty entry (``... has an empty entry in FIXED DIMENSIONS``).
 - A metric reads an LOD expression inside an aggregate call, one per call (010951), with nothing else from the view in that call.
 - The table the expression aggregates must reference every table its ``FIXED DIMENSIONS`` read, along one path.
 - A materialization cannot cover an LOD expression.

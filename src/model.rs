@@ -1751,6 +1751,10 @@ fn validate_yaml_members(def: &SemanticViewDefinition) -> Result<(), String> {
         slot_single("dimension", "name", &d.name)?;
         member_expr("dimension", &d.name, &d.expr)?;
         reject_output_type("dimension", &d.name, d.output_type.as_deref())?;
+        // An LOD dimension has no table prefix in the DDL, so no source_table.
+        if d.source_table.is_none() && crate::graph::lod::member_lod(&d.expr).is_some() {
+            continue;
+        }
         let Some(src) = d.source_table.as_deref() else {
             return Err(format!(
                 "dimension '{}' has no source_table; a dimension must name its table \
@@ -1764,6 +1768,10 @@ fn validate_yaml_members(def: &SemanticViewDefinition) -> Result<(), String> {
         slot_single("fact", "name", &f.name)?;
         member_expr("fact", &f.name, &f.expr)?;
         reject_output_type("fact", &f.name, f.output_type.as_deref())?;
+        // An LOD fact has no table prefix in the DDL, so no source_table.
+        if f.source_table.is_none() && crate::graph::lod::member_lod(&f.expr).is_some() {
+            continue;
+        }
         let Some(src) = f.source_table.as_deref() else {
             return Err(format!(
                 "fact '{}' has no source_table; a fact must name its table \
@@ -2041,6 +2049,37 @@ mod tests {
         assert!(!out.contains("generated_name"), "{out}");
         let back = SemanticViewDefinition::from_yaml_with_size_cap("v", &out).expect("re-import");
         assert_eq!(back.joins, def.joins);
+    }
+
+    /// An LOD fact or dimension has no `source_table` (its DDL form has no
+    /// table prefix), and the YAML import takes it and round-trips it (review
+    /// of #368: the import refused every one). A plain member still needs one.
+    #[test]
+    fn yaml_lod_members_have_no_source_table() {
+        let yaml = "tables:\n  - alias: o\n    table: orders\n    pk_columns: [id]\n  \
+             - alias: c\n    table: customers\n    pk_columns: [id]\n\
+             joins:\n  - name: oc\n    from_alias: o\n    table: c\n    fk_columns: [customer_id]\n\
+             facts:\n  - name: opc\n    expr: COUNT(o.id) FIXED DIMENSIONS (c.region)\n\
+             dimensions:\n  - name: region\n    expr: c.region\n    source_table: c\n  \
+             - name: obr\n    expr: COUNT(o.id) FIXED DIMENSIONS (c.region)\n\
+             metrics:\n  - name: avg_opc\n    expr: AVG(opc)\n";
+        let def = SemanticViewDefinition::from_yaml_with_size_cap("v", yaml).expect("accepted");
+        assert_eq!(def.facts[0].source_table, None);
+        let out = crate::render_yaml::render_yaml_export(&def).expect("export");
+        let back = SemanticViewDefinition::from_yaml_with_size_cap("v", &out).expect("re-import");
+        assert_eq!(back.facts, def.facts);
+        assert_eq!(back.dimensions, def.dimensions);
+        let plain = yaml.replace(
+            "expr: COUNT(o.id) FIXED DIMENSIONS (c.region)\n\ndimensions",
+            "expr: o.id\ndimensions",
+        );
+        let plain = plain.replacen(
+            "expr: COUNT(o.id) FIXED DIMENSIONS (c.region)\n",
+            "expr: o.id\n",
+            1,
+        );
+        let e = yaml_err(&plain);
+        assert!(e.contains("fact 'opc' has no source_table"), "{e}");
     }
 
     /// A parsed definition serialized with serde (as `fuzz_yaml_parse` does)

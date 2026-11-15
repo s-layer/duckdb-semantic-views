@@ -13,7 +13,7 @@ mod materializations;
 mod metadata;
 mod metrics;
 mod relationships;
-mod scan;
+pub(crate) mod scan;
 mod tables;
 mod variables;
 mod window;

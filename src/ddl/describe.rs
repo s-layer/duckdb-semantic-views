@@ -600,7 +600,14 @@ fn lod_parts(def: &SemanticViewDefinition, expr: &str) -> Option<(String, String
                 crate::graph::lod::Resolved::Dimension(i) => Some(&def.dimensions[i].name),
                 _ => None,
             };
-            match (crate::graph::lod::member_table(def, resolved), name) {
+            // The table as the TABLE and parent-entity rows name it.
+            let table = crate::graph::lod::member_table(def, resolved).map(|t| {
+                def.tables
+                    .iter()
+                    .find(|r| crate::ident::ident_matches(&r.alias, t))
+                    .map_or(t, crate::model::TableRef::listed_name)
+            });
+            match (table, name) {
                 (Some(t), Some(n)) => format_json_array(&[t.to_string(), n.clone()]),
                 _ => format_json_array(std::slice::from_ref(entry)),
             }
