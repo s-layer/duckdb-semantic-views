@@ -988,11 +988,26 @@ fn collect_na_dim_source_tables(
             let Some(dim) = super::resolution::find_dimension(def, &nd.dimension) else {
                 continue;
             };
-            if let Some(ref st) = dim.source_table {
-                let alias = st.to_ascii_lowercase();
+            let mut push = |t: &str| {
+                let alias = t.to_ascii_lowercase();
                 if !sources.contains(&alias) {
                     sources.push(alias);
                 }
+            };
+            if let Some(ref st) = dim.source_table {
+                push(st);
+            }
+            // A dimension written as another table's dimension (Phase 8.2)
+            // reads that table, and the tables its facts read, in its
+            // expression: join them too, or the ORDER BY names a table the
+            // snapshot never joined (v0.20.0 review F3).
+            let own = dim
+                .source_table
+                .as_deref()
+                .or_else(|| def.tables.first().map(|t| t.alias.as_str()))
+                .unwrap_or_default();
+            for (_, to) in super::window_members::hops(def, own, own, &dim.expr) {
+                push(&to);
             }
         }
     }

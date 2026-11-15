@@ -162,6 +162,25 @@ pub fn lower_lod(def: &SemanticViewDefinition) -> Cow<'_, SemanticViewDefinition
     lower_lod_at(def, &QueryGrain::default())
 }
 
+/// `def` as a query with no dimensions reads its LOD expressions, or `None`
+/// when it has none: the steps `expand` takes ahead of [`lower_lod_at`]
+/// that its spliced member expressions need (bare columns qualified,
+/// dimension references lowered), then [`lower_lod`]. Used to type and bind
+/// an `INCLUDE` or `EXCLUDE` fact, which no query can name in `FACTS`
+/// (v0.20.0 review F2).
+#[must_use]
+pub fn lod_lowered_for_probe(def: &SemanticViewDefinition) -> Option<SemanticViewDefinition> {
+    if !has_lod(def) {
+        return None;
+    }
+    let qualified = super::bare_columns::qualify_bare_columns(def);
+    let refs = super::dim_refs::lower_dimension_references(&qualified);
+    match lower_lod(&refs) {
+        Cow::Owned(lowered) => Some(lowered),
+        Cow::Borrowed(_) => None,
+    }
+}
+
 /// What an `INCLUDE` or `EXCLUDE` expression's grain depends on in a query
 /// (Phase 8.5b): the dimensions it groups by and the filter it applies
 /// first. Snowflake computes `INCLUDE DIMENSIONS (d)` at the query's

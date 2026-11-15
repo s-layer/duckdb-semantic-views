@@ -214,6 +214,21 @@ SELECT property_value FROM (DESCRIBE SEMANTIC VIEW sales_sv) WHERE object_name =
 ----
 [["orders","category"]]
 
+# L33d: SHOW SEMANTIC FACTS types an INCLUDE and an EXCLUDE fact, as
+# Snowflake lists LOD facts with a type (fixture 11 L20; v0.20.0 review F2).
+query TT
+SELECT name, data_type FROM (SHOW SEMANTIC FACTS IN sales_sv) WHERE name IN ('num_orders_incl_customer', 'regional_revenue_excl_cat') ORDER BY 1;
+----
+num_orders_incl_customer	BIGINT
+regional_revenue_excl_cat	DECIMAL(38,2)
+
+# L33e: and DESCRIBE.
+query TT
+SELECT object_name, property_value FROM (DESCRIBE SEMANTIC VIEW sales_sv) WHERE object_name IN ('num_orders_incl_customer', 'regional_revenue_excl_cat') AND property = 'DATA_TYPE' ORDER BY 1;
+----
+num_orders_incl_customer	BIGINT
+regional_revenue_excl_cat	DECIMAL(38,2)
+
 # L33c: SHOW SEMANTIC DIMENSIONS ... FOR METRIC lists, for an INCLUDE metric,
 # the dimensions its table reaches.
 query T
@@ -325,6 +340,19 @@ NULL	120.00	60.0
 
 statement ok
 DROP SEMANTIC VIEW sales_ok7;
+
+# L24f: an INCLUDE fact whose aggregate doesn't bind is refused at CREATE,
+# also when no metric reads it, as every member is bound at CREATE (v0.20.0
+# review F2).
+statement error
+CREATE SEMANTIC VIEW sales_bad_incl
+  TABLES (customers AS customers PRIMARY KEY (customer_id), orders AS orders PRIMARY KEY (order_id))
+  RELATIONSHIPS (orders(customer_id) REFERENCES customers)
+  FACTS (bad_incl AS SUM(orders.category) INCLUDE DIMENSIONS (customers.customer_id))
+  DIMENSIONS (customers.customer_id AS customer_id, orders.category AS category)
+  METRICS (orders.order_count AS COUNT(orders.order_id));
+----
+fact 'bad_incl' does not bind
 
 # Q1 (not in the fixtures, which have no table below orders): an INCLUDE
 # metric grouped by a table its home doesn't reference, a child of orders, has

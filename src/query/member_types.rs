@@ -230,6 +230,11 @@ pub fn infer_member_types(
         };
         out.facts = prober.batch_then_each(&def, &names, build)?;
         prober.retry_missing(one_role.as_ref(), &names, &mut out.facts, build)?;
+        // A query can't name an INCLUDE or EXCLUDE fact in FACTS (010969),
+        // so it is typed on the LOD-lowered copy, where it is a column of its
+        // hidden table (v0.20.0 review F2).
+        let lowered = crate::expand::lod_lowered_for_probe(&def);
+        prober.retry_missing(lowered.as_ref(), &names, &mut out.facts, build)?;
     }
     if wanted.metrics {
         let (window, plain): (Vec<_>, Vec<_>) =
@@ -296,6 +301,7 @@ pub fn first_unbound_member(
     let typed = infer_member_types(view_name, def, Wanted::ALL, cancelled, probe)?;
     let def = public_copy(def);
     let one_role = single_role_copy(&def);
+    let lowered = crate::expand::lod_lowered_for_probe(&def);
     let mut prober = Prober {
         view_name,
         cancelled,
@@ -329,7 +335,10 @@ pub fn first_unbound_member(
     for (kind, name) in missing {
         let mut first_error = None;
         let mut binds = false;
-        for d in std::iter::once(&def).chain(one_role.as_ref()) {
+        for d in std::iter::once(&def)
+            .chain(one_role.as_ref())
+            .chain(lowered.as_ref().filter(|_| kind == "fact"))
+        {
             let req = member_request(d, kind, name);
             prober.last_failure = None;
             if prober.run(d, &req)?.is_some() {
