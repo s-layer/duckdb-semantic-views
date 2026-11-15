@@ -230,6 +230,21 @@ pub fn infer_member_types(
         };
         out.facts = prober.batch_then_each(&def, &names, build)?;
         prober.retry_missing(one_role.as_ref(), &names, &mut out.facts, build)?;
+        // A query can't name an INCLUDE or EXCLUDE fact in FACTS (010969),
+        // so it is typed on the LOD-lowered copy, where it is a column of its
+        // hidden table, and on the lowered one-role copy when it plays roles
+        // (v0.20.0 review F2).
+        let lod_names: Vec<String> = def
+            .facts
+            .iter()
+            .filter(|f| crate::graph::lod::is_lod_fact(f))
+            .map(|f| f.name.clone())
+            .collect();
+        if !lod_names.is_empty() {
+            for copy in lod_lowered_copies(&def, one_role.as_ref()) {
+                prober.retry_missing(Some(&copy), &lod_names, &mut out.facts, build)?;
+            }
+        }
     }
     if wanted.metrics {
         let (window, plain): (Vec<_>, Vec<_>) =
@@ -296,6 +311,7 @@ pub fn first_unbound_member(
     let typed = infer_member_types(view_name, def, Wanted::ALL, cancelled, probe)?;
     let def = public_copy(def);
     let one_role = single_role_copy(&def);
+    let lowered = lod_lowered_copies(&def, one_role.as_ref());
     let mut prober = Prober {
         view_name,
         cancelled,
@@ -329,7 +345,10 @@ pub fn first_unbound_member(
     for (kind, name) in missing {
         let mut first_error = None;
         let mut binds = false;
-        for d in std::iter::once(&def).chain(one_role.as_ref()) {
+        for d in std::iter::once(&def)
+            .chain(one_role.as_ref())
+            .chain(lowered.iter().filter(|_| kind == "fact"))
+        {
             let req = member_request(d, kind, name);
             prober.last_failure = None;
             if prober.run(d, &req)?.is_some() {
@@ -440,6 +459,20 @@ fn public_copy(def: &SemanticViewDefinition) -> SemanticViewDefinition {
         f.access = AccessModifier::Public;
     }
     def
+}
+
+/// The LOD-lowered copies of `def` and of its one-role copy, empty when it
+/// has no LOD expression (`expand::lod_lowered_for_probe`). Used only to type
+/// and bind an `INCLUDE` or `EXCLUDE` fact, which no query can name in
+/// `FACTS`.
+fn lod_lowered_copies(
+    def: &SemanticViewDefinition,
+    one_role: Option<&SemanticViewDefinition>,
+) -> Vec<SemanticViewDefinition> {
+    std::iter::once(def)
+        .chain(one_role)
+        .filter_map(crate::expand::lod_lowered_for_probe)
+        .collect()
 }
 
 /// A copy of `def` keeping only the first-declared relationship between each

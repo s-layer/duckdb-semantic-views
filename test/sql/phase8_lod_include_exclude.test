@@ -214,6 +214,21 @@ SELECT property_value FROM (DESCRIBE SEMANTIC VIEW sales_sv) WHERE object_name =
 ----
 [["orders","category"]]
 
+# L33d: SHOW SEMANTIC FACTS types an INCLUDE and an EXCLUDE fact, as
+# Snowflake lists LOD facts with a type (fixture 11 L20; v0.20.0 review F2).
+query TT
+SELECT name, data_type FROM (SHOW SEMANTIC FACTS IN sales_sv) WHERE name IN ('num_orders_incl_customer', 'regional_revenue_excl_cat') ORDER BY 1;
+----
+num_orders_incl_customer	BIGINT
+regional_revenue_excl_cat	DECIMAL(38,2)
+
+# L33e: and DESCRIBE.
+query TT
+SELECT object_name, property_value FROM (DESCRIBE SEMANTIC VIEW sales_sv) WHERE object_name IN ('num_orders_incl_customer', 'regional_revenue_excl_cat') AND property = 'DATA_TYPE' ORDER BY 1;
+----
+num_orders_incl_customer	BIGINT
+regional_revenue_excl_cat	DECIMAL(38,2)
+
 # L33c: SHOW SEMANTIC DIMENSIONS ... FOR METRIC lists, for an INCLUDE metric,
 # the dimensions its table reaches.
 query T
@@ -325,6 +340,39 @@ NULL	120.00	60.0
 
 statement ok
 DROP SEMANTIC VIEW sales_ok7;
+
+# L24f: an INCLUDE fact whose aggregate doesn't bind is refused at CREATE,
+# also when no metric reads it, as every member is bound at CREATE (v0.20.0
+# review F2).
+statement error
+CREATE SEMANTIC VIEW sales_bad_incl
+  TABLES (customers AS customers PRIMARY KEY (customer_id), orders AS orders PRIMARY KEY (order_id))
+  RELATIONSHIPS (orders(customer_id) REFERENCES customers)
+  FACTS (bad_incl AS SUM(orders.category) INCLUDE DIMENSIONS (customers.customer_id))
+  DIMENSIONS (customers.customer_id AS customer_id, orders.category AS category)
+  METRICS (orders.order_count AS COUNT(orders.order_id));
+----
+fact 'bad_incl' does not bind
+
+# L24g: an INCLUDE fact over a window fact binds at CREATE, as a query reads
+# it: the window fact first, as its table's column (v0.20.0 #371 review).
+# Orders 101..112 are rows 1..12, so the customers sum 10, 11, 24 and 10, and
+# orders 111 and 112, with no customer row, 23.
+statement ok
+CREATE SEMANTIC VIEW sales_win_incl
+  TABLES (customers AS customers PRIMARY KEY (customer_id), orders AS orders PRIMARY KEY (order_id))
+  RELATIONSHIPS (orders(customer_id) REFERENCES customers)
+  FACTS (orders.rn AS ROW_NUMBER() OVER (ORDER BY order_id),
+    rn_incl AS SUM(orders.rn) INCLUDE DIMENSIONS (customers.customer_id))
+  DIMENSIONS (customers.customer_id AS customer_id, customers.region AS region)
+  METRICS (avg_rn AS AVG(rn_incl));
+
+query TR
+SELECT * FROM SEMANTIC_VIEW(sales_win_incl DIMENSIONS customers.region METRICS avg_rn) ORDER BY 1 NULLS LAST;
+----
+North	10.5
+South	17.0
+NULL	23.0
 
 # Q1 (not in the fixtures, which have no table below orders): an INCLUDE
 # metric grouped by a table its home doesn't reference, a child of orders, has

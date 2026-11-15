@@ -354,3 +354,109 @@ statement error
 SELECT * FROM SEMANTIC_VIEW(xref_diamond DIMENSIONS orders.d_any_region METRICS orders.revenue);
 ----
 more than one path
+
+# N1: NON ADDITIVE BY a reference to a reference: the snapshot joins the
+# tables the reference reads (v0.20.0 review F3). The latest region is US,
+# Bob's order of 5. Expected values are the same metric over a copy of the
+# region on orders.
+statement ok
+CREATE SEMANTIC VIEW xref_na1
+  TABLES (region AS x_regions PRIMARY KEY (r_id), nation AS x_nations PRIMARY KEY (n_id),
+    customer AS x_customers PRIMARY KEY (c_id), orders AS x_orders PRIMARY KEY (o_id))
+  RELATIONSHIPS (nation_region AS nation (r_id) REFERENCES region,
+    customer_nation AS customer (n_id) REFERENCES nation, order_customer AS orders (c_id) REFERENCES customer)
+  DIMENSIONS (region.d_region_name AS r_name, customer.d_customer_name AS c_name,
+    customer.d_customer_region AS region.d_region_name, orders.d_order_region AS customer.d_customer_region)
+  METRICS (orders.m NON ADDITIVE BY (d_order_region) AS SUM(amount));
+
+query I
+SELECT * FROM SEMANTIC_VIEW(xref_na1 METRICS orders.m);
+----
+5
+
+query TI
+SELECT * FROM SEMANTIC_VIEW(xref_na1 DIMENSIONS customer.d_customer_name METRICS orders.m) ORDER BY 1;
+----
+Ann	30
+Bob	5
+Cid	7
+
+# N2: NON ADDITIVE BY another table's reference dimension, descending: the
+# earliest region is Cid's NULL one, his order of 7.
+statement ok
+CREATE SEMANTIC VIEW xref_na2
+  TABLES (region AS x_regions PRIMARY KEY (r_id), nation AS x_nations PRIMARY KEY (n_id),
+    customer AS x_customers PRIMARY KEY (c_id), orders AS x_orders PRIMARY KEY (o_id))
+  RELATIONSHIPS (nation_region AS nation (r_id) REFERENCES region,
+    customer_nation AS customer (n_id) REFERENCES nation, order_customer AS orders (c_id) REFERENCES customer)
+  DIMENSIONS (region.d_region_name AS r_name, customer.d_customer_name AS c_name,
+    customer.d_customer_region AS region.d_region_name)
+  METRICS (orders.m NON ADDITIVE BY (d_customer_region DESC) AS SUM(amount));
+
+query I
+SELECT * FROM SEMANTIC_VIEW(xref_na2 METRICS orders.m);
+----
+7
+
+# N3: a metric on the reference's own table.
+statement ok
+CREATE SEMANTIC VIEW xref_na3
+  TABLES (region AS x_regions PRIMARY KEY (r_id), nation AS x_nations PRIMARY KEY (n_id),
+    customer AS x_customers PRIMARY KEY (c_id), orders AS x_orders PRIMARY KEY (o_id))
+  RELATIONSHIPS (nation_region AS nation (r_id) REFERENCES region,
+    customer_nation AS customer (n_id) REFERENCES nation, order_customer AS orders (c_id) REFERENCES customer)
+  DIMENSIONS (region.d_region_name AS r_name, customer.d_customer_name AS c_name,
+    customer.d_customer_region AS region.d_region_name)
+  METRICS (customer.m NON ADDITIVE BY (d_customer_region) AS COUNT(c_id));
+
+query I
+SELECT * FROM SEMANTIC_VIEW(xref_na3 METRICS customer.m);
+----
+1
+
+# N4: a NA dimension whose expression reads a fact of a table that fans out
+# from the metric's table is refused as a fan trap, as the same dimension
+# queried is, rather than joined into the snapshot (#371 review, EXP-9).
+statement ok
+CREATE SEMANTIC VIEW xref_na4
+  TABLES (customer AS x_customers PRIMARY KEY (c_id), orders AS x_orders PRIMARY KEY (o_id))
+  RELATIONSHIPS (order_customer AS orders (c_id) REFERENCES customer)
+  FACTS (orders.f_amt AS amount)
+  DIMENSIONS (customer.d_name AS c_name, customer.d_amt AS orders.f_amt)
+  METRICS (customer.m NON ADDITIVE BY (d_amt) AS COUNT(c_id));
+
+statement error
+SELECT * FROM SEMANTIC_VIEW(xref_na4 METRICS customer.m);
+----
+fan trap detected
+
+# N5: N1 with orders, the metric's table, declared first, and the snapshot
+# grouped by a table the reference reads (region) and by one between (nation).
+statement ok
+CREATE SEMANTIC VIEW xref_na5
+  TABLES (orders AS x_orders PRIMARY KEY (o_id), customer AS x_customers PRIMARY KEY (c_id),
+    nation AS x_nations PRIMARY KEY (n_id), region AS x_regions PRIMARY KEY (r_id))
+  RELATIONSHIPS (nation_region AS nation (r_id) REFERENCES region,
+    customer_nation AS customer (n_id) REFERENCES nation, order_customer AS orders (c_id) REFERENCES customer)
+  DIMENSIONS (region.d_region_name AS r_name, nation.d_nation AS n_name, customer.d_customer_name AS c_name,
+    customer.d_customer_region AS region.d_region_name, orders.d_order_region AS customer.d_customer_region)
+  METRICS (orders.m NON ADDITIVE BY (d_order_region) AS SUM(amount));
+
+query I
+SELECT * FROM SEMANTIC_VIEW(xref_na5 METRICS orders.m);
+----
+5
+
+query TI
+SELECT * FROM SEMANTIC_VIEW(xref_na5 DIMENSIONS region.d_region_name METRICS orders.m) ORDER BY 1 NULLS LAST;
+----
+EU	30
+US	5
+NULL	7
+
+query TI
+SELECT * FROM SEMANTIC_VIEW(xref_na5 DIMENSIONS nation.d_nation METRICS orders.m) ORDER BY 1 NULLS LAST;
+----
+FR	30
+US	5
+NULL	7
