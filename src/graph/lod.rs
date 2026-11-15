@@ -479,13 +479,6 @@ pub(crate) struct Resolution {
 #[allow(clippy::too_many_lines)]
 pub(crate) fn resolve_lod(def: &SemanticViewDefinition, lod: &Lod) -> Result<Resolution, String> {
     let what = lod.describe(def);
-    if lod.kind != LodKind::Fixed {
-        return Err(format!(
-            "{what} uses {} DIMENSIONS, which this version does not support yet; only FIXED \
-             DIMENSIONS is.",
-            lod.kind.keyword()
-        ));
-    }
     let body = lod.body.as_str();
     if !lod_clauses(body).is_empty() {
         return Err(nested_lod(&what));
@@ -795,6 +788,54 @@ mod tests {
             .map_or_else(|| "<accepted>".to_string(), |e| e.message)
     }
 
+    /// `INCLUDE` and `EXCLUDE DIMENSIONS` are accepted (Phase 8.5b), named
+    /// and inline, and their entries meet the rules `FIXED` ones do.
+    #[test]
+    fn include_and_exclude_are_accepted_with_the_fixed_rules() {
+        let accepted = refusal(
+            ", n AS COUNT(orders.order_id) INCLUDE DIMENSIONS (customers.customer_id), \
+             x AS SUM(orders.order_amount) EXCLUDE DIMENSIONS (orders.category)",
+            "",
+            ", a AS AVG(n), b AS AVG(x), \
+             c AS AVG(SUM(orders.order_amount) INCLUDE DIMENSIONS (customers.customer_id)), \
+             d AS SUM(orders.order_amount) / AVG(SUM(orders.order_amount) EXCLUDE DIMENSIONS (customers.region))",
+        );
+        assert_eq!(accepted, "<accepted>");
+        let cases = [
+            (
+                refusal(
+                    ", opc AS COUNT(orders.order_id) FIXED DIMENSIONS (customers.customer_id), \
+                     n AS COUNT(orders.order_id) INCLUDE DIMENSIONS (opc)",
+                    "",
+                    "",
+                ),
+                "lists LOD expression 'opc' in INCLUDE DIMENSIONS",
+            ),
+            (
+                refusal(
+                    ", n AS COUNT(orders.order_id) EXCLUDE DIMENSIONS (customers.customer_id + 1)",
+                    "",
+                    "",
+                ),
+                "lists 'customers.customer_id + 1' in EXCLUDE DIMENSIONS",
+            ),
+            (
+                refusal(
+                    ", n AS COUNT(orders.order_id) INCLUDE DIMENSIONS (customers.nope)",
+                    "",
+                    "",
+                ),
+                "lists 'customers.nope' in INCLUDE DIMENSIONS, which is no dimension or fact",
+            ),
+        ];
+        let wrong: Vec<String> = cases
+            .iter()
+            .filter(|(got, want)| !got.contains(want))
+            .map(|(got, want)| format!("{want:?} not in {got:?}"))
+            .collect();
+        assert!(wrong.is_empty(), "{wrong:#?}");
+    }
+
     /// An LOD fact or dimension parses without a table prefix, stored as
     /// written, and is read back as its body and clause.
     #[test]
@@ -903,10 +944,6 @@ mod tests {
                     "",
                 ),
                 "which are not related along foreign keys",
-            ),
-            (
-                refusal(", n AS COUNT(orders.order_id) EXCLUDE DIMENSIONS (category)", "", ""),
-                "uses EXCLUDE DIMENSIONS, which this version does not support yet",
             ),
             (
                 refusal(

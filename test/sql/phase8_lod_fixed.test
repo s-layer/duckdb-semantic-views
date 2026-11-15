@@ -28,7 +28,7 @@ INSERT INTO orders VALUES (101, 1, 'Electronics', 400), (102, 1, 'Electronics', 
   (109, 3, 'Clothing', 100), (110, 4, 'Electronics', 200);
 
 # L0: the documented view's FIXED members (its INCLUDE and EXCLUDE members are
-# Phase 8.5b). `orders` declares no key, as in the docs.
+# in phase8_lod_include_exclude.test). `orders` declares no key, as in the docs.
 statement ok
 CREATE SEMANTIC VIEW sales_sv
   TABLES (
@@ -682,18 +682,6 @@ CREATE SEMANTIC VIEW sales_trailing
 
 statement ok
 DROP SEMANTIC VIEW sales_trailing;
-
-# L24h: INCLUDE and EXCLUDE DIMENSIONS are not supported yet (TECH-DEBT #113,
-# Phase 8.5b).
-statement error
-CREATE SEMANTIC VIEW sales_bad
-  TABLES (customers AS customers PRIMARY KEY (customer_id), orders AS orders)
-  RELATIONSHIPS (orders(customer_id) REFERENCES customers)
-  FACTS (nic AS COUNT(orders.order_id) INCLUDE DIMENSIONS (customers.customer_id))
-  DIMENSIONS (customers.customer_id AS customer_id, orders.order_id AS order_id)
-  METRICS (avg_nic AS AVG(nic));
-----
-uses INCLUDE DIMENSIONS, which this version does not support yet
 
 # L24i: LOD expressions are not supported in materializations.
 statement error

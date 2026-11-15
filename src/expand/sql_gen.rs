@@ -1249,16 +1249,6 @@ pub fn expand(
     // derived table computes over all the table's rows (`window_members`).
     let windowed = super::window_members::lower_window_members(def, req);
     let def = &*windowed;
-    // Phase 8.5: an LOD expression is read through a hidden table of its
-    // fixed-grain values, which its home table references (`lod`). After
-    // the steps above, so the member expressions it splices are qualified.
-    let lowered_lod = super::lod::lower_lod(def);
-    let def = &*lowered_lod;
-    // Phase 6.3: a metric written over a same-table metric carries that
-    // metric's aggregate from here on, so every later step sees what it
-    // computes (`graph::same_table_metrics`).
-    let inlined = crate::graph::inline_same_table_metrics(def);
-    let def = &*inlined;
     // The predicate's subqueries become CTEs ahead of the expansion, so that
     // they are uncorrelated (`where_clause::hoist_subqueries`). What is left in
     // the predicate is resolved as before: a `(SELECT * FROM __sv_sqN)` is
@@ -1275,20 +1265,39 @@ pub fn expand(
         }
         None => req,
     };
-    let Some(hoisted) = req
+    let hoisted = req
         .where_clause
         .as_deref()
         .map(super::where_clause::hoist_subqueries)
-        .filter(|h| !h.ctes.is_empty())
-    else {
-        return expand_unhoisted(view_name, def, req);
+        .filter(|h| !h.ctes.is_empty());
+    let with_predicate;
+    let req = match &hoisted {
+        Some(h) => {
+            with_predicate = QueryRequest {
+                where_clause: Some(h.predicate.clone()),
+                ..req.clone()
+            };
+            &with_predicate
+        }
+        None => req,
     };
-    let req = QueryRequest {
-        where_clause: Some(hoisted.predicate),
-        ..req.clone()
-    };
-    let sql = expand_unhoisted(view_name, def, &req)?;
-    Ok(super::where_clause::with_ctes(&sql, &hoisted.ctes))
+    // Phase 8.5: an LOD expression is read through a hidden table of its
+    // values, which its home table references (`lod`); an INCLUDE or EXCLUDE
+    // one at the query's grain, over the rows its filter keeps. After the
+    // steps above, so the member expressions it splices are qualified.
+    let grain = super::lod::query_grain(view_name, def, req)?;
+    let lowered_lod = super::lod::lower_lod_at(def, &grain);
+    let def = &*lowered_lod;
+    // Phase 6.3: a metric written over a same-table metric carries that
+    // metric's aggregate from here on, so every later step sees what it
+    // computes (`graph::same_table_metrics`).
+    let inlined = crate::graph::inline_same_table_metrics(def);
+    let def = &*inlined;
+    let sql = expand_unhoisted(view_name, def, req)?;
+    Ok(match hoisted {
+        Some(h) => super::where_clause::with_ctes(&sql, &h.ctes),
+        None => sql,
+    })
 }
 
 /// [`expand`], for a predicate whose subqueries are already hoisted.

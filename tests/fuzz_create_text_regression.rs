@@ -260,3 +260,21 @@ fn unicode_space_before_create() {
         render_create_ddl(&name.name, &def).expect("an accepted definition renders");
     }
 }
+
+/// Run 43733824205: a variable "named" `e` with an escape string after it,
+/// `e'''%\''`. The clause scanner reads `e'...'` as one escape-string literal,
+/// the entry lexer read `e` as the name and the rest as a plain string, and
+/// the render put a space between them, so the re-planned clause read the
+/// quotes differently and lost its dollar quote. An escape string is a
+/// literal, not a variable name, so the entry is refused.
+#[test]
+fn escape_string_where_a_variable_name_belongs() {
+    let text = "CREATE SEMANTIC VIEW v TABLES (s AS t PRIMARY KEY (id)) \
+                VARIABLES (e'''%\\''&x $$ ' $$) METRICS (s.n AS COUNT(*))";
+    let err = plan_create(text).expect_err("an escape string is no variable name");
+    assert!(
+        err.message.contains("Expected a variable name"),
+        "{}",
+        err.message
+    );
+}

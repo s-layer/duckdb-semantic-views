@@ -1,15 +1,15 @@
 .. meta::
-   :description: Compute a value at a fixed grain, such as orders per customer averaged by region or a share of the grand total, with LOD expressions and FIXED DIMENSIONS
+   :description: Compute a value at a grain other than the query's, such as orders per customer averaged by region or a share of a region's revenue, with LOD expressions and FIXED, INCLUDE or EXCLUDE DIMENSIONS
 
 .. _howto-lod:
 
-========================================================
-How to Compute Values at a Fixed Grain (LOD Expressions)
-========================================================
+===========================================================
+How to Compute Values at Another Grain (LOD Expressions)
+===========================================================
 
 .. versionadded:: 0.20.0
 
-This guide shows how to compute a value at a grain other than the query's, such as each customer's order count averaged by region, or each region's revenue as a share of the grand total. You write the value as a **level-of-detail (LOD) expression**: an aggregate followed by ``FIXED DIMENSIONS (...)``, the dimensions it is computed at. The syntax and the answers are Snowflake's.
+This guide shows how to compute a value at a grain other than the query's, such as each customer's order count averaged by region, or each region's revenue as a share of the grand total. You write the value as a **level-of-detail (LOD) expression**: an aggregate followed by the dimensions it is computed at. ``FIXED DIMENSIONS (...)`` names them outright, ``INCLUDE DIMENSIONS (...)`` adds them to the query's dimensions, and ``EXCLUDE DIMENSIONS (...)`` takes them away. The syntax and the answers are Snowflake's.
 
 **Prerequisites:**
 
@@ -48,7 +48,7 @@ Declare LOD Expressions
 An LOD expression is declared as a fact or a dimension **without a table prefix**, and a metric that reads one has no table prefix either:
 
 .. code-block:: sql
-   :emphasize-lines: 11,12,20,24,25,26
+   :emphasize-lines: 11-14,21,25-31
 
    CREATE SEMANTIC VIEW sales
    TABLES (
@@ -61,7 +61,9 @@ An LOD expression is declared as a fact or a dimension **without a table prefix*
    FACTS (
        orders.order_amount AS amount,
        orders_per_customer AS COUNT(orders.order_id) FIXED DIMENSIONS (customers.customer_id),
-       grand_total_revenue AS SUM(orders.order_amount) FIXED DIMENSIONS ()
+       grand_total_revenue AS SUM(orders.order_amount) FIXED DIMENSIONS (),
+       orders_incl_customer AS COUNT(orders.order_id) INCLUDE DIMENSIONS (customers.customer_id),
+       region_revenue      AS SUM(orders.order_amount) EXCLUDE DIMENSIONS (customers.customer_id)
    )
    DIMENSIONS (
        customers.customer_id AS customer_id,
@@ -74,10 +76,14 @@ An LOD expression is declared as a fact or a dimension **without a table prefix*
        orders.total_revenue    AS SUM(amount),
        avg_orders_per_customer AS AVG(orders_per_customer),
        pct_of_total            AS SUM(orders.order_amount) / AVG(grand_total_revenue),
-       avg_orders_inline       AS AVG(COUNT(orders.order_id) FIXED DIMENSIONS (customers.customer_id))
+       avg_orders_inline       AS AVG(COUNT(orders.order_id) FIXED DIMENSIONS (customers.customer_id)),
+       avg_orders_incl_customer AS AVG(orders_incl_customer),
+       avg_customer_revenue    AS AVG(SUM(orders.order_amount) INCLUDE DIMENSIONS (customers.customer_id)),
+       pct_of_region_revenue   AS SUM(orders.order_amount) / AVG(SUM(orders.order_amount) EXCLUDE DIMENSIONS (orders.category)),
+       avg_region_revenue      AS AVG(region_revenue)
    );
 
-Each expression is one aggregate over the view's facts and dimensions, followed by the dimensions it is fixed at, each named as ``<table>.<name>``. ``FIXED DIMENSIONS ()`` is the grand total. The table it aggregates (``orders`` here) must reference every table its ``FIXED DIMENSIONS`` read, directly or through other tables. ``orders`` needs no ``PRIMARY KEY``.
+Each expression is one aggregate over the view's facts and dimensions, followed by its dimensions, each named as ``<table>.<name>``. ``FIXED DIMENSIONS ()`` is the grand total. The table it aggregates (``orders`` here) must reference every table its dimensions read, directly or through other tables. ``orders`` needs no ``PRIMARY KEY``.
 
 
 .. _howto-lod-metric:
@@ -170,10 +176,70 @@ An LOD dimension gives each row its value at the fixed grain. ``orders_by_region
    └─────────────┴──────────────────┴───────────────┘
 
 
+.. _howto-lod-include:
+
+Add a Dimension to the Query's Grain (INCLUDE)
+==============================================
+
+An ``INCLUDE DIMENSIONS`` expression is computed at the query's dimensions plus its own. ``orders_incl_customer`` counts each customer's orders within each group of the query, and ``avg_orders_incl_customer`` averages those counts. Grouped by region alone, it gives the same answer as the ``FIXED`` metric. Grouped by region and category, the two differ:
+
+.. code-block:: sql
+
+   SELECT * FROM SEMANTIC_VIEW(sales
+       DIMENSIONS customers.region, orders.category
+       METRICS avg_orders_per_customer, avg_orders_incl_customer
+   ) ORDER BY region, category;
+
+.. code-block:: text
+
+   ┌────────┬─────────────┬─────────────────────────┬──────────────────────────┐
+   │ region │  category   │ avg_orders_per_customer │ avg_orders_incl_customer │
+   ├────────┼─────────────┼─────────────────────────┼──────────────────────────┤
+   │ North  │ Clothing    │                     3.0 │                      1.5 │
+   │ North  │ Electronics │                     3.0 │                      1.5 │
+   │ South  │ Clothing    │                     3.0 │                      1.0 │
+   │ South  │ Electronics │                     2.0 │                      1.5 │
+   └────────┴─────────────┴─────────────────────────┴──────────────────────────┘
+
+The ``FIXED`` metric averages each customer's count of all orders. The ``INCLUDE`` metric counts only the orders in the row's category: North's clothing orders are Alice's 2 and Bob's 1, which average 1.5.
+
+``avg_customer_revenue`` writes an ``INCLUDE`` expression inline. By region it is the average customer's revenue: 650 for North (Alice's 1000 and Bob's 300) and 400 for South.
+
+
+.. _howto-lod-exclude:
+
+Take a Dimension Out of the Query's Grain (EXCLUDE)
+===================================================
+
+An ``EXCLUDE DIMENSIONS`` expression is computed at the query's dimensions minus its own. ``pct_of_region_revenue`` divides each group's revenue by its revenue without the category, which is its region's revenue when the query groups by region and category:
+
+.. code-block:: sql
+
+   SELECT region, category, round(pct_of_region_revenue, 3) AS pct FROM SEMANTIC_VIEW(sales
+       DIMENSIONS customers.region, orders.category
+       METRICS pct_of_region_revenue
+   ) ORDER BY region, category;
+
+.. code-block:: text
+
+   ┌────────┬─────────────┬───────┐
+   │ region │  category   │  pct  │
+   ├────────┼─────────────┼───────┤
+   │ North  │ Clothing    │ 0.385 │
+   │ North  │ Electronics │ 0.615 │
+   │ South  │ Clothing    │ 0.125 │
+   │ South  │ Electronics │ 0.875 │
+   └────────┴─────────────┴───────┘
+
+North's clothing revenue is 500.00 of its 1300.00. A query that doesn't group by the category has nothing to take out, so the same metric by region alone is 1.0 for each region.
+
+An ``EXCLUDE`` value is listed for every group the query lists, also one with no rows of the aggregated table. Grouped by region and customer, ``avg_region_revenue`` gives each customer their region's revenue, and a customer with no orders gets it too.
+
+
 .. _howto-lod-filters:
 
-Filters Apply After the Calculation
-===================================
+Filters and LOD Expressions
+===========================
 
 A ``FIXED`` expression is computed over every row, before the query's ``WHERE``. The filter decides which rows are left, not what the expression counts:
 
@@ -195,6 +261,27 @@ A ``FIXED`` expression is computed over every row, before the query's ``WHERE``.
    └────────┴─────────────────────────┘
 
 Each customer keeps its full order count: Alice still counts 4, not her 2 clothing orders. Dan has no clothing order, so South averages Carol's 3 alone.
+
+An ``INCLUDE`` or ``EXCLUDE`` expression is computed at the query's grain, so it is computed over the rows the ``WHERE`` keeps:
+
+.. code-block:: sql
+
+   SELECT * FROM SEMANTIC_VIEW(sales
+       DIMENSIONS customers.region
+       METRICS avg_orders_per_customer, avg_orders_incl_customer
+       WHERE orders.category = 'Electronics'
+   ) ORDER BY region;
+
+.. code-block:: text
+
+   ┌────────┬─────────────────────────┬──────────────────────────┐
+   │ region │ avg_orders_per_customer │ avg_orders_incl_customer │
+   ├────────┼─────────────────────────┼──────────────────────────┤
+   │ North  │                     3.0 │                      1.5 │
+   │ South  │                     2.0 │                      1.5 │
+   └────────┴─────────────────────────┴──────────────────────────┘
+
+The ``FIXED`` metric still counts every order of each customer with an electronics order. The ``INCLUDE`` metric counts only their electronics orders: Alice's 2 and Bob's 1 in North, Carol's 2 and Dan's 1 in South.
 
 
 .. _howto-lod-facts:
@@ -236,7 +323,8 @@ Snowflake differs here. It counts the same ``NULL`` customer in an average such 
 What Is Not Supported
 =====================
 
-- ``INCLUDE DIMENSIONS`` and ``EXCLUDE DIMENSIONS`` are refused at ``CREATE`` for now; only ``FIXED DIMENSIONS`` is supported. They are planned for the next release.
+- An ``INCLUDE`` or ``EXCLUDE`` expression is computed at the query's grain, so a query can read it only in ``METRICS``, inside an aggregate: not in ``DIMENSIONS``, ``FACTS`` or ``WHERE``. A query that reads one can't group by an expression item, or group or filter by an LOD dimension, which has a grain of its own. As in Snowflake, these are refused.
+- A query that reads an ``INCLUDE`` or ``EXCLUDE`` expression can group and filter only by tables its aggregated table reaches along foreign keys by one path, or by that table itself.
 - An LOD expression cannot be written in a query; declare it in the view.
 - A query that reads an LOD expression and reaches across a :ref:`direct many-to-many relationship <ref-create-direct-many-to-many>` is refused, as in Snowflake (010959).
 - A materialization cannot cover an LOD expression, or a metric that reads one.
@@ -251,7 +339,7 @@ Troubleshooting
 
 - a fact, dimension or metric with a table prefix that holds or reads an LOD expression;
 - an LOD expression that reads another, or that is not one aggregate over facts and dimensions;
-- ``FIXED DIMENSIONS`` listing an expression, an LOD expression, or a name the view doesn't define;
+- ``FIXED``, ``INCLUDE`` or ``EXCLUDE DIMENSIONS`` listing an expression, an LOD expression, or a name the view doesn't define;
 - a metric that reads an LOD expression outside an aggregate call, two in one call, or another member in the same call;
 - an LOD expression whose tables are not related along foreign keys, or reached by more than one path.
 

@@ -154,6 +154,9 @@ unsafe fn show_dims_for_metric(
         .unwrap_or(met);
     let mut rows: Vec<(Vec<String>, bool)> = crate::expand::dimensions_for_metric(&lowered, met)
         .into_iter()
+        // Phase 8.5b: an INCLUDE or EXCLUDE expression is computed at the
+        // query's dimensions, so it is grouped only by those its rows reach.
+        .filter(|d| crate::expand::lod_grain_allows(&bridged, &met.name, &d.name))
         .map(|d| {
             let table_name = d
                 .source_table

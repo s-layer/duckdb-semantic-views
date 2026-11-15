@@ -64,10 +64,13 @@ pub(crate) fn parse_variable_entry(entry: &str, offset: usize) -> Result<Variabl
         return Err(cur.err(0, "Missing variable name.".to_string()));
     };
     let name = cur.text(name_tok);
+    // A name abutting a `.` is qualified, and one abutting a string is a
+    // literal's introducer (`e'...'`, an escape string): neither is a
+    // variable name (fuzz run 43733824205).
     if !matches!(name_tok.kind, TokenKind::Ident { .. })
-        || toks
-            .get(1)
-            .is_some_and(|t| t.kind == TokenKind::Symbol(b'.') && t.start == name_tok.end)
+        || toks.get(1).is_some_and(|t| {
+            t.start == name_tok.end && matches!(t.kind, TokenKind::Symbol(b'.') | TokenKind::String)
+        })
     {
         return Err(cur.err(
             name_tok.start,
@@ -230,6 +233,20 @@ mod tests {
             default: d.map(str::to_string),
             comment: c.map(str::to_string),
         }
+    }
+
+    /// A name abutting a string is a literal with an introducer (`e'...'`,
+    /// an escape string; `x'...'`), not a variable name (fuzz run
+    /// 43733824205).
+    #[test]
+    fn a_string_introducer_is_no_variable_name() {
+        for text in ["e'x' INTEGER", "E'a\\'b' VARCHAR", "x'ff'"] {
+            let (msg, at) = entry_err(text);
+            assert!(msg.contains("Expected a variable name"), "{text}: {msg}");
+            assert_eq!(at, Some(0), "{text}");
+        }
+        // With a space it is a name and a type, as before.
+        assert_eq!(entry("e VARCHAR").name, "e");
     }
 
     /// Snowflake's documented entries.
