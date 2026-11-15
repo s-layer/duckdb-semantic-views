@@ -1792,7 +1792,7 @@ INCLUDE or EXCLUDE expression in a query
 
 .. code-block:: text
 
-   semantic view 'sales': fact 'orders_incl_customer' uses INCLUDE DIMENSIONS,
+   semantic view 'sales': LOD fact 'orders_incl_customer' uses INCLUDE DIMENSIONS,
    so it is computed at the query's grain, and can be read only in METRICS, as
    the argument of an aggregate function (such as AVG(orders_incl_customer)),
    not in FACTS.

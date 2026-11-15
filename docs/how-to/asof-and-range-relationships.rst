@@ -78,7 +78,7 @@ Write ``ASOF`` before the target's date column in the ``REFERENCES`` list. The o
        a.address_count AS COUNT(*)
    );
 
-The referenced columns, ``ASOF`` column included, must be the target's ``PRIMARY KEY`` or a ``UNIQUE`` key, as for any relationship: an address history has one row per customer and start date. Only one column of a relationship can be ``ASOF``, and the two ``ASOF`` columns must be numbers, dates, times or timestamps that compare.
+The referenced columns, ``ASOF`` column included, must be the target's ``PRIMARY KEY`` or a ``UNIQUE`` key: an address history has one row per customer and start date. (A plain relationship to non-key columns is :ref:`many-to-many <ref-create-direct-many-to-many>` instead, which an ``ASOF`` one can't be.) Only one column of a relationship can be ``ASOF``, and the two ``ASOF`` columns must be numbers, dates, times or timestamps that compare.
 
 List each order with the city it was matched to:
 

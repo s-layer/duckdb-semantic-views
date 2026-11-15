@@ -7,7 +7,7 @@
 How to Use Window Function Metrics
 =======================================
 
-This guide shows how to define metrics that use SQL window functions -- rolling averages, lag comparisons, running totals, and rankings -- using the ``OVER`` clause in the ``METRICS`` section.
+This guide shows how to define metrics that use SQL window functions -- rolling averages, lag comparisons, running totals, and rankings -- using the ``OVER`` clause in the ``METRICS`` section, and how to give each row a window value with a window fact or dimension (see :ref:`howto-window-members`).
 
 **Prerequisites:**
 
@@ -232,6 +232,107 @@ The dimensions a window clause names (in ``PARTITION BY``, ``PARTITION BY EXCLUD
 .. versionchanged:: 0.19.0
 
    ``PARTITION BY`` and ``PARTITION BY EXCLUDING`` accept the ``alias.name`` form, which ``ORDER BY`` already accepted. ``CREATE`` refuses a bare name of another table's dimension, a dimension of a finer table or of one reached more than one way, a window over a metric with ``USING``, and a frame or an order-sensitive function with no ``ORDER BY``, as Snowflake does. A view created by 0.18.0 with one of these windows keeps loading and answering as before, and its ``GET_DDL`` shows the window as written; rewrite the window before running that DDL again.
+
+
+.. _howto-window-members:
+
+Rank or Total Each Row with a Window Fact or Dimension
+======================================================
+
+.. versionadded:: 0.20.0
+
+A window metric is computed over the query's result. To give each **row** a value computed over its table instead, such as a sale's rank or its category's revenue, put the window function in a fact or a dimension, as in Snowflake. Its value is computed over every row of the table, before the query's ``WHERE``.
+
+.. code-block:: sql
+
+   CREATE TABLE win_stores (store_id INTEGER, region VARCHAR);
+   INSERT INTO win_stores VALUES (1, 'North'), (2, 'South');
+
+   CREATE TABLE win_sales (id INTEGER, store_id INTEGER, category VARCHAR, units INTEGER, revenue DECIMAL(10,2));
+   INSERT INTO win_sales VALUES
+       (1, 1, 'A', 5, 50), (2, 1, 'B', 2, 30), (3, 2, 'A', 8, 70),
+       (4, 2, 'B', 1, 10), (5, 1, 'A', 3, 20);
+
+   CREATE SEMANTIC VIEW store_sales
+   TABLES (
+       st    AS win_stores PRIMARY KEY (store_id),
+       sales AS win_sales  PRIMARY KEY (id)
+   )
+   RELATIONSHIPS (
+       sale_store AS sales(store_id) REFERENCES st
+   )
+   FACTS (
+       sales.revenue_by_category AS SUM(revenue) OVER (PARTITION BY category),
+       sales.region_revenue      AS SUM(revenue) OVER (PARTITION BY st.region)
+   )
+   DIMENSIONS (
+       sales.sale_id    AS id,
+       sales.category   AS category,
+       st.region        AS region,
+       sales.units_rank AS ROW_NUMBER() OVER (ORDER BY units DESC)
+   )
+   METRICS (
+       sales.revenue     AS SUM(revenue),
+       sales.max_cat_rev AS MAX(revenue_by_category)
+   );
+
+A query filtered to category ``A`` still gets each sale's rank among all five sales:
+
+.. code-block:: sql
+
+   SELECT * FROM SEMANTIC_VIEW(store_sales
+       DIMENSIONS sales.sale_id, sales.units_rank
+       WHERE sales.category = 'A'
+   ) ORDER BY sale_id;
+
+.. code-block:: text
+
+   ┌─────────┬────────────┐
+   │ sale_id │ units_rank │
+   ├─────────┼────────────┤
+   │       1 │          2 │
+   │       3 │          1 │
+   │       5 │          3 │
+   └─────────┴────────────┘
+
+A window fact can read a table its own table references, here the store's region. ``FACTS`` lists each sale's values:
+
+.. code-block:: sql
+
+   SELECT * FROM SEMANTIC_VIEW(store_sales
+       FACTS sales.sale_id, sales.revenue_by_category, sales.region_revenue
+   ) ORDER BY sale_id;
+
+.. code-block:: text
+
+   ┌─────────┬─────────────────────┬────────────────┐
+   │ sale_id │ revenue_by_category │ region_revenue │
+   ├─────────┼─────────────────────┼────────────────┤
+   │       1 │              140.00 │         100.00 │
+   │       2 │               40.00 │         100.00 │
+   │       3 │              140.00 │          80.00 │
+   │       4 │               40.00 │          80.00 │
+   │       5 │              140.00 │         100.00 │
+   └─────────┴─────────────────────┴────────────────┘
+
+A query can group by a window dimension and filter on one, and a metric can aggregate a window fact, such as ``max_cat_rev`` above:
+
+.. code-block:: sql
+
+   SELECT * FROM SEMANTIC_VIEW(store_sales
+       METRICS sales.revenue
+       WHERE sales.units_rank <= 2
+   );
+
+.. code-block:: text
+
+   ┌───────────────┐
+   │    revenue    │
+   ├───────────────┤
+   │        120.00 │
+   └───────────────┘
+
+The two sales with the most units, 3 and 1, made 120.00. ``CREATE`` refuses a window fact or dimension that reads a child table or a table reached by more than one path. See :ref:`window functions in facts and dimensions <ref-create-window-members>` for the full rules.
 
 
 .. _howto-window-verify:

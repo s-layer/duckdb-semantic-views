@@ -96,7 +96,12 @@ html_theme_options = {
                 {
                     "title": "Many-to-Many Relationships",
                     "url": "how-to/many-to-many-relationships",
-                    "summary": "Group a metric across a bridge table, each row counted once per group",
+                    "summary": "Group a metric across a bridge table or a non-key column, each row counted once per group",
+                },
+                {
+                    "title": "Dimension References",
+                    "url": "how-to/dimension-references",
+                    "summary": "Write a dimension as a dimension of a table its table references",
                 },
                 {
                     "title": "Tables Defined by a Query",
@@ -137,6 +142,11 @@ html_theme_options = {
                     "title": "Window Metrics",
                     "url": "how-to/window-metrics",
                     "summary": "Define rolling averages, lag comparisons, and rankings with OVER clauses",
+                },
+                {
+                    "title": "LOD Expressions",
+                    "url": "how-to/lod-expressions",
+                    "summary": "Compute a value at another grain with FIXED, INCLUDE or EXCLUDE DIMENSIONS",
                 },
                 {
                     "title": "Wildcard Selection",

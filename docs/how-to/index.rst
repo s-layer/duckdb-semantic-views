@@ -1,5 +1,5 @@
 .. meta::
-   :description: Goal-oriented guides for standard-SQL queries, view variables, tables defined by a query, CREATE OR ALTER, FACTS, derived metrics, role-playing dimensions, fan trap and multi-grain resolution, ASOF and range relationships, many-to-many bridges, data source connectivity, query filtering, metadata annotations, semi-additive metrics, window metrics, LOD expressions, wildcard selection, fact queries, materializations, and YAML definitions
+   :description: Goal-oriented guides for standard-SQL queries, view variables, tables defined by a query, CREATE OR ALTER, FACTS, derived metrics, role-playing dimensions, fan trap and multi-grain resolution, ASOF and range relationships, many-to-many relationships, dimension references, data source connectivity, query filtering, metadata annotations, semi-additive metrics, window metrics, LOD expressions, wildcard selection, fact queries, materializations, and YAML definitions
 
 .. _how-to-guides:
 
@@ -16,14 +16,15 @@ Goal-oriented guides for specific tasks with DuckDB Semantic Views.
 - :ref:`howto-role-playing` -- Join the same table through several named relationships, pick the route with ``USING``, and query a diamond.
 - :ref:`howto-fan-traps` -- See how a metric grouped below its grain is counted, which queries still raise the fan trap error, and how to fix them.
 - :ref:`howto-asof-range` -- Join each row to the record in effect at its date, or to the period that holds it, with ASOF and range relationships.
-- :ref:`howto-many-to-many` -- Group a metric by a dimension linked many-to-many through a bridge table, counting each row once per group.
+- :ref:`howto-many-to-many` -- Group a metric by a dimension linked many-to-many, through a bridge table or directly on a non-key column, counting each row once per group.
+- :ref:`howto-dimension-references` -- Write a dimension as a dimension of a table its table references, such as an order's region read through its customer.
 - :ref:`howto-query-tables` -- Make a ``TABLES`` entry a query that joins, filters or pre-aggregates source tables inside the view.
 
 **Advanced Metrics**
 
 - :ref:`howto-semi-additive` -- Define metrics with NON ADDITIVE BY for snapshot data like account balances and inventory levels.
-- :ref:`howto-window-metrics` -- Define window function metrics for rolling averages, lag comparisons, and rankings using OVER clauses.
-- :ref:`howto-lod` -- Compute a value at a fixed grain, such as orders per customer averaged by region or a share of the grand total, with ``FIXED DIMENSIONS``.
+- :ref:`howto-window-metrics` -- Define window function metrics for rolling averages, lag comparisons, and rankings using OVER clauses, and window facts or dimensions that rank or total each row.
+- :ref:`howto-lod` -- Compute a value at another grain than the query's, such as orders per customer averaged by region or a category's share of its region, with ``FIXED``, ``INCLUDE`` or ``EXCLUDE DIMENSIONS``.
 
 **Data & Queries**
 
@@ -50,6 +51,7 @@ Goal-oriented guides for specific tasks with DuckDB Semantic Views.
    fan-traps
    asof-and-range-relationships
    many-to-many-relationships
+   dimension-references
    query-defined-tables
    data-sources
    filtering
