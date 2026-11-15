@@ -1,15 +1,15 @@
 .. meta::
-   :description: Group a metric by a dimension on the other side of a bridge table, such as books by author country, counting each row once per group
+   :description: Group a metric by a dimension on the other side of a many-to-many relationship, through a bridge table such as books by author country or directly on a non-key column such as orders by promotion channel, counting each row once per group
 
 .. _howto-many-to-many:
 
-=====================================================
-How to Model Many-to-Many Relationships with a Bridge
-=====================================================
+=======================================
+How to Model Many-to-Many Relationships
+=======================================
 
 .. versionadded:: 0.19.0
 
-This guide shows how to group or filter a metric by a dimension that is linked to it many-to-many, such as page counts by the authors' country when a book can have several authors and an author several books. The link is a **bridge table** (``book_authors``) that references both sides. No new syntax is needed: you declare the bridge's two relationships, and the extension counts each book once per group, never once per author, as Snowflake does.
+This guide shows how to group or filter a metric by a dimension that is linked to it many-to-many, such as page counts by the authors' country when a book can have several authors and an author several books. The link is a **bridge table** (``book_authors``) that references both sides. No new syntax is needed: you declare the bridge's two relationships, and the extension counts each book once per group, never once per author, as Snowflake does. When one table's column matches several rows of the other, such as an order's promotion code, the relationship can also be declared directly, with no bridge (see :ref:`howto-m2m-direct`).
 
 **Prerequisites:**
 
@@ -322,6 +322,113 @@ Verify the Generated SQL
 :ref:`SHOW SEMANTIC DIMENSIONS ... FOR METRIC <ref-show-dims-for-metric>` lists the dimensions across the bridge among those a metric can be grouped by: for ``total_pages`` it lists ``author``, ``country``, ``role`` and ``title``.
 
 
+.. _howto-m2m-direct:
+
+Relate Two Tables on a Non-Key Column
+=====================================
+
+.. versionadded:: 0.20.0
+
+A many-to-many relationship needs no bridge when one table's column matches several rows of the other. Here each order carries a promotion code, and a code runs on several channels, so ``promotions`` has no key at all:
+
+.. code-block:: sql
+
+   CREATE TABLE promo_orders (order_id INTEGER, promo_code VARCHAR, amount DECIMAL(10,2));
+   INSERT INTO promo_orders VALUES
+       (1, 'SPRING', 100), (2, 'SPRING', 40), (3, 'WELCOME', 60),
+       (4, 'NOPE', 30), (5, NULL, 20);
+
+   CREATE TABLE promotions (promo_code VARCHAR, channel VARCHAR);
+   INSERT INTO promotions VALUES
+       ('SPRING', 'Web'), ('SPRING', 'Web'), ('SPRING', 'Email'), ('WELCOME', 'Web');
+
+Declare the relationship on the code. Because ``promo_code`` is not a ``PRIMARY KEY`` or ``UNIQUE`` key of ``promotions``, the relationship is many-to-many, as in Snowflake:
+
+.. code-block:: sql
+   :emphasize-lines: 7
+
+   CREATE SEMANTIC VIEW promo_sales
+   TABLES (
+       o AS promo_orders PRIMARY KEY (order_id),
+       p AS promotions
+   )
+   RELATIONSHIPS (
+       order_promotions AS o(promo_code) REFERENCES p(promo_code)
+   )
+   FACTS (
+       o.order_amount AS amount
+   )
+   DIMENSIONS (
+       o.order_id   AS order_id,
+       o.promo_code AS promo_code,
+       p.channel    AS channel
+   )
+   METRICS (
+       o.revenue     AS SUM(order_amount),
+       o.order_count AS COUNT(*)
+   );
+
+Grouped by channel, each order counts once under each channel its code runs on, even though ``SPRING`` has two ``Web`` rows:
+
+.. code-block:: sql
+
+   SELECT * FROM SEMANTIC_VIEW(promo_sales
+       DIMENSIONS p.channel
+       METRICS o.revenue, o.order_count
+   ) ORDER BY channel NULLS LAST;
+
+.. code-block:: text
+
+   ┌─────────┬───────────────┬─────────────┐
+   │ channel │    revenue    │ order_count │
+   ├─────────┼───────────────┼─────────────┤
+   │ Email   │        140.00 │           2 │
+   │ Web     │        200.00 │           3 │
+   │ NULL    │         50.00 │           2 │
+   └─────────┴───────────────┴─────────────┘
+
+Orders 1 and 2 (``SPRING``) count under both channels, so the groups add up to more than the 250.00 total. Order 4, whose code no promotion has, and order 5, with a ``NULL`` code, count in the ``NULL`` group. A filter across the relationship keeps an order when any of its promotions passes, and counts it once:
+
+.. code-block:: sql
+
+   SELECT * FROM SEMANTIC_VIEW(promo_sales
+       METRICS o.revenue, o.order_count
+       WHERE p.channel = 'Web'
+   );
+
+.. code-block:: text
+
+   ┌───────────────┬─────────────┐
+   │    revenue    │ order_count │
+   ├───────────────┼─────────────┤
+   │        200.00 │           3 │
+   └───────────────┴─────────────┘
+
+A query with only dimensions lists the combinations that occur together, and a ``FACTS`` query returns one row per matching pair, duplicates included:
+
+.. code-block:: sql
+
+   SELECT * FROM SEMANTIC_VIEW(promo_sales
+       DIMENSIONS o.promo_code, p.channel
+   ) ORDER BY 1, 2;
+
+.. code-block:: text
+
+   ┌────────────┬─────────┐
+   │ promo_code │ channel │
+   ├────────────┼─────────┤
+   │ SPRING     │ Email   │
+   │ SPRING     │ Web     │
+   │ WELCOME    │ Web     │
+   └────────────┴─────────┘
+
+The orders' table needs a ``PRIMARY KEY`` to count each order once. A metric on the keyless ``promotions`` table, such as ``p.promotion_rows AS COUNT(*)``, can be grouped by a promotion dimension, but grouping it by ``o.promo_code`` is refused, because its rows have no key to count them once by. See :ref:`direct many-to-many relationships <ref-create-direct-many-to-many>` for the full rules.
+
+.. warning::
+
+   A view with a direct many-to-many relationship is stored in format 4. Releases 0.18.0 and 0.19.0 refuse to open it, and 0.17.0 and older open it without checking and give wrong answers. Don't open such a database with them.
+
+
 .. _howto-m2m-limits:
 
 What Is Refused
@@ -356,6 +463,7 @@ Related
 =======
 
 - :ref:`Many-to-many relationships through a bridge <ref-create-bridge-relationships>` -- The rules in the ``CREATE SEMANTIC VIEW`` reference
+- :ref:`Direct many-to-many relationships <ref-create-direct-many-to-many>` -- The rules for a relationship to non-key columns
 - :ref:`howto-fan-traps` -- How a metric is counted by a dimension below its grain
 - :ref:`howto-asof-range` -- Relationships that match on a date or a period
 - :ref:`explanation-metric-grain` -- Why a metric is counted over its own table

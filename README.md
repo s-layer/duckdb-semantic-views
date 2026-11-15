@@ -135,6 +135,8 @@ SELECT * FROM SEMANTIC_VIEW(analytics
 );
 ```
 
+A relationship's name is optional, as in Snowflake: `o(customer_id) REFERENCES c` gets a generated `SYS_RELATIONSHIP_<id>` name, which stays the same each time the view is created. Name it when a metric's `USING` needs to pick it.
+
 See the generated SQL with `explain_semantic_view`:
 
 ```sql
@@ -313,10 +315,12 @@ Documented in full on the [docs site](https://s-layer.github.io/duckdb-semantic-
 - **[Standard SQL queries](https://s-layer.github.io/duckdb-semantic-views/how-to/standard-sql.html)** -- `SELECT region, AGG(revenue) FROM sales WHERE ... GROUP BY region HAVING ...`, as in Snowflake; it works in subqueries, CTEs, `CREATE TABLE AS` and from Python.
 - **[Pre-aggregation filtering](https://s-layer.github.io/duckdb-semantic-views/how-to/filtering.html)** -- a `WHERE` inside `SEMANTIC_VIEW(...)` (`where_clause :=` in `semantic_view()`) filters rows *before* metrics are aggregated, which an outer `WHERE` cannot express. Prepared-statement parameters work there.
 - **[ASOF and range relationships](https://s-layer.github.io/duckdb-semantic-views/how-to/asof-and-range-relationships.html)** -- `o(cust_id, order_date) REFERENCES a(cust_id, ASOF start_date)` joins each order to the address in effect on its date, and `e(event_ts) REFERENCES p(BETWEEN start_ts AND end_ts EXCLUSIVE)` each event to the period that holds it, as in Snowflake.
-- **[Many-to-many relationships](https://s-layer.github.io/duckdb-semantic-views/how-to/many-to-many-relationships.html)** -- a bridge table such as `book_authors` links books and authors; a book metric grouped by author country counts each book once per country.
+- **[Many-to-many relationships](https://s-layer.github.io/duckdb-semantic-views/how-to/many-to-many-relationships.html)** -- a bridge table such as `book_authors` links books and authors, or a relationship to a non-key column (`orders(promo_code) REFERENCES promotions(promo_code)`) links them directly; a book metric grouped by author country counts each book once per country.
+- **[Dimension references](https://s-layer.github.io/duckdb-semantic-views/how-to/dimension-references.html)** -- `customer.customer_region AS region.region_name` reads another table's dimension along the relationships, as in Snowflake.
 - **[Multi-grain queries](https://s-layer.github.io/duckdb-semantic-views/explanation/metric-grain.html)** -- metrics at different grains are each aggregated over their own table and joined on the queried dimensions.
 - **[Semi-additive metrics](https://s-layer.github.io/duckdb-semantic-views/how-to/semi-additive-metrics.html)** -- `NON ADDITIVE BY` picks one snapshot row per group before aggregating (balances, inventory levels).
-- **[Window metrics](https://s-layer.github.io/duckdb-semantic-views/how-to/window-metrics.html)** -- `OVER (PARTITION BY ...)` for running totals and shares of parent.
+- **[Window metrics](https://s-layer.github.io/duckdb-semantic-views/how-to/window-metrics.html)** -- `OVER (PARTITION BY ...)` for running totals and shares of parent, and window facts and dimensions (`ROW_NUMBER() OVER (ORDER BY units DESC)`) that rank or total each row over its whole table.
+- **[Level-of-detail expressions](https://s-layer.github.io/duckdb-semantic-views/how-to/lod-expressions.html)** -- `AVG(SUM(orders.order_amount) INCLUDE DIMENSIONS (customers.customer_id))` averages per-customer revenue in each group; `FIXED`, `INCLUDE` and `EXCLUDE DIMENSIONS`, as in Snowflake.
 - **[Materializations](https://s-layer.github.io/duckdb-semantic-views/how-to/materializations.html)** -- route matching queries to a pre-aggregated table.
 - **[YAML definitions](https://s-layer.github.io/duckdb-semantic-views/how-to/yaml-definitions.html)** -- define views from YAML, and export back.
 - **[Metadata annotations](https://s-layer.github.io/duckdb-semantic-views/how-to/metadata-annotations.html)** -- `COMMENT`, `WITH SYNONYMS`, `PRIVATE`, `LABELS = (FILTER)`, and `WITH TAG`.
