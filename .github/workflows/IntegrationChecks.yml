@@ -49,9 +49,6 @@ jobs:
         with:
           submodules: true
 
-      - name: Install Rust stable
-        uses: dtolnay/rust-toolchain@stable
-
       # Pre-install the toolchain pinned in rust-toolchain.toml before `make`
       # runs cargo, so cargo's flake-prone lazy rustup install is a no-op. See
       # the composite action for the full rationale.
@@ -118,9 +115,6 @@ jobs:
         with:
           submodules: true
 
-      - name: Install Rust stable
-        uses: dtolnay/rust-toolchain@stable
-
       # Pre-install the toolchain pinned in rust-toolchain.toml before `make`
       # runs cargo, so cargo's flake-prone lazy rustup install is a no-op. See
       # the composite action for the full rationale.
@@ -159,7 +153,9 @@ jobs:
         run: pip install uv
 
       - name: Install just
-        uses: taiki-e/install-action@just
+        uses: taiki-e/install-action@v2.90.5
+        with:
+          tool: just
 
       # Runs the same suite list as local `just test-all`, minus the three
       # suites with their own jobs in this file / CodeQuality.yml: test-rust
@@ -215,7 +211,9 @@ jobs:
         run: make configure
 
       - name: Install just
-        uses: taiki-e/install-action@just
+        uses: taiki-e/install-action@v2.90.5
+        with:
+          tool: just
 
       # `test-sql-prebuilt` is `test-sql` minus the build — same body, so the
       # two cannot drift, and `_ensure-test-deps` still runs (it reinstalls the

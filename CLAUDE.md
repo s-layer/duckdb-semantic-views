@@ -239,7 +239,7 @@ If a command not on the list needs the bypass, halt and ask first.
 
 Write `uses:` refs as tags (`@v2.1.1`), not commit SHAs: the lockfile holds the commit, and a SHA in the workflow file is redundant.
 
-Some actions here are referenced by branch rather than tag (`dtolnay/rust-toolchain@stable` and `@nightly`, `taiki-e/install-action@<tool>`), because the branch name selects what they install. Dependabot doesn't move those pins. To advance them to the branch's current commit, run `gh actions-lock --relock --no-interactive` and review the lockfile diff.
+Don't reference an action by branch (`dtolnay/rust-toolchain@stable`, `taiki-e/install-action@just`). Those branches are force-pushed, so the locked commit stops verifying and every job fails in setup until someone relocks by hand, and Dependabot never moves them. Install Rust with `./.github/actions/setup-pinned-rust` (the channel comes from `rust-toolchain.toml`, which Dependabot bumps) or a `rustup` step, and install tools with a release tag plus `with: tool:` (`taiki-e/install-action@v2.90.5`). Dependabot bumps tags and updates the lockfile in the same PR.
 
 The lockfile doesn't cover reusable workflows called from another repository with a job-level `uses:`: the extension-ci-tools `_extension_distribution.yml` in BuildAll/BuildQuick and `anentropic/github-reviewbot` in claude-review run at whatever their ref (`@v2.0-cyanoptera`, `@main`) points to. Changing those refs (by hand or by the DuckDB version monitor) needs no lockfile update. Nor does it follow the local composite action `.github/actions/setup-pinned-rust`; it has no `uses:` steps today, so keep it that way or the action it adds goes unlocked.
 

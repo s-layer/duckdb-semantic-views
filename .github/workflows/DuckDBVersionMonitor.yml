@@ -54,10 +54,6 @@ jobs:
         if: steps.latest.outputs.is_new == 'true'
         uses: extractions/setup-just@v4.0.0
 
-      - name: Install Rust stable
-        if: steps.latest.outputs.is_new == 'true'
-        uses: dtolnay/rust-toolchain@stable
-
       # Pre-install the pinned toolchain so the `make` build below doesn't hit
       # cargo's flake-prone lazy rustup install. See the composite action.
       - name: Install pinned Rust toolchain
@@ -236,10 +232,6 @@ jobs:
       - name: Install just
         if: steps.lts.outputs.is_new == 'true'
         uses: extractions/setup-just@v4.0.0
-
-      - name: Install Rust stable
-        if: steps.lts.outputs.is_new == 'true'
-        uses: dtolnay/rust-toolchain@stable
 
       # Pre-install the pinned toolchain so the `make` build below doesn't hit
       # cargo's flake-prone lazy rustup install. See the composite action.
