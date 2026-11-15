@@ -42,10 +42,16 @@ pub(crate) struct DimRefs {
 /// Every dimension that references another table's dimension, with what it
 /// references. Empty for a view with none (or with no tables).
 pub(crate) fn dimension_references(def: &SemanticViewDefinition) -> Vec<DimRefs> {
-    let exprs = def
-        .dimensions
-        .iter()
-        .map(|d| (d.source_table.as_deref(), d.expr.as_str()));
+    // Phase 8.5: an LOD dimension's members are read by its hidden table
+    // (`expand::lod`), not referenced as a dimension's are.
+    let exprs = def.dimensions.iter().map(|d| {
+        let expr = if super::lod::is_lod_dimension(d) {
+            ""
+        } else {
+            d.expr.as_str()
+        };
+        (d.source_table.as_deref(), expr)
+    });
     references_from(def, exprs)
 }
 

@@ -1,5 +1,5 @@
 .. meta::
-   :description: Goal-oriented guides for standard-SQL queries, view variables, tables defined by a query, CREATE OR ALTER, FACTS, derived metrics, role-playing dimensions, fan trap and multi-grain resolution, ASOF and range relationships, many-to-many bridges, data source connectivity, query filtering, metadata annotations, semi-additive metrics, window metrics, wildcard selection, fact queries, materializations, and YAML definitions
+   :description: Goal-oriented guides for standard-SQL queries, view variables, tables defined by a query, CREATE OR ALTER, FACTS, derived metrics, role-playing dimensions, fan trap and multi-grain resolution, ASOF and range relationships, many-to-many bridges, data source connectivity, query filtering, metadata annotations, semi-additive metrics, window metrics, LOD expressions, wildcard selection, fact queries, materializations, and YAML definitions
 
 .. _how-to-guides:
 
@@ -23,6 +23,7 @@ Goal-oriented guides for specific tasks with DuckDB Semantic Views.
 
 - :ref:`howto-semi-additive` -- Define metrics with NON ADDITIVE BY for snapshot data like account balances and inventory levels.
 - :ref:`howto-window-metrics` -- Define window function metrics for rolling averages, lag comparisons, and rankings using OVER clauses.
+- :ref:`howto-lod` -- Compute a value at a fixed grain, such as orders per customer averaged by region or a share of the grand total, with ``FIXED DIMENSIONS``.
 
 **Data & Queries**
 
@@ -57,6 +58,7 @@ Goal-oriented guides for specific tasks with DuckDB Semantic Views.
    metadata-annotations
    semi-additive-metrics
    window-metrics
+   lod-expressions
    wildcard-selection
    query-facts
    materializations

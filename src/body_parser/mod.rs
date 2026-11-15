@@ -252,7 +252,8 @@ pub fn parse_keyword_body(text: &str, base_offset: usize) -> Result<KeywordBody,
         .map(|e| Fact {
             name: e.name,
             expr: e.expr,
-            source_table: Some(e.source_alias),
+            // Phase 8.5: an LOD fact has no table prefix.
+            source_table: Some(e.source_alias).filter(|a| !a.is_empty()),
             output_type: None,
             comment: e.comment,
             synonyms: e.synonyms,
@@ -270,7 +271,8 @@ pub fn parse_keyword_body(text: &str, base_offset: usize) -> Result<KeywordBody,
         .map(|e| Dimension {
             name: e.name,
             expr: e.expr,
-            source_table: Some(e.source_alias),
+            // Phase 8.5: an LOD dimension has no table prefix.
+            source_table: Some(e.source_alias).filter(|a| !a.is_empty()),
             output_type: None,
             comment: e.comment,
             synonyms: e.synonyms,

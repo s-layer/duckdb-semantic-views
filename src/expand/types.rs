@@ -557,6 +557,17 @@ pub enum ExpandError {
         member: String,
         relationship: String,
     },
+    /// Phase 8.5: an LOD expression a query writes breaks a rule `CREATE`
+    /// applies to one the view declares (`graph::lod`), such as an ad-hoc
+    /// aggregate that reads an LOD fact beside another member.
+    LodRule { view_name: String, reason: String },
+    /// Phase 8.5: a query reads an LOD expression and reaches across a
+    /// many-to-many relationship, which Snowflake refuses (010959, fixture
+    /// 11b M16q/c/d).
+    LodAcrossManyToMany {
+        view_name: String,
+        relationship: String,
+    },
     /// A query with no metrics names members on two tables that no table
     /// reaches both of by following relationships many-to-one (two children of
     /// one parent), so there are no rows that hold them together. Snowflake
@@ -1107,6 +1118,21 @@ impl fmt::Display for ExpandError {
                      table '{table}' is counted once per value it matches, by its key, and table \
                      '{table}' has no PRIMARY KEY. Declare PRIMARY KEY (cols) for '{table}' in the \
                      TABLES clause, or leave out the members across the relationship."
+                )
+            }
+            Self::LodRule { view_name, reason } => {
+                write!(f, "semantic view '{view_name}': {reason}")
+            }
+            Self::LodAcrossManyToMany {
+                view_name,
+                relationship,
+            } => {
+                write!(
+                    f,
+                    "semantic view '{view_name}': the query reads an LOD expression and \
+                     reaches across many-to-many relationship '{relationship}'. An LOD \
+                     expression cannot be read across a many-to-many relationship; query it \
+                     without the members on the relationship's far side"
                 )
             }
             Self::UnrelatedTables {

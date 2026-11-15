@@ -484,26 +484,44 @@ fn collect_fact_rows(
     rows: &mut Vec<DescribeRow>,
 ) {
     for fact in &def.facts {
-        let parent = fact
-            .source_table
-            .as_ref()
-            .and_then(|a| alias_map.get(a).cloned())
-            .unwrap_or_else(|| base_table.to_string());
+        // Phase 8.5: an LOD fact is on no table (Snowflake, fixture 11 L20c).
+        let lod = lod_parts(def, &fact.expr).filter(|_| fact.source_table.is_none());
+        let parent = if lod.is_some() {
+            String::new()
+        } else {
+            fact.source_table
+                .as_ref()
+                .and_then(|a| alias_map.get(a).cloned())
+                .unwrap_or_else(|| base_table.to_string())
+        };
 
-        rows.push(DescribeRow {
-            object_kind: "FACT".to_string(),
-            object_name: fact.name.clone(),
-            parent_entity: parent.clone(),
-            property: "TABLE".to_string(),
-            property_value: parent.clone(),
-        });
+        if lod.is_none() {
+            rows.push(DescribeRow {
+                object_kind: "FACT".to_string(),
+                object_name: fact.name.clone(),
+                parent_entity: parent.clone(),
+                property: "TABLE".to_string(),
+                property_value: parent.clone(),
+            });
+        }
         rows.push(DescribeRow {
             object_kind: "FACT".to_string(),
             object_name: fact.name.clone(),
             parent_entity: parent.clone(),
             property: "EXPRESSION".to_string(),
-            property_value: fact.expr.clone(),
+            property_value: lod
+                .as_ref()
+                .map_or_else(|| fact.expr.clone(), |(body, _, _)| body.clone()),
         });
+        if let Some((_, property, value)) = &lod {
+            rows.push(DescribeRow {
+                object_kind: "FACT".to_string(),
+                object_name: fact.name.clone(),
+                parent_entity: parent.clone(),
+                property: property.clone(),
+                property_value: value.clone(),
+            });
+        }
         rows.push(DescribeRow {
             object_kind: "FACT".to_string(),
             object_name: fact.name.clone(),
@@ -561,6 +579,40 @@ fn collect_fact_rows(
     }
 }
 
+/// Phase 8.5: an LOD member's expression as DESCRIBE shows it: its body, the
+/// clause's property (`FIXED_DIMENSIONS`, ...), and the property's value, a
+/// JSON array of `[table, name]` pairs (fixture 11 L20c). `None` for any
+/// other expression.
+fn lod_parts(def: &SemanticViewDefinition, expr: &str) -> Option<(String, String, String)> {
+    let (body, clause) = crate::graph::lod::member_lod(expr)?;
+    let pairs: Vec<String> = clause
+        .entries
+        .iter()
+        .map(|entry| {
+            let refs = crate::expr_tokens::scan_references(entry);
+            let resolved = refs
+                .first()
+                .map_or(crate::graph::lod::Resolved::Other, |r| {
+                    crate::graph::lod::resolve(def, r)
+                });
+            let name = match resolved {
+                crate::graph::lod::Resolved::Fact(i) => Some(&def.facts[i].name),
+                crate::graph::lod::Resolved::Dimension(i) => Some(&def.dimensions[i].name),
+                _ => None,
+            };
+            match (crate::graph::lod::member_table(def, resolved), name) {
+                (Some(t), Some(n)) => format_json_array(&[t.to_string(), n.clone()]),
+                _ => format_json_array(std::slice::from_ref(entry)),
+            }
+        })
+        .collect();
+    Some((
+        body.to_string(),
+        format!("{}_DIMENSIONS", clause.kind.keyword()),
+        format!("[{}]", pairs.join(",")),
+    ))
+}
+
 /// Collect DIMENSION property rows from the definition.
 ///
 /// Each dimension emits: `TABLE`, `EXPRESSION`, `DATA_TYPE`, plus `COMMENT` /
@@ -573,26 +625,45 @@ fn collect_dimension_rows(
     rows: &mut Vec<DescribeRow>,
 ) {
     for dim in &def.dimensions {
-        let parent = dim
-            .source_table
-            .as_ref()
-            .and_then(|a| alias_map.get(a).cloned())
-            .unwrap_or_else(|| base_table.to_string());
+        // Phase 8.5: an LOD dimension is on no table (Snowflake, fixture 11
+        // L20c).
+        let lod = lod_parts(def, &dim.expr).filter(|_| dim.source_table.is_none());
+        let parent = if lod.is_some() {
+            String::new()
+        } else {
+            dim.source_table
+                .as_ref()
+                .and_then(|a| alias_map.get(a).cloned())
+                .unwrap_or_else(|| base_table.to_string())
+        };
 
-        rows.push(DescribeRow {
-            object_kind: "DIMENSION".to_string(),
-            object_name: dim.name.clone(),
-            parent_entity: parent.clone(),
-            property: "TABLE".to_string(),
-            property_value: parent.clone(),
-        });
+        if lod.is_none() {
+            rows.push(DescribeRow {
+                object_kind: "DIMENSION".to_string(),
+                object_name: dim.name.clone(),
+                parent_entity: parent.clone(),
+                property: "TABLE".to_string(),
+                property_value: parent.clone(),
+            });
+        }
         rows.push(DescribeRow {
             object_kind: "DIMENSION".to_string(),
             object_name: dim.name.clone(),
             parent_entity: parent.clone(),
             property: "EXPRESSION".to_string(),
-            property_value: dim.expr.clone(),
+            property_value: lod
+                .as_ref()
+                .map_or_else(|| dim.expr.clone(), |(body, _, _)| body.clone()),
         });
+        if let Some((_, property, value)) = &lod {
+            rows.push(DescribeRow {
+                object_kind: "DIMENSION".to_string(),
+                object_name: dim.name.clone(),
+                parent_entity: parent.clone(),
+                property: property.clone(),
+                property_value: value.clone(),
+            });
+        }
         rows.push(DescribeRow {
             object_kind: "DIMENSION".to_string(),
             object_name: dim.name.clone(),

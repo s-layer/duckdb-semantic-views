@@ -848,6 +848,45 @@ mod tests {
         assert_eq!(parsed[0].ref_columns, def.joins[0].ref_columns);
     }
 
+    /// Phase 8.5: LOD facts, dimensions and metrics render with no table
+    /// prefix and their clause as written, and parse back the same.
+    #[test]
+    fn lod_members_render_and_reparse() {
+        let mut def = minimal_def();
+        def.facts.push(Fact {
+            name: "opc".to_string(),
+            expr: "COUNT(o.id) FIXED DIMENSIONS (o.region)".to_string(),
+            ..Default::default()
+        });
+        def.dimensions.push(crate::model::Dimension {
+            name: "total".to_string(),
+            expr: "SUM(o.amount) FIXED DIMENSIONS ()".to_string(),
+            ..Default::default()
+        });
+        def.metrics.push(Metric {
+            name: "avg_opc".to_string(),
+            expr: "AVG(opc) + AVG(COUNT(o.id) FIXED DIMENSIONS (o.region))".to_string(),
+            ..Default::default()
+        });
+        let ddl = render_create_ddl("v", &def).unwrap();
+        assert!(
+            ddl.contains("    opc AS COUNT(o.id) FIXED DIMENSIONS (o.region)"),
+            "{ddl}"
+        );
+        let body = &ddl[ddl.find(" AS\n").unwrap() + 4..];
+        let parsed = crate::body_parser::parse_keyword_body(body, 0).unwrap();
+        assert_eq!(parsed.facts.last(), def.facts.last());
+        assert_eq!(parsed.dimensions.last(), def.dimensions.last());
+        assert_eq!(
+            parsed.metrics.last().map(|m| &m.expr),
+            def.metrics.last().map(|m| &m.expr)
+        );
+        assert_eq!(
+            parsed.metrics.last().and_then(|m| m.source_table.clone()),
+            None
+        );
+    }
+
     /// Phase 7.2: a range relationship and its table's DISTINCT RANGE
     /// constraint render in Snowflake's form and parse back the same.
     #[test]

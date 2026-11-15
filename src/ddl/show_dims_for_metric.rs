@@ -144,7 +144,15 @@ unsafe fn show_dims_for_metric(
     // Phase 8.4: a many-to-many relationship is walked as the query walks it,
     // through its table of keys, which fans out from the key to the far side.
     let bridged = crate::expand::lower_many_to_many(&def);
-    let mut rows: Vec<(Vec<String>, bool)> = crate::expand::dimensions_for_metric(&bridged, met)
+    // Phase 8.5: an LOD metric is walked as the query reads it, over the
+    // hidden tables of its LOD expressions.
+    let lowered = crate::expand::lower_lod(&bridged);
+    let met = lowered
+        .metrics
+        .iter()
+        .find(|m| m.name == met.name)
+        .unwrap_or(met);
+    let mut rows: Vec<(Vec<String>, bool)> = crate::expand::dimensions_for_metric(&lowered, met)
         .into_iter()
         .map(|d| {
             let table_name = d

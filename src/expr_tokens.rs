@@ -1093,6 +1093,147 @@ pub(crate) fn rewrite_qualifier(expr: &str, alias: &str, replacement: &str) -> S
     out
 }
 
+/// The kind of a level-of-detail clause (Phase 8.5): `FIXED`, `INCLUDE` or
+/// `EXCLUDE DIMENSIONS (...)`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum LodKind {
+    Fixed,
+    Include,
+    Exclude,
+}
+
+impl LodKind {
+    /// The clause's keyword, upper case.
+    pub(crate) fn keyword(self) -> &'static str {
+        match self {
+            Self::Fixed => "FIXED",
+            Self::Include => "INCLUDE",
+            Self::Exclude => "EXCLUDE",
+        }
+    }
+}
+
+/// One `FIXED | INCLUDE | EXCLUDE DIMENSIONS (...)` clause in expression text.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct LodClause {
+    pub(crate) kind: LodKind,
+    /// Byte offset of the kind keyword.
+    pub(crate) start: usize,
+    /// Byte offset just past the clause's closing `)`.
+    pub(crate) end: usize,
+    /// The entries of its list, trimmed, as written.
+    pub(crate) entries: Vec<String>,
+}
+
+/// Every level-of-detail clause in `expr` (Phase 8.5), in source order: the
+/// word `FIXED`, `INCLUDE` or `EXCLUDE` followed by `DIMENSIONS (`, outside
+/// literals and quoted names. Nothing else in an expression has that shape:
+/// `DIMENSIONS` is no function of `DuckDB`'s.
+pub(crate) fn lod_clauses(expr: &str) -> Vec<LodClause> {
+    let bytes = expr.as_bytes();
+    let mut out = Vec::new();
+    for head in scan_function_heads(expr) {
+        if !head.raw.eq_ignore_ascii_case("dimensions") {
+            continue;
+        }
+        // The word before it, with only whitespace between.
+        let before = expr[..head.start].trim_end();
+        let word_start = before
+            .bytes()
+            .rposition(|b| !crate::util::is_ident_byte(b))
+            .map_or(0, |p| p + 1);
+        let word = &before[word_start..];
+        let kind = match word.to_ascii_lowercase().as_str() {
+            "fixed" => LodKind::Fixed,
+            "include" => LodKind::Include,
+            "exclude" => LodKind::Exclude,
+            _ => continue,
+        };
+        if before.len() == head.start || before[..word_start].ends_with(['.', '"']) {
+            continue;
+        }
+        let open = skip_whitespace_and_comments(bytes, head.end);
+        let end = skip_balanced(bytes, open, b'(', b')');
+        let inner = expr.get(open + 1..end.saturating_sub(1)).unwrap_or("");
+        let entries = depth0_comma_split(inner)
+            .into_iter()
+            .map(|e| e.trim().to_string())
+            .filter(|e| !e.is_empty())
+            .collect();
+        out.push(LodClause {
+            kind,
+            start: word_start,
+            end,
+            entries,
+        });
+    }
+    out
+}
+
+/// `text` split at its commas outside brackets, literals and quoted names.
+fn depth0_comma_split(text: &str) -> Vec<&str> {
+    let bytes = text.as_bytes();
+    let mut parts = Vec::new();
+    let mut depth = 0usize;
+    let mut from = 0;
+    let mut i = 0;
+    while i < bytes.len() {
+        match bytes[i] {
+            b'\'' => {
+                i = skip_single_quoted(bytes, i);
+                continue;
+            }
+            b'"' => {
+                i = skip_quoted_part(bytes, i);
+                continue;
+            }
+            b'(' | b'[' | b'{' => depth += 1,
+            b')' | b']' | b'}' => depth = depth.saturating_sub(1),
+            b',' if depth == 0 => {
+                parts.push(&text[from..i]);
+                from = i + 1;
+            }
+            _ => {}
+        }
+        i += 1;
+    }
+    parts.push(&text[from..]);
+    parts
+}
+
+/// The offset of the `(` that most closely encloses `pos` in `expr`, outside
+/// literals and quoted names, or `None` at the top level.
+pub(crate) fn enclosing_paren(expr: &str, pos: usize) -> Option<usize> {
+    let bytes = expr.as_bytes();
+    let mut stack: Vec<usize> = Vec::new();
+    let mut i = 0;
+    while i < pos.min(bytes.len()) {
+        match bytes[i] {
+            b'\'' => {
+                i = skip_single_quoted(bytes, i);
+                continue;
+            }
+            b'"' => {
+                i = skip_quoted_part(bytes, i);
+                continue;
+            }
+            b'$' => {
+                if let Some(next) = try_skip_dollar_quoted(bytes, i) {
+                    i = next;
+                    continue;
+                }
+            }
+            b'(' => stack.push(i),
+            b')' => {
+                stack.pop();
+            }
+            _ => {}
+        }
+        i += 1;
+    }
+    stack.pop()
+}
+
 #[cfg(test)]
 mod tests {
 
@@ -2023,5 +2164,27 @@ mod tests {
             .map(|r| r.raw)
             .collect();
         assert_eq!(refs, vec!["o.price$usd$", "o.a$b"]);
+    }
+
+    #[test]
+    fn lod_clauses_are_found_outside_literals() {
+        let e = "AVG(COUNT(o.id) FIXED DIMENSIONS (c.id, c.\"a,b\")) + 'FIXED DIMENSIONS (x)'";
+        let got = lod_clauses(e);
+        assert_eq!(got.len(), 1);
+        assert_eq!(got[0].kind, LodKind::Fixed);
+        assert_eq!(got[0].entries, vec!["c.id", "c.\"a,b\""]);
+        assert_eq!(
+            &e[got[0].start..got[0].end],
+            "FIXED DIMENSIONS (c.id, c.\"a,b\")"
+        );
+        assert_eq!(enclosing_paren(e, got[0].start), Some(3));
+        let empty = lod_clauses("SUM(o.x) fixed dimensions ( )");
+        assert_eq!(empty[0].entries, Vec::<String>::new());
+        assert!(lod_clauses("o.fixed DIMENSIONS (x)").is_empty());
+        assert_eq!(
+            lod_clauses("SUM(x) EXCLUDE DIMENSIONS (o.c)")[0].kind,
+            LodKind::Exclude
+        );
+        assert_eq!(enclosing_paren("a + (b)", 2), None);
     }
 }

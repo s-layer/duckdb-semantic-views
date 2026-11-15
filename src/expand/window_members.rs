@@ -114,7 +114,12 @@ fn reached_facts(expr: &str, facts: &[Fact]) -> HashSet<usize> {
 /// as the query reaches a fact's own references through the fact's table. In
 /// first-reached order, each pair once. `base` is the table of a member
 /// without one.
-fn hops(def: &SemanticViewDefinition, base: &str, own: &str, expr: &str) -> Vec<(String, String)> {
+pub(super) fn hops(
+    def: &SemanticViewDefinition,
+    base: &str,
+    own: &str,
+    expr: &str,
+) -> Vec<(String, String)> {
     let alias_of = |name: &str| {
         def.tables
             .iter()
@@ -167,7 +172,7 @@ fn hops(def: &SemanticViewDefinition, base: &str, own: &str, expr: &str) -> Vec<
 /// The ways from `from` to `to` along foreign keys
 /// ([`crate::graph::chain_paths`]), the walker a dimension reference is
 /// path-counted with, so the two CREATE checks agree.
-fn paths(def: &SemanticViewDefinition, from: &str, to: &str) -> Vec<Vec<usize>> {
+pub(super) fn paths(def: &SemanticViewDefinition, from: &str, to: &str) -> Vec<Vec<usize>> {
     crate::graph::chain_paths(def, from, to, &|_| true)
 }
 
@@ -302,7 +307,7 @@ fn derived_table(
 /// expression of each member so reached (for a metric, also its window's and
 /// its `NON ADDITIVE BY`'s). A name is taken bare: an over-approximation, so
 /// a member it misses can only be one no query step reads.
-fn needed(def: &SemanticViewDefinition, req: &QueryRequest) -> HashSet<String> {
+pub(super) fn needed(def: &SemanticViewDefinition, req: &QueryRequest) -> HashSet<String> {
     let last = |name: &str| match crate::ident::parse_qualified_identifier(name) {
         Ok(parts) => parts
             .last()

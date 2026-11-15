@@ -1146,7 +1146,10 @@ impl SemanticViewDefinition {
         // column.
         // Phase 8.4: a direct many-to-many relationship, which an older
         // reader would join as many-to-one and count each row once per match.
+        // Phase 8.5: an LOD expression, which an older reader would splice
+        // as written.
         if !crate::graph::dimension_references(self).is_empty()
+            || crate::graph::lod::has_lod(self)
             || !crate::graph::window_fact_references(self).is_empty()
             || self
                 .joins

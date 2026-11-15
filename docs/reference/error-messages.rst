@@ -1758,6 +1758,67 @@ Many-to-many relationship without a key
 **Fix:** Declare a ``PRIMARY KEY`` for the table in the ``TABLES`` clause, or query the metric without members across the relationship.
 
 
+.. _ref-err-lod-rule:
+
+LOD expression rules
+--------------------
+
+.. versionadded:: 0.20.0
+
+.. code-block:: text
+
+   metric 'avg_orders' reads two LOD expressions in one aggregate call. An
+   aggregate function can read only one LOD expression; aggregate each on its own.
+
+**Cause:** ``CREATE`` found an :ref:`LOD expression <ref-create-lod>` that breaks one of Snowflake's rules. The message names the member and the rule; the rules are:
+
+- A fact, dimension or metric with a table prefix cannot hold or read an LOD expression (Snowflake's 010946): ``... has a table prefix and reads LOD expression '<name>'``.
+- An LOD expression is one aggregate over facts and dimensions (010943): ``... must be a single aggregate over facts or dimensions``, or ``... reads '<name>', which is no fact or dimension of the view``.
+- An LOD expression cannot read another (010952), and ``FIXED DIMENSIONS`` cannot list one (010945) or an expression (000002).
+- A metric reads an LOD expression inside an aggregate call, one per call (010951), with nothing else from the view in that call.
+- The table the expression aggregates must reference every table its ``FIXED DIMENSIONS`` read, along one path.
+- A materialization cannot cover an LOD expression.
+- ``INCLUDE DIMENSIONS`` and ``EXCLUDE DIMENSIONS`` are not supported yet: ``... uses INCLUDE DIMENSIONS, which this version does not support yet``.
+
+**Fix:** Follow the rule the message names: drop the table prefix, define an expression as a dimension first and list the dimension, or aggregate each LOD expression in its own call.
+
+
+.. _ref-err-lod-many-to-many:
+
+LOD expression across a many-to-many relationship
+-------------------------------------------------
+
+.. versionadded:: 0.20.0
+
+.. code-block:: text
+
+   semantic view '<view>': the query reads an LOD expression and reaches across
+   many-to-many relationship '<rel>'. An LOD expression cannot be read across a
+   many-to-many relationship; query it without the members on the relationship's
+   far side
+
+**Cause:** The query reads an :ref:`LOD expression <ref-create-lod>`, in a metric, a dimension, a fact or the filter, and also a member across a :ref:`direct many-to-many relationship <ref-create-direct-many-to-many>`. Snowflake refuses the same query (010959).
+
+**Fix:** Query the LOD expression without the members on the relationship's far side, or query those members without the LOD expression.
+
+
+.. _ref-err-lod-row-level:
+
+LOD expression read as a row-level value
+----------------------------------------
+
+.. versionadded:: 0.20.0
+
+.. code-block:: text
+
+   '<name>' in '<item>' is an LOD dimension; an expression item cannot read one
+   as a row-level value. Name it on its own, or aggregate it in METRICS
+
+**Cause:** An expression item of a query, such as ``DIMENSIONS orders_by_region + 1``, reads an LOD fact or dimension inside a larger expression. Only a bare LOD member, or an aggregate of an LOD fact alone (``METRICS AVG(orders_per_customer)``), can be read.
+
+**Fix:** Name the LOD member on its own, or declare the expression in the view as a new LOD expression.
+
+
 .. _ref-err-facts-metrics:
 
 Cannot combine facts and metrics

@@ -1222,8 +1222,20 @@ pub fn expand(
     // Phase 8.4: a many-to-many relationship is read through a hidden table of
     // its distinct keys, which both tables reference (`many_to_many`). First,
     // so every later step sees two many-to-one relationships.
+    // Phase 8.5: an LOD expression a query writes (an ad-hoc aggregate of an
+    // LOD fact) meets the rules a declared one does, and no LOD expression
+    // is read across a many-to-many relationship (Snowflake's 010959).
+    if crate::graph::lod::has_lod(def) {
+        super::lod::check_lod_paths(view_name, def, req)?;
+    }
     let bridged = super::many_to_many::lower_many_to_many(def);
     let def = &*bridged;
+    if crate::graph::lod::has_lod(def) {
+        crate::graph::validate_lod(def).map_err(|e| ExpandError::LodRule {
+            view_name: view_name.to_string(),
+            reason: e.message,
+        })?;
+    }
     // TECH-DEBT #83: a bare column of a member's own table is that table's
     // column, whatever else the query joins (`bare_columns`). First, so the
     // steps below see each expression as it binds.
@@ -1237,6 +1249,11 @@ pub fn expand(
     // derived table computes over all the table's rows (`window_members`).
     let windowed = super::window_members::lower_window_members(def, req);
     let def = &*windowed;
+    // Phase 8.5: an LOD expression is read through a hidden table of its
+    // fixed-grain values, which its home table references (`lod`). After
+    // the steps above, so the member expressions it splices are qualified.
+    let lowered_lod = super::lod::lower_lod(def);
+    let def = &*lowered_lod;
     // Phase 6.3: a metric written over a same-table metric carries that
     // metric's aggregate from here on, so every later step sees what it
     // computes (`graph::same_table_metrics`).
