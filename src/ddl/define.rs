@@ -148,7 +148,12 @@ pub fn enrich_definition_for_create(
     // so a self-reference or a cycle through a many-to-many relationship is
     // refused as any other is.
     let bridged = crate::expand::lower_many_to_many(&def);
-    let checked = &*bridged;
+    // Phase 8.5: an LOD expression is checked as written, then the checks
+    // below see it as the query reads it, through a hidden table of its own
+    // (`expand::lower_lod`).
+    crate::graph::validate_lod(&bridged)?;
+    let lowered = crate::expand::lower_lod(&bridged);
+    let checked = &*lowered;
     crate::graph::validate_name_uniqueness(checked)?;
     if crate::expand::has_many_to_many(&def) {
         crate::graph::validate_graph(&def)?;

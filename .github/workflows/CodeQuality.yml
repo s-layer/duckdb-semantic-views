@@ -46,11 +46,6 @@ jobs:
         with:
           submodules: recursive
 
-      - name: Install Rust stable
-        uses: dtolnay/rust-toolchain@stable
-        with:
-          components: rustfmt, clippy
-
       # Pre-install the toolchain pinned in rust-toolchain.toml before any
       # cargo command (every fmt/clippy step below runs under it), so cargo's
       # flake-prone lazy rustup install is a no-op. See the composite action for
@@ -59,7 +54,9 @@ jobs:
         uses: ./.github/actions/setup-pinned-rust
 
       - name: Install just
-        uses: taiki-e/install-action@just
+        uses: taiki-e/install-action@v2.90.5
+        with:
+          tool: just
 
       # Both sync checks below CALL the Justfile recipe rather than
       # reimplementing it. They used to be inline copies that "mirrored" the
@@ -118,11 +115,6 @@ jobs:
         with:
           submodules: recursive
 
-      - name: Install Rust stable
-        uses: dtolnay/rust-toolchain@stable
-        with:
-          components: rustfmt, clippy
-
       # Pre-install the toolchain pinned in rust-toolchain.toml before any
       # cargo command (every test step below runs under it), so cargo's
       # flake-prone lazy rustup install is a no-op. See the composite action for
@@ -161,11 +153,6 @@ jobs:
         with:
           submodules: recursive
 
-      - name: Install Rust stable
-        uses: dtolnay/rust-toolchain@stable
-        with:
-          components: rustfmt, clippy
-
       # Pre-install the toolchain pinned in rust-toolchain.toml before any
       # cargo command (the llvm-cov step below runs under it), so cargo's
       # flake-prone lazy rustup install is a no-op. See the composite action for
@@ -190,10 +177,14 @@ jobs:
           echo "After:" && df -h /
 
       - name: Install cargo-llvm-cov
-        uses: taiki-e/install-action@cargo-llvm-cov
+        uses: taiki-e/install-action@v2.90.5
+        with:
+          tool: cargo-llvm-cov
 
       - name: Install cargo-nextest
-        uses: taiki-e/install-action@nextest
+        uses: taiki-e/install-action@v2.90.5
+        with:
+          tool: nextest
 
       # Note: --lib flag may be needed for cdylib crates. If this fails, try:
       #   cargo llvm-cov --lib nextest --fail-under-lines 80

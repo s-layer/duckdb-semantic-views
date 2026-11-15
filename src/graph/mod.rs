@@ -4,6 +4,7 @@ mod cardinality;
 mod derived_metrics;
 mod dim_refs;
 mod facts;
+pub(crate) mod lod;
 mod member_exprs;
 mod member_refs;
 mod names;
@@ -23,6 +24,7 @@ pub use derived_metrics::{contains_aggregate_function, validate_derived_metrics}
 pub use dim_refs::validate_dimension_references;
 pub(crate) use dim_refs::{dimension_references, window_fact_references};
 pub use facts::{find_fact_references, validate_facts};
+pub use lod::validate_lod;
 pub use member_exprs::validate_member_expressions;
 pub use member_refs::validate_member_references;
 pub use names::validate_name_uniqueness;

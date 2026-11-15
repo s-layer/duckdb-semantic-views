@@ -114,37 +114,48 @@ fn parse_single_qualified_entry(
     // quote-aware (PA-6): a dot inside a quoted name (`"a.b"`) is part of that
     // one token, not a qualifier separator. `name` keeps the source-slice form
     // because it may itself contain dots (`o.x.y` → alias `o`, name `x.y`).
-    let Some(dot_tok) = cur.find_symbol(b'.').filter(|d| d.start < as_tok.start) else {
-        return Err(cur.err(
-            0,
-            format!(
-                "Expected 'alias.name' qualified identifier, got '{entry}'. Each dimension/metric entry must have the form 'alias.name AS expr'.",
-            ),
-        ));
+    let dot_tok = cur.find_symbol(b'.').filter(|d| d.start < as_tok.start);
+    // Phase 8.5: an LOD fact or dimension has no table prefix
+    // (`orders_per_customer AS COUNT(orders.order_id) FIXED DIMENSIONS
+    // (customers.customer_id)`); `graph::validate_lod` checks the rest.
+    let unprefixed_lod = dot_tok.is_none()
+        && !crate::expr_tokens::lod_clauses(&entry_after_access[as_tok.end..]).is_empty();
+    let (source_alias, name_start) = if unprefixed_lod {
+        (String::new(), 0)
+    } else {
+        let Some(dot_tok) = dot_tok else {
+            return Err(cur.err(
+                0,
+                format!(
+                    "Expected 'alias.name' qualified identifier, got '{entry}'. Each dimension/metric entry must have the form 'alias.name AS expr'.",
+                ),
+            ));
+        };
+        let source_alias = entry_after_access[..dot_tok.start].trim().to_string();
+        if source_alias.is_empty() {
+            return Err(cur.err(
+                0,
+                format!("Source alias before '.' is empty in entry '{entry}'."),
+            ));
+        }
+        (source_alias, dot_tok.end)
     };
-    let source_alias = entry_after_access[..dot_tok.start].trim().to_string();
-    if source_alias.is_empty() {
-        return Err(cur.err(
-            0,
-            format!("Source alias before '.' is empty in entry '{entry}'."),
-        ));
-    }
 
     // Snowflake writes `LABELS = (...)` between the name and `AS`. A `LABELS`
     // keyword in the name slot ends the name there.
     let (name_end, leading_filter) = leading_labels(
         &cur,
         entry_after_access,
-        dot_tok.end,
+        name_start,
         as_tok.start,
         entry,
         clause_name,
     )?;
 
-    let bare_name = entry_after_access[dot_tok.end..name_end].trim().to_string();
+    let bare_name = entry_after_access[name_start..name_end].trim().to_string();
     if bare_name.is_empty() {
         return Err(cur.err(
-            dot_tok.end,
+            name_start,
             format!("Missing bare name between '.' and 'AS' in entry '{entry}'."),
         ));
     }
@@ -153,7 +164,10 @@ fn parse_single_qualified_entry(
     // identifier — `o.d junk AS x` previously stored the two-word name
     // `"d junk"`, and an empty quoted `""` slid through. Report with the caret
     // at the offending slot.
-    if let Some(reason) = super::scan::ddl_identifier_slot_error(&source_alias) {
+    if let Some(reason) = Some(&source_alias)
+        .filter(|a| !a.is_empty())
+        .and_then(|a| super::scan::ddl_identifier_slot_error(a))
+    {
         return Err(cur.err(
             0,
             format!("Invalid source alias in {clause_name} entry '{entry}': {reason}."),
@@ -161,7 +175,7 @@ fn parse_single_qualified_entry(
     }
     if let Some(reason) = super::scan::ddl_identifier_slot_error(&bare_name) {
         return Err(cur.err(
-            dot_tok.end,
+            name_start,
             format!("Invalid name in {clause_name} entry '{entry}': {reason}."),
         ));
     }

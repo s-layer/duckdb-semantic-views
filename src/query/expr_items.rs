@@ -366,10 +366,13 @@ impl<'a> MemberIndex<'a> {
             index.names.insert(normalize_ident_part(name));
             let mut keys = vec![normalize_ident_part(name)];
             // A member declared without a table is on the base table, so
-            // `<base>.<name>` names it, as it does as a plain item.
-            let table = table
-                .as_deref()
-                .or_else(|| def.tables.first().map(|t| t.alias.as_str()));
+            // `<base>.<name>` names it, as it does as a plain item. Not an LOD
+            // fact or dimension (Phase 8.5), which is named without a table.
+            let table = table.as_deref().or_else(|| {
+                (!member.is_lod())
+                    .then(|| def.tables.first().map(|t| t.alias.as_str()))
+                    .flatten()
+            });
             if let Some(t) = table {
                 keys.push(normalize_ident_part(&format!("{t}.{name}")));
             }
@@ -550,9 +553,48 @@ impl<'d> Lowering<'d, '_> {
         Ok(name)
     }
 
+    /// An ad-hoc metric that reads an LOD fact or dimension (Phase 8.5):
+    /// stored as written, as an unprefixed metric `expand::lod` lowers.
+    fn lower_lod_metric(&mut self, text: &str) -> Result<String, ItemError> {
+        // Its other names are checked as on the plain path: a private
+        // member is refused, and so is a name that is no member of the
+        // view, unless it is no column at all.
+        let mut out = Splice::new(text);
+        let lambdas = lambda_scopes(text);
+        for r in scan_references(text) {
+            if is_local_name(text, &r, &lambdas) {
+                continue;
+            }
+            if let Resolved::Unknown = self.resolve(&r, true)? {
+                if let Some(call) = self.refuse_undeclared(text, &r, text)? {
+                    out.replace(r.start..r.end, call);
+                }
+            }
+        }
+        let name = self.fresh_name();
+        self.added.metrics.push(Metric {
+            name: name.clone(),
+            expr: out.finish(),
+            source_table: None,
+            ..Metric::default()
+        });
+        Ok(name)
+    }
+
     /// A `METRICS` item: each aggregate becomes a metric, and the rest a
     /// derived metric over them.
     fn lower_metric(&mut self, text: &str) -> Result<String, ItemError> {
+        // Phase 8.5: an aggregate of an LOD fact or dimension (`AVG(
+        // orders_per_customer)`, fixture 11 L29) is an LOD metric, read as
+        // the view's own are (`expand::lod`), which also checks its rules.
+        let lod_keys = crate::graph::lod::lod_member_keys(self.def);
+        if !lod_keys.is_empty()
+            && scan_references(text)
+                .iter()
+                .any(|r| r.is_bare() && lod_keys.contains(&r.key()))
+        {
+            return self.lower_lod_metric(text);
+        }
         let mut aggregates: Vec<std::ops::Range<usize>> = Vec::new();
         for head in scan_function_heads(text) {
             if call_is_windowed(text, &head) {
@@ -645,6 +687,7 @@ impl<'d> Lowering<'d, '_> {
     /// name the item as written, `item`, and the expression as `what`. `text`
     /// can differ from `item` only in its subqueries (Phase 8.2b: a
     /// `DIMENSIONS` item's are hoisted first), which are not scanned.
+    #[allow(clippy::too_many_lines)]
     fn row_level(
         &self,
         text: &str,
@@ -663,6 +706,14 @@ impl<'d> Lowering<'d, '_> {
                 continue;
             }
             let (member, member_table, field_at) = match self.resolve(&r, false)? {
+                Resolved::RowLevel(member, _, _) if member.is_lod() => {
+                    return Err(invalid(format!(
+                        "'{}' in '{item}' is an LOD {}; an expression item cannot read one \
+                         as a row-level value. Name it on its own, or aggregate it in METRICS",
+                        r.raw,
+                        member.kind()
+                    )));
+                }
                 Resolved::RowLevel(member, member_table, field_at) => {
                     (member, member_table, field_at)
                 }
@@ -933,6 +984,15 @@ impl Member<'_> {
             Self::Dimension(_) => "dimension",
             Self::Fact(_) => "fact",
             Self::Metric(_) => "metric",
+        }
+    }
+
+    /// Phase 8.5: an LOD fact or dimension.
+    fn is_lod(&self) -> bool {
+        match self {
+            Self::Dimension(d) => crate::graph::lod::is_lod_dimension(d),
+            Self::Fact(f) => crate::graph::lod::is_lod_fact(f),
+            Self::Metric(_) => false,
         }
     }
 }
@@ -1460,6 +1520,56 @@ mod tests {
             .iter()
             .map(|m| (m.name.clone(), m.expr.clone(), m.source_table.clone()))
             .collect()
+    }
+
+    /// An ad-hoc metric over an LOD fact still refuses a private member and
+    /// an undeclared column in its other parts (review of #368: the LOD
+    /// branch returned before either check).
+    #[test]
+    fn an_lod_metric_item_still_refuses_private_and_undeclared_names() {
+        let mut d = def();
+        d.facts.push(Fact {
+            name: "opc".into(),
+            expr: "COUNT(o.id) FIXED DIMENSIONS (c.name)".into(),
+            ..Default::default()
+        });
+        d.facts.push(Fact {
+            name: "plod".into(),
+            expr: "SUM(o.amount) FIXED DIMENSIONS (c.name)".into(),
+            access: AccessModifier::Private,
+            ..Default::default()
+        });
+        let run = |metric: &str| {
+            lower_expression_items(
+                "v",
+                &d,
+                items(&[], &[metric], &[]),
+                &Substitution::default(),
+            )
+            .map(|_| ())
+            .map_err(|e| match e {
+                ItemError::Invalid(message) => message,
+                ItemError::Expand(e) => e.to_string(),
+            })
+        };
+        let refusals = [
+            ("MAX(plod)", "private"),
+            ("AVG(opc) + SUM(secret)", "private"),
+            ("AVG(opc) + hidden", "private"),
+            (
+                "AVG(opc) + SUM(o.undeclared)",
+                "is not a dimension, fact or metric",
+            ),
+        ];
+        // Each case reports on its own, so one red doesn't hide another.
+        let wrong: Vec<_> = refusals
+            .iter()
+            .filter(|(m, want)| !run(m).is_err_and(|e| e.contains(want)))
+            .map(|(m, _)| *m)
+            .collect();
+        assert!(wrong.is_empty(), "not refused as expected: {wrong:?}");
+        run("AVG(opc) + SUM(amount)").unwrap();
+        run("AVG(opc) + revenue").unwrap();
     }
 
     #[test]

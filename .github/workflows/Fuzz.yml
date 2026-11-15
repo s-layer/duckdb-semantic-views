@@ -98,7 +98,11 @@ jobs:
         target: [fuzz_json_parse, fuzz_sql_expand, fuzz_query_names, fuzz_ddl_parse, fuzz_yaml_parse, fuzz_create_text, fuzz_keyword_body, fuzz_render_roundtrip, fuzz_where_predicate]
     steps:
       - uses: actions/checkout@v7.0.1
-      - uses: dtolnay/rust-toolchain@nightly
+      # cargo-fuzz needs nightly (selected by RUSTUP_TOOLCHAIN above). It is
+      # installed with the runner's rustup rather than a branch-referenced
+      # action, whose lockfile pin breaks whenever that branch is force-pushed.
+      - name: Install Rust nightly
+        run: rustup toolchain install nightly --profile minimal --no-self-update
       - run: cargo install cargo-fuzz
 
       - name: Build fuzz target

@@ -867,6 +867,39 @@ A query filtered on ``sales.category = 'A'`` still gets each sale's rank among a
 
    A metric over a window fact, a window fact that reads another table's dimension, and a window dimension on a table a metric's table references were refused at ``CREATE`` or failed at query time, and a window dimension's value was computed over the rows left after the ``WHERE``.
 
+.. _ref-create-lod:
+
+**Level-of-detail (LOD) expressions.**
+
+.. versionadded:: 0.20.0
+
+As in Snowflake, a fact, a dimension or an aggregate call in a metric can be an aggregate computed at a fixed grain: an aggregate over the view's facts and dimensions, followed by ``FIXED DIMENSIONS (...)`` and the dimensions or facts it is computed at, each written as ``<table>.<name>``. ``FIXED DIMENSIONS ()`` is the grand total. An LOD fact or dimension has no table prefix, and neither does a metric that reads one:
+
+.. code-block:: sql
+
+   FACTS (
+       orders_per_customer AS COUNT(orders.order_id) FIXED DIMENSIONS (customers.customer_id),
+       grand_total_revenue AS SUM(orders.order_amount) FIXED DIMENSIONS ()
+   )
+   DIMENSIONS (
+       orders_by_region AS COUNT(orders.order_id) FIXED DIMENSIONS (customers.region)
+   )
+   METRICS (
+       avg_orders_per_customer AS AVG(orders_per_customer),
+       pct_of_total            AS SUM(orders.order_amount) / AVG(grand_total_revenue),
+       avg_orders_inline       AS AVG(COUNT(orders.order_id) FIXED DIMENSIONS (customers.customer_id))
+   )
+
+The answers are Snowflake's:
+
+- The value is computed over every row of the table it aggregates, with the tables it references left-joined, before the query's ``WHERE``. A filter decides which rows are left, not what the value counts.
+- A metric over an LOD fact counts each fixed-grain value once per group: an average of ``orders_per_customer`` by region averages the region's customers, each once. Grouped by an order dimension, each customer counts once in each group its orders are in. An aggregate call that reads an LOD expression reads only it, with constants and variables; other calls of the same metric read the tables' facts and dimensions, as ``SUM(orders.order_amount)`` in ``pct_of_total``.
+- A query can group and filter by an LOD dimension, and aggregate an LOD fact in an expression item (``METRICS AVG(orders_per_customer)``). Alone in ``FACTS``, an LOD fact returns one row per fixed-grain value; beside a fact or dimension of the table it aggregates, one row per row of that table.
+- ``SHOW SEMANTIC DIMENSIONS ... FOR METRIC`` lists for a metric over an LOD expression every dimension it can be grouped by.
+- A ``NULL`` fixed-dimension value is one value, where Snowflake reads the LOD value as ``NULL`` in some queries (see :ref:`howto-lod-nulls`).
+
+``CREATE`` refuses, as Snowflake does (:ref:`ref-err-lod-rule`): a member with a table prefix that holds or reads an LOD expression; an LOD expression that reads another, that is not one aggregate over facts and dimensions, or whose ``FIXED DIMENSIONS`` list an expression, an LOD expression or a name the view doesn't define; a metric that reads an LOD expression outside an aggregate call, two in one call, or another member in the same call; an LOD expression whose table doesn't reference the tables its ``FIXED DIMENSIONS`` read, or reaches one by more than one path; and a materialization covering an LOD expression or a metric that reads one. A query that reads an LOD expression across a :ref:`direct many-to-many relationship <ref-create-direct-many-to-many>` is refused (:ref:`ref-err-lod-many-to-many`, Snowflake's 010959). ``INCLUDE DIMENSIONS`` and ``EXCLUDE DIMENSIONS`` are refused for now. ``DESCRIBE`` shows an LOD fact or dimension with no table, its aggregate as its ``EXPRESSION`` and its dimensions in a ``FIXED_DIMENSIONS`` row; ``GET_DDL`` and the YAML export write it as written. A view with one is stored in format 4, which 0.19.0 and older refuse to read. See :ref:`howto-lod`.
+
 .. note::
 
    **Column qualification in expressions.** The ``<alias>.<dim_name>`` on the left of ``AS`` (the logical name) must always carry its table-alias prefix. Column references *inside the expression* on the right of ``AS`` may be either qualified (``o.region``) or unqualified (``region``). As in Snowflake, an unqualified column is a column of the member's own table: ``ap.airport_count AS COUNT(code)`` counts the airports' ``code`` in every query, even one that also joins another table with a ``code`` column. The same rule applies to ``METRICS`` and ``FACTS`` expressions. An unqualified column that belongs only to *another* table is refused at ``CREATE`` (:ref:`ref-err-bare-column`); to use it, define a fact on that table and reference the fact. An unqualified name that is a variable, a fact, or (in a metric, outside an aggregate call) another metric on the same table is that member, not a column, except that a fact on *another* table does not take over a column of the member's own table: beside ``c.amount AS c.credit``, ``o.rev AS SUM(amount)`` sums ``o.amount``; write ``c.amount`` to name the fact. A member's own name in its own expression is its column: ``li.qty AS qty`` and ``o.amount AS SUM(amount)`` read ``li.qty`` and ``o.amount``. A field or method read off an own column follows the same rule: ``s.a``, ``m.day`` and ``txt.upper()`` read the member's own ``s``, ``m`` and ``txt``, unless ``s``, ``m`` or ``txt`` is a table alias of the view, in which case the name is that table's column, as in DuckDB. Re-creating a view made by an earlier release unchanged, with ``CREATE OR ALTER``, keeps its materializations.
