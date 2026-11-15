@@ -1773,3 +1773,32 @@ fn asof_relationship_matches_when_vs_is_not_after_ts() {
     check_case(&case).unwrap();
     check_listing(&case).unwrap();
 }
+
+/// Two metrics on `t3`, each `USING` one of its two relationships to `t1`
+/// (`twin`), grouped by the dimension past `t1` that `t2` also reaches: each
+/// is read along its own relationship, in any declaration order (reviewbot,
+/// #367: one grain group joined both along the first-declared one).
+#[test]
+fn twin_using_roles_are_each_followed_past_the_role_played_table() {
+    let case = Case {
+        n: 5,
+        edges: vec![(1, 0), (2, 1), (3, 1), (3, 2), (4, 1), (4, 2)],
+        one_to_one: vec![false, true, false, false, false, false],
+        rows: vec![
+            vec![(Some(0), None, vec![])],
+            vec![(None, None, vec![None]), (None, None, vec![Some(0)])],
+            vec![(None, None, vec![None])],
+            vec![(None, None, vec![None, None])],
+            vec![(None, None, vec![None, None])],
+        ],
+        orders: [vec![0, 1, 2, 3, 4], vec![0, 1, 2, 3, 4]],
+        metric: Some(3),
+        dims: vec![0, 2],
+        filter: None,
+        doubled: Some(2),
+        using: Some(false),
+        twin: true,
+        asof: None,
+    };
+    check_case(&case).unwrap();
+}

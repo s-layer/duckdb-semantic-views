@@ -1860,6 +1860,7 @@ fn expand_unhoisted(
             Some(anchor) => super::semi_additive::SnapshotFrom::Grain {
                 anchor,
                 paths: &no_paths,
+                using: &[],
             },
             None => super::semi_additive::SnapshotFrom::Base {
                 where_scopes: &where_scopes,
