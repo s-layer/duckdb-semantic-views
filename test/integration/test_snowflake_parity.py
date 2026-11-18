@@ -13,12 +13,15 @@ same statements here and checks, statement by statement, that we do what Snowfla
 - a statement Snowflake ran succeeds here too;
 - a query Snowflake answered returns the same rows (as a multiset; numbers compared by
   value, so 350.00000000 and 350.0 agree; column names compared case-insensitively);
-- a statement Snowflake refused fails here too (the message is not compared).
+- a statement Snowflake refused fails here too (the message is not compared);
+- an INSERT adds as many rows as it did on Snowflake.
 
 Snowflake is the reference for what a semantic view means, so a difference is a bug here
-unless test/snowflake_parity/approved_differences.toml lists it with the reason it is
-expected. An approved difference that no longer differs also fails the run, so the list
-cannot go stale.
+unless test/snowflake_parity/approved_differences.toml lists it under `differences` with
+the reason it is expected. An approved difference that no longer differs also fails the run,
+so the list cannot go stale. A query whose Snowflake answer can't be reproduced at all (it
+depends on names Snowflake invented for that run) is listed under `unreproducible` instead:
+it must still succeed, but its rows are not compared.
 
 Not compared, and counted in the summary: schema setup (CREATE/USE/DROP SCHEMA, since the
 fixtures ran in a throwaway Snowflake schema), EXPLAIN (plans differ by design) and
@@ -88,8 +91,8 @@ def parse_recording(path: Path) -> list[Recorded]:
             continue
         columns = _cells(lines[0])
         rows = [_cells(line) for line in lines[2:]]
-        if columns == ["status"]:  # DDL: Snowflake reports a status line, not rows
-            columns, rows = [], []
+        if columns == ["status"] and not QUERY.match(sql.group(1)):
+            columns, rows = [], []  # DDL: Snowflake reports a status line, not rows
         statements.append(Recorded(label, sql.group(1), None, columns, rows))
     return statements
 
@@ -159,12 +162,23 @@ def _key(row: list[object]) -> tuple[str, ...]:
     return tuple(repr(_value(cell)) for cell in row)
 
 
-def compare(statement: Recorded, con: duckdb.DuckDBPyConnection) -> str | None:
-    """None when we do what Snowflake did, else what differs."""
+INSERTED = ["number of rows inserted"]
+
+
+def compare(
+    statement: Recorded, con: duckdb.DuckDBPyConnection, *, compare_rows: bool = True
+) -> str | None:
+    """
+    None when we do what Snowflake did, else what differs.
+
+    With ``compare_rows=False`` only success or failure is compared (see ``unreproducible`` in
+    approved_differences.toml).
+    """
     try:
-        result = con.sql(to_duckdb(statement.sql))
-        rows = result.fetchall() if result is not None else []
-        columns = [c.lower() for c in result.columns] if result is not None else []
+        cursor = con.execute(to_duckdb(statement.sql))
+        description = cursor.description or []
+        columns = [str(d[0]).lower() for d in description]
+        rows = cursor.fetchall() if description else []
     except duckdb.Error as exc:
         if statement.error is not None:
             return None
@@ -172,8 +186,17 @@ def compare(statement: Recorded, con: duckdb.DuckDBPyConnection) -> str | None:
     if statement.error is not None:
         return f"Snowflake refused ({statement.error.splitlines()[0][:120]}), we succeeded"
     assert statement.columns is not None and statement.rows is not None
-    if not statement.columns or not QUERY.match(statement.sql):
-        return None  # DDL or DML: success is the whole answer (row counts are reported apart)
+    if not QUERY.match(statement.sql):
+        if [c.lower() for c in statement.columns] == INSERTED:
+            theirs = sum(int(row[0]) for row in statement.rows)
+            ours = sum(int(row[0]) for row in rows)
+            if ours != theirs:
+                return f"rows inserted: Snowflake {theirs}, ours {ours}"
+        return None  # other DDL and DML: success is the whole answer
+    if not statement.columns:
+        return "the recording has no result table for this query, so nothing can be compared"
+    if not compare_rows:
+        return None
     expected_columns = [c.lower() for c in statement.columns]
     if columns != expected_columns:
         return f"columns: Snowflake {expected_columns}, ours {columns}"
@@ -186,19 +209,25 @@ def compare(statement: Recorded, con: duckdb.DuckDBPyConnection) -> str | None:
 
 
 def main() -> int:
-    approved: dict[str, dict[str, str]] = tomllib.loads(APPROVED.read_text())
+    listed = tomllib.loads(APPROVED.read_text())
+    assert set(listed) <= {"differences", "unreproducible"}, f"{APPROVED.name}: {set(listed)}"
+    approved: dict[str, dict[str, str]] = listed.get("differences", {})
+    unreproducible: dict[str, dict[str, str]] = listed.get("unreproducible", {})
     ext_path = get_extension_path()
     if not ext_path.exists():
         print(f"ERROR: extension not found at {ext_path}")
         return 1
 
     failures: list[str] = []
-    compared = skipped = approved_hits = 0
+    compared = skipped = approved_hits = success_only = 0
     recordings = sorted(RECORDED.glob("*.md"))
     assert recordings, f"no recordings in {RECORDED}"
     for path in recordings:
         fixture = path.stem
         allowed = approved.get(fixture, {})
+        loose = unreproducible.get(fixture, {})
+        for label in sorted(set(allowed) & set(loose)):
+            failures.append(f"{fixture}:{label}: listed as both a difference and unreproducible")
         con = duckdb.connect(
             config={"allow_unsigned_extensions": "true", "extension_directory": get_ext_dir()}
         )
@@ -211,7 +240,13 @@ def main() -> int:
                 continue
             compared += 1
             ident = f"{fixture}:{statement.label}"
-            difference = compare(statement, con)
+            loosened = statement.label in loose
+            difference = compare(statement, con, compare_rows=not loosened)
+            if loosened:
+                seen.add(statement.label)
+                if not QUERY.match(statement.sql):
+                    failures.append(f"{ident}: listed as unreproducible, but it is not a query")
+                success_only += 1
             if statement.label in allowed:
                 seen.add(statement.label)
                 if difference is None:
@@ -223,17 +258,18 @@ def main() -> int:
                     approved_hits += 1
             elif difference is not None:
                 failures.append(f"{ident}: {difference}\n    {statement.sql.splitlines()[0][:160]}")
-        for label in sorted(set(allowed) - seen):
+        for label in sorted((set(allowed) | set(loose)) - seen):
             failures.append(
                 f"{fixture}:{label}: approved in {APPROVED.name}, but no such statement is compared"
             )
         con.close()
-    for fixture in sorted(set(approved) - {p.stem for p in recordings}):
+    for fixture in sorted((set(approved) | set(unreproducible)) - {p.stem for p in recordings}):
         failures.append(f"{fixture}: in {APPROVED.name}, but there is no such recording")
 
     print(
         f"Snowflake parity: {len(recordings)} recordings, {compared} statements compared "
-        f"({approved_hits} approved differences), {skipped} not compared"
+        f"({approved_hits} approved differences, {success_only} unreproducible so success only),"
+        f" {skipped} not compared"
     )
     for failure in failures:
         print(f"FAIL {failure}")
