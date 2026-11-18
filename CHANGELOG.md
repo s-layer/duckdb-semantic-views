@@ -9,10 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-### Fixed
-
-- `SHOW SEMANTIC DIMENSIONS ... FOR METRIC` ends with a `labels` column (`["FILTER"]` for a named filter, `[]` otherwise), as in Snowflake and as `SHOW SEMANTIC DIMENSIONS` already does.
-- An ASOF relationship whose referenced columns other than the ASOF one are the referenced table's key, such as `notes(order_id, noted_at) REFERENCES orders(order_id, ASOF placed_at)` with `orders` keyed on `order_id`, is accepted, as in Snowflake. `CREATE` used to refuse it unless the key included the ASOF column.
+_No unreleased changes yet._
 
 ## [0.20.0] - 2026-11-18
 
@@ -33,6 +30,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - A dimension written over a fact of another table (`customers.c_region AS regions.region_fact`), queried with a metric that reaches that table by two paths (orders reach regions through customers and through stores), read the fact along the metric's path: under `USING (order_store)` it gave the store's region, and with no `USING` the query was refused. It now reads the fact along the dimension's own table's path, the customer's region, and a query that needs both paths' values at once is refused.
 - The error for a dimension on a table that references a role-played table, grouped by a metric that reaches that table across one of its roles, says the query fans out from the role-played table, and lists only that table's roles.
 - A metric whose `USING` names one of two relationships to a table, grouped by a dimension on a table past it that another path also reaches, could follow the other relationship, depending on the order the relationships were declared in, and give that relationship's numbers. It follows the relationship its `USING` names, and two such metrics naming different relationships are each read along their own.
+- `SHOW SEMANTIC DIMENSIONS ... FOR METRIC` ends with a `labels` column (`["FILTER"]` for a named filter, `[]` otherwise), as in Snowflake and as `SHOW SEMANTIC DIMENSIONS` already does.
+- An ASOF relationship whose referenced columns other than the ASOF one are the referenced table's key, such as `notes(order_id, noted_at) REFERENCES orders(order_id, ASOF placed_at)` with `orders` keyed on `order_id`, is accepted, as in Snowflake. `CREATE` used to refuse it unless the key included the ASOF column.
 
 ## [0.19.0] - 2026-11-12
 
