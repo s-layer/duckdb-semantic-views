@@ -33,5 +33,5 @@ pub use relationship::{validate_graph, RelationshipGraph};
 pub use same_table_metrics::{has_same_table_metric_refs, validate_same_table_metric_refs};
 pub(crate) use same_table_metrics::{inline_same_table_metrics, same_table_metric_ref_spans};
 pub use using::validate_using_relationships;
-pub(crate) use window_dims::chain_paths;
 pub use window_dims::validate_window_dimensions;
+pub(crate) use window_dims::{all_chain_paths, chain_paths};

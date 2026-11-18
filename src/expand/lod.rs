@@ -81,12 +81,104 @@ use super::resolution::{quote_ident, quote_stored_ident, table_source};
 /// The column of a hidden LOD table that holds the value.
 pub(crate) const VALUE_COLUMN: &str = "__sv_lod";
 
-/// The prefix of a hidden LOD table's alias.
+/// The prefix of a hidden LOD table's alias (a `FIXED` expression's keeps
+/// just this one).
 pub(crate) const TABLE_PREFIX: &str = "__sv_lod_";
+/// The prefix of an `INCLUDE` or `EXCLUDE` expression's hidden table, whose
+/// grain the query's dimensions set: [`query_grain`] and [`lod_grain_allows`]
+/// check the paths it is read along, so `SHOW ... FOR METRIC`'s many-to-many
+/// check passes it by (`multi_path::refused_as_many_to_many`).
+pub(crate) const GRAIN_PREFIX: &str = "__sv_lod_grain_";
+/// The prefix of a hidden table read across a diamond ([`diamond_root`]),
+/// whose key is listed from one table that reaches each member by one path,
+/// so the multi-path checks pass it by (`multi_path::check_metric_paths`).
+pub(crate) const DIAMOND_PREFIX: &str = "__sv_lod_diamond_";
+
+/// Whether `alias` is the hidden table of an `INCLUDE` or `EXCLUDE`
+/// expression ([`GRAIN_PREFIX`], [`DIAMOND_PREFIX`]).
+pub(crate) fn is_grain_table(alias: &str) -> bool {
+    let alias = normalize_ident_part(alias);
+    alias.starts_with(GRAIN_PREFIX) || alias.starts_with(DIAMOND_PREFIX)
+}
+
+/// The joins `joins` walks from `home`, each as `(join, forward, extras)`, in
+/// the order their conditions can be read: `forward` when it adds the join's
+/// referenced table, `extras` the other relationships into that table its ON
+/// clause also ANDs ([`joined_from`]).
+fn ordered_steps(
+    def: &SemanticViewDefinition,
+    home: &TableRef,
+    joins: Vec<usize>,
+) -> Vec<(usize, bool, Vec<usize>)> {
+    // Walked from the home table, each join adds the table at its far end.
+    let mut steps: Vec<(usize, bool, String)> = Vec::new();
+    let mut tree = vec![normalize_ident_part(&home.alias)];
+    for j in joins {
+        let join = &def.joins[j];
+        let forward = tree.contains(&normalize_ident_part(&join.from_alias));
+        let added = if forward {
+            &join.table
+        } else {
+            &join.from_alias
+        };
+        tree.push(normalize_ident_part(added));
+        steps.push((j, forward, normalize_ident_part(added)));
+    }
+    // Across a diamond, a table the walk reaches is also joined on every
+    // other relationship to it from a table the walk reaches, as Snowflake
+    // joins it (fixture 14d D3, D6): an order whose customer and store are in
+    // different regions finds no region.
+    let extra = |added: &str| -> Vec<usize> {
+        (0..def.joins.len())
+            .filter(|e| !steps.iter().any(|(j, _, _)| j == e))
+            .filter(|&e| {
+                let x = &def.joins[e];
+                x.cardinality != Cardinality::ManyToMany
+                    && x.asof.is_none()
+                    && x.range_end.is_none()
+                    && normalize_ident_part(&x.table) == added
+                    && tree.contains(&normalize_ident_part(&x.from_alias))
+            })
+            .collect()
+    };
+    // Each step once the tables its conditions read are joined.
+    let mut ordered: Vec<(usize, bool, Vec<usize>)> = Vec::new();
+    let mut present = vec![normalize_ident_part(&home.alias)];
+    let mut pending: Vec<&(usize, bool, String)> = steps.iter().collect();
+    while !pending.is_empty() {
+        let ready = pending.iter().position(|(j, forward, added)| {
+            let join = &def.joins[*j];
+            let near = if *forward {
+                &join.from_alias
+            } else {
+                &join.table
+            };
+            let extras = if *forward { extra(added) } else { Vec::new() };
+            present.contains(&normalize_ident_part(near))
+                && extras
+                    .iter()
+                    .all(|&e| present.contains(&normalize_ident_part(&def.joins[e].from_alias)))
+        });
+        // With none ready, the rest in walk order, joined on their own
+        // relationships alone.
+        let (j, forward, added) = match ready {
+            Some(i) => pending.remove(i),
+            None => pending.remove(0),
+        };
+        let extras = if ready.is_some() && *forward {
+            extra(added)
+        } else {
+            Vec::new()
+        };
+        ordered.push((*j, *forward, extras));
+        present.push(added.clone());
+    }
+    ordered
+}
 
 /// `FROM <home> LEFT JOIN ...`: `home`'s source with every table of `tables`,
 /// and every table the qualified names and facts of `texts` read, joined
-/// along its one path from `home`.
+/// along its one path from `home`, or down to it when it is below `home`.
 fn joined_from(
     def: &SemanticViewDefinition,
     home: &TableRef,
@@ -94,34 +186,61 @@ fn joined_from(
     texts: &[&str],
 ) -> String {
     let base = def.tables.first().map_or("", |b| b.alias.as_str());
+    // Up along foreign keys, or down from `from` to a table below it, walked
+    // from `from`'s end.
+    let path = |from: &str, to: &str| {
+        chosen_path(def, from, to).or_else(|| {
+            chosen_path(def, to, from).map(|mut p| {
+                p.reverse();
+                p
+            })
+        })
+    };
+    let mut wanted: Vec<(String, String)> = tables
+        .iter()
+        .map(|t| (home.alias.clone(), t.clone()))
+        .collect();
+    for text in texts {
+        wanted.extend(super::window_members::hops(def, base, &home.alias, text));
+    }
+    // A table neither above nor below `from`, such as one a child table
+    // references (a return's reason code), is joined from the table of the
+    // tree that reaches it: walked once its tables are joined.
     let mut joins: Vec<usize> = Vec::new();
-    let mut add_path = |from: &str, to: &str| {
-        if let Some(path) = super::window_members::paths(def, from, to)
-            .into_iter()
-            .next()
-        {
-            for j in path {
+    let mut tree: Vec<String> = vec![home.alias.clone()];
+    loop {
+        let before = wanted.len();
+        wanted.retain(|(from, to)| {
+            let found = path(from, to).or_else(|| {
+                tree.iter()
+                    .filter(|t| !ident_matches(t, from))
+                    .find_map(|t| path(t, to))
+            });
+            let Some(found) = found else {
+                return true;
+            };
+            for j in found {
                 if !joins.contains(&j) {
                     joins.push(j);
+                    let join = &def.joins[j];
+                    for t in [&join.from_alias, &join.table] {
+                        if !tree.iter().any(|x| ident_matches(x, t)) {
+                            tree.push(t.clone());
+                        }
+                    }
                 }
             }
-        }
-    };
-    for t in tables {
-        add_path(&home.alias, t);
-    }
-    for text in texts {
-        for (from, other) in super::window_members::hops(def, base, &home.alias, text) {
-            add_path(&from, &other);
+            false
+        });
+        if wanted.is_empty() || wanted.len() == before {
+            break;
         }
     }
+    let ordered = ordered_steps(def, home, joins);
     let alias = quote_stored_ident(&home.alias);
     let mut sql = format!("FROM {} AS {alias}", table_source(home, def));
-    // Walked from the home table, each join adds the table at its far end.
-    let mut present = vec![normalize_ident_part(&home.alias)];
-    for j in joins {
+    for (j, forward, extras) in ordered {
         let join = &def.joins[j];
-        let forward = present.contains(&normalize_ident_part(&join.from_alias));
         let added = if forward {
             &join.table
         } else {
@@ -135,16 +254,106 @@ fn joined_from(
         } else {
             "LEFT JOIN"
         };
+        let mut on = synthesize_on_clause(join, &def.tables);
+        for e in extras {
+            let _ = write!(
+                on,
+                " AND {}",
+                synthesize_on_clause(&def.joins[e], &def.tables)
+            );
+        }
         let _ = write!(
             sql,
-            "\n{kind} {} AS {} ON {}",
+            "\n{kind} {} AS {} ON {on}",
             table_source(other, def),
             quote_stored_ident(&other.alias),
-            synthesize_on_clause(join, &def.tables)
         );
-        present.push(normalize_ident_part(added));
     }
     sql
+}
+
+/// The path `from` reaches `to` by along foreign keys: its one path, or,
+/// across a diamond, the one whose relationship names, read from `from`,
+/// sort first, which is the path Snowflake takes for an `INCLUDE` or
+/// `EXCLUDE` expression (fixture 14d D1-D12: its declaration order does not
+/// matter). Names compare upper-cased, as Snowflake stores an unquoted name.
+fn chosen_path(def: &SemanticViewDefinition, from: &str, to: &str) -> Option<Vec<usize>> {
+    let mut paths = crate::graph::all_chain_paths(def, from, to);
+    paths.sort_by_cached_key(|p| {
+        p.iter()
+            .map(|&j| {
+                def.joins[j]
+                    .name
+                    .as_deref()
+                    .unwrap_or_default()
+                    .to_ascii_uppercase()
+            })
+            .collect::<Vec<_>>()
+    });
+    paths.into_iter().next()
+}
+
+/// Whether `from` reaches `to` along foreign keys through two different
+/// tables (a diamond): more than one path, and no two relationships between
+/// the same pair of tables on them, which would play one table in two roles
+/// and need `USING` to choose.
+fn across_diamond(def: &SemanticViewDefinition, from: &str, to: &str) -> bool {
+    let paths = crate::graph::all_chain_paths(def, from, to);
+    if paths.len() < 2 {
+        return false;
+    }
+    let mut pairs: Vec<(usize, (String, String))> = Vec::new();
+    for &j in paths.iter().flatten() {
+        let join = &def.joins[j];
+        let pair = (
+            normalize_ident_part(&join.from_alias),
+            normalize_ident_part(&join.table),
+        );
+        if pairs.iter().any(|(k, p)| *k != j && *p == pair) {
+            return false;
+        }
+        pairs.push((j, pair));
+    }
+    true
+}
+
+/// The table an `INCLUDE` or `EXCLUDE` expression that reaches a table
+/// across a diamond is read from: the table a dimensions-only query of its
+/// grain's tables (`grouped`) and the filter's lists from, when it reaches
+/// each of them by one path. Its values are computed over the home table's
+/// rows along the paths [`chosen_path`] picks, and a value whose key no row of
+/// that table holds (an order whose customer and store are in different
+/// regions) is read with NULL dimensions (fixture 14d D3, D6).
+fn diamond_attach<'d>(
+    def: &'d SemanticViewDefinition,
+    grouped: &[String],
+    filter_tables: &[String],
+) -> Option<&'d TableRef> {
+    let tables: Vec<String> = grouped
+        .iter()
+        .chain(filter_tables)
+        .map(|t| t.to_ascii_lowercase())
+        .collect();
+    if tables.is_empty() {
+        return None;
+    }
+    let super::sql_gen::Anchor::At(anchor) = super::sql_gen::member_anchor(def, &tables) else {
+        return None;
+    };
+    if !tables.iter().all(|t| reached_by_one_path(def, &anchor, t)) {
+        return None;
+    }
+    def.tables.iter().find(|t| ident_matches(&t.alias, &anchor))
+}
+
+/// Whether an `INCLUDE` or `EXCLUDE` expression is read across a diamond
+/// ([`diamond_attach`]): its home reaches one of `tables` by two paths, and
+/// every one of them by some path without a role-played table.
+fn reads_across_diamond(def: &SemanticViewDefinition, home: &str, tables: &[String]) -> bool {
+    tables.iter().any(|t| across_diamond(def, home, t))
+        && tables
+            .iter()
+            .all(|t| reached_by_one_path(def, home, t) || across_diamond(def, home, t))
 }
 
 /// The table an `INCLUDE` or `EXCLUDE` expression whose home table is `home`
@@ -199,6 +408,126 @@ fn own_tables<'a>(
             .filter(move |_| kind == LodKind::Include)
             .filter_map(|&k| member_table(def, k).map(str::to_string)),
     )
+}
+
+/// The tables of an `INCLUDE` or `EXCLUDE` expression's grain at a query's
+/// dimensions `dims`: theirs and, for `INCLUDE`, its own dimensions', or
+/// those of the query's it does not exclude.
+fn grouped_tables(
+    def: &SemanticViewDefinition,
+    kind: LodKind,
+    res: &Resolution,
+    dims: &[Resolved],
+) -> Vec<String> {
+    let grain: Vec<Resolved> = match kind {
+        LodKind::Fixed => Vec::new(),
+        LodKind::Include => dims.iter().chain(&res.keys).copied().collect(),
+        LodKind::Exclude => dims
+            .iter()
+            .filter(|d| !res.keys.contains(d))
+            .copied()
+            .collect(),
+    };
+    let mut out: Vec<String> = Vec::new();
+    for t in grain.into_iter().filter_map(|k| member_table(def, k)) {
+        if !out.iter().any(|o| ident_matches(o, t)) {
+            out.push(t.to_string());
+        }
+    }
+    out
+}
+
+/// The table an `INCLUDE` or `EXCLUDE` expression read across a diamond is
+/// read from ([`diamond_attach`]), or `None` when it is not read across one.
+///
+/// The table is the one a dimensions-only query of the query's dimensions,
+/// with an `INCLUDE` expression's own, and the filter lists from, as for an
+/// `EXCLUDE` one read from another table than its home.
+fn diamond_root<'d>(
+    def: &'d SemanticViewDefinition,
+    kind: LodKind,
+    res: &Resolution,
+    dims: &[Resolved],
+    filter_tables: &[String],
+) -> Option<&'d TableRef> {
+    if kind == LodKind::Fixed {
+        return None;
+    }
+    // An EXCLUDE expression's groups are listed by every query dimension,
+    // the ones it leaves out of its grain too.
+    let listed: Vec<String> = if kind == LodKind::Include {
+        grouped_tables(def, kind, res, dims)
+    } else {
+        let mut out: Vec<String> = Vec::new();
+        for t in dims.iter().filter_map(|&k| member_table(def, k)) {
+            if !out.iter().any(|o| ident_matches(o, t)) {
+                out.push(t.to_string());
+            }
+        }
+        out
+    };
+    let needed: Vec<String> = listed
+        .iter()
+        .chain(filter_tables)
+        .chain(&res.tables)
+        .cloned()
+        .collect();
+    if !reads_across_diamond(def, &res.home, &needed) {
+        return None;
+    }
+    // A filter on the path not taken is refused (fixture 14e G3): each table
+    // the filter reads is the home, or on the paths taken to the listed
+    // tables, or above one of them by one path.
+    let mut tree: Vec<String> = Vec::new();
+    for l in &listed {
+        for j in chosen_path(def, &res.home, l).unwrap_or_default() {
+            let join = &def.joins[j];
+            tree.push(join.from_alias.clone());
+            tree.push(join.table.clone());
+        }
+        tree.push(l.clone());
+    }
+    let on_path = |t: &str| {
+        ident_matches(t, &res.home)
+            || tree
+                .iter()
+                .filter(|x| !ident_matches(x, &res.home))
+                .any(|x| reached_by_one_path(def, x, t))
+    };
+    if !filter_tables.iter().all(|t| on_path(t)) {
+        return None;
+    }
+    diamond_attach(def, &listed, filter_tables)
+}
+
+/// The tables a query's `WHERE` reads: those of the members it names, and
+/// those its qualified column references name.
+fn filter_tables_of(def: &SemanticViewDefinition, filter: Option<&str>) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    for r in filter.map(scan_references).unwrap_or_default() {
+        match resolve(def, &r) {
+            resolved @ (Resolved::Fact(_) | Resolved::Dimension(_)) => {
+                if let Some(t) = member_table(def, resolved) {
+                    out.push(t.to_string());
+                }
+            }
+            Resolved::Lod => {}
+            _ => {
+                if r.is_bare() {
+                    continue;
+                }
+                let q = r.first_part_key();
+                if let Some(t) = def
+                    .tables
+                    .iter()
+                    .find(|t| normalize_ident_part(&t.alias) == q)
+                {
+                    out.push(t.alias.clone());
+                }
+            }
+        }
+    }
+    out
 }
 
 /// `name`, with `_` appended while `taken` says it is in use.
@@ -260,6 +589,11 @@ pub(super) struct QueryGrain {
     pub(super) filter: Option<String>,
     /// The tables that `WHERE` reads.
     pub(super) filter_tables: Vec<String>,
+    /// The tables of the query's metrics that read no LOD expression (its
+    /// plain metrics), which decide the rows an `INCLUDE` or `EXCLUDE`
+    /// expression grouped by a table below its home is computed over
+    /// (fixture 14d).
+    pub(super) plain_tables: Vec<String>,
 }
 
 /// [`lower_lod`] at a query's grain: each `INCLUDE` expression is computed
@@ -372,12 +706,36 @@ pub(super) fn lower_lod_at<'d>(
             LodKind::Fixed => None,
             LodKind::Include | LodKind::Exclude => child_root(def, &grain_tables, &home.alias),
         };
+        // Beside a plain metric on its home, it is computed over that
+        // metric's rows instead: the home's, each once per group of the
+        // child rows it joins down to, the ones with none in the NULL group
+        // (fixture 14d C1-C4, C8). A key the child table lists no group for
+        // then has NULL dimensions (C3, C8).
+        // Across a diamond, it is read from the table its grain is listed
+        // from, its values computed along the paths Snowflake picks.
+        let diamond = match below {
+            Some(_) => None,
+            None => diamond_root(def, lod.kind, &res, &grain.dims, &grain.filter_tables),
+        };
+        let home_rows = below.is_some()
+            && !home.pk_columns.is_empty()
+            && grain
+                .plain_tables
+                .iter()
+                .any(|t| ident_matches(t, &home.alias));
         // Its grain: its own dimensions, or the query's with them or without.
         let mut grain_keys: Vec<Resolved> = Vec::new();
         let (attach, filter) = match lod.kind {
+            // Computed over every row, it is still read through the child
+            // table the query lists from, so a key with no row there (a
+            // customer with no return) keeps NULL dimensions, and one with
+            // rows there is grouped by those alone (fixture 14e F1, F2).
             LodKind::Fixed => {
                 grain_keys.clone_from(&res.keys);
-                (home, None)
+                (
+                    child_root(def, &grain_tables, &home.alias).unwrap_or(home),
+                    None,
+                )
             }
             LodKind::Include => {
                 grain_keys.clone_from(&grain.dims);
@@ -386,7 +744,7 @@ pub(super) fn lower_lod_at<'d>(
                         grain_keys.push(*k);
                     }
                 }
-                (below.unwrap_or(home), filter_sql.as_deref())
+                (diamond.or(below).unwrap_or(home), filter_sql.as_deref())
             }
             LodKind::Exclude => {
                 grain_keys = grain
@@ -397,7 +755,7 @@ pub(super) fn lower_lod_at<'d>(
                     .collect();
                 // Below its home, the groups are the child table's rows even
                 // when only the filter names it (no dimensions).
-                let at = below.unwrap_or_else(|| {
+                let at = diamond.or(below).unwrap_or_else(|| {
                     listed_from
                         .as_deref()
                         .and_then(|a| def.tables.iter().find(|t| ident_matches(&t.alias, a)))
@@ -417,21 +775,81 @@ pub(super) fn lower_lod_at<'d>(
             format!("ROW({})", parts.join(", "))
         };
         let body = body_sql(&lod.body);
-        let mut read: Vec<String> = res.tables.clone();
+        // The tables it reads: the body's (through `texts`) and its grain's,
+        // not those of the dimensions an EXCLUDE expression leaves out, which
+        // across a diamond would join their path too.
+        let excluded: Vec<&str> = match lod.kind {
+            LodKind::Exclude => res
+                .keys
+                .iter()
+                .filter_map(|&k| member_table(def, k))
+                .collect(),
+            _ => Vec::new(),
+        };
+        let mut read: Vec<String> = res
+            .tables
+            .iter()
+            .filter(|t| !excluded.iter().any(|x| ident_matches(x, t)))
+            .cloned()
+            .collect();
         read.extend(key_tables.iter().cloned());
         let mut texts: Vec<&str> = vec![&key_sql, &body];
         texts.extend(filter);
         // Computed over the home table's rows, or over the rows of the table
-        // below it that the query lists from, each joined up to the home.
-        let source = match below {
-            Some(b) => {
-                read.push(home.alias.clone());
-                b
-            }
-            None => home,
+        // below it that the query lists from, each joined up to the home, or
+        // beside a plain metric on the home over the home's rows once per
+        // group.
+        let (select_key, from, filter_clause) = if home_rows {
+            let at = quote_stored_ident(&home.alias);
+            let pks: Vec<(String, String)> = home
+                .pk_columns
+                .iter()
+                .enumerate()
+                .map(|(i, c)| {
+                    (
+                        format!("{at}.{}", quote_stored_ident(c)),
+                        format!("__sv_pk{i}"),
+                    )
+                })
+                .collect();
+            let mut down_texts: Vec<&str> = vec![&key_sql];
+            down_texts.extend(filter);
+            let rows = format!(
+                "SELECT DISTINCT {}, {key_sql} AS \"__sv_k\"\n{}{}",
+                pks.iter()
+                    .map(|(c, a)| format!("{c} AS {}", quote_ident(a)))
+                    .collect::<Vec<_>>()
+                    .join(", "),
+                joined_from(def, home, &key_tables, &down_texts),
+                filter.map(|f| format!("\nWHERE {f}")).unwrap_or_default()
+            );
+            let on = pks
+                .iter()
+                .map(|(c, a)| format!("{c} = \"__sv_rows\".{}", quote_ident(a)))
+                .collect::<Vec<_>>()
+                .join(" AND ");
+            (
+                "\"__sv_rows\".\"__sv_k\"".to_string(),
+                format!(
+                    "{}\nJOIN ({rows}) AS \"__sv_rows\" ON {on}",
+                    joined_from(def, home, &res.tables, &[&body])
+                ),
+                String::new(),
+            )
+        } else {
+            let source = match below {
+                Some(b) => {
+                    read.push(home.alias.clone());
+                    b
+                }
+                None => home,
+            };
+            (
+                key_sql.clone(),
+                joined_from(def, source, &read, &texts),
+                filter.map(|f| format!("\nWHERE {f}")).unwrap_or_default(),
+            )
         };
-        let from = joined_from(def, source, &read, &texts);
-        let filter_clause = filter.map(|f| format!("\nWHERE {f}")).unwrap_or_default();
         let name = match lod.origin {
             Origin::Fact(i) => def.facts[i].name.clone(),
             Origin::Dimension(i) => def.dimensions[i].name.clone(),
@@ -443,8 +861,16 @@ pub(super) fn lower_lod_at<'d>(
         // find their value as well (11b E5).
         // Read from a table below its home, the groups are that table's rows,
         // so no twin is needed.
+        // Across a diamond, a value no row there lists is read with NULL
+        // dimensions, as Snowflake reads it, so no twin either. Nor for a
+        // FIXED expression read through a child table, whose values with no
+        // child row are read with NULL dimensions too (fixture 14g J2-J5).
         let mut attachments = vec![attach];
-        if below.is_none() && !ident_matches(&attach.alias, &home.alias) {
+        if lod.kind == LodKind::Exclude
+            && below.is_none()
+            && diamond.is_none()
+            && !ident_matches(&attach.alias, &home.alias)
+        {
             attachments.push(home);
         }
         let mut aliases: Vec<String> = Vec::new();
@@ -454,7 +880,14 @@ pub(super) fn lower_lod_at<'d>(
             } else {
                 format!("_{t}")
             };
-            let alias = unique(format!("{TABLE_PREFIX}{n}{suffix}"), |a| {
+            let prefix = if diamond.is_some() {
+                DIAMOND_PREFIX
+            } else if lod.kind == LodKind::Fixed {
+                TABLE_PREFIX
+            } else {
+                GRAIN_PREFIX
+            };
+            let alias = unique(format!("{prefix}{n}{suffix}"), |a| {
                 out.tables.iter().any(|t| ident_matches(&t.alias, a))
             });
             let key = unique(format!("__sv_lodk_{n}{suffix}"), |c| {
@@ -464,7 +897,7 @@ pub(super) fn lower_lod_at<'d>(
                     .is_some_and(|(_, cols)| cols.iter().any(|x| ident_matches(x, c)))
             });
             let query = format!(
-                "SELECT {key_sql} AS {}, {body} AS {}\n{from}{filter_clause}\nGROUP BY 1",
+                "SELECT {select_key} AS {}, {body} AS {}\n{from}{filter_clause}\nGROUP BY 1",
                 quote_ident(&key),
                 quote_ident(VALUE_COLUMN)
             );
@@ -687,6 +1120,64 @@ pub(super) fn lower_lod_at<'d>(
     Cow::Owned(out)
 }
 
+/// Refuse a `FIXED` expression read through a table below its home (fixture
+/// 14g) when that table reaches one of the expression's own dimensions'
+/// tables by more than one path: its key would be read along whichever path
+/// the relationship names pick, which no rule makes Snowflake's.
+fn check_fixed_paths(
+    def: &SemanticViewDefinition,
+    req: &super::types::QueryRequest,
+    lods: &[crate::graph::lod::Lod],
+    needed: &std::collections::HashSet<String>,
+    refuse: &dyn Fn(String) -> super::types::ExpandError,
+) -> Result<(), super::types::ExpandError> {
+    let name_of = |lod: &crate::graph::lod::Lod| match lod.origin {
+        Origin::Fact(i) => def.facts[i].name.clone(),
+        Origin::Dimension(i) => def.dimensions[i].name.clone(),
+        Origin::Metric { metric, .. } => def.metrics[metric].name.clone(),
+    };
+    let mut grain_tables: Vec<String> = req
+        .dimensions
+        .iter()
+        .filter_map(|d| match scan_references(d.as_str()).as_slice() {
+            [r] => member_table(def, resolve(def, r)).map(str::to_ascii_lowercase),
+            _ => None,
+        })
+        .collect();
+    grain_tables.extend(
+        filter_tables_of(def, req.where_clause.as_deref())
+            .iter()
+            .map(|t| t.to_ascii_lowercase()),
+    );
+    for lod in lods
+        .iter()
+        .filter(|l| l.kind == LodKind::Fixed && needed.contains(&normalize_ident_part(&name_of(l))))
+    {
+        let Ok(res) = resolve_lod(def, lod) else {
+            continue;
+        };
+        let Some(child) = child_root(def, &grain_tables, &res.home) else {
+            continue;
+        };
+        for &k in &res.keys {
+            let Some(t) = member_table(def, k) else {
+                continue;
+            };
+            if !reached_by_one_path(def, &child.alias, t) {
+                return Err(refuse(format!(
+                    "{} uses FIXED DIMENSIONS and is read through table '{}', which the query \
+                     lists its rows from, but '{}' reaches table '{t}' of its dimensions by more \
+                     than one path.",
+                    lod.describe(def),
+                    child.alias,
+                    child.alias
+                )));
+            }
+        }
+    }
+    Ok(())
+}
+
 /// The grain a query gives the `INCLUDE` and `EXCLUDE` expressions it reads
 /// (see [`QueryGrain`]), after the rules Snowflake checks for them in a query.
 /// `def` is the definition [`lower_lod_at`] lowers, and `req` the query as
@@ -717,7 +1208,7 @@ pub(super) fn query_grain(
     if !has_lod(def) {
         return Ok(QueryGrain::default());
     }
-    let Ok((lods, _)) = collect_lods(def) else {
+    let Ok((lods, lod_metrics)) = collect_lods(def) else {
         return Ok(QueryGrain::default());
     };
     let needed = super::window_members::needed(def, req);
@@ -730,8 +1221,33 @@ pub(super) fn query_grain(
         .iter()
         .filter(|l| l.kind != LodKind::Fixed && needed.contains(&normalize_ident_part(name_of(l))))
         .collect();
+    check_fixed_paths(def, req, &lods, &needed, &refuse)?;
     let Some(first) = read.first() else {
-        return Ok(QueryGrain::default());
+        // Only FIXED expressions: no rule to check, but the tables the query
+        // lists its rows from decide which table they are read through.
+        let fixed_read = lods.iter().any(|l| {
+            l.kind == LodKind::Fixed && needed.contains(&normalize_ident_part(name_of(l)))
+        });
+        if !fixed_read {
+            return Ok(QueryGrain::default());
+        }
+        let dims: Vec<Resolved> = req
+            .dimensions
+            .iter()
+            .filter_map(|d| match scan_references(d.as_str()).as_slice() {
+                [r] => match resolve(def, r) {
+                    k @ Resolved::Dimension(_) => Some(k),
+                    _ => None,
+                },
+                _ => None,
+            })
+            .collect();
+        return Ok(QueryGrain {
+            dims,
+            filter: None,
+            filter_tables: filter_tables_of(def, req.where_clause.as_deref()),
+            plain_tables: Vec::new(),
+        });
     };
     let first_what = first.describe(def);
     let first_kind = first.kind.keyword();
@@ -809,40 +1325,21 @@ pub(super) fn query_grain(
             _ => {}
         }
     }
-    // The tables the filter reads, and an LOD expression it reads.
-    let mut filter_tables: Vec<String> = Vec::new();
+    // An LOD expression the filter reads, and the tables it reads.
     if let Some(w) = req.where_clause.as_deref() {
-        for r in scan_references(w) {
-            match resolve(def, &r) {
-                Resolved::Lod => {
-                    return Err(refuse(format!(
-                        "{first_what} uses {first_kind} DIMENSIONS, so it is computed over the \
-                         rows the query's WHERE keeps, and that WHERE reads LOD expression '{}', \
-                         which is computed at a grain of its own.",
-                        r.raw
-                    )));
-                }
-                resolved @ (Resolved::Fact(_) | Resolved::Dimension(_)) => {
-                    if let Some(t) = member_table(def, resolved) {
-                        filter_tables.push(t.to_string());
-                    }
-                }
-                _ => {
-                    if r.is_bare() {
-                        continue;
-                    }
-                    let q = r.first_part_key();
-                    if let Some(t) = def
-                        .tables
-                        .iter()
-                        .find(|t| normalize_ident_part(&t.alias) == q)
-                    {
-                        filter_tables.push(t.alias.clone());
-                    }
-                }
-            }
+        if let Some(r) = scan_references(w)
+            .into_iter()
+            .find(|r| resolve(def, r) == Resolved::Lod)
+        {
+            return Err(refuse(format!(
+                "{first_what} uses {first_kind} DIMENSIONS, so it is computed over the \
+                 rows the query's WHERE keeps, and that WHERE reads LOD expression '{}', \
+                 which is computed at a grain of its own.",
+                r.raw
+            )));
         }
     }
+    let filter_tables = filter_tables_of(def, req.where_clause.as_deref());
     // The tables the query lists its rows from.
     let grain_tables: Vec<String> = dims
         .iter()
@@ -858,6 +1355,9 @@ pub(super) fn query_grain(
             continue;
         };
         let below = child_root(def, &grain_tables, &res.home);
+        if below.is_none() && diamond_root(def, lod.kind, &res, &dims, &filter_tables).is_some() {
+            continue;
+        }
         let root = below.map_or(res.home.as_str(), |b| b.alias.as_str());
         let grouped = dims.iter().filter(|d| match lod.kind {
             LodKind::Exclude => !res.keys.contains(d),
@@ -882,10 +1382,35 @@ pub(super) fn query_grain(
             }
         }
     }
+    // The tables of the metrics that read no LOD expression.
+    let mut plain_tables: Vec<String> = Vec::new();
+    for m in &req.metrics {
+        let name = crate::ident::parse_qualified_identifier(m.as_str())
+            .ok()
+            .and_then(|p| p.last().cloned())
+            .unwrap_or_else(|| m.as_str().to_string());
+        let Some((i, metric)) = def
+            .metrics
+            .iter()
+            .enumerate()
+            .find(|(_, x)| ident_matches(&x.name, &name))
+        else {
+            continue;
+        };
+        if lod_metrics.iter().any(|(mi, _)| *mi == i) {
+            continue;
+        }
+        for t in super::facts::collect_derived_metric_source_tables(metric, &def.metrics) {
+            if !plain_tables.iter().any(|p| ident_matches(p, &t)) {
+                plain_tables.push(t);
+            }
+        }
+    }
     Ok(QueryGrain {
         dims,
         filter: req.where_clause.clone().filter(|w| !w.trim().is_empty()),
         filter_tables,
+        plain_tables,
     })
 }
 
@@ -937,6 +1462,10 @@ pub fn lod_grain_allows(def: &SemanticViewDefinition, metric: &str, dim: &str) -
             continue;
         };
         if reached_by_one_path(def, &res.home, t) {
+            continue;
+        }
+        // Across a diamond, along the path Snowflake picks (fixture 14d).
+        if diamond_root(def, lod.kind, &res, &[Resolved::Dimension(d)], &[]).is_some() {
             continue;
         }
         // A table below the home: grouped by it alone, the expression is

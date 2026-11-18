@@ -72,6 +72,26 @@ pub(crate) fn chain_paths(
     to: &str,
     keep: &dyn Fn(&[usize]) -> bool,
 ) -> Vec<Vec<usize>> {
+    chain_paths_up_to(def, from, to, keep, 2)
+}
+
+/// Every way from `from` to `to` ([`chain_paths`]), not only the first two,
+/// for a rule that chooses among them whatever order they are declared in.
+pub(crate) fn all_chain_paths(
+    def: &SemanticViewDefinition,
+    from: &str,
+    to: &str,
+) -> Vec<Vec<usize>> {
+    chain_paths_up_to(def, from, to, &|_| true, usize::MAX)
+}
+
+fn chain_paths_up_to(
+    def: &SemanticViewDefinition,
+    from: &str,
+    to: &str,
+    keep: &dyn Fn(&[usize]) -> bool,
+    limit: usize,
+) -> Vec<Vec<usize>> {
     struct Walk<'a> {
         def: &'a SemanticViewDefinition,
         to: &'a str,
@@ -79,6 +99,7 @@ pub(crate) fn chain_paths(
         seen: Vec<String>,
         path: Vec<usize>,
         out: Vec<Vec<usize>>,
+        limit: usize,
     }
     impl Walk<'_> {
         fn walk(&mut self, at: &str) {
@@ -105,7 +126,7 @@ pub(crate) fn chain_paths(
                 self.walk(&next);
                 self.path.pop();
                 self.seen.pop();
-                if self.out.len() >= 2 {
+                if self.out.len() >= self.limit {
                     return;
                 }
             }
@@ -118,6 +139,7 @@ pub(crate) fn chain_paths(
         seen: vec![normalize_ident_part(from)],
         path: Vec::new(),
         out: Vec::new(),
+        limit,
     };
     w.walk(from);
     w.out

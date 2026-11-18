@@ -553,7 +553,10 @@ fn render_undirected(def: &SemanticViewDefinition, path: &[String]) -> String {
 /// DIMENSIONS ... FOR METRIC`, which leaves such a member out.
 #[cfg_attr(not(feature = "extension"), allow(dead_code))]
 pub(crate) fn refused_as_many_to_many(def: &SemanticViewDefinition, home: &str, to: &str) -> bool {
+    // Not the hidden table of an INCLUDE or EXCLUDE expression, whose paths
+    // `lod_grain_allows` checks as the query does. A FIXED one is checked.
     !home.eq_ignore_ascii_case(to)
+        && !super::lod::is_grain_table(home)
         && admitted_paths(def, home, to, &[]).is_empty()
         && many_to_many_paths(def, home, to).is_some()
 }
@@ -690,6 +693,13 @@ pub(super) fn check_metric_paths(
                     });
                 }
                 if !paths.is_empty() || member.table == home {
+                    continue;
+                }
+                // A hidden LOD table read across a diamond is read through the
+                // one table its key is listed from, which reaches the member
+                // by one path (`lod::diamond_attach`); the other ways step
+                // back along a foreign key of that table.
+                if home.starts_with(super::lod::DIAMOND_PREFIX) {
                     continue;
                 }
                 if let Some(routes) = many_to_many_paths(def, &home, &member.table) {

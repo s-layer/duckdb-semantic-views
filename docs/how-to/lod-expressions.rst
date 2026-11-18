@@ -325,6 +325,26 @@ As in Snowflake, the expression is then computed over the returns, each joined t
 
    SELECT * FROM SEMANTIC_VIEW(sales_returns
        DIMENSIONS order_returns.reason
+       METRICS avg_customer_revenue
+   ) ORDER BY reason;
+
+.. code-block:: text
+
+   ┌─────────┬──────────────────────┐
+   │ reason  │ avg_customer_revenue │
+   ├─────────┼──────────────────────┤
+   │ damaged │                350.0 │
+   │ late    │               1100.0 │
+   └─────────┴──────────────────────┘
+
+Alice's late returns are 101 (400), 103 (300) and 102 twice (200 each), so her late revenue is 1100. A return with a ``NULL`` reason would make a ``NULL`` group of its own. Filtering by the returns works the same way: ``WHERE order_returns.reason = 'late'`` by region gives North 1100.
+
+Beside a plain metric on the aggregated table, such as ``total_revenue`` on orders, the expression is computed over that metric's rows instead, as Snowflake computes it: each order once per group of its returns, and the orders with no return in the ``NULL`` group:
+
+.. code-block:: sql
+
+   SELECT * FROM SEMANTIC_VIEW(sales_returns
+       DIMENSIONS order_returns.reason
        METRICS orders.total_revenue, avg_customer_revenue
    ) ORDER BY reason;
 
@@ -334,15 +354,23 @@ As in Snowflake, the expression is then computed over the returns, each joined t
    │ reason  │ total_revenue │ avg_customer_revenue │
    ├─────────┼───────────────┼──────────────────────┤
    │ damaged │        700.00 │                350.0 │
-   │ late    │        900.00 │               1100.0 │
-   │ NULL    │        900.00 │                 NULL │
+   │ late    │        900.00 │                900.0 │
+   │ NULL    │        900.00 │                225.0 │
    └─────────┴───────────────┴──────────────────────┘
 
-Alice's late returns are 101 (400), 103 (300) and 102 twice (200 each), so her late revenue is 1100, while ``total_revenue`` counts each order once per group (900). The ``NULL`` row is ``total_revenue``'s orders with no return; the LOD expression has no returns to compute there. A return with a ``NULL`` reason would make a ``NULL`` group of its own. Filtering by the returns works the same way: ``WHERE order_returns.reason = 'late'`` by region gives North 1100.
+Alice's late revenue is now 900, order 102 counted once. A plain metric on another table, such as one on the returns or on the customers, leaves the first answer; so does an LOD metric. When a value has no return to list its group, for example a customer whose only orders have no return in a query grouped by region and reason, it is read in a row whose dimensions are all ``NULL``. A ``WHERE`` applies to that row too, so ``WHERE customers.region = 'North'`` drops it, and a value whose returns the ``WHERE`` all drops is left out. To compute the expression over the returns, query it without the plain metric.
 
-Snowflake gives these answers when the LOD metric is queried on its own. Beside a plain metric such as ``total_revenue``, Snowflake computes it once per group instead (late 900 here), and in some queries returns a ``NULL`` group as an extra row. The extension gives the same answer whatever else the query names.
+A ``FIXED`` expression is computed over every row of the aggregated table whatever the query groups by, but when the query groups or filters by a table below it, the groups still come from that table, as Snowflake reads them: each customer's value goes to the groups of its returns, and a customer with no return to a row whose dimensions are all ``NULL``, even when the query also groups by region.
 
-A query across a diamond, where the aggregated table reaches the grouped table along two paths (orders reach regions through customers and through stores), is refused, as it is for a plain metric.
+
+.. _howto-lod-diamond:
+
+Across Two Paths
+================
+
+The aggregated table can reach a grouped table along two paths, as orders reach regions through customers and through stores. A plain metric is refused there. An ``INCLUDE`` or ``EXCLUDE`` expression is computed, as in Snowflake, along one path, which the relationship names choose. Read from the aggregated table, the paths are compared by the names of their relationships, upper-cased, hop by hop, and the first name that differs decides: the smaller name wins, whatever the paths' lengths. Any other table the expression needs, such as an ``INCLUDE`` dimension on the other path, is joined too, and a table that two relationships reach from the joined tables is joined on both.
+
+So name the relationships to choose the path. Snowflake gives an unnamed relationship a random name each time the view is created, so there the path can change with every ``CREATE``; the extension gives it a name made from its position in ``RELATIONSHIPS``, its tables and its columns (``SYS_RELATIONSHIP_...``, shown by ``DESCRIBE SEMANTIC VIEW``), so the path stays the same while the view does, but it is not one you chose, and it can change when a ``CREATE OR REPLACE`` adds a relationship before the others. A query that filters by a table on the path not taken is refused, as in Snowflake.
 
 
 .. _howto-lod-facts:
@@ -385,7 +413,7 @@ What Is Not Supported
 =====================
 
 - An ``INCLUDE`` or ``EXCLUDE`` expression is computed at the query's grain, so a query can read it only in ``METRICS``, inside an aggregate: not in ``DIMENSIONS``, ``FACTS`` or ``WHERE``. A query that reads one can't group by an expression item, or group or filter by an LOD dimension, which has a grain of its own. As in Snowflake, these are refused.
-- A query that reads an ``INCLUDE`` or ``EXCLUDE`` expression can't group or filter by a table its aggregated table reaches along more than one path, or by a table neither reaches the other from along foreign keys (see :ref:`howto-lod-child`).
+- A query that reads an ``INCLUDE`` or ``EXCLUDE`` expression can't filter by a table on the path not taken across two paths (see :ref:`howto-lod-diamond`), or group or filter by a table neither the aggregated table nor the grouped tables reach along foreign keys (see :ref:`howto-lod-child`).
 - An LOD expression cannot be written in a query; declare it in the view.
 - A query that reads an LOD expression and reaches across a :ref:`direct many-to-many relationship <ref-create-direct-many-to-many>` is refused, as in Snowflake (010959).
 - A materialization cannot cover an LOD expression, or a metric that reads one.
