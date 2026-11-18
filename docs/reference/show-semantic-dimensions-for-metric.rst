@@ -73,7 +73,7 @@ When ``LIKE`` and ``STARTS WITH`` are both present, a dimension must satisfy bot
 Output Columns
 ==============
 
-Returns one row per reachable dimension with 6 columns:
+Returns one row per reachable dimension with 7 columns:
 
 .. list-table::
    :header-rows: 1
@@ -100,6 +100,9 @@ Returns one row per reachable dimension with 6 columns:
    * - ``comment``
      - VARCHAR
      - The dimension comment text. Empty string if no comment is set.
+   * - ``labels``
+     - VARCHAR
+     - JSON array of the dimension's labels: ``["FILTER"]`` for a :ref:`named filter <howto-annotations-filters>`, ``[]`` otherwise.
 
 
 .. versionchanged:: 0.14.0
@@ -111,6 +114,11 @@ Returns one row per reachable dimension with 6 columns:
 .. versionchanged:: 0.18.0
 
    Added the ``synonyms`` and ``comment`` columns, after ``required``, as in Snowflake's output.
+
+.. versionchanged:: 0.21.0
+
+   Added the ``labels`` column, after ``comment``, as in Snowflake's output and in
+   :doc:`SHOW SEMANTIC DIMENSIONS <show-semantic-dimensions>`.
 
 
 .. _ref-show-dims-for-metric-filtering:

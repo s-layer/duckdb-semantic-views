@@ -23,6 +23,13 @@ so the list cannot go stale. A query whose Snowflake answer can't be reproduced 
 depends on names Snowflake invented for that run) is listed under `unreproducible` instead:
 it must still succeed, but its rows are not compared.
 
+A statement whose run lost its connection before Snowflake answered is recorded as "Not
+reached". It is not run here either, so later statements see the state Snowflake saw.
+
+A SHOW is held to the same column names and to listing the same names (its `name`
+column, case-insensitively); its other cells are each engine's own spelling of types,
+tables and empty lists.
+
 Not compared, and counted in the summary: schema setup (CREATE/USE/DROP SCHEMA, since the
 fixtures ran in a throwaway Snowflake schema), EXPLAIN (plans differ by design) and
 DESCRIBE (Snowflake's output uses its own name folding and qualification).
@@ -59,6 +66,7 @@ RECORDED = PARITY / "recorded"
 APPROVED = PARITY / "approved_differences.toml"
 
 QUERY = re.compile(r"^\s*(SELECT|WITH|SHOW)\b", re.I)
+SHOW = re.compile(r"^\s*SHOW\b", re.I)
 NOT_COMPARED = re.compile(
     r"^\s*(CREATE (OR REPLACE )?SCHEMA|USE |DROP SCHEMA|EXPLAIN|DESCRIBE)", re.I
 )
@@ -71,6 +79,7 @@ class Recorded:
     error: str | None
     columns: list[str] | None
     rows: list[list[str]] | None
+    reached: bool = True
 
 
 def parse_recording(path: Path) -> list[Recorded]:
@@ -81,6 +90,9 @@ def parse_recording(path: Path) -> list[Recorded]:
         sql = re.search(r"```sql\n(.*?)\n```", section, re.S)
         assert sql is not None, f"{path.name}: section {label!r} has no SQL"
         after = section[sql.end() :]
+        if "**Not reached:**" in after:  # the connection failed before Snowflake answered
+            statements.append(Recorded(label, sql.group(1), None, None, None, reached=False))
+            continue
         error = re.search(r"\*\*Error:\*\*\n\n```\n(.*?)\n```", after, re.S)
         if error is not None:
             statements.append(Recorded(label, sql.group(1), error.group(1), None, None))
@@ -200,6 +212,15 @@ def compare(
     expected_columns = [c.lower() for c in statement.columns]
     if columns != expected_columns:
         return f"columns: Snowflake {expected_columns}, ours {columns}"
+    if SHOW.match(statement.sql) and "name" in columns:
+        # SHOW spells cells in each engine's own way (Snowflake's NUMBER(38,0) for our
+        # INTEGER, upper-case names, NULL for an empty list), so compare what it lists.
+        at = columns.index("name")
+        listed = sorted(str(row[at]).lower() for row in rows)
+        expected = sorted(row[at].lower() for row in statement.rows)
+        if listed != expected:
+            return f"names listed: Snowflake {expected}, ours {listed}"
+        return None
     scales = _scales(statement.rows, len(columns))
     ours = sorted(_key(_rounded(list(row), scales)) for row in rows)
     theirs = sorted(_key(list(row)) for row in statement.rows)
@@ -219,7 +240,7 @@ def main() -> int:
         return 1
 
     failures: list[str] = []
-    compared = skipped = approved_hits = success_only = 0
+    compared = skipped = approved_hits = success_only = not_reached = 0
     recordings = sorted(RECORDED.glob("*.md"))
     assert recordings, f"no recordings in {RECORDED}"
     for path in recordings:
@@ -235,6 +256,9 @@ def main() -> int:
         con.execute("LOAD semantic_views")
         seen: set[str] = set()
         for statement in parse_recording(path):
+            if not statement.reached:
+                not_reached += 1  # nor run here, so the state stays as Snowflake's was
+                continue
             if NOT_COMPARED.match(statement.sql):
                 skipped += 1
                 continue
@@ -269,7 +293,7 @@ def main() -> int:
     print(
         f"Snowflake parity: {len(recordings)} recordings, {compared} statements compared "
         f"({approved_hits} approved differences, {success_only} unreproducible so success only),"
-        f" {skipped} not compared"
+        f" {skipped} not compared, {not_reached} never reached Snowflake"
     )
     for failure in failures:
         print(f"FAIL {failure}")

@@ -176,10 +176,10 @@ memory	main	filter_sv	p3411_customers	customer_name	VARCHAR	[]	(empty)	[]
 # LIKE '%gio%' matches only region
 # ============================================================
 
-query TTTTTT rowsort
+query TTTTTTT rowsort
 SHOW SEMANTIC DIMENSIONS LIKE '%gio%' IN filter_sv FOR METRIC total_amount
 ----
-p3411_customers	region	VARCHAR	false	[]	(empty)
+p3411_customers	region	VARCHAR	false	[]	(empty)	[]
 
 # ============================================================
 # Test 14: FOR METRIC with STARTS WITH
@@ -187,10 +187,10 @@ p3411_customers	region	VARCHAR	false	[]	(empty)
 # STARTS WITH 'customer' matches customer_name
 # ============================================================
 
-query TTTTTT rowsort
+query TTTTTTT rowsort
 SHOW SEMANTIC DIMENSIONS IN filter_sv FOR METRIC total_amount STARTS WITH 'customer'
 ----
-p3411_customers	customer_name	VARCHAR	false	[]	(empty)
+p3411_customers	customer_name	VARCHAR	false	[]	(empty)	[]
 
 # ============================================================
 # Test 15: FOR METRIC with LIMIT
@@ -198,12 +198,12 @@ p3411_customers	customer_name	VARCHAR	false	[]	(empty)
 # LIMIT 3 returns all (deterministic since there are exactly 3)
 # ============================================================
 
-query TTTTTT rowsort
+query TTTTTTT rowsort
 SHOW SEMANTIC DIMENSIONS IN filter_sv FOR METRIC total_amount LIMIT 3
 ----
-p3411_customers	customer_name	VARCHAR	false	[]	(empty)
-p3411_customers	region	VARCHAR	false	[]	(empty)
-p3411_orders	order_date	DATE	false	[]	(empty)
+p3411_customers	customer_name	VARCHAR	false	[]	(empty)	[]
+p3411_customers	region	VARCHAR	false	[]	(empty)	[]
+p3411_orders	order_date	DATE	false	[]	(empty)	[]
 
 # ============================================================
 # Test 16: Error: wrong clause order (LIKE after IN)

@@ -1,9 +1,9 @@
 //! `SHOW SEMANTIC DIMENSIONS ... FOR METRIC` dispatcher (ST-2).
 //!
 //! A two-argument TF `(view_name, metric_name)` returning Snowflake's columns
-//! `(table_name, name, data_type, required, synonyms, comment)`: five VARCHAR
-//! and the BOOL `required`, which goes last on the wire and fourth in the
-//! output. It doesn't fit the shared `EntityRow` (extra metric arg, fan-trap
+//! `(table_name, name, data_type, required, synonyms, comment, labels)`: six
+//! VARCHAR and the BOOL `required`, which goes last on the wire and fourth in
+//! the output. It doesn't fit the shared `EntityRow` (extra metric arg, fan-trap
 //! reachability filter, BOOL column), so it keeps its own body — but routes the
 //! scaffold through [`crate::ddl::read_ffi::run_dispatcher`] like every other
 //! read-side function.
@@ -170,6 +170,11 @@ unsafe fn show_dims_for_metric(
                     types.dimension(&d.name, d.output_type.as_ref()),
                     format_json_array(&d.synonyms),
                     d.comment.clone().unwrap_or_default(),
+                    format_json_array(&if d.is_filter {
+                        vec!["FILTER".to_string()]
+                    } else {
+                        Vec::new()
+                    }),
                 ],
                 required_dim_names.contains(&crate::ident::normalize_ident_part(&d.name)),
             )

@@ -322,10 +322,10 @@ SHOW SEMANTIC MATERIALIZATIONS IN dcf_sp;
 ----
 memory	dcf_b	dcf_sp	dcf_mat_b	dcf_orders	["region"]	[]
 
-query TTTTTT nosort
+query TTTTTTT nosort
 SHOW SEMANTIC DIMENSIONS IN dcf_sp FOR METRIC total;
 ----
-dcf_orders	region	VARCHAR	false	[]	(empty)
+dcf_orders	region	VARCHAR	false	[]	(empty)	[]
 
 # F-090: search_path.rs::RESOLVING_READ_FUNCTIONS (base-table schema) — PRE-EXISTING (TECH-DEBT #96): DESCRIBE reports BASE_TABLE_SCHEMA_NAME = the VIEW's schema (dcf_b), but the base table resolved at CREATE to memory.main.dcf_orders (as EXPLAIN shows); there is no dcf_b.dcf_orders
 query T

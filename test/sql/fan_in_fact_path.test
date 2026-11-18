@@ -85,12 +85,12 @@ CREATE SEMANTIC VIEW fi_sv AS
 # shipment once per item_qty group (Snowflake fixture 8 S1-S3, Phase 7 PR 4e).
 # ============================================================
 
-query TTTTTT rowsort
+query TTTTTTT rowsort
 SHOW SEMANTIC DIMENSIONS IN fi_sv FOR METRIC total_ship_cost
 ----
-fi_customers	customer_country	VARCHAR	false	[]	(empty)
-fi_line_items	item_qty	INTEGER	false	[]	(empty)
-fi_shipments	carrier	VARCHAR	false	[]	(empty)
+fi_customers	customer_country	VARCHAR	false	[]	(empty)	[]
+fi_line_items	item_qty	INTEGER	false	[]	(empty)	[]
+fi_shipments	carrier	VARCHAR	false	[]	(empty)	[]
 
 # The listed fanned dimension is answered: shipment 1000 (order 10, 4.50) is
 # counted once under each of order 10's quantities, 1 and 2.
@@ -106,12 +106,12 @@ SELECT * FROM SEMANTIC_VIEW(fi_sv DIMENSIONS item_qty METRICS total_ship_cost);
 # and `s` across the same fan-out.
 # ============================================================
 
-query TTTTTT rowsort
+query TTTTTTT rowsort
 SHOW SEMANTIC DIMENSIONS IN fi_sv FOR METRIC line_total
 ----
-fi_customers	customer_country	VARCHAR	false	[]	(empty)
-fi_line_items	item_qty	INTEGER	false	[]	(empty)
-fi_shipments	carrier	VARCHAR	false	[]	(empty)
+fi_customers	customer_country	VARCHAR	false	[]	(empty)	[]
+fi_line_items	item_qty	INTEGER	false	[]	(empty)	[]
+fi_shipments	carrier	VARCHAR	false	[]	(empty)	[]
 
 # ============================================================
 # Test 3: a fact on the base table with a dimension across the fan-in

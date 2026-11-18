@@ -9,7 +9,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-_No unreleased changes yet._
+### Fixed
+
+- `SHOW SEMANTIC DIMENSIONS ... FOR METRIC` ends with a `labels` column (`["FILTER"]` for a named filter, `[]` otherwise), as in Snowflake and as `SHOW SEMANTIC DIMENSIONS` already does.
+- An ASOF relationship whose referenced columns other than the ASOF one are the referenced table's key, such as `notes(order_id, noted_at) REFERENCES orders(order_id, ASOF placed_at)` with `orders` keyed on `order_id`, is accepted, as in Snowflake. `CREATE` used to refuse it unless the key included the ASOF column.
 
 ## [0.20.0] - 2026-11-18
 

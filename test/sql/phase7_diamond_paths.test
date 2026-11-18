@@ -146,21 +146,21 @@ Bo	20
 # SHOW ... FOR METRIC lists every dimension a metric reaches by some path that
 # does not fan out. Revenue reaches stores directly (o -> s), though the tree
 # walked from regions, the first table, went o -> c -> r -> s and hid it.
-query TTTTTT rowsort
+query TTTTTTT rowsort
 SHOW SEMANTIC DIMENSIONS IN dv_r FOR METRIC revenue
 ----
-dp_customers	cust_name	VARCHAR	false	[]	(empty)
-dp_orders	order_id	INTEGER	false	[]	(empty)
-dp_regions	region_name	VARCHAR	false	[]	(empty)
-dp_stores	store_name	VARCHAR	false	[]	(empty)
+dp_customers	cust_name	VARCHAR	false	[]	(empty)	[]
+dp_orders	order_id	INTEGER	false	[]	(empty)	[]
+dp_regions	region_name	VARCHAR	false	[]	(empty)	[]
+dp_stores	store_name	VARCHAR	false	[]	(empty)	[]
 
 # A customer count reaches regions, not orders (c -> o fans out) or stores
 # (c -> r -> s fans out).
-query TTTTTT rowsort
+query TTTTTTT rowsort
 SHOW SEMANTIC DIMENSIONS IN dv_r FOR METRIC customer_count
 ----
-dp_customers	cust_name	VARCHAR	false	[]	(empty)
-dp_regions	region_name	VARCHAR	false	[]	(empty)
+dp_customers	cust_name	VARCHAR	false	[]	(empty)	[]
+dp_regions	region_name	VARCHAR	false	[]	(empty)	[]
 
 # D1o: Snowflake creates the diamond with orders first, and so do we now. It
 # used to be refused ("diamond: 'r' is reachable from multiple tables").
@@ -272,13 +272,13 @@ Ana	S-EU
 Ana	S-US
 Bo	S-US
 
-query TTTTTT rowsort
+query TTTTTTT rowsort
 SHOW SEMANTIC DIMENSIONS IN dv_o FOR METRIC revenue
 ----
-dp_customers	cust_name	VARCHAR	false	[]	(empty)
-dp_orders	order_id	INTEGER	false	[]	(empty)
-dp_regions	region_name	VARCHAR	false	[]	(empty)
-dp_stores	store_name	VARCHAR	false	[]	(empty)
+dp_customers	cust_name	VARCHAR	false	[]	(empty)	[]
+dp_orders	order_id	INTEGER	false	[]	(empty)	[]
+dp_regions	region_name	VARCHAR	false	[]	(empty)	[]
+dp_stores	store_name	VARCHAR	false	[]	(empty)	[]
 
 # A one-to-one step back is safe for SHOW, but not a chain: shipments
 # reference their order one-to-one and a region of their own, and orders reach
@@ -324,10 +324,10 @@ SELECT * FROM SEMANTIC_VIEW(dq_v DIMENSIONS s.carrier METRICS o.revenue);
 ----
 across a many-to-many relationship
 
-query TTTTTT rowsort
+query TTTTTTT rowsort
 SHOW SEMANTIC DIMENSIONS IN dq_v FOR METRIC revenue
 ----
-dq_regions	region_name	VARCHAR	false	[]	(empty)
+dq_regions	region_name	VARCHAR	false	[]	(empty)	[]
 
 # Phase 7 PR 5b (TECH-DEBT #109): a semi-additive metric follows the path its
 # USING picks. first_by_store keeps the earliest order (NON ADDITIVE BY
