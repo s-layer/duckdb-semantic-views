@@ -115,7 +115,7 @@ Returns one row per reachable dimension with 7 columns:
 
    Added the ``synonyms`` and ``comment`` columns, after ``required``, as in Snowflake's output.
 
-.. versionchanged:: 0.21.0
+.. versionchanged:: 0.20.0
 
    Added the ``labels`` column, after ``comment``, as in Snowflake's output and in
    :doc:`SHOW SEMANTIC DIMENSIONS <show-semantic-dimensions>`.
