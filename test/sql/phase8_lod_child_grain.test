@@ -661,6 +661,37 @@ SELECT * FROM SEMANTIC_VIEW(sd_split DIMENSIONS regions.manager METRICS avg_excl
 Nina	1600.0
 Sam	500.0
 
+# Three paths: orders reach regions through customers, stores and
+# warehouses, declared in that order. The warehouses path's names (a_...)
+# sort first, so it is taken, though it is declared last (North: orders
+# 101-105, 1200; South: 106-110, 900).
+statement ok
+CREATE TABLE orders_w AS SELECT o.*, CASE WHEN order_id <= 105 THEN 1 ELSE 2 END AS warehouse_id FROM orders o;
+
+statement ok
+CREATE TABLE warehouses (warehouse_id INTEGER, region VARCHAR);
+
+statement ok
+INSERT INTO warehouses VALUES (1, 'North'), (2, 'South');
+
+statement ok
+CREATE SEMANTIC VIEW sd_three
+  TABLES (customers AS customers PRIMARY KEY (customer_id), orders AS orders_w PRIMARY KEY (order_id),
+    stores AS stores PRIMARY KEY (store_id), warehouses AS warehouses PRIMARY KEY (warehouse_id),
+    regions AS regions PRIMARY KEY (region))
+  RELATIONSHIPS (c_ord_cust AS orders(customer_id) REFERENCES customers, c_cust_reg AS customers(region) REFERENCES regions,
+    s_ord_store AS orders(store_id) REFERENCES stores, s_store_reg AS stores(region) REFERENCES regions,
+    a_ord_wh AS orders(warehouse_id) REFERENCES warehouses, a_wh_reg AS warehouses(region) REFERENCES regions)
+  FACTS (orders.order_amount AS amount)
+  DIMENSIONS (customers.customer_id AS customer_id, stores.store_id AS store_id, regions.manager AS manager)
+  METRICS (avg_store_rev_excl AS AVG(SUM(orders.order_amount) EXCLUDE DIMENSIONS (stores.store_id)));
+
+query TR
+SELECT * FROM SEMANTIC_VIEW(sd_three DIMENSIONS regions.manager METRICS avg_store_rev_excl) ORDER BY 1 NULLS LAST;
+----
+Nina	1200.0
+Sam	900.0
+
 # G3: a filter on the path not taken is refused (010246).
 statement error
 SELECT * FROM SEMANTIC_VIEW(sd_cust_first DIMENSIONS regions.manager METRICS avg_customer_rev WHERE stores.store_id = 1);
@@ -825,3 +856,190 @@ query TR
 SELECT * FROM SEMANTIC_VIEW(sales_child_f DIMENSIONS customers.region METRICS avg_orders_fixed WHERE order_returns.reason = 'late') ORDER BY 1 NULLS LAST;
 ----
 North	4.0
+
+# Beside a plain metric, a grain table the child table references (each
+# return's reason label) is joined from the returns: the values are those of
+# the query by reason alone (14d C1), each with its reason's label.
+statement ok
+CREATE TABLE reasons (reason VARCHAR, label VARCHAR);
+
+statement ok
+INSERT INTO reasons VALUES ('damaged', 'Damaged'), ('late', 'Late');
+
+statement ok
+CREATE SEMANTIC VIEW sales_child_lbl
+  TABLES (customers AS customers PRIMARY KEY (customer_id), orders AS orders PRIMARY KEY (order_id),
+    order_returns AS order_returns PRIMARY KEY (return_id), reasons AS reasons PRIMARY KEY (reason))
+  RELATIONSHIPS (orders(customer_id) REFERENCES customers, order_returns(order_id) REFERENCES orders,
+    order_returns(reason) REFERENCES reasons)
+  FACTS (orders.order_amount AS amount)
+  DIMENSIONS (customers.customer_id AS customer_id, order_returns.reason AS reason, reasons.label AS label)
+  METRICS (
+    orders.total_revenue AS SUM(amount),
+    avg_customer_rev AS AVG(SUM(orders.order_amount) INCLUDE DIMENSIONS (customers.customer_id))
+  );
+
+query TTRR
+SELECT * FROM SEMANTIC_VIEW(sales_child_lbl DIMENSIONS order_returns.reason, reasons.label METRICS orders.total_revenue, avg_customer_rev) ORDER BY 1 NULLS LAST;
+----
+damaged	Damaged	700.00	350.0
+late	Late	900.00	900.0
+NULL	NULL	900.00	225.0
+
+
+# Beside a plain metric on a home with no primary key, whose returns
+# reference it through a UNIQUE key, the plain metric is refused as a fan
+# trap (a fan-out is answered once per group only from a primary key), so
+# the LOD expression never needs the home's rows without one.
+statement ok
+CREATE SEMANTIC VIEW sales_child_uq
+  TABLES (customers AS customers PRIMARY KEY (customer_id), orders AS orders UNIQUE (order_id),
+    order_returns AS order_returns PRIMARY KEY (return_id))
+  RELATIONSHIPS (orders(customer_id) REFERENCES customers, order_returns(order_id) REFERENCES orders(order_id))
+  FACTS (orders.order_amount AS amount)
+  DIMENSIONS (customers.customer_id AS customer_id, order_returns.reason AS reason)
+  METRICS (
+    orders.total_revenue AS SUM(amount),
+    avg_customer_rev AS AVG(SUM(orders.order_amount) INCLUDE DIMENSIONS (customers.customer_id))
+  );
+
+statement error
+SELECT * FROM SEMANTIC_VIEW(sales_child_uq DIMENSIONS order_returns.reason METRICS orders.total_revenue, avg_customer_rev);
+----
+fan trap
+
+# Review round 1. A home with a two-column primary key: the home rows are
+# matched to their returns on both columns. Each pair of orders shares an
+# order_no, so a match on order_no alone would fan out. Same orders and
+# returns as sales_child, so C1 and P1 are the answers.
+statement ok
+CREATE TABLE orders_cp (order_no INTEGER, part INTEGER, customer_id INTEGER, amount DECIMAL(10,2));
+
+statement ok
+INSERT INTO orders_cp SELECT (order_id - 99) // 2, (order_id - 100) % 2 + 1, customer_id, amount FROM orders;
+
+statement ok
+CREATE TABLE order_returns_cp (return_id INTEGER, order_no INTEGER, part INTEGER, reason VARCHAR);
+
+statement ok
+INSERT INTO order_returns_cp SELECT return_id, (order_id - 99) // 2, (order_id - 100) % 2 + 1, reason FROM order_returns;
+
+statement ok
+CREATE SEMANTIC VIEW sales_child_cp
+  TABLES (customers AS customers PRIMARY KEY (customer_id), orders_cp AS orders_cp PRIMARY KEY (order_no, part),
+    order_returns_cp AS order_returns_cp PRIMARY KEY (return_id))
+  RELATIONSHIPS (orders_cp(customer_id) REFERENCES customers, order_returns_cp(order_no, part) REFERENCES orders_cp)
+  FACTS (orders_cp.order_amount AS amount)
+  DIMENSIONS (customers.customer_id AS customer_id, order_returns_cp.reason AS reason)
+  METRICS (
+    orders_cp.total_revenue AS SUM(amount),
+    avg_customer_rev AS AVG(SUM(orders_cp.order_amount) INCLUDE DIMENSIONS (customers.customer_id))
+  );
+
+query TRR
+SELECT * FROM SEMANTIC_VIEW(sales_child_cp DIMENSIONS order_returns_cp.reason METRICS orders_cp.total_revenue, avg_customer_rev) ORDER BY 1 NULLS LAST;
+----
+damaged	700.00	350.0
+late	900.00	900.0
+NULL	900.00	225.0
+
+query TR
+SELECT * FROM SEMANTIC_VIEW(sales_child_cp DIMENSIONS order_returns_cp.reason METRICS avg_customer_rev) ORDER BY 1 NULLS LAST;
+----
+damaged	350.0
+late	1100.0
+NULL	100.0
+
+# Review round 1. A FIXED expression whose table reaches the grouped table
+# by no chain of foreign keys and two ways (customers and stores meet through
+# orders and through regions) is refused, as before #115.
+statement ok
+CREATE SEMANTIC VIEW sd_fixed_meet
+  TABLES (customers AS customers PRIMARY KEY (customer_id), orders AS orders PRIMARY KEY (order_id),
+    stores AS stores PRIMARY KEY (store_id), regions AS regions PRIMARY KEY (region))
+  RELATIONSHIPS (a_ord_cust AS orders(customer_id) REFERENCES customers, b_ord_store AS orders(store_id) REFERENCES stores,
+    a_cust_reg AS customers(region) REFERENCES regions, b_store_reg AS stores(region) REFERENCES regions)
+  DIMENSIONS (customers.customer_id AS customer_id, customers.cregion AS region, stores.store_id AS store_id)
+  METRICS (avg_cust_per_region AS AVG(COUNT(customers.customer_id) FIXED DIMENSIONS (customers.cregion)));
+
+statement error
+SELECT * FROM SEMANTIC_VIEW(sd_fixed_meet DIMENSIONS stores.store_id METRICS avg_cust_per_region);
+----
+more than one path
+
+# SHOW ... FOR METRIC leaves store_id out too, as the query refuses it, but
+# an INCLUDE or EXCLUDE metric across a diamond lists the far table (above).
+query T
+SELECT name FROM (SHOW SEMANTIC DIMENSIONS IN sd_fixed_meet FOR METRIC avg_cust_per_region) ORDER BY 1;
+----
+cregion
+customer_id
+
+# A FIXED expression read through a child table that reaches the
+# expression's dimension table two ways (each return names its customer as
+# well as its order) is refused: its key would follow whichever path the
+# relationship names pick.
+statement ok
+CREATE TABLE order_returns_c AS SELECT r.*, o.customer_id FROM order_returns r LEFT JOIN orders o USING (order_id);
+
+statement ok
+CREATE SEMANTIC VIEW sales_child_2p
+  TABLES (customers AS customers PRIMARY KEY (customer_id), orders AS orders PRIMARY KEY (order_id),
+    order_returns AS order_returns_c PRIMARY KEY (return_id))
+  RELATIONSHIPS (orders(customer_id) REFERENCES customers, order_returns(order_id) REFERENCES orders,
+    order_returns(customer_id) REFERENCES customers)
+  DIMENSIONS (customers.customer_id AS customer_id, orders.order_id AS order_id, order_returns.reason AS reason)
+  METRICS (avg_orders_fixed AS AVG(COUNT(orders.order_id) FIXED DIMENSIONS (customers.customer_id)));
+
+statement error
+SELECT * FROM SEMANTIC_VIEW(sales_child_2p DIMENSIONS order_returns.reason METRICS avg_orders_fixed);
+----
+more than one path
+
+# An EXCLUDE expression across the diamond filtered on the path not taken
+# (the stores, when the customers' path is taken) is refused, as G3 is.
+statement error
+SELECT * FROM SEMANTIC_VIEW(sd_cust_first DIMENSIONS regions.manager METRICS avg_store_rev_excl WHERE stores.store_id = 1);
+----
+regions
+
+# Two paths to a table, one of them a role-played table (departure and
+# arrival airports), are no diamond whatever the declaration order: the
+# roles need a USING, so an INCLUDE expression by the airport is refused in
+# both orders.
+statement ok
+CREATE TABLE airports (code VARCHAR, city VARCHAR);
+
+statement ok
+CREATE TABLE hubs (hub_id INTEGER, code VARCHAR);
+
+statement ok
+CREATE TABLE flights (flight_id INTEGER, hub_id INTEGER, dep VARCHAR, arr VARCHAR, seats INTEGER);
+
+statement ok
+CREATE SEMANTIC VIEW sd_air_hub_first
+  TABLES (flights AS flights PRIMARY KEY (flight_id), hubs AS hubs PRIMARY KEY (hub_id), airports AS airports PRIMARY KEY (code))
+  RELATIONSHIPS (f_hub AS flights(hub_id) REFERENCES hubs, h_air AS hubs(code) REFERENCES airports,
+    f_dep AS flights(dep) REFERENCES airports, f_arr AS flights(arr) REFERENCES airports)
+  FACTS (flights.seats AS seats)
+  DIMENSIONS (flights.flight_id AS flight_id, airports.city AS city)
+  METRICS (avg_flight_seats AS AVG(SUM(flights.seats) INCLUDE DIMENSIONS (flights.flight_id)));
+
+statement ok
+CREATE SEMANTIC VIEW sd_air_roles_first
+  TABLES (flights AS flights PRIMARY KEY (flight_id), hubs AS hubs PRIMARY KEY (hub_id), airports AS airports PRIMARY KEY (code))
+  RELATIONSHIPS (f_dep AS flights(dep) REFERENCES airports, f_arr AS flights(arr) REFERENCES airports,
+    f_hub AS flights(hub_id) REFERENCES hubs, h_air AS hubs(code) REFERENCES airports)
+  FACTS (flights.seats AS seats)
+  DIMENSIONS (flights.flight_id AS flight_id, airports.city AS city)
+  METRICS (avg_flight_seats AS AVG(SUM(flights.seats) INCLUDE DIMENSIONS (flights.flight_id)));
+
+statement error
+SELECT * FROM SEMANTIC_VIEW(sd_air_hub_first DIMENSIONS airports.city METRICS avg_flight_seats);
+----
+airports
+
+statement error
+SELECT * FROM SEMANTIC_VIEW(sd_air_roles_first DIMENSIONS airports.city METRICS avg_flight_seats);
+----
+airports

@@ -370,7 +370,7 @@ Across Two Paths
 
 The aggregated table can reach a grouped table along two paths, as orders reach regions through customers and through stores. A plain metric is refused there. An ``INCLUDE`` or ``EXCLUDE`` expression is computed, as in Snowflake, along one path, which the relationship names choose. Read from the aggregated table, the paths are compared by the names of their relationships, upper-cased, hop by hop, and the first name that differs decides: the smaller name wins, whatever the paths' lengths. Any other table the expression needs, such as an ``INCLUDE`` dimension on the other path, is joined too, and a table that two relationships reach from the joined tables is joined on both.
 
-So name the relationships to choose the path. Snowflake gives an unnamed relationship a random name each time the view is created, so there the path can change with every ``CREATE``; the extension gives it a name made from its tables and columns (``SYS_RELATIONSHIP_...``, shown by ``DESCRIBE SEMANTIC VIEW``), so the path stays the same, but it is not one you chose. A query that filters by a table on the path not taken is refused, as in Snowflake.
+So name the relationships to choose the path. Snowflake gives an unnamed relationship a random name each time the view is created, so there the path can change with every ``CREATE``; the extension gives it a name made from its position in ``RELATIONSHIPS``, its tables and its columns (``SYS_RELATIONSHIP_...``, shown by ``DESCRIBE SEMANTIC VIEW``), so the path stays the same while the view does, but it is not one you chose, and it can change when a ``CREATE OR REPLACE`` adds a relationship before the others. A query that filters by a table on the path not taken is refused, as in Snowflake.
 
 
 .. _howto-lod-facts:

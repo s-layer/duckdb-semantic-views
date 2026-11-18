@@ -1100,7 +1100,9 @@ mod child_table {
         ("rcat", "r", "rcat"),
     ];
     const RCAT: usize = 3;
-    const METS: [&str; 3] = ["sum_ov", "m_ie", "m_ie_inl"];
+    /// `cnt_r` is a plain metric on the child, which leaves the LOD
+    /// expression's rows alone (14e E1, E2).
+    const METS: [&str; 4] = ["sum_ov", "m_ie", "m_ie_inl", "cnt_r"];
 
     #[derive(Debug, Clone)]
     enum Pred {
@@ -1388,6 +1390,16 @@ mod child_table {
             if let Some(s) = &sum {
                 groups.extend(s.keys().cloned());
             }
+            let cnt = self.mets.contains(&3).then(|| {
+                let mut per: BTreeMap<Row, i128> = BTreeMap::new();
+                for (row, _) in self.child_rows() {
+                    *per.entry(self.project(&row, &self.dims)).or_default() += 1;
+                }
+                per
+            });
+            if let Some(c) = &cnt {
+                groups.extend(c.keys().cloned());
+            }
             // Alone, every group the child rows list has a value. Beside a
             // plain metric the values come from the home rows, so a group only
             // orphaned child rows (no order) list has none and is not listed.
@@ -1409,6 +1421,14 @@ mod child_table {
                     for m in &self.mets {
                         row.push(match METS[*m] {
                             "sum_ov" => sum.as_ref().and_then(|s| s.get(&g).copied().flatten()),
+                            "cnt_r" => {
+                                let c = cnt.as_ref().and_then(|c| c.get(&g).copied());
+                                if self.dims.is_empty() {
+                                    Some(c.unwrap_or(0))
+                                } else {
+                                    c
+                                }
+                            }
                             _ if self.dims.is_empty() && ie.is_empty() => empty(self.outer),
                             _ => ie.get(&g).copied().flatten(),
                         });
@@ -1473,6 +1493,7 @@ mod child_table {
                     metric("sum_ov", "SUM(o.ov)".to_string(), Some("o")),
                     metric("m_ie", format!("{outer}(lie)"), None),
                     metric("m_ie_inl", format!("{outer}({})", self.lie_sql()), None),
+                    metric("cnt_r", "COUNT(r.id)".to_string(), Some("r")),
                 ],
                 ..Default::default()
             }
@@ -1581,7 +1602,7 @@ mod child_table {
             prop::sample::subsequence(vec![0usize, 1, 2], 0..=2),
             arb_agg(),
             prop::sample::subsequence((0..DIMS.len()).collect::<Vec<usize>>(), 0..=2),
-            prop::sample::subsequence(vec![0usize, 1, 2], 1..=2),
+            prop::sample::subsequence(vec![0usize, 1, 2, 3], 1..=3),
             prop::option::of(arb_pred()),
         )
             .prop_map(
@@ -1594,7 +1615,7 @@ mod child_table {
                     if !touched.contains(&RCAT) {
                         dims.push(RCAT);
                     }
-                    if mets == [0] {
+                    if !mets.iter().any(|m| *m == 1 || *m == 2) {
                         mets.push(1);
                     }
                     Case {
@@ -1666,6 +1687,9 @@ mod child_table {
                 if case.mets.contains(&0) {
                     labels.push("beside a plain metric");
                 }
+                if case.mets.contains(&3) && !case.mets.contains(&0) {
+                    labels.push("beside a plain metric on the child");
+                }
                 if case.inst.r.iter().any(|(_, rcat)| rcat.is_none()) && by_child {
                     labels.push("a NULL child group");
                 }
@@ -1683,6 +1707,7 @@ mod child_table {
             "exclude filtered by the child",
             "an order repeated in a group",
             "beside a plain metric",
+            "beside a plain metric on the child",
             "a NULL child group",
         ] {
             assert!(
@@ -1695,23 +1720,29 @@ mod child_table {
 
 /// `INCLUDE` / `EXCLUDE DIMENSIONS` across a **diamond** (Snowflake fixtures
 /// 14d and 14e): `o` reaches `g` through `c` and through `s`, each hop a
-/// named relationship. A plain metric by `g` is refused there; an LOD
-/// expression follows one path, the one whose relationship names, upper-cased
-/// and read from `o`, come first. The four names are drawn in random order
-/// from a pool whose upper-cased order differs from its raw order, so the
-/// case-folding is exercised too.
+/// named relationship, and in about half the cases the `s` path is a hop
+/// longer (`s -> d -> g`). A plain metric by `g` is refused there; an LOD
+/// expression follows one path, the one whose relationship names,
+/// upper-cased and read from `o`, come first, the first difference deciding
+/// whatever the lengths. The names are drawn in random order from a pool
+/// whose upper-cased order differs from its raw order, so the case-folding
+/// is exercised too. About half the cases filter on `gcat`.
 ///
-/// - `INCLUDE` the key `K` (`c.id` or `s.id`) by `gcat`: each order's `gcat`
-///   is read along the chosen path. When `K` is on the other path, its table
-///   is joined from `o` as well and `g` is joined on both relationships into
-///   it, ANDed (14d D3, D6), so an order whose customer and store sit in
-///   different `g` rows has a `NULL` `gcat`. The value per `(gcat, K)` is the
-///   aggregate over its orders, and a group's the outer aggregate of its
-///   values.
+/// - `INCLUDE` the key `K` (`c.id` or `s.id`) by `gcat`: each order's value
+///   key is its `gcat`, read along the chosen path, and its `K`. When `K`'s
+///   table is on the other path and references `g` itself, `g` is joined on
+///   both relationships into it, ANDed (14d D3, D6), so an order whose
+///   customer and store sit in different `g` rows has a `NULL` `gcat`. The
+///   values are aggregated over the orders the filter keeps, and listed by
+///   the `K` rows, each with its own `gcat` (read along its own path): a
+///   value no `K` row has the key of gets `NULL` dimensions.
 /// - `EXCLUDE` the key `K` by `gcat` and `K`: the value per `gcat` is read
 ///   along the chosen path alone (the excluded key's table is not joined),
-///   and listed for every `K` row whose own `gcat` (through `K`) is that
-///   value's; a value no `K` row lists is read with `NULL` dimensions.
+///   and listed for every `K` row whose own `gcat` is that value's; a value
+///   no `K` row lists is read with `NULL` dimensions.
+/// - The filter applies to the orders the values are computed over, and
+///   again to the listed rows, after the match (14f), so a `NULL`-dimension
+///   row is kept or dropped as the filter evaluates on `NULL`.
 mod diamond {
     use super::{lookup, sql_cell, Agg};
     use proptest::prelude::*;
@@ -1724,8 +1755,9 @@ mod diamond {
     type Cell = Option<i64>;
     type Row = Vec<Option<i128>>;
 
-    /// Upper-cased: `D_A < D_B < D_C < D_D`; raw: `D_c < d_A < d_D < d_b`.
-    const NAMES: [&str; 4] = ["d_A", "d_b", "D_c", "d_D"];
+    /// Upper-cased: `D_A < D_B < D_C < D_D < D_E`; raw:
+    /// `D_c < D_e < d_A < d_D < d_b`.
+    const NAMES: [&str; 5] = ["d_A", "d_b", "D_c", "d_D", "D_e"];
 
     #[derive(Debug, Clone)]
     struct Instance {
@@ -1733,22 +1765,34 @@ mod diamond {
         o: Vec<(Cell, Cell, Cell)>,
         /// `fk_g` of each customer.
         c: Vec<Cell>,
-        /// `fk_g` of each store.
+        /// `fk_g` (or `fk_d` on the long path) of each store.
         s: Vec<Cell>,
+        /// `fk_g` of each district (the long path only).
+        d: Vec<Cell>,
         /// `gcat` of each `g` row.
         g: Vec<Cell>,
+    }
+
+    #[derive(Debug, Clone, Copy)]
+    enum Pred {
+        Eq(i64),
+        IsNull,
     }
 
     #[derive(Debug, Clone)]
     struct Case {
         inst: Instance,
-        /// Names of `o -> c`, `o -> s`, `c -> g`, `s -> g`.
-        names: [usize; 4],
+        /// Names of `o -> c`, `o -> s`, `c -> g`, `s -> g` (or `s -> d`),
+        /// `d -> g`.
+        names: [usize; 5],
+        /// The `s` path goes through `d`.
+        long: bool,
         include: bool,
         /// The key's table: `c` when true, else `s`.
         key_c: bool,
         agg: Agg,
         outer: Agg,
+        pred: Option<Pred>,
     }
 
     impl Case {
@@ -1756,17 +1800,28 @@ mod diamond {
             NAMES[self.names[hop]]
         }
 
-        /// Whether the path through `c` is taken.
-        fn through_c(&self) -> bool {
-            let up = |h: usize| self.name(h).to_uppercase();
-            (up(0), up(2)) < (up(1), up(3))
+        fn path_names(&self, through_c: bool) -> Vec<&'static str> {
+            match (through_c, self.long) {
+                (true, _) => vec![self.name(0), self.name(2)],
+                (false, false) => vec![self.name(1), self.name(3)],
+                (false, true) => vec![self.name(1), self.name(3), self.name(4)],
+            }
         }
 
-        /// `fk_g` of the customer or store `i`.
+        /// Whether the path through `c` is taken.
+        fn through_c(&self) -> bool {
+            let up = |p: Vec<&str>| p.iter().map(|n| n.to_uppercase()).collect::<Vec<_>>();
+            up(self.path_names(true)) < up(self.path_names(false))
+        }
+
+        /// The `g` row of the customer (`on_c`) or store `i`, along its own
+        /// path.
         fn fk_g(&self, on_c: bool, i: usize) -> Option<usize> {
             let inst = &self.inst;
             if on_c {
                 lookup(inst.c[i], inst.g.len())
+            } else if self.long {
+                lookup(inst.s[i], inst.d.len()).and_then(|d| lookup(inst.d[d], inst.g.len()))
             } else {
                 lookup(inst.s[i], inst.g.len())
             }
@@ -1785,13 +1840,22 @@ mod diamond {
             g.and_then(|g| self.inst.g[g]).map(i128::from)
         }
 
+        fn passes(&self, gcat: Option<i128>) -> bool {
+            match self.pred {
+                None => true,
+                Some(Pred::Eq(k)) => gcat == Some(i128::from(k)),
+                Some(Pred::IsNull) => gcat.is_none(),
+            }
+        }
+
         /// The `g` row an order reaches along the chosen path, joined on
-        /// the key's relationship too when `with_key` and the key's table is
-        /// on the other path.
+        /// the key's relationship into `g` too when `with_key`, the key's
+        /// table is on the other path and it references `g` itself.
         fn order_g(&self, o: usize, with_key: bool) -> Option<usize> {
             let x = self.through_c();
             let xg = self.parent(x, o).and_then(|p| self.fk_g(x, p));
-            if !with_key || self.key_c == x {
+            let direct = self.key_c || !self.long;
+            if !with_key || self.key_c == x || !direct {
                 return xg;
             }
             let kg = self
@@ -1813,11 +1877,14 @@ mod diamond {
             };
             let mut members: BTreeMap<Row, Vec<Option<i128>>> = BTreeMap::new();
             for (o, (_, _, ov)) in inst.o.iter().enumerate() {
+                let g = self.gcat(self.order_g(o, self.include));
+                if !self.passes(g) {
+                    continue;
+                }
                 let key = if self.include {
-                    let k = self.parent(self.key_c, o).map(|k| k as i128);
-                    vec![self.gcat(self.order_g(o, true)), k]
+                    vec![g, self.parent(self.key_c, o).map(|k| k as i128)]
                 } else {
-                    vec![self.gcat(self.order_g(o, false))]
+                    vec![g]
                 };
                 members.entry(key).or_default().push(ov.map(i128::from));
             }
@@ -1825,20 +1892,32 @@ mod diamond {
                 .into_iter()
                 .map(|(k, vs)| (k, self.agg.apply(vs.into_iter())))
                 .collect();
+            // The key rows, each `(gcat, id)` along its own path.
+            let listed: Vec<Row> = (0..keys_n)
+                .map(|r| vec![self.gcat(self.fk_g(self.key_c, r)), Some(r as i128)])
+                .collect();
             let mut per: BTreeMap<Row, Vec<Option<i128>>> = BTreeMap::new();
             for (k, v) in &values {
-                if self.include {
-                    per.entry(vec![k[0]]).or_default().push(*v);
-                    continue;
-                }
-                let listed: BTreeSet<Row> = (0..keys_n)
-                    .filter(|r| self.gcat(self.fk_g(self.key_c, *r)) == k[0])
-                    .map(|r| vec![k[0], Some(r as i128)])
+                let rows: Vec<&Row> = listed
+                    .iter()
+                    .filter(|l| if self.include { *l == k } else { l[0] == k[0] })
                     .collect();
-                if listed.is_empty() {
-                    per.entry(vec![None, None]).or_default().push(*v);
-                }
-                for g in listed {
+                let groups: BTreeSet<Row> = if rows.is_empty() {
+                    let null = if self.include {
+                        vec![None]
+                    } else {
+                        vec![None, None]
+                    };
+                    std::iter::once(null)
+                        .filter(|_| self.passes(None))
+                        .collect()
+                } else {
+                    rows.into_iter()
+                        .filter(|l| self.passes(l[0]))
+                        .map(|l| if self.include { vec![l[0]] } else { l.clone() })
+                        .collect()
+                };
+                for g in groups {
                     per.entry(g).or_default().push(*v);
                 }
             }
@@ -1885,14 +1964,22 @@ mod diamond {
             };
             let kind = if self.include { "INCLUDE" } else { "EXCLUDE" };
             let k = if self.key_c { "c" } else { "s" };
+            let mut tables = vec![table("o"), table("c"), table("s"), table("g")];
+            let mut joins = vec![
+                join("o", "c", "fk_c", self.name(0)),
+                join("o", "s", "fk_s", self.name(1)),
+                join("c", "g", "fk_g", self.name(2)),
+            ];
+            if self.long {
+                tables.push(table("d"));
+                joins.push(join("s", "d", "fk_g", self.name(3)));
+                joins.push(join("d", "g", "fk_g", self.name(4)));
+            } else {
+                joins.push(join("s", "g", "fk_g", self.name(3)));
+            }
             SemanticViewDefinition {
-                tables: vec![table("o"), table("c"), table("s"), table("g")],
-                joins: vec![
-                    join("o", "c", "fk_c", self.name(0)),
-                    join("o", "s", "fk_s", self.name(1)),
-                    join("c", "g", "fk_g", self.name(2)),
-                    join("s", "g", "fk_g", self.name(3)),
-                ],
+                tables,
+                joins,
                 dimensions: vec![
                     dim("gcat", "g", "gcat"),
                     dim("cid", "c", "id"),
@@ -1923,16 +2010,19 @@ mod diamond {
             let mut sql = "CREATE TABLE o_tbl (id BIGINT, fk_c BIGINT, fk_s BIGINT, ov BIGINT);
                  CREATE TABLE c_tbl (id BIGINT, fk_g BIGINT);
                  CREATE TABLE s_tbl (id BIGINT, fk_g BIGINT);
+                 CREATE TABLE d_tbl (id BIGINT, fk_g BIGINT);
                  CREATE TABLE g_tbl (id BIGINT, gcat BIGINT);"
                 .to_string();
             for (i, (c, s, v)) in self.inst.o.iter().enumerate() {
                 let cells = [*c, *s, *v].map(sql_cell).join(", ");
                 sql += &format!("INSERT INTO o_tbl VALUES ({i}, {cells});");
             }
+            let inst = &self.inst;
             for (t, rows) in [
-                ("c", &self.inst.c),
-                ("s", &self.inst.s),
-                ("g", &self.inst.g),
+                ("c", &inst.c),
+                ("s", &inst.s),
+                ("d", &inst.d),
+                ("g", &inst.g),
             ] {
                 for (i, v) in rows.iter().enumerate() {
                     sql += &format!("INSERT INTO {t}_tbl VALUES ({i}, {});", sql_cell(*v));
@@ -1950,6 +2040,10 @@ mod diamond {
             QueryRequest {
                 dimensions,
                 metrics: vec![MetricName::new("m")],
+                where_clause: self.pred.map(|p| match p {
+                    Pred::Eq(k) => format!("gcat = {k}"),
+                    Pred::IsNull => "gcat IS NULL".to_string(),
+                }),
                 ..QueryRequest::default()
             }
         }
@@ -1973,29 +2067,54 @@ mod diamond {
         ]
     }
 
+    fn arb_pred() -> impl Strategy<Value = Option<Pred>> {
+        prop_oneof![
+            2 => Just(None),
+            1 => (0i64..2).prop_map(|k| Some(Pred::Eq(k))),
+            1 => Just(Some(Pred::IsNull)),
+        ]
+    }
+
     fn arb_case() -> impl Strategy<Value = Case> {
-        (1usize..4, 1usize..4, 1usize..4, 1usize..7)
-            .prop_flat_map(|(nc, ns, ng, no)| {
+        (
+            1usize..4,
+            1usize..4,
+            1usize..3,
+            1usize..4,
+            1usize..7,
+            any::<bool>(),
+        )
+            .prop_flat_map(|(nc, ns, nd, ng, no, long)| {
+                let s_to = if long { nd } else { ng };
                 (
-                    prop::collection::vec((fk(nc), fk(ns), cell(20)), no),
-                    prop::collection::vec(fk(ng), nc),
-                    prop::collection::vec(fk(ng), ns),
-                    prop::collection::vec(cell(2), ng),
-                    Just([0usize, 1, 2, 3]).prop_shuffle(),
+                    (
+                        prop::collection::vec((fk(nc), fk(ns), cell(20)), no),
+                        prop::collection::vec(fk(ng), nc),
+                        prop::collection::vec(fk(s_to), ns),
+                        prop::collection::vec(fk(ng), nd),
+                        prop::collection::vec(cell(2), ng),
+                    ),
+                    Just([0usize, 1, 2, 3, 4]).prop_shuffle(),
+                    Just(long),
                     any::<bool>(),
                     any::<bool>(),
                     arb_agg(),
                     arb_agg(),
+                    arb_pred(),
                 )
             })
-            .prop_map(|(o, c, s, g, names, include, key_c, agg, outer)| Case {
-                inst: Instance { o, c, s, g },
-                names: names.try_into().expect("four names"),
-                include,
-                key_c,
-                agg,
-                outer,
-            })
+            .prop_map(
+                |((o, c, s, d, g), names, long, include, key_c, agg, outer, pred)| Case {
+                    inst: Instance { o, c, s, d, g },
+                    names: names.try_into().expect("five names"),
+                    long,
+                    include,
+                    key_c,
+                    agg,
+                    outer,
+                    pred,
+                },
+            )
     }
 
     fn check(case: &Case) -> Result<usize, TestCaseError> {
@@ -2030,22 +2149,33 @@ mod diamond {
         );
         let strategy = arb_case();
         let mut seen: BTreeMap<&str, usize> = BTreeMap::new();
-        for _ in 0..1500 {
+        for _ in 0..2000 {
             let case = strategy.new_tree(&mut runner).expect("case").current();
             let n = check(&case).expect("the property holds");
             if n == 0 {
                 continue;
             }
             let on_path = case.key_c == case.through_c();
-            let raw_first = (case.name(0), case.name(2)) < (case.name(1), case.name(3));
+            let raw = |c: bool| {
+                case.path_names(c)
+                    .iter()
+                    .map(|n| (*n).to_string())
+                    .collect::<Vec<_>>()
+            };
             let mut labels = vec![match (case.include, on_path) {
                 (true, true) => "include, key on the path",
                 (true, false) => "include, key on the other path",
                 (false, true) => "exclude, key on the path",
                 (false, false) => "exclude, key on the other path",
             }];
-            if raw_first != case.through_c() {
+            if (raw(true) < raw(false)) != case.through_c() {
                 labels.push("case-folding decides the path");
+            }
+            if case.long && !case.through_c() {
+                labels.push("the longer path is taken");
+            }
+            if case.pred.is_some() {
+                labels.push("filtered");
             }
             // An order whose customer and store reach different `g` rows.
             if (0..case.inst.o.len()).any(|o| {
@@ -2065,6 +2195,8 @@ mod diamond {
             "exclude, key on the path",
             "exclude, key on the other path",
             "case-folding decides the path",
+            "the longer path is taken",
+            "filtered",
             "the paths disagree",
         ] {
             assert!(
