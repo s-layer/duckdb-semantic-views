@@ -9,6 +9,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+_No unreleased changes yet._
+
+## [0.20.0] - 2026-11-18
+
 ### Added
 
 - A relationship's name is optional, as in Snowflake: `RELATIONSHIPS (orders(customer_id) REFERENCES customers)` is accepted, in the DDL and in YAML. The relationship gets a generated name, `SYS_RELATIONSHIP_` followed by an id, which `DESCRIBE SEMANTIC VIEW` shows. Snowflake draws a new random id on every `CREATE`; here the id comes from the entry's position, tables and columns, so re-creating the view, also from its `GET_DDL` or YAML export, keeps it. `GET_DDL` and the YAML export leave the generated name out. A metric's `USING` cannot name a generated name, which changes when a relationship is declared before it; name the relationship instead.
@@ -1183,7 +1187,8 @@ Connection-lifecycle and ADBC fixes. Two downstream regressions reported against
 - `list_semantic_views()` and `describe_semantic_view()` introspection functions
 - Fuzz targets for FFI boundary testing
 
-[Unreleased]: https://github.com/s-layer/duckdb-semantic-views/compare/v0.19.0...HEAD
+[Unreleased]: https://github.com/s-layer/duckdb-semantic-views/compare/v0.20.0...HEAD
+[0.20.0]: https://github.com/s-layer/duckdb-semantic-views/compare/v0.19.0...v0.20.0
 [0.19.0]: https://github.com/s-layer/duckdb-semantic-views/compare/v0.18.0...v0.19.0
 [0.18.0]: https://github.com/s-layer/duckdb-semantic-views/compare/v0.17.0...v0.18.0
 [0.17.0]: https://github.com/s-layer/duckdb-semantic-views/compare/v0.16.0...v0.17.0
