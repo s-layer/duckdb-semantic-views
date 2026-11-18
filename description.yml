@@ -12,7 +12,7 @@ extension:
 
 repo:
   github: s-layer/duckdb-semantic-views
-  ref: 82361ce3c6a99834768eed51d8cb2defa406e36a
+  ref: df7712b14db6d0ba38d1654ee8dc95c9509d4d9e
   variegata: 71ea4f11e76c6ad2542bbc77c8669ac491ebc2a4
 
 docs:
