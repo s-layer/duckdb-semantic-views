@@ -311,6 +311,22 @@ fn validate_fk_references(def: &SemanticViewDefinition) -> Result<(), String> {
         if super::cardinality::references_a_key(target, &join.ref_columns) {
             continue;
         }
+        // An ASOF reference picks one row among those its other columns
+        // match, so it is enough for those to be a key (Snowflake fixture 8,
+        // T1c: `REFERENCES o (order_id, ASOF placed_at)` on PRIMARY KEY
+        // (order_id)).
+        if let Some(i) = join.asof {
+            let others: Vec<String> = join
+                .ref_columns
+                .iter()
+                .enumerate()
+                .filter(|&(j, _)| j != i)
+                .map(|(_, c)| c.clone())
+                .collect();
+            if !others.is_empty() && super::cardinality::references_a_key(target, &others) {
+                continue;
+            }
+        }
 
         // Neither matches -- build error
         let rel_name = join.name.as_deref().unwrap_or("?");
@@ -2160,6 +2176,71 @@ mod tests {
             def.joins[0].asof = Some(0);
             let err = validate_fk_references(&def).unwrap_err();
             assert!(err.contains("both an ASOF and a range"), "{err}");
+        }
+
+        fn asof_tables(pk: &[&str]) -> Vec<TableRef> {
+            let table = |alias: &str, name: &str, pk: &[&str]| TableRef {
+                alias: alias.to_string(),
+                table: name.to_string(),
+                definition: None,
+                pk_columns: pk.iter().map(ToString::to_string).collect(),
+                unique_constraints: vec![],
+                comment: None,
+                synonyms: vec![],
+                tags: Vec::new(),
+                distinct_ranges: vec![],
+            };
+            vec![table("n", "notes", &["note_id"]), table("o", "orders", pk)]
+        }
+
+        fn asof_join(ref_columns: &[&str]) -> Join {
+            Join {
+                table: "o".to_string(),
+                from_alias: "n".to_string(),
+                fk_columns: vec!["order_id".to_string(), "noted_at".to_string()],
+                ref_columns: ref_columns.iter().map(ToString::to_string).collect(),
+                name: Some("n_order".to_string()),
+                asof: Some(1),
+                ..Default::default()
+            }
+        }
+
+        /// Snowflake fixture 8, T1c: `n (order_id, noted_at) REFERENCES
+        /// o (order_id, ASOF placed_at)` with `o` keyed on `order_id` alone is
+        /// accepted. The ASOF column picks one row among those the other columns
+        /// match, so those other columns are the key it needs.
+        #[test]
+        fn asof_reference_keyed_without_its_asof_column_passes() {
+            let def = make_fk_ref_def(
+                asof_tables(&["order_id"]),
+                vec![asof_join(&["order_id", "placed_at"])],
+            );
+            assert!(validate_fk_references(&def).is_ok());
+        }
+
+        /// Fixture 8, T1: the key may also include the ASOF column.
+        #[test]
+        fn asof_reference_keyed_with_its_asof_column_passes() {
+            let def = make_fk_ref_def(
+                asof_tables(&["order_id", "placed_at"]),
+                vec![asof_join(&["order_id", "placed_at"])],
+            );
+            assert!(validate_fk_references(&def).is_ok());
+        }
+
+        /// Neither the referenced columns nor those other than the ASOF one are
+        /// a key: still refused.
+        #[test]
+        fn asof_reference_matching_no_key_is_rejected() {
+            let def = make_fk_ref_def(
+                asof_tables(&["order_no"]),
+                vec![asof_join(&["order_id", "placed_at"])],
+            );
+            let err = validate_fk_references(&def).unwrap_err();
+            assert!(
+                err.contains("does not match any PRIMARY KEY or UNIQUE constraint"),
+                "{err}"
+            );
         }
     }
 }

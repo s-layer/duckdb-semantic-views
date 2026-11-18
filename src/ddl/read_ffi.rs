@@ -40,8 +40,8 @@
 //!
 //! ## Variant: VARCHAR with a trailing BOOLEAN column
 //!
-//! `show_semantic_dimensions_for_metric` returns 5 VARCHAR + 1 BOOLEAN. Its
-//! schema header carries five VARCHAR tags then `BOOLEAN`; each row emits the
+//! `show_semantic_dimensions_for_metric` returns 6 VARCHAR + 1 BOOLEAN. Its
+//! schema header carries six VARCHAR tags then `BOOLEAN`; each row emits the
 //! VARCHAR cells first, then a single trailing `u8` for the BOOLEAN (1 = TRUE,
 //! 0 = FALSE). C++ side parses with `sv_read_u8` after the string reads and
 //! places the BOOLEAN at the bind's `bool_col` output column (the fourth,

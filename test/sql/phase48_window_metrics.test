@@ -181,12 +181,12 @@ requires dimension 'd.date'
 # year and store should be required=FALSE
 # ========================================
 
-query TTTTTT rowsort
+query TTTTTTT rowsort
 SHOW SEMANTIC DIMENSIONS IN p48_sales_view FOR METRIC avg_qty
 ----
-p48_dates	date	DATE	true	[]	(empty)
-p48_dates	year	INTEGER	false	[]	(empty)
-p48_sales	store	VARCHAR	false	[]	(empty)
+p48_dates	date	DATE	true	[]	(empty)	[]
+p48_dates	year	INTEGER	false	[]	(empty)	[]
+p48_sales	store	VARCHAR	false	[]	(empty)	[]
 
 # ========================================
 # Test 7: GET_DDL round-trip

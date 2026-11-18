@@ -82,6 +82,15 @@ SHOW SEMANTIC FACTS IN nf_sv
 memory	main	nf_sv	nf_orders	amt	DECIMAL(10,2)	[]	(empty)	[]
 memory	main	nf_sv	nf_orders	is_large	BOOLEAN	[]	(empty)	["FILTER"]
 
+# SHOW SEMANTIC DIMENSIONS ... FOR METRIC ends with the same `labels` column, as
+# in Snowflake (fixture 8, S1-S3): table_name, name, data_type, required,
+# synonyms, comment, labels.
+query TTTTTTT rowsort
+SHOW SEMANTIC DIMENSIONS IN nf_sv FOR METRIC revenue
+----
+nf_orders	country	VARCHAR	false	[]	(empty)	[]
+nf_orders	is_domestic	BOOLEAN	false	[]	(empty)	["FILTER"]
+
 # ============================================================
 # Test 2: GET_DDL renders the clause back, exactly twice — once per labelled
 # member, and not on the two plain ones.

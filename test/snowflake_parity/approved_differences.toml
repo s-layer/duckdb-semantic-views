@@ -1,0 +1,21 @@
+# Statements in test/snowflake_parity/recorded/ that are not held to Snowflake's answer.
+#
+# Each table is keyed by recording (its file name without .md) and maps a statement's label
+# to the reason. test/integration/test_snowflake_parity.py fails on a listed label that no
+# longer exists, and on a label listed in both tables.
+#
+# [differences.<recording>]: we knowingly give a different answer. The run fails on any
+# unlisted difference, and on a listed one that now agrees.
+#
+# [unreproducible.<recording>]: Snowflake's answer depends on something it chose at random
+# for that run, so there is no answer to agree with. The query must still succeed (or fail)
+# as it did on Snowflake, but its rows are not compared, whichever way they come out.
+
+[unreproducible.fixture-14d]
+D10 = """sd_unnamed: a diamond whose relationships have no names. Snowflake names an unnamed \
+relationship at random and picks the diamond path by name (fixture 14d, H2), so each \
+re-creation of the view can take either path. We name them rel_1, rel_2, ... in declaration \
+order."""
+D11 = "Same view and cause as D10 (the view is re-created between them)."
+D12 = """Same view and cause as D10. This run's random names happened to pick our path, so \
+its rows match ours by chance."""

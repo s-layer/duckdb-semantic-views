@@ -1500,7 +1500,7 @@ static void sv_emit_varchar_rows(
 }
 
 // VARCHAR rows with one BOOL column (used by
-// show_semantic_dimensions_for_metric, which returns 5 VARCHAR + 1 BOOLEAN).
+// show_semantic_dimensions_for_metric, which returns 6 VARCHAR + 1 BOOLEAN).
 // On the wire the BOOL comes after every VARCHAR cell; `bool_col` is where it
 // goes in the output, the VARCHAR cells filling the other columns in order.
 struct SvVarcharBoolBindData : public TableFunctionData {
@@ -2489,7 +2489,7 @@ static unique_ptr<FunctionData> sv_show_semantic_materializations_bind(
 }
 
 // show_semantic_dimensions_for_metric: Snowflake's table_name, name,
-// data_type, required, synonyms, comment (5 VARCHAR + 1 BOOL), 2 VARCHAR
+// data_type, required, synonyms, comment, labels (6 VARCHAR + 1 BOOL), 2 VARCHAR
 // input args.
 static unique_ptr<FunctionData> sv_show_semantic_dimensions_for_metric_bind(
     ClientContext &context,
@@ -2509,9 +2509,11 @@ static unique_ptr<FunctionData> sv_show_semantic_dimensions_for_metric_bind(
     names.emplace_back("synonyms");
     return_types.push_back(LogicalType::VARCHAR);
     names.emplace_back("comment");
+    return_types.push_back(LogicalType::VARCHAR);
+    names.emplace_back("labels");
     bd->bool_col = 3;
     sv_run_varchar_bool_bind_with_two_names(
-        context, input, *bd, /*expected_varchar_cols*/ 5,
+        context, input, *bd, /*expected_varchar_cols*/ 6,
         "show_semantic_dimensions_for_metric",
         [](const uint8_t *vn, size_t vnl,
            const uint8_t *mn, size_t mnl,

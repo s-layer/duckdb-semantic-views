@@ -61,10 +61,10 @@ memory	main	sns weird view	sns_sales	"total amount"	HUGEINT	[]	(empty)
 # rather than one eating the other's text.
 # ============================================================
 
-query TTTTTT rowsort
+query TTTTTTT rowsort
 SHOW SEMANTIC DIMENSIONS IN "sns weird view" FOR METRIC "total amount"
 ----
-sns_sales	region	VARCHAR	false	[]	(empty)
+sns_sales	region	VARCHAR	false	[]	(empty)	[]
 
 # ============================================================
 # Test 3: the CONSUMER half — a quoted reference to an UNQUOTED declaration.
@@ -80,16 +80,16 @@ sns_sales	region	VARCHAR	false	[]	(empty)
 # takes raw pointers, so this file is its only coverage.
 # ============================================================
 
-query TTTTTT rowsort
+query TTTTTTT rowsort
 SHOW SEMANTIC DIMENSIONS IN sns_plain FOR METRIC "plain_total"
 ----
-sns_sales	region	VARCHAR	false	[]	(empty)
+sns_sales	region	VARCHAR	false	[]	(empty)	[]
 
 # ...and the reverse spelling, to pin that the normalisation is symmetric.
-query TTTTTT rowsort
+query TTTTTTT rowsort
 SHOW SEMANTIC DIMENSIONS IN "sns weird view" FOR METRIC "TOTAL AMOUNT"
 ----
-sns_sales	region	VARCHAR	false	[]	(empty)
+sns_sales	region	VARCHAR	false	[]	(empty)	[]
 
 # ============================================================
 # Test 4: `IN SCHEMA` with a quoted, whitespace-bearing name.
@@ -142,10 +142,10 @@ SHOW SEMANTIC VIEWS LIKE 'sns%' IN SCHEMA "main" LIMIT 5
 # example and doc shows, and they must be untouched by the new scan.
 # ============================================================
 
-query TTTTTT rowsort
+query TTTTTTT rowsort
 SHOW SEMANTIC DIMENSIONS IN sns_plain FOR METRIC plain_total
 ----
-sns_sales	region	VARCHAR	false	[]	(empty)
+sns_sales	region	VARCHAR	false	[]	(empty)	[]
 
 statement ok
 SHOW SEMANTIC VIEWS IN SCHEMA main

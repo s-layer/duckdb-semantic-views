@@ -252,10 +252,10 @@ SHOW SEMANTIC METRICS IN sp_show
 ----
 memory	main	sp_show	sp_orders	revenue	HUGEINT	[]	(empty)
 
-query TTTTTT
+query TTTTTTT
 SHOW SEMANTIC DIMENSIONS IN sp_show FOR METRIC revenue
 ----
-sp_orders	region	VARCHAR	false	["area"]	where
+sp_orders	region	VARCHAR	false	["area"]	where	[]
 
 query T
 SELECT column_name FROM (DESCRIBE SELECT * FROM (SHOW SEMANTIC DIMENSIONS IN sp_show FOR METRIC revenue))
@@ -266,6 +266,7 @@ data_type
 required
 synonyms
 comment
+labels
 
 # --- ALTER SEMANTIC VIEW ... SET TAG / UNSET TAG, at view level as in Snowflake ---
 

@@ -109,10 +109,10 @@ memory	main	v	dcs_orders	raw_amount	INTEGER	[]	(empty)	[]
 
 # S-204: rewrite.rs::phase34_1_1_show_filter_tests::test_rewrite_show_dims_for_metric_with_all_clauses — LIKE, IN, FOR METRIC, STARTS WITH, LIMIT all together
 # LIKE drops cust_initial, which would sort first, and LIMIT 1 drops customer.
-query TTTTTT nosort
+query TTTTTTT nosort
 SHOW SEMANTIC DIMENSIONS LIKE '%r%' IN v FOR METRIC revenue STARTS WITH 'c' LIMIT 1
 ----
-dcs_orders	cust_tier	VARCHAR	false	[]	(empty)
+dcs_orders	cust_tier	VARCHAR	false	[]	(empty)	[]
 
 # S-205: rewrite.rs::phase34_1_1_show_filter_tests::test_rewrite_show_case_insensitive — lower-case SHOW keywords and clauses
 query TTTTTTTTT rowsort
@@ -123,13 +123,13 @@ memory	main	v	dcs_orders	customer	VARCHAR	[]	(empty)	[]
 memory	main	v	dcs_orders	region	VARCHAR	[]	(empty)	[]
 
 # S-206: rewrite.rs::test_for_metric_requires_boundaries, show_scope_other_commands_tests::for_metric_still_composes_with_a_view_name, show_name_slot_quoted_ident_tests::an_unquoted_view_and_metric_are_unchanged — IN <view> FOR METRIC <metric>
-query TTTTTT rowsort
+query TTTTTTT rowsort
 SHOW SEMANTIC DIMENSIONS IN v FOR METRIC revenue
 ----
-dcs_orders	cust_initial	VARCHAR	false	[]	(empty)
-dcs_orders	cust_tier	VARCHAR	false	[]	(empty)
-dcs_orders	customer	VARCHAR	false	[]	(empty)
-dcs_orders	region	VARCHAR	false	[]	(empty)
+dcs_orders	cust_initial	VARCHAR	false	[]	(empty)	[]
+dcs_orders	cust_tier	VARCHAR	false	[]	(empty)	[]
+dcs_orders	customer	VARCHAR	false	[]	(empty)	[]
+dcs_orders	region	VARCHAR	false	[]	(empty)	[]
 
 # S-207: rewrite.rs::phase34_1_1_show_filter_tests::test_rewrite_show_views_like — SHOW SEMANTIC VIEWS LIKE
 query TTTTTT nosort
@@ -375,18 +375,18 @@ SHOW SEMANTIC DIMENSIONS IN "my view"
 memory	main	my view	dcs_orders	region	VARCHAR	[]	(empty)	[]
 
 # S-233: rewrite.rs::show_name_slot_quoted_ident_tests::for_metric_accepts_a_quoted_name_containing_whitespace — FOR METRIC "<metric with space>"
-query TTTTTT rowsort
+query TTTTTTT rowsort
 SHOW SEMANTIC DIMENSIONS IN v FOR METRIC "revenue"
 ----
-dcs_orders	cust_initial	VARCHAR	false	[]	(empty)
-dcs_orders	cust_tier	VARCHAR	false	[]	(empty)
-dcs_orders	customer	VARCHAR	false	[]	(empty)
-dcs_orders	region	VARCHAR	false	[]	(empty)
+dcs_orders	cust_initial	VARCHAR	false	[]	(empty)	[]
+dcs_orders	cust_tier	VARCHAR	false	[]	(empty)	[]
+dcs_orders	customer	VARCHAR	false	[]	(empty)	[]
+dcs_orders	region	VARCHAR	false	[]	(empty)	[]
 
-query TTTTTT rowsort
+query TTTTTTT rowsort
 SHOW SEMANTIC DIMENSIONS IN "my view" FOR METRIC "my metric"
 ----
-dcs_orders	region	VARCHAR	false	[]	(empty)
+dcs_orders	region	VARCHAR	false	[]	(empty)	[]
 
 # S-234: rewrite.rs::show_name_slot_quoted_ident_tests::a_quoted_view_name_containing_a_dot_keeps_its_quotes — IN "a.b" names the view literally called `a.b`, not view `b` [text]
 statement ok
