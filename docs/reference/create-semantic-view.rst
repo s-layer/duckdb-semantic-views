@@ -538,7 +538,7 @@ Each order takes the address of its customer with the greatest ``start_date`` on
 
 - At most one column of a relationship can be ``ASOF``, and it can be any column of the list.
 - The two ``ASOF`` columns must be numbers, dates, times or timestamps, of types that compare. ``CREATE`` checks this against the tables.
-- The referenced columns, the ``ASOF`` one included, must be the target's ``PRIMARY KEY`` or a ``UNIQUE`` key, as for a range relationship. Another relationship to non-key columns is :ref:`many-to-many <ref-create-direct-many-to-many>`, which an ``ASOF`` one can't be. The data is not checked against it, and the answer for data that breaks the key is not defined, as for any key here. If two target rows share a key and a start value, an order that matches them is joined to one of the two (Snowflake also picks one).
+- The referenced columns, or those other than the ``ASOF`` one, must be the target's ``PRIMARY KEY`` or a ``UNIQUE`` key, as in Snowflake: ``REFERENCES a (cust_id, ASOF start_date)`` takes a key on ``(cust_id, start_date)`` or on ``cust_id`` alone. Another relationship to non-key columns is :ref:`many-to-many <ref-create-direct-many-to-many>`, which an ``ASOF`` one can't be. The data is not checked against it, and the answer for data that breaks the key is not defined, as for any key here. If two target rows share a key and a start value, an order that matches them is joined to one of the two (Snowflake also picks one).
 - An ``ASOF`` relationship is always many-to-one, whatever keys the "from" table declares, since many rows can match the same target row. A metric on the target is computed over the target's own rows, and grouping it by a dimension of the "from" table is refused as a :ref:`fan trap <howto-fan-traps>`.
 - ``DESCRIBE`` writes the column in ``REF_KEY`` as ``{"type":"ASOF","column":"<column>"}``, ``GET_DDL`` writes the keyword back, and the YAML export writes the column's 0-based position in the list as ``asof``. A release of the extension older than 0.19.0 cannot read a view with an ``ASOF`` relationship.
 
@@ -635,7 +635,7 @@ The answers are Snowflake's:
 The extension infers cardinality from the "from" table's constraints:
 
 - If the FK columns match a ``PRIMARY KEY`` or ``UNIQUE`` constraint on the "from" table, the relationship is **one-to-one**, unless it is ``ASOF`` or a range relationship.
-- If the referenced columns are not the target's ``PRIMARY KEY`` or a ``UNIQUE`` key, the relationship is **many-to-many** (see above), unless it is ``ASOF`` or a range relationship, whose referenced columns must be a key.
+- If the referenced columns are not the target's ``PRIMARY KEY`` or a ``UNIQUE`` key, the relationship is **many-to-many** (see above), unless it is ``ASOF`` or a range relationship, whose referenced columns must be a key (for ``ASOF``, with or without the ``ASOF`` column).
 - Otherwise, the relationship is **many-to-one** (the default).
 
 Cardinality is used for :ref:`fan trap detection <howto-fan-traps>`.

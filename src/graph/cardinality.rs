@@ -95,7 +95,8 @@ pub(crate) fn infer_cardinality(
         // table make the relationship many-to-many, as Snowflake reads it (a
         // direct many-to-many relationship): each referencing row can match
         // many referenced rows. An ASOF or range relationship's referenced
-        // columns must still be a key (`graph::validate_fk_references`).
+        // columns (for ASOF, or those other than the ASOF one) must still be a
+        // key (`graph::validate_fk_references`).
         if let Some(t) = target {
             if join.asof.is_none()
                 && join.range_end.is_none()

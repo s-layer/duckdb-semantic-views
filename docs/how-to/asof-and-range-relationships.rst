@@ -78,7 +78,7 @@ Write ``ASOF`` before the target's date column in the ``REFERENCES`` list. The o
        a.address_count AS COUNT(*)
    );
 
-The referenced columns, ``ASOF`` column included, must be the target's ``PRIMARY KEY`` or a ``UNIQUE`` key: an address history has one row per customer and start date. (A plain relationship to non-key columns is :ref:`many-to-many <ref-create-direct-many-to-many>` instead, which an ``ASOF`` one can't be.) Only one column of a relationship can be ``ASOF``, and the two ``ASOF`` columns must be numbers, dates, times or timestamps that compare.
+The referenced columns must be the target's ``PRIMARY KEY`` or a ``UNIQUE`` key, either with the ``ASOF`` column (an address history has one row per customer and start date) or without it (a table with one row per customer). (A plain relationship to non-key columns is :ref:`many-to-many <ref-create-direct-many-to-many>` instead, which an ``ASOF`` one can't be.) Only one column of a relationship can be ``ASOF``, and the two ``ASOF`` columns must be numbers, dates, times or timestamps that compare.
 
 List each order with the city it was matched to:
 
@@ -353,7 +353,7 @@ Troubleshooting
    The ``ASOF`` pair is compared with ``>=``, so it needs an ordered type, as in Snowflake. Match on a date or a number, casting in a :ref:`table defined by a query <howto-query-tables>` if the column is stored as text.
 
 **FK (cust_id, start_date) in relationship 'order_address' does not match any PRIMARY KEY or UNIQUE constraint on table 'a'**
-   The referenced columns, the ``ASOF`` one included, must be the target's key. Declare ``PRIMARY KEY (cust_id, start_date)`` on the history table.
+   The referenced columns, or those other than the ``ASOF`` one, must be the target's key. Declare ``PRIMARY KEY (cust_id, start_date)`` on the history table.
 
 **range relationship 'signup_campaign' references BETWEEN start_date AND end_date on table 'c', which has no matching DISTINCT RANGE constraint**
    Declare ``CONSTRAINT <name> DISTINCT RANGE BETWEEN start_date AND end_date EXCLUSIVE`` on the target. When the table declares one on other columns, or in the other order, the message names it.
