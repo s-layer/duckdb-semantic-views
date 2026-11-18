@@ -68,7 +68,7 @@ use std::fmt::Write as _;
 use crate::expr_tokens::scan_references;
 use crate::graph::lod::{
     collect_lods, has_lod, is_lod_fact, member_table, resolve, resolve_lod, LodKind, Origin,
-    PartLod, Resolved,
+    PartLod, Resolution, Resolved,
 };
 use crate::ident::{ident_matches, normalize_ident_part};
 use crate::model::{
@@ -181,6 +181,24 @@ fn child_root<'d>(
 /// Whether `from` is `to` or references it along foreign keys by one path.
 fn reached_by_one_path(def: &SemanticViewDefinition, from: &str, to: &str) -> bool {
     ident_matches(from, to) || crate::graph::chain_paths(def, from, to, &|_| true).len() == 1
+}
+
+/// The tables an `INCLUDE` or `EXCLUDE` expression read from a table below
+/// its home must reach (#115): the tables its aggregate reads, and for
+/// `INCLUDE` those of its own dimensions, which are in its grain (an
+/// `EXCLUDE` one's are not). `query_grain` and `lod_grain_allows` both check
+/// them, so a dimension `SHOW ... FOR METRIC` lists is one a query answers.
+fn own_tables<'a>(
+    def: &'a SemanticViewDefinition,
+    kind: LodKind,
+    res: &'a Resolution,
+) -> impl Iterator<Item = String> + 'a {
+    res.tables.iter().cloned().chain(
+        res.keys
+            .iter()
+            .filter(move |_| kind == LodKind::Include)
+            .filter_map(|&k| member_table(def, k).map(str::to_string)),
+    )
 }
 
 /// `name`, with `_` appended while `taken` says it is in use.
@@ -845,15 +863,7 @@ pub(super) fn query_grain(
             LodKind::Exclude => !res.keys.contains(d),
             _ => true,
         });
-        // An INCLUDE expression's own dimensions are in its grain; an
-        // EXCLUDE one's are not.
-        let own_keys = res.keys.iter().filter(|_| lod.kind == LodKind::Include);
-        let own = below.map(|_| {
-            res.tables
-                .iter()
-                .cloned()
-                .chain(own_keys.filter_map(|&k| member_table(def, k).map(str::to_string)))
-        });
+        let own = below.map(|_| own_tables(def, lod.kind, &res));
         let tables = grouped
             .filter_map(|&d| member_table(def, d).map(str::to_string))
             .chain(filter_tables.iter().cloned())
@@ -936,16 +946,7 @@ pub fn lod_grain_allows(def: &SemanticViewDefinition, metric: &str, dim: &str) -
         let Some(below) = child_root(def, &grain_tables, &res.home) else {
             return false;
         };
-        let own = res.tables.iter().cloned().chain(
-            res.keys
-                .iter()
-                .filter(|_| lod.kind == LodKind::Include)
-                .filter_map(|&k| member_table(def, k).map(str::to_string)),
-        );
-        if !own
-            .into_iter()
-            .all(|o| reached_by_one_path(def, &below.alias, &o))
-        {
+        if !own_tables(def, lod.kind, &res).all(|o| reached_by_one_path(def, &below.alias, &o)) {
             return false;
         }
     }
