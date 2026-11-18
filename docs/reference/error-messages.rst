@@ -1802,7 +1802,7 @@ INCLUDE or EXCLUDE expression in a query
 - It is named in ``DIMENSIONS``, ``FACTS`` or ``WHERE``, where it has no grain: ``... can be read only in METRICS ...``.
 - The query groups by an expression item: ``... can't be beside an expression in DIMENSIONS``.
 - The query groups or filters by an LOD dimension, which has a grain of its own: ``... can't be grouped by LOD dimension '<name>' ...``, or ``... that WHERE reads LOD expression '<name>' ...``.
-- The query groups or filters by a table the aggregated table does not reach along foreign keys by one path: ``... does not reference along foreign keys by one path``.
+- The query groups or filters by a table that neither the aggregated table nor the table the query's rows are listed from (a table below it, such as returns below orders) reaches along foreign keys by one path, as across a diamond: ``... does not reference along foreign keys by one path``.
 
 **Fix:** Read the expression in a metric, as the argument of an aggregate function. Group by dimensions the view defines (define an expression as a dimension first), and leave out the LOD dimension or the table the message names.
 

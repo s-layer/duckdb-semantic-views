@@ -1046,3 +1046,569 @@ fn every_kind_is_reached() {
         );
     }
 }
+
+/// `INCLUDE` / `EXCLUDE` grouped or filtered by a **child** of the
+/// expression's home table (TECH-DEBT #115, Snowflake fixture 14c).
+///
+/// Shape: `r(fk_o) REFERENCES o(id)`, `o(fk_c) REFERENCES c(id)`. The LOD
+/// fact `lie` is an aggregate of `o.ov` with `INCLUDE` or `EXCLUDE` on the
+/// home or parent dimensions (`ocat`, `ccat`, `cid`). Every query groups or
+/// filters by the child dimension `rcat`, so its grain is listed from `r`.
+///
+/// Snowflake's rule, stated over the rows and never in SQL:
+///
+/// - `lie` is computed over the `r` rows the filter keeps, each left-joined up
+///   to its order and customer, aggregated at the LOD's grain (the query's
+///   dimensions with or without the LOD's own). An order with two children in
+///   one group counts twice; an orphan child (NULL or dangling `fk_o`) brings
+///   a NULL `ov`.
+/// - The groups are those rows' values: an order with no children makes no
+///   group, a child with a NULL `rcat` makes the NULL group.
+/// - An `INCLUDE` tuple counts once in the group that holds it; an `EXCLUDE`
+///   group takes its coarser tuple's value. Either way the value reaches only
+///   the groups the child rows list: a group that only a plain metric's
+///   childless orders make has a NULL `lie` (Snowflake 14b R3, South's NULL
+///   group).
+/// - A plain metric beside it (`sum_ov`) keeps its own rule, the orders
+///   left-joined down to the children and each counted once per group (fixture
+///   7), and does not change `lie`'s value. (Snowflake changes it when a plain
+///   metric is co-queried; that divergence is documented.)
+mod child_table {
+    use super::{lookup, sql_cell, Agg, Cell, LodKind};
+    use proptest::prelude::*;
+    use semantic_views::expand::{expand, DimensionName, MetricName, QueryRequest};
+    use semantic_views::model::{
+        Cardinality, Dimension, Fact, Join, Metric, SemanticViewDefinition, TableRef,
+    };
+    use std::collections::{BTreeMap, BTreeSet};
+
+    #[derive(Debug, Clone)]
+    struct Instance {
+        /// `ccat`; row `i` has id `i`.
+        c: Vec<Cell>,
+        /// `(fk_c, ocat, ov)`; row `i` has id `i`.
+        o: Vec<(Cell, Cell, Cell)>,
+        /// `(fk_o, rcat)`; row `i` has id `i`.
+        r: Vec<(Cell, Cell)>,
+    }
+
+    /// `(name, table, column)`. `rcat` is index 3.
+    const DIMS: [(&str, &str, &str); 4] = [
+        ("ocat", "o", "ocat"),
+        ("ccat", "c", "ccat"),
+        ("cid", "c", "id"),
+        ("rcat", "r", "rcat"),
+    ];
+    const RCAT: usize = 3;
+    const METS: [&str; 3] = ["sum_ov", "m_ie", "m_ie_inl"];
+
+    #[derive(Debug, Clone)]
+    enum Pred {
+        Eq(usize, i64),
+        IsNull(usize),
+        Or(Box<Pred>, Box<Pred>),
+    }
+
+    impl Pred {
+        fn sql(&self) -> String {
+            match self {
+                Pred::Eq(d, k) => format!("{} = {k}", DIMS[*d].0),
+                Pred::IsNull(d) => format!("{} IS NULL", DIMS[*d].0),
+                Pred::Or(a, b) => format!("({}) OR ({})", a.sql(), b.sql()),
+            }
+        }
+
+        fn dims(&self, out: &mut BTreeSet<usize>) {
+            match self {
+                Pred::Eq(d, _) | Pred::IsNull(d) => {
+                    out.insert(*d);
+                }
+                Pred::Or(a, b) => {
+                    a.dims(out);
+                    b.dims(out);
+                }
+            }
+        }
+
+        fn eval(&self, row: &[Option<i128>]) -> Option<bool> {
+            match self {
+                Pred::Eq(d, k) => row[*d].map(|v| v == i128::from(*k)),
+                Pred::IsNull(d) => Some(row[*d].is_none()),
+                Pred::Or(a, b) => match (a.eval(row), b.eval(row)) {
+                    (Some(true), _) | (_, Some(true)) => Some(true),
+                    (Some(false), Some(false)) => Some(false),
+                    _ => None,
+                },
+            }
+        }
+    }
+
+    #[derive(Debug, Clone)]
+    struct Case {
+        inst: Instance,
+        agg: Agg,
+        kind: LodKind,
+        fixed: Vec<usize>,
+        outer: Agg,
+        dims: Vec<usize>,
+        mets: Vec<usize>,
+        pred: Option<Pred>,
+    }
+
+    type Row = Vec<Option<i128>>;
+    type Groups = BTreeMap<Row, Option<i128>>;
+
+    impl Case {
+        fn lie_sql(&self) -> String {
+            let dims: Vec<String> = self
+                .fixed
+                .iter()
+                .map(|d| format!("{}.{}", DIMS[*d].1, DIMS[*d].0))
+                .collect();
+            let kind = if self.kind == LodKind::Include {
+                "INCLUDE"
+            } else {
+                "EXCLUDE"
+            };
+            format!(
+                "{}(o.ov) {kind} DIMENSIONS ({})",
+                self.agg.sql(),
+                dims.join(", ")
+            )
+        }
+
+        fn passes(&self, row: &[Option<i128>]) -> bool {
+            self.pred.as_ref().is_none_or(|p| p.eval(row) == Some(true))
+        }
+
+        /// The dimension row of an order `o` (if any) with child category
+        /// `rcat`: `ocat, ccat, cid, rcat`.
+        fn row(&self, o: Option<usize>, rcat: Cell) -> Row {
+            let inst = &self.inst;
+            let c = o.and_then(|o| lookup(inst.o[o].0, inst.c.len()));
+            vec![
+                o.and_then(|o| inst.o[o].1).map(i128::from),
+                c.and_then(|c| inst.c[c]).map(i128::from),
+                c.map(|c| c as i128),
+                rcat.map(i128::from),
+            ]
+        }
+
+        fn project(&self, row: &[Option<i128>], dims: &[usize]) -> Row {
+            dims.iter().map(|d| row[*d]).collect()
+        }
+
+        /// `lie`'s grain: the query's dimensions with (`INCLUDE`) or without
+        /// (`EXCLUDE`) the LOD's own.
+        fn grain(&self) -> Vec<usize> {
+            let mut g: BTreeSet<usize> = self.dims.iter().copied().collect();
+            if self.kind == LodKind::Include {
+                g.extend(self.fixed.iter().copied());
+            } else {
+                for d in &self.fixed {
+                    g.remove(d);
+                }
+            }
+            g.into_iter().collect()
+        }
+
+        /// The child rows the filter keeps, each joined up: its dimension row
+        /// and its order's `ov`.
+        fn child_rows(&self) -> Vec<(Row, Option<i128>)> {
+            let inst = &self.inst;
+            inst.r
+                .iter()
+                .map(|(fk, rcat)| {
+                    let o = lookup(*fk, inst.o.len());
+                    let ov = o.and_then(|o| inst.o[o].2).map(i128::from);
+                    (self.row(o, *rcat), ov)
+                })
+                .filter(|(row, _)| self.passes(row))
+                .collect()
+        }
+
+        /// `sum_ov`: each order counted once per group of its rows, an order
+        /// with no children one row with a NULL `rcat`.
+        fn sum_ov(&self) -> Groups {
+            let inst = &self.inst;
+            let mut per: BTreeMap<Row, Vec<Option<i128>>> = BTreeMap::new();
+            for (i, (_, _, ov)) in inst.o.iter().enumerate() {
+                let kids: Vec<Cell> = inst
+                    .r
+                    .iter()
+                    .filter(|(fk, _)| lookup(*fk, inst.o.len()) == Some(i))
+                    .map(|(_, rcat)| *rcat)
+                    .collect();
+                let kids = if kids.is_empty() { vec![None] } else { kids };
+                let groups: BTreeSet<Row> = kids
+                    .into_iter()
+                    .map(|rcat| self.row(Some(i), rcat))
+                    .filter(|row| self.passes(row))
+                    .map(|row| self.project(&row, &self.dims))
+                    .collect();
+                for g in groups {
+                    per.entry(g).or_default().push(ov.map(i128::from));
+                }
+            }
+            per.into_iter()
+                .map(|(g, vs)| (g, Agg::Sum.apply(vs.into_iter())))
+                .collect()
+        }
+
+        /// `lie`'s value per tuple of its grain.
+        fn lie_values(&self) -> BTreeMap<Row, Option<i128>> {
+            let grain = self.grain();
+            let mut members: BTreeMap<Row, Vec<Option<i128>>> = BTreeMap::new();
+            for (row, ov) in self.child_rows() {
+                members
+                    .entry(self.project(&row, &grain))
+                    .or_default()
+                    .push(ov);
+            }
+            members
+                .into_iter()
+                .map(|(k, vs)| (k, self.agg.apply(vs.into_iter())))
+                .collect()
+        }
+
+        /// The groups the child rows list.
+        fn child_groups(&self) -> BTreeSet<Row> {
+            self.child_rows()
+                .iter()
+                .map(|(row, _)| self.project(row, &self.dims))
+                .collect()
+        }
+
+        /// The outer aggregate of `lie` per group the child rows list.
+        fn m_ie(&self) -> Groups {
+            let grain = self.grain();
+            let values = self.lie_values();
+            let at = |g: &Row, d: usize| g[self.dims.iter().position(|x| *x == d).expect("dim")];
+            if self.kind == LodKind::Include {
+                let mut per: BTreeMap<Row, Vec<Option<i128>>> = BTreeMap::new();
+                for (k, v) in &values {
+                    let g: Row = self
+                        .dims
+                        .iter()
+                        .map(|d| k[grain.iter().position(|x| x == d).expect("in grain")])
+                        .collect();
+                    per.entry(g).or_default().push(*v);
+                }
+                return per
+                    .into_iter()
+                    .map(|(g, vs)| (g, self.outer.apply(vs.into_iter())))
+                    .collect();
+            }
+            // Only the groups the child rows list: a group that only a plain
+            // metric's childless orders make has no child rows to compute
+            // over (Snowflake 14b R3 gives it a NULL too).
+            self.child_groups()
+                .iter()
+                .filter_map(|g| {
+                    let k: Row = grain.iter().map(|d| at(g, *d)).collect();
+                    values
+                        .get(&k)
+                        .map(|v| (g.clone(), self.outer.apply(std::iter::once(*v))))
+                })
+                .collect()
+        }
+
+        fn oracle(&self) -> Vec<Row> {
+            let mut groups: BTreeSet<Row> = BTreeSet::new();
+            let sum = self.mets.contains(&0).then(|| self.sum_ov());
+            if let Some(s) = &sum {
+                groups.extend(s.keys().cloned());
+            }
+            groups.extend(self.child_groups());
+            if self.dims.is_empty() {
+                groups.insert(vec![]);
+            }
+            let ie = self.m_ie();
+            groups.extend(ie.keys().cloned());
+            let empty = |agg: Agg| agg.apply(std::iter::empty());
+            let mut out: Vec<Row> = groups
+                .into_iter()
+                .map(|g| {
+                    let mut row = g.clone();
+                    for m in &self.mets {
+                        row.push(match METS[*m] {
+                            "sum_ov" => sum.as_ref().and_then(|s| s.get(&g).copied().flatten()),
+                            _ if self.dims.is_empty() && ie.is_empty() => empty(self.outer),
+                            _ => ie.get(&g).copied().flatten(),
+                        });
+                    }
+                    row
+                })
+                .collect();
+            out.sort();
+            out
+        }
+
+        fn def(&self) -> SemanticViewDefinition {
+            let table = |alias: &str| TableRef {
+                alias: alias.to_string(),
+                table: format!("{alias}_tbl"),
+                pk_columns: vec!["id".to_string()],
+                ..Default::default()
+            };
+            let join = |from: &str, to: &str, fk: &str| Join {
+                table: to.to_string(),
+                from_alias: from.to_string(),
+                fk_columns: vec![fk.to_string()],
+                ref_columns: vec!["id".to_string()],
+                name: Some(format!("{from}_{to}")),
+                cardinality: Cardinality::ManyToOne,
+                ..Default::default()
+            };
+            let metric = |name: &str, expr: String, t: Option<&str>| Metric {
+                name: name.to_string(),
+                expr,
+                source_table: t.map(str::to_string),
+                ..Default::default()
+            };
+            let outer = self.outer.sql();
+            SemanticViewDefinition {
+                tables: vec![table("c"), table("o"), table("r")],
+                joins: vec![join("o", "c", "fk_c"), join("r", "o", "fk_o")],
+                dimensions: DIMS
+                    .iter()
+                    .map(|(name, t, col)| Dimension {
+                        name: (*name).to_string(),
+                        expr: format!("{t}.{col}"),
+                        source_table: Some((*t).to_string()),
+                        ..Default::default()
+                    })
+                    .collect(),
+                facts: vec![
+                    Fact {
+                        name: "ov".to_string(),
+                        expr: "o.ov".to_string(),
+                        source_table: Some("o".to_string()),
+                        ..Default::default()
+                    },
+                    Fact {
+                        name: "lie".to_string(),
+                        expr: self.lie_sql(),
+                        source_table: None,
+                        ..Default::default()
+                    },
+                ],
+                metrics: vec![
+                    metric("sum_ov", "SUM(o.ov)".to_string(), Some("o")),
+                    metric("m_ie", format!("{outer}(lie)"), None),
+                    metric("m_ie_inl", format!("{outer}({})", self.lie_sql()), None),
+                ],
+                ..Default::default()
+            }
+        }
+
+        fn db(&self) -> duckdb::Connection {
+            let con = duckdb::Connection::open_in_memory().expect("in-memory DuckDB");
+            let mut sql = "CREATE TABLE c_tbl (id BIGINT, ccat BIGINT);
+                 CREATE TABLE o_tbl (id BIGINT, fk_c BIGINT, ocat BIGINT, ov BIGINT);
+                 CREATE TABLE r_tbl (id BIGINT, fk_o BIGINT, rcat BIGINT);"
+                .to_string();
+            for (i, cat) in self.inst.c.iter().enumerate() {
+                sql += &format!("INSERT INTO c_tbl VALUES ({i}, {});", sql_cell(*cat));
+            }
+            for (i, (f, cat, v)) in self.inst.o.iter().enumerate() {
+                let cells = [*f, *cat, *v].map(sql_cell).join(", ");
+                sql += &format!("INSERT INTO o_tbl VALUES ({i}, {cells});");
+            }
+            for (i, (f, cat)) in self.inst.r.iter().enumerate() {
+                let cells = [*f, *cat].map(sql_cell).join(", ");
+                sql += &format!("INSERT INTO r_tbl VALUES ({i}, {cells});");
+            }
+            con.execute_batch(&sql).expect("data");
+            con
+        }
+
+        fn request(&self) -> QueryRequest {
+            QueryRequest {
+                dimensions: self
+                    .dims
+                    .iter()
+                    .map(|d| DimensionName::new(DIMS[*d].0))
+                    .collect(),
+                metrics: self
+                    .mets
+                    .iter()
+                    .map(|m| MetricName::new(METS[*m]))
+                    .collect(),
+                where_clause: self.pred.as_ref().map(Pred::sql),
+                ..QueryRequest::default()
+            }
+        }
+
+        /// Whether two children of one order share a group of `lie`'s grain,
+        /// the shape where counting per child row and once per group differ.
+        fn repeats_an_order(&self) -> bool {
+            let inst = &self.inst;
+            let grain = self.grain();
+            let mut seen = BTreeSet::new();
+            inst.r.iter().any(|(fk, rcat)| {
+                let o = lookup(*fk, inst.o.len());
+                let row = self.row(o, *rcat);
+                o.is_some() && self.passes(&row) && !seen.insert((o, self.project(&row, &grain)))
+            })
+        }
+    }
+
+    fn cell(n: i64) -> impl Strategy<Value = Cell> {
+        prop_oneof![1 => Just(None), 4 => (0..n).prop_map(Some)]
+    }
+
+    fn fk(n: usize) -> impl Strategy<Value = Cell> {
+        let n = n as i64;
+        prop_oneof![1 => Just(None), 1 => Just(Some(n + 7)), 6 => (0..n).prop_map(Some)]
+    }
+
+    fn arb_instance() -> impl Strategy<Value = Instance> {
+        (1usize..4, 1usize..6).prop_flat_map(|(nc, no)| {
+            (
+                prop::collection::vec(cell(3), nc),
+                prop::collection::vec((fk(nc), cell(3), cell(20)), no),
+                prop::collection::vec((fk(no), cell(2)), 0..9),
+            )
+                .prop_map(|(c, o, r)| Instance { c, o, r })
+        })
+    }
+
+    fn arb_agg() -> impl Strategy<Value = Agg> {
+        prop_oneof![
+            Just(Agg::Sum),
+            Just(Agg::Count),
+            Just(Agg::Min),
+            Just(Agg::Max)
+        ]
+    }
+
+    fn arb_pred() -> impl Strategy<Value = Pred> {
+        let leaf = prop_oneof![
+            (0..DIMS.len(), 0i64..3).prop_map(|(d, k)| Pred::Eq(d, k)),
+            (0..DIMS.len()).prop_map(Pred::IsNull),
+        ];
+        leaf.prop_recursive(1, 3, 2, |inner| {
+            (inner.clone(), inner).prop_map(|(a, b)| Pred::Or(Box::new(a), Box::new(b)))
+        })
+    }
+
+    fn arb_case() -> impl Strategy<Value = Case> {
+        (
+            arb_instance(),
+            arb_agg(),
+            any::<bool>(),
+            prop::sample::subsequence(vec![0usize, 1, 2], 0..=2),
+            arb_agg(),
+            prop::sample::subsequence((0..DIMS.len()).collect::<Vec<usize>>(), 0..=2),
+            prop::sample::subsequence(vec![0usize, 1, 2], 1..=2),
+            prop::option::of(arb_pred()),
+        )
+            .prop_map(
+                |(inst, agg, include, fixed, outer, mut dims, mut mets, pred)| {
+                    let mut touched = BTreeSet::new();
+                    if let Some(p) = &pred {
+                        p.dims(&mut touched);
+                    }
+                    touched.extend(dims.iter().copied());
+                    if !touched.contains(&RCAT) {
+                        dims.push(RCAT);
+                    }
+                    if mets == [0] {
+                        mets.push(1);
+                    }
+                    Case {
+                        inst,
+                        agg,
+                        kind: if include {
+                            LodKind::Include
+                        } else {
+                            LodKind::Exclude
+                        },
+                        fixed,
+                        outer,
+                        dims,
+                        mets,
+                        pred,
+                    }
+                },
+            )
+    }
+
+    /// Answers the case and compares with the oracle; the number of rows.
+    fn check(case: &Case) -> Result<usize, TestCaseError> {
+        let sql = expand("v", &case.def(), &case.request())
+            .map_err(|e| TestCaseError::fail(format!("refused: {e}")))?;
+        let got = super::run(&case.db(), &sql);
+        let want = case.oracle();
+        prop_assert_eq!(&got, &want, "SQL:\n{}", sql);
+        Ok(got.len())
+    }
+
+    proptest! {
+        #![proptest_config(ProptestConfig::with_cases(512))]
+
+        #[test]
+        fn lod_by_a_child_matches_snowflakes_rules(case in arb_case()) {
+            check(&case)?;
+        }
+    }
+
+    /// The generator reaches every shape with rows, so the property above is
+    /// not vacuous.
+    #[test]
+    fn every_child_shape_is_reached() {
+        use proptest::strategy::ValueTree;
+        use proptest::test_runner::{Config, TestRunner};
+        let mut runner = TestRunner::new_with_rng(
+            Config::default(),
+            proptest::test_runner::TestRng::deterministic_rng(
+                proptest::test_runner::RngAlgorithm::ChaCha,
+            ),
+        );
+        let strategy = arb_case();
+        let mut seen: BTreeMap<&str, usize> = BTreeMap::new();
+        for _ in 0..1500 {
+            let case = strategy.new_tree(&mut runner).expect("case").current();
+            let n = check(&case).expect("the property holds");
+            let by_child = case.dims.contains(&RCAT);
+            let mut labels = vec![];
+            if n == 0 {
+                labels.push("empty");
+            } else {
+                labels.push(match (case.kind, by_child) {
+                    (LodKind::Include, true) => "include by the child",
+                    (LodKind::Include, false) => "include filtered by the child",
+                    (_, true) => "exclude by the child",
+                    (_, false) => "exclude filtered by the child",
+                });
+                if case.repeats_an_order() {
+                    labels.push("an order repeated in a group");
+                }
+                if case.mets.contains(&0) {
+                    labels.push("beside a plain metric");
+                }
+                if case.inst.r.iter().any(|(_, rcat)| rcat.is_none()) && by_child {
+                    labels.push("a NULL child group");
+                }
+            }
+            for l in labels {
+                *seen.entry(l).or_default() += 1;
+            }
+        }
+        for label in [
+            "include by the child",
+            "include filtered by the child",
+            "exclude by the child",
+            "exclude filtered by the child",
+            "an order repeated in a group",
+            "beside a plain metric",
+            "a NULL child group",
+        ] {
+            assert!(
+                seen.get(label).copied().unwrap_or(0) >= 10,
+                "{label} reached too rarely: {seen:?}"
+            );
+        }
+    }
+}

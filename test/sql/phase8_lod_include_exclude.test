@@ -374,10 +374,9 @@ North	10.5
 South	17.0
 NULL	23.0
 
-# Q1 (not in the fixtures, which have no table below orders): an INCLUDE
-# metric grouped by a table its home doesn't reference, a child of orders, has
-# no single grain to compute at, and is refused. Snowflake's answer is not
-# known yet: TECH-DEBT #115.
+# Q1: an INCLUDE metric grouped by a child of orders is computed over the
+# child's rows, each joined up to its order, as Snowflake computes it (fixture
+# 14c, TECH-DEBT #115; the full set of cases is in phase8_lod_child_grain.test).
 statement ok
 CREATE TABLE order_returns (return_id INTEGER, order_id INTEGER, reason VARCHAR);
 
@@ -393,16 +392,17 @@ CREATE SEMANTIC VIEW sales_child
   DIMENSIONS (customers.customer_id AS customer_id, customers.region AS region, order_returns.reason AS reason)
   METRICS (avg_customer_rev AS AVG(SUM(orders.order_amount) INCLUDE DIMENSIONS (customers.customer_id)));
 
-statement error
-SELECT * FROM SEMANTIC_VIEW(sales_child DIMENSIONS order_returns.reason METRICS avg_customer_rev);
+query TR
+SELECT * FROM SEMANTIC_VIEW(sales_child DIMENSIONS order_returns.reason METRICS avg_customer_rev) ORDER BY 1 NULLS LAST;
 ----
-the query groups or filters by table 'order_returns', which 'orders' does not reference along foreign keys by one path
+damaged	400.0
+late	300.0
 
-# Q1b: nor filtered by it.
-statement error
-SELECT * FROM SEMANTIC_VIEW(sales_child DIMENSIONS customers.region METRICS avg_customer_rev WHERE order_returns.reason = 'late');
+# Q1b: and filtered by it, over the rows the filter keeps.
+query TR
+SELECT * FROM SEMANTIC_VIEW(sales_child DIMENSIONS customers.region METRICS avg_customer_rev WHERE order_returns.reason = 'late') ORDER BY 1 NULLS LAST;
 ----
-the query groups or filters by table 'order_returns'
+South	300.0
 
 # Q1c: grouped by a table it does reference, it is answered.
 query TR

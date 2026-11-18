@@ -44,9 +44,17 @@
 //! row of the home table (a customer with no orders) gets its value too, and
 //! to its home table through a twin, so a group of home rows with no row there
 //! (orders with no customer row) does as well; the metric reads the first
-//! value that is not `NULL`. With no query (`CREATE` checks, `SHOW`), an
-//! `INCLUDE` one is lowered at its listed dimensions and an `EXCLUDE` one at
-//! none.
+//! value that is not `NULL`.
+//!
+//! When the query's dimensions and filter are listed from a table below the
+//! home table (returns below orders), an `INCLUDE` or `EXCLUDE` hidden table
+//! is computed over that table's rows instead, each joined up to the home,
+//! and joined to that table alone (`child_root`, TECH-DEBT #115): Snowflake's
+//! plans for such a query (fixture 14c) count an order once per return in a
+//! group, and list the groups from the returns.
+//!
+//! With no query (`CREATE` checks, `SHOW`), an `INCLUDE` one is lowered at
+//! its listed dimensions and an `EXCLUDE` one at none.
 //!
 //! The lowering runs after the bare-column, dimension-reference and window
 //! lowerings, so the member expressions it splices are already qualified, and
@@ -137,6 +145,42 @@ fn joined_from(
         present.push(normalize_ident_part(added));
     }
     sql
+}
+
+/// The table an `INCLUDE` or `EXCLUDE` expression whose home table is `home`
+/// is computed from when a query lists its rows from a table below that home
+/// (TECH-DEBT #115): the table a dimensions-only query of `grain_tables` (the
+/// query's dimension and filter tables) lists from, when it is not `home` and
+/// references `home` along foreign keys by one path. `None` when the query's
+/// rows are listed from the home or a table above it, or from no one table.
+///
+/// Snowflake computes such an expression over that table's rows, each joined
+/// up to the home table, and lists the query's groups from the same rows
+/// (fixture 14c's plans P1-P7): an order with two returns in one group counts
+/// twice, and orders with no return make no group.
+fn child_root<'d>(
+    def: &'d SemanticViewDefinition,
+    grain_tables: &[String],
+    home: &str,
+) -> Option<&'d TableRef> {
+    if grain_tables.is_empty() {
+        return None;
+    }
+    let super::sql_gen::Anchor::At(anchor) = super::sql_gen::member_anchor(def, grain_tables)
+    else {
+        return None;
+    };
+    if ident_matches(&anchor, home)
+        || crate::graph::chain_paths(def, &anchor, home, &|_| true).len() != 1
+    {
+        return None;
+    }
+    def.tables.iter().find(|t| ident_matches(&t.alias, &anchor))
+}
+
+/// Whether `from` is `to` or references it along foreign keys by one path.
+fn reached_by_one_path(def: &SemanticViewDefinition, from: &str, to: &str) -> bool {
+    ident_matches(from, to) || crate::graph::chain_paths(def, from, to, &|_| true).len() == 1
 }
 
 /// `name`, with `_` appended while `taken` says it is in use.
@@ -304,6 +348,12 @@ pub(super) fn lower_lod_at<'d>(
         else {
             return Cow::Borrowed(def);
         };
+        // Read from a table below its home, an INCLUDE or EXCLUDE expression
+        // is computed over that table's rows and read from it (#115).
+        let below = match lod.kind {
+            LodKind::Fixed => None,
+            LodKind::Include | LodKind::Exclude => child_root(def, &grain_tables, &home.alias),
+        };
         // Its grain: its own dimensions, or the query's with them or without.
         let mut grain_keys: Vec<Resolved> = Vec::new();
         let (attach, filter) = match lod.kind {
@@ -318,7 +368,7 @@ pub(super) fn lower_lod_at<'d>(
                         grain_keys.push(*k);
                     }
                 }
-                (home, filter_sql.as_deref())
+                (below.unwrap_or(home), filter_sql.as_deref())
             }
             LodKind::Exclude => {
                 grain_keys = grain
@@ -327,10 +377,14 @@ pub(super) fn lower_lod_at<'d>(
                     .filter(|d| !res.keys.contains(d))
                     .copied()
                     .collect();
-                let at = listed_from
-                    .as_deref()
-                    .and_then(|a| def.tables.iter().find(|t| ident_matches(&t.alias, a)))
-                    .unwrap_or(home);
+                // Below its home, the groups are the child table's rows even
+                // when only the filter names it (no dimensions).
+                let at = below.unwrap_or_else(|| {
+                    listed_from
+                        .as_deref()
+                        .and_then(|a| def.tables.iter().find(|t| ident_matches(&t.alias, a)))
+                        .unwrap_or(home)
+                });
                 (at, filter_sql.as_deref())
             }
         };
@@ -349,7 +403,16 @@ pub(super) fn lower_lod_at<'d>(
         read.extend(key_tables.iter().cloned());
         let mut texts: Vec<&str> = vec![&key_sql, &body];
         texts.extend(filter);
-        let from = joined_from(def, home, &read, &texts);
+        // Computed over the home table's rows, or over the rows of the table
+        // below it that the query lists from, each joined up to the home.
+        let source = match below {
+            Some(b) => {
+                read.push(home.alias.clone());
+                b
+            }
+            None => home,
+        };
+        let from = joined_from(def, source, &read, &texts);
         let filter_clause = filter.map(|f| format!("\nWHERE {f}")).unwrap_or_default();
         let name = match lod.origin {
             Origin::Fact(i) => def.facts[i].name.clone(),
@@ -360,8 +423,10 @@ pub(super) fn lower_lod_at<'d>(
         // read from its home too, through a twin of its table, so that the
         // groups of rows with no row there (orders with no customer row)
         // find their value as well (11b E5).
+        // Read from a table below its home, the groups are that table's rows,
+        // so no twin is needed.
         let mut attachments = vec![attach];
-        if !ident_matches(&attach.alias, &home.alias) {
+        if below.is_none() && !ident_matches(&attach.alias, &home.alias) {
             attachments.push(home);
         }
         let mut aliases: Vec<String> = Vec::new();
@@ -760,22 +825,41 @@ pub(super) fn query_grain(
             }
         }
     }
-    // Every table its grain and filter read is reached from its home.
+    // The tables the query lists its rows from.
+    let grain_tables: Vec<String> = dims
+        .iter()
+        .filter_map(|&d| member_table(def, d).map(str::to_ascii_lowercase))
+        .chain(filter_tables.iter().map(|t| t.to_ascii_lowercase()))
+        .collect();
+    // Every table its grain and filter read is reached from its home by one
+    // path, or, when the query lists its rows from a table below the home,
+    // from that table, which also reaches the home and the expression's own
+    // tables (#115).
     for lod in &read {
         let Ok(res) = resolve_lod(def, lod) else {
             continue;
         };
+        let below = child_root(def, &grain_tables, &res.home);
+        let root = below.map_or(res.home.as_str(), |b| b.alias.as_str());
         let grouped = dims.iter().filter(|d| match lod.kind {
             LodKind::Exclude => !res.keys.contains(d),
             _ => true,
         });
+        // An INCLUDE expression's own dimensions are in its grain; an
+        // EXCLUDE one's are not.
+        let own_keys = res.keys.iter().filter(|_| lod.kind == LodKind::Include);
+        let own = below.map(|_| {
+            res.tables
+                .iter()
+                .cloned()
+                .chain(own_keys.filter_map(|&k| member_table(def, k).map(str::to_string)))
+        });
         let tables = grouped
             .filter_map(|&d| member_table(def, d).map(str::to_string))
-            .chain(filter_tables.iter().cloned());
+            .chain(filter_tables.iter().cloned())
+            .chain(own.into_iter().flatten());
         for t in tables {
-            let reached = ident_matches(&t, &res.home)
-                || crate::graph::chain_paths(def, &res.home, &t, &|_| true).len() == 1;
-            if !reached {
+            if !reached_by_one_path(def, root, &t) {
                 return Err(refuse(format!(
                     "{} uses {} DIMENSIONS, so it aggregates the rows of table '{}' at the \
                      query's grain, but the query groups or filters by table '{t}', which \
@@ -783,7 +867,7 @@ pub(super) fn query_grain(
                     lod.describe(def),
                     lod.kind.keyword(),
                     res.home,
-                    res.home
+                    root
                 )));
             }
         }
@@ -842,9 +926,26 @@ pub fn lod_grain_allows(def: &SemanticViewDefinition, metric: &str, dim: &str) -
         let Some(t) = def.dimensions[d].source_table.as_deref() else {
             continue;
         };
-        let reached = ident_matches(t, &res.home)
-            || crate::graph::chain_paths(def, &res.home, t, &|_| true).len() == 1;
-        if !reached {
+        if reached_by_one_path(def, &res.home, t) {
+            continue;
+        }
+        // A table below the home: grouped by it alone, the expression is
+        // read from its rows (#115), so they reach the home and the
+        // expression's own tables.
+        let grain_tables = [t.to_ascii_lowercase()];
+        let Some(below) = child_root(def, &grain_tables, &res.home) else {
+            return false;
+        };
+        let own = res.tables.iter().cloned().chain(
+            res.keys
+                .iter()
+                .filter(|_| lod.kind == LodKind::Include)
+                .filter_map(|&k| member_table(def, k).map(str::to_string)),
+        );
+        if !own
+            .into_iter()
+            .all(|o| reached_by_one_path(def, &below.alias, &o))
+        {
             return false;
         }
     }

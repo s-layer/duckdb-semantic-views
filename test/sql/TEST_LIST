@@ -179,3 +179,4 @@ test/sql/phase8_window_members.test
 test/sql/phase8_many_to_many.test
 test/sql/phase8_lod_fixed.test
 test/sql/phase8_lod_include_exclude.test
+test/sql/phase8_lod_child_grain.test
