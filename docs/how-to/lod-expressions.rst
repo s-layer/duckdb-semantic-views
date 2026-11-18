@@ -284,6 +284,67 @@ An ``INCLUDE`` or ``EXCLUDE`` expression is computed at the query's grain, so it
 The ``FIXED`` metric still counts every order of each customer with an electronics order. The ``INCLUDE`` metric counts only their electronics orders: Alice's 2 and Bob's 1 in North, Carol's 2 and Dan's 1 in South.
 
 
+.. _howto-lod-child:
+
+Group by a Table Below the Aggregated One
+=========================================
+
+A query can group or filter an ``INCLUDE`` or ``EXCLUDE`` expression by a table below the one it aggregates, such as order returns below orders. Add a returns table, where order 102 is returned twice for the same reason:
+
+.. code-block:: sql
+
+   CREATE TABLE order_returns (return_id INTEGER, order_id INTEGER, reason VARCHAR);
+   INSERT INTO order_returns VALUES
+       (1, 101, 'damaged'), (2, 101, 'late'), (3, 102, 'late'),
+       (4, 102, 'late'),    (5, 103, 'late'), (6, 107, 'damaged');
+
+   CREATE SEMANTIC VIEW sales_returns
+   TABLES (
+       customers     AS customers PRIMARY KEY (customer_id),
+       orders        AS orders PRIMARY KEY (order_id),
+       order_returns AS order_returns PRIMARY KEY (return_id)
+   )
+   RELATIONSHIPS (
+       orders(customer_id) REFERENCES customers,
+       order_returns(order_id) REFERENCES orders
+   )
+   FACTS (orders.order_amount AS amount)
+   DIMENSIONS (
+       customers.customer_id AS customer_id,
+       customers.region      AS region,
+       order_returns.reason  AS reason
+   )
+   METRICS (
+       orders.total_revenue AS SUM(amount),
+       avg_customer_revenue AS AVG(SUM(orders.order_amount) INCLUDE DIMENSIONS (customers.customer_id))
+   );
+
+As in Snowflake, the expression is then computed over the returns, each joined to its order. An order counts once for each of its returns in a group, and the groups are the returns' reasons:
+
+.. code-block:: sql
+
+   SELECT * FROM SEMANTIC_VIEW(sales_returns
+       DIMENSIONS order_returns.reason
+       METRICS orders.total_revenue, avg_customer_revenue
+   ) ORDER BY reason;
+
+.. code-block:: text
+
+   ┌─────────┬───────────────┬──────────────────────┐
+   │ reason  │ total_revenue │ avg_customer_revenue │
+   ├─────────┼───────────────┼──────────────────────┤
+   │ damaged │        700.00 │                350.0 │
+   │ late    │        900.00 │               1100.0 │
+   │ NULL    │        900.00 │                 NULL │
+   └─────────┴───────────────┴──────────────────────┘
+
+Alice's late returns are 101 (400), 103 (300) and 102 twice (200 each), so her late revenue is 1100, while ``total_revenue`` counts each order once per group (900). The ``NULL`` row is ``total_revenue``'s orders with no return; the LOD expression has no returns to compute there. A return with a ``NULL`` reason would make a ``NULL`` group of its own. Filtering by the returns works the same way: ``WHERE order_returns.reason = 'late'`` by region gives North 1100.
+
+Snowflake gives these answers when the LOD metric is queried on its own. Beside a plain metric such as ``total_revenue``, Snowflake computes it once per group instead (late 900 here), and in some queries returns a ``NULL`` group as an extra row. The extension gives the same answer whatever else the query names.
+
+A query across a diamond, where the aggregated table reaches the grouped table along two paths (orders reach regions through customers and through stores), is refused, as it is for a plain metric.
+
+
 .. _howto-lod-facts:
 
 Read an LOD Fact in FACTS
@@ -324,7 +385,7 @@ What Is Not Supported
 =====================
 
 - An ``INCLUDE`` or ``EXCLUDE`` expression is computed at the query's grain, so a query can read it only in ``METRICS``, inside an aggregate: not in ``DIMENSIONS``, ``FACTS`` or ``WHERE``. A query that reads one can't group by an expression item, or group or filter by an LOD dimension, which has a grain of its own. As in Snowflake, these are refused.
-- A query that reads an ``INCLUDE`` or ``EXCLUDE`` expression can group and filter only by tables its aggregated table reaches along foreign keys by one path, or by that table itself.
+- A query that reads an ``INCLUDE`` or ``EXCLUDE`` expression can't group or filter by a table its aggregated table reaches along more than one path, or by a table neither reaches the other from along foreign keys (see :ref:`howto-lod-child`).
 - An LOD expression cannot be written in a query; declare it in the view.
 - A query that reads an LOD expression and reaches across a :ref:`direct many-to-many relationship <ref-create-direct-many-to-many>` is refused, as in Snowflake (010959).
 - A materialization cannot cover an LOD expression, or a metric that reads one.

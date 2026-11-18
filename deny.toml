@@ -24,7 +24,7 @@ version = 2
 unused-ignored-advisory = "deny"
 # zip 6.0.0 is a build dependency of libduckdb-sys =1.10506.0, which requires
 # zip "6", so the advisories' fix (zip >= 9) cannot be taken until a
-# libduckdb-sys release moves. All four are in archive extraction, which
+# libduckdb-sys release moves. All seven are in archive extraction, which
 # libduckdb-sys's build script runs only with DUCKDB_DOWNLOAD_LIB=1, to unpack
 # DuckDB's own release zip. This repo never sets it: the `bundled` build
 # unpacks the crate's duckdb.tar.gz with tar instead. Drop these when the
@@ -34,16 +34,24 @@ ignore = [
     { id = "RUSTSEC-2026-0368", reason = "zip 6 via libduckdb-sys build script; extraction path unused (DUCKDB_DOWNLOAD_LIB unset)" },
     { id = "RUSTSEC-2026-0369", reason = "zip 6 via libduckdb-sys build script; extraction path unused (DUCKDB_DOWNLOAD_LIB unset)" },
     { id = "RUSTSEC-2026-0429", reason = "zip 6 via libduckdb-sys build script; extraction path unused (DUCKDB_DOWNLOAD_LIB unset)" },
+    { id = "RUSTSEC-2026-0545", reason = "zip 6 via libduckdb-sys build script; extraction path unused (DUCKDB_DOWNLOAD_LIB unset)" },
+    { id = "RUSTSEC-2026-0547", reason = "zip 6 via libduckdb-sys build script; extraction path unused (DUCKDB_DOWNLOAD_LIB unset)" },
+    { id = "RUSTSEC-2026-0548", reason = "zip 6 via libduckdb-sys build script; extraction path unused (DUCKDB_DOWNLOAD_LIB unset)" },
+    # chrono is unmaintained (no vulnerability). It reaches the graph only
+    # through the arrow crates the duckdb crate pins, and has no maintained
+    # drop-in replacement upstream; this repo doesn't use it (TECH-DEBT #104).
+    { id = "RUSTSEC-2026-0543", reason = "chrono unmaintained, only via duckdb's arrow 58; not used here" },
 ]
 
 [bans]
 multiple-versions = "warn"
 wildcards = "allow"
-# The zip ignores above match by advisory ID anywhere in the graph. This keeps
-# zip itself to the one place they were reviewed for: a crate that pulls zip
-# in other than libduckdb-sys fails the check (TECH-DEBT #104).
+# The zip and chrono ignores above match by advisory ID anywhere in the graph.
+# This keeps each crate to the one place they were reviewed for: a crate that
+# pulls zip in other than libduckdb-sys, or chrono other than arrow, fails the check (TECH-DEBT #104).
 deny = [
     { crate = "zip", wrappers = ["libduckdb-sys"], reason = "zip 6 advisories are ignored only for libduckdb-sys's build script" },
+    { crate = "chrono", wrappers = ["arrow-arith", "arrow-array", "arrow-cast"], reason = "the chrono unmaintained advisory is ignored only for duckdb's arrow crates" },
 ]
 
 [sources]
