@@ -8,8 +8,11 @@
 # two returns in one group counts twice. The groups are that table's rows:
 # orders with no return make no group, a return with a NULL reason makes a
 # NULL group. Each case below is Snowflake's answer to the query run on its
-# own (14c P-labels, 14 Q-labels). A diamond stays refused, as for a plain
-# metric (010246).
+# own (14c P-labels, 14 Q-labels), or beside a plain metric (14d C-labels),
+# which changes the rows the value is computed over, with the filter applied
+# after the values are matched to the child rows (14f H-labels). Across a
+# diamond the expression follows the path Snowflake's relationship names pick
+# (14d D-labels, 14e G-labels); a plain metric there stays refused (010246).
 
 require semantic_views
 
@@ -62,7 +65,10 @@ CREATE SEMANTIC VIEW sales_child
     orders.total_revenue AS SUM(amount),
     avg_customer_rev AS AVG(SUM(orders.order_amount) INCLUDE DIMENSIONS (customers.customer_id)),
     region_rev_via_exclude AS AVG(region_total_excl_customer),
-    max_order_rev AS MAX(SUM(orders.order_amount) INCLUDE DIMENSIONS (orders.order_id))
+    max_order_rev AS MAX(SUM(orders.order_amount) INCLUDE DIMENSIONS (orders.order_id)),
+    order_returns.return_count AS COUNT(order_returns.return_id),
+    customers.customer_count AS COUNT(customers.customer_id),
+    avg_orders_fixed AS AVG(COUNT(orders.order_id) FIXED DIMENSIONS (customers.customer_id))
   );
 
 # P1: INCLUDE customer by reason. late is customer 1's four late return rows
@@ -134,13 +140,160 @@ CREATE SEMANTIC VIEW sales_child_nn
   RELATIONSHIPS (orders(customer_id) REFERENCES customers, order_returns(order_id) REFERENCES orders)
   FACTS (orders.order_amount AS amount)
   DIMENSIONS (customers.customer_id AS customer_id, customers.region AS region, order_returns.reason AS reason)
-  METRICS (avg_customer_rev AS AVG(SUM(orders.order_amount) INCLUDE DIMENSIONS (customers.customer_id)));
+  METRICS (
+    orders.total_revenue AS SUM(amount),
+    avg_customer_rev AS AVG(SUM(orders.order_amount) INCLUDE DIMENSIONS (customers.customer_id))
+  );
 
 query TR
 SELECT * FROM SEMANTIC_VIEW(sales_child_nn DIMENSIONS order_returns.reason METRICS avg_customer_rev) ORDER BY 1 NULLS LAST;
 ----
 damaged	350.0
 late	1100.0
+
+# Beside a plain metric (fixture 14d, C-labels), the value is computed over
+# that metric's rows instead: orders LEFT JOIN returns, each order once per
+# group, so late is 900 (102 once), and the orders with no return fall in the
+# NULL group. The value rows are matched to the groups the returns list, and
+# a value whose group no return lists has NULL dimensions.
+
+# C1: the NULL group is 104's 100 and the customers' orders with no return:
+# customer 2's 300, 3's 300 and 4's 200 (225).
+query TRR
+SELECT * FROM SEMANTIC_VIEW(sales_child DIMENSIONS order_returns.reason METRICS orders.total_revenue, avg_customer_rev) ORDER BY 1 NULLS LAST;
+----
+damaged	700.00	350.0
+late	900.00	900.0
+NULL	900.00	225.0
+
+# C2: EXCLUDE beside a plain metric.
+query TRR
+SELECT * FROM SEMANTIC_VIEW(sales_child DIMENSIONS order_returns.reason METRICS orders.total_revenue, region_rev_via_exclude) ORDER BY 1 NULLS LAST;
+----
+damaged	700.00	700.0
+late	900.00	900.0
+NULL	900.00	900.0
+
+# C3: no return lists South with a NULL reason, so South's 500 has NULL
+# dimensions: South/NULL gets no value, and a NULL/NULL row has it.
+query TTRR
+SELECT * FROM SEMANTIC_VIEW(sales_child DIMENSIONS customers.region, order_returns.reason METRICS orders.total_revenue, region_rev_via_exclude) ORDER BY 1 NULLS LAST, 2 NULLS LAST;
+----
+North	damaged	400.00	400.0
+North	late	900.00	900.0
+North	NULL	400.00	400.0
+South	damaged	300.00	300.0
+South	NULL	500.00	NULL
+NULL	NULL	NULL	500.0
+
+# C4: with no NULL-reason return the returns list no NULL group, but the
+# value's NULL group meets the plain metric's.
+query TRR
+SELECT * FROM SEMANTIC_VIEW(sales_child_nn DIMENSIONS order_returns.reason METRICS orders.total_revenue, avg_customer_rev) ORDER BY 1 NULLS LAST;
+----
+damaged	700.00	350.0
+late	900.00	900.0
+NULL	900.00	225.0
+
+# C8: customers 2, 3 and 4 have no NULL-reason return: their values (300,
+# 300, 200) share the NULL/NULL row.
+query ITRR
+SELECT * FROM SEMANTIC_VIEW(sales_child DIMENSIONS customers.customer_id, order_returns.reason METRICS orders.total_revenue, avg_customer_rev) ORDER BY 1 NULLS LAST, 2 NULLS LAST;
+----
+1	damaged	400.00	400.0
+1	late	900.00	900.0
+1	NULL	100.00	100.0
+2	NULL	300.00	NULL
+3	damaged	300.00	300.0
+3	NULL	300.00	NULL
+4	NULL	200.00	NULL
+NULL	NULL	NULL	266.6666666666667
+
+# C5: beside a plain metric on the returns themselves, the rows are the
+# returns, as alone.
+query TIR
+SELECT * FROM SEMANTIC_VIEW(sales_child DIMENSIONS order_returns.reason METRICS order_returns.return_count, avg_customer_rev) ORDER BY 1 NULLS LAST;
+----
+damaged	2	350.0
+late	4	1100.0
+NULL	1	100.0
+
+# Only a plain metric on the expression's own home table changes its rows
+# (fixture 14e, E-labels). E3: beside plain metrics on the orders and on the
+# returns, in either order, the orders' rows.
+query TRIR
+SELECT * FROM SEMANTIC_VIEW(sales_child DIMENSIONS order_returns.reason METRICS orders.total_revenue, order_returns.return_count, avg_customer_rev) ORDER BY 1 NULLS LAST;
+----
+damaged	700.00	2	350.0
+late	900.00	4	900.0
+NULL	900.00	1	225.0
+
+query TIRR
+SELECT * FROM SEMANTIC_VIEW(sales_child DIMENSIONS order_returns.reason METRICS order_returns.return_count, orders.total_revenue, avg_customer_rev) ORDER BY 1 NULLS LAST;
+----
+damaged	2	700.00	350.0
+late	4	900.00	900.0
+NULL	1	900.00	225.0
+
+# E4: beside a plain metric on the customers, above the home: as alone.
+query TIR
+SELECT * FROM SEMANTIC_VIEW(sales_child DIMENSIONS order_returns.reason METRICS customers.customer_count, avg_customer_rev) ORDER BY 1 NULLS LAST;
+----
+damaged	2	350.0
+late	1	1100.0
+NULL	4	100.0
+
+# E1, E2: beside a plain metric on the returns, grouped above the home: the
+# home's rows, as alone.
+query TIR
+SELECT * FROM SEMANTIC_VIEW(sales_child DIMENSIONS customers.region METRICS order_returns.return_count, avg_customer_rev) ORDER BY 1 NULLS LAST;
+----
+North	6	650.0
+South	1	400.0
+
+query TIR
+SELECT * FROM SEMANTIC_VIEW(sales_child DIMENSIONS customers.region METRICS order_returns.return_count, region_rev_via_exclude) ORDER BY 1 NULLS LAST;
+----
+North	6	1300.0
+South	1	800.0
+
+# E6: filtered on the returns beside a plain metric on the orders: the orders
+# with a late return, once each (900); E6b, alone: each late return (1100).
+query TRR
+SELECT * FROM SEMANTIC_VIEW(sales_child DIMENSIONS customers.region METRICS orders.total_revenue, avg_customer_rev WHERE order_returns.reason = 'late') ORDER BY 1 NULLS LAST;
+----
+North	900.00	900.0
+
+query TR
+SELECT * FROM SEMANTIC_VIEW(sales_child DIMENSIONS customers.region METRICS avg_customer_rev WHERE order_returns.reason = 'late') ORDER BY 1 NULLS LAST;
+----
+North	1100.0
+
+# F1, F2: FIXED by the returns' reason, alone or beside a plain metric. The
+# customers are grouped by their returns' reasons, and the NULL group is the
+# customers with a NULL-reason return (1) or none at all (2, 4): customer 3's
+# orders with no return don't put it there.
+query TR
+SELECT * FROM SEMANTIC_VIEW(sales_child DIMENSIONS order_returns.reason METRICS avg_orders_fixed) ORDER BY 1 NULLS LAST;
+----
+damaged	3.5
+late	4.0
+NULL	2.3333333333333335
+
+query TRR
+SELECT * FROM SEMANTIC_VIEW(sales_child DIMENSIONS order_returns.reason METRICS orders.total_revenue, avg_orders_fixed) ORDER BY 1 NULLS LAST;
+----
+damaged	700.00	3.5
+late	900.00	4.0
+NULL	900.00	2.3333333333333335
+
+# C7: beside another INCLUDE metric and no plain one, both as alone.
+query TRR
+SELECT * FROM SEMANTIC_VIEW(sales_child DIMENSIONS order_returns.reason METRICS avg_customer_rev, max_order_rev) ORDER BY 1 NULLS LAST;
+----
+damaged	350.0	400.00
+late	1100.0	400.00
+NULL	100.0	100.00
 
 # A return of an order that is not there (an orphan) is one of the rows too,
 # joined up to a NULL order: EXCLUDE with no dimensions, filtered to it alone,
@@ -250,10 +403,14 @@ customers	region
 order_returns_14	reason
 orders	order_id
 
-# A diamond: orders reach regions through customers and through stores.
-# Snowflake refuses a plain metric by the far table (010246) and answers an
-# LOD one along whichever path each part of its plan picks (fixture 14c P8,
-# P10), so it stays refused here.
+# A diamond: orders reach regions through customers and through stores
+# (fixture 14d, D-labels). Snowflake refuses a plain metric by the far table
+# (010246), and answers an INCLUDE or EXCLUDE one along the path whose first
+# relationship out of the orders has the smaller name, whatever the order
+# they are declared in. A table the query needs on the other path is joined
+# to regions too, so an order whose customer and store are in different
+# regions has no manager. By the customers: Nina 1300, Sam 800; by the
+# stores: Nina 1000, Sam 1100.
 statement ok
 CREATE TABLE stores (store_id INTEGER, region VARCHAR);
 
@@ -267,24 +424,404 @@ statement ok
 INSERT INTO regions VALUES ('North', 'Nina'), ('South', 'Sam');
 
 statement ok
-CREATE SEMANTIC VIEW sales_diamond
+CREATE SEMANTIC VIEW sd_cust_first
+  TABLES (customers AS customers PRIMARY KEY (customer_id), orders AS orders PRIMARY KEY (order_id),
+    stores AS stores PRIMARY KEY (store_id), regions AS regions PRIMARY KEY (region))
+  RELATIONSHIPS (a_ord_cust AS orders(customer_id) REFERENCES customers, b_ord_store AS orders(store_id) REFERENCES stores,
+    a_cust_reg AS customers(region) REFERENCES regions, b_store_reg AS stores(region) REFERENCES regions)
+  FACTS (orders.order_amount AS amount)
+  DIMENSIONS (customers.customer_id AS customer_id, stores.store_id AS store_id, regions.manager AS manager)
+  METRICS (
+    orders.total_revenue AS SUM(amount),
+    avg_customer_rev AS AVG(SUM(orders.order_amount) INCLUDE DIMENSIONS (customers.customer_id)),
+    avg_store_rev AS AVG(SUM(orders.order_amount) INCLUDE DIMENSIONS (stores.store_id)),
+    avg_store_rev_excl AS AVG(SUM(orders.order_amount) EXCLUDE DIMENSIONS (stores.store_id)),
+    avg_cust_rev_excl AS AVG(SUM(orders.order_amount) EXCLUDE DIMENSIONS (customers.customer_id))
+  );
+
+# D1: EXCLUDE store by manager, through the customers.
+query TR
+SELECT * FROM SEMANTIC_VIEW(sd_cust_first DIMENSIONS regions.manager METRICS avg_store_rev_excl) ORDER BY 1 NULLS LAST;
+----
+Nina	1300.0
+Sam	800.0
+
+# D2: INCLUDE customer, through the customers.
+query TR
+SELECT * FROM SEMANTIC_VIEW(sd_cust_first DIMENSIONS regions.manager METRICS avg_customer_rev) ORDER BY 1 NULLS LAST;
+----
+Nina	650.0
+Sam	400.0
+
+# D3: INCLUDE store: the stores are on the other path, so regions is joined
+# through both. Nina: store 1's orders by North customers (800); Sam: store
+# 2's by South customers (600); the rest have no manager: store 2's 500 and
+# store 1's 200 (350).
+query TR
+SELECT * FROM SEMANTIC_VIEW(sd_cust_first DIMENSIONS regions.manager METRICS avg_store_rev) ORDER BY 1 NULLS LAST;
+----
+Nina	800.0
+Sam	600.0
+NULL	350.0
+
+# A plain metric by the far table stays refused (010246).
+statement error
+SELECT * FROM SEMANTIC_VIEW(sd_cust_first DIMENSIONS regions.manager METRICS orders.total_revenue);
+----
+regions
+
+# SHOW ... FOR METRIC lists the far table's dimension for an LOD metric.
+query T
+SELECT name FROM (SHOW SEMANTIC DIMENSIONS IN sd_cust_first FOR METRIC avg_store_rev_excl) ORDER BY 1;
+----
+customer_id
+manager
+store_id
+
+statement ok
+CREATE SEMANTIC VIEW sd_store_first
+  TABLES (customers AS customers PRIMARY KEY (customer_id), orders AS orders PRIMARY KEY (order_id),
+    stores AS stores PRIMARY KEY (store_id), regions AS regions PRIMARY KEY (region))
+  RELATIONSHIPS (b_ord_cust AS orders(customer_id) REFERENCES customers, a_ord_store AS orders(store_id) REFERENCES stores,
+    b_cust_reg AS customers(region) REFERENCES regions, a_store_reg AS stores(region) REFERENCES regions)
+  FACTS (orders.order_amount AS amount)
+  DIMENSIONS (customers.customer_id AS customer_id, stores.store_id AS store_id, regions.manager AS manager)
+  METRICS (
+    avg_customer_rev AS AVG(SUM(orders.order_amount) INCLUDE DIMENSIONS (customers.customer_id)),
+    avg_store_rev AS AVG(SUM(orders.order_amount) INCLUDE DIMENSIONS (stores.store_id)),
+    avg_store_rev_excl AS AVG(SUM(orders.order_amount) EXCLUDE DIMENSIONS (stores.store_id))
+  );
+
+# D5: named the other way, through the stores.
+query TR
+SELECT * FROM SEMANTIC_VIEW(sd_store_first DIMENSIONS regions.manager METRICS avg_store_rev_excl) ORDER BY 1 NULLS LAST;
+----
+Nina	1000.0
+Sam	1100.0
+
+# D6: INCLUDE customer, now on the other path. Nina: customers 1 (600) and
+# 2 (200) at store 1; Sam: 3 (400) and 4 (200) at store 2; no manager: 1's
+# 400 and 2's 100 at store 2, 3's 200 at store 1.
+query TR
+SELECT * FROM SEMANTIC_VIEW(sd_store_first DIMENSIONS regions.manager METRICS avg_customer_rev) ORDER BY 1 NULLS LAST;
+----
+Nina	400.0
+Sam	300.0
+NULL	233.33333333333334
+
+# D7: INCLUDE store, through the stores.
+query TR
+SELECT * FROM SEMANTIC_VIEW(sd_store_first DIMENSIONS regions.manager METRICS avg_store_rev) ORDER BY 1 NULLS LAST;
+----
+Nina	1000.0
+Sam	1100.0
+
+# D9: sd_cust_first's names, declared in the reverse order: still through the
+# customers.
+statement ok
+CREATE SEMANTIC VIEW sd_cust_first_rev
+  TABLES (customers AS customers PRIMARY KEY (customer_id), orders AS orders PRIMARY KEY (order_id),
+    stores AS stores PRIMARY KEY (store_id), regions AS regions PRIMARY KEY (region))
+  RELATIONSHIPS (b_store_reg AS stores(region) REFERENCES regions, a_cust_reg AS customers(region) REFERENCES regions,
+    b_ord_store AS orders(store_id) REFERENCES stores, a_ord_cust AS orders(customer_id) REFERENCES customers)
+  FACTS (orders.order_amount AS amount)
+  DIMENSIONS (customers.customer_id AS customer_id, stores.store_id AS store_id, regions.manager AS manager)
+  METRICS (avg_store_rev_excl AS AVG(SUM(orders.order_amount) EXCLUDE DIMENSIONS (stores.store_id)));
+
+query TR
+SELECT * FROM SEMANTIC_VIEW(sd_cust_first_rev DIMENSIONS regions.manager METRICS avg_store_rev_excl) ORDER BY 1 NULLS LAST;
+----
+Nina	1300.0
+Sam	800.0
+
+# Fixture 14b's diamond shapes (D3, D5, D6, D4), on the named view, where the
+# path is the customers'.
+# 14b D3: EXCLUDE customer by manager and customer: each customer shows its
+# region's total.
+query TIR
+SELECT * FROM SEMANTIC_VIEW(sd_cust_first DIMENSIONS regions.manager, customers.customer_id METRICS avg_cust_rev_excl) ORDER BY 1 NULLS LAST, 2 NULLS LAST;
+----
+Nina	1	1300.0
+Nina	2	1300.0
+Sam	3	800.0
+Sam	4	800.0
+
+# 14b D5: INCLUDE customer by manager and customer.
+query TIR
+SELECT * FROM SEMANTIC_VIEW(sd_cust_first DIMENSIONS regions.manager, customers.customer_id METRICS avg_customer_rev) ORDER BY 1 NULLS LAST, 2 NULLS LAST;
+----
+Nina	1	1000.0
+Nina	2	300.0
+Sam	3	600.0
+Sam	4	200.0
+
+# 14b D6: INCLUDE customer filtered by manager.
+query IR
+SELECT * FROM SEMANTIC_VIEW(sd_cust_first DIMENSIONS customers.customer_id METRICS avg_customer_rev WHERE regions.manager = 'Nina') ORDER BY 1 NULLS LAST;
+----
+1	1000.0
+2	300.0
+
+# 14b D4: grouped by manager and store, no one table lists the groups (the
+# orders reach regions two ways): refused (010246).
+statement error
+SELECT * FROM SEMANTIC_VIEW(sd_cust_first DIMENSIONS regions.manager, stores.store_id METRICS avg_customer_rev);
+----
+regions
+
+# Unnamed relationships: Snowflake names each SYS_RELATIONSHIP_<uuid> at
+# random on every CREATE, so its path changes between CREATEs (14d V7, V9,
+# V11). Ours are named from each entry, so the view always takes the same
+# one of the two paths: here orders -> customers (SYS_RELATIONSHIP_30ce...)
+# sorts before orders -> stores (SYS_RELATIONSHIP_9b44...).
+statement ok
+CREATE SEMANTIC VIEW sd_unnamed
   TABLES (customers AS customers PRIMARY KEY (customer_id), orders AS orders PRIMARY KEY (order_id),
     stores AS stores PRIMARY KEY (store_id), regions AS regions PRIMARY KEY (region))
   RELATIONSHIPS (orders(customer_id) REFERENCES customers, orders(store_id) REFERENCES stores,
     customers(region) REFERENCES regions, stores(region) REFERENCES regions)
   FACTS (orders.order_amount AS amount)
   DIMENSIONS (customers.customer_id AS customer_id, stores.store_id AS store_id, regions.manager AS manager)
+  METRICS (avg_store_rev_excl AS AVG(SUM(orders.order_amount) EXCLUDE DIMENSIONS (stores.store_id)));
+
+query TR
+SELECT * FROM SEMANTIC_VIEW(sd_unnamed DIMENSIONS regions.manager METRICS avg_store_rev_excl) ORDER BY 1 NULLS LAST;
+----
+Nina	1300.0
+Sam	800.0
+
+# Fixture 14e G-labels: the paths compare by their relationship names from
+# the orders, the first that differs deciding, whatever their length.
+statement ok
+CREATE TABLE stores_d (store_id INTEGER, district_id INTEGER);
+
+statement ok
+CREATE TABLE districts (district_id INTEGER, region VARCHAR);
+
+statement ok
+INSERT INTO stores_d VALUES (1, 1), (2, 2);
+
+statement ok
+INSERT INTO districts VALUES (1, 'North'), (2, 'South');
+
+# G1: the three-hop stores path (a_ord_store) beats the two-hop customers one.
+statement ok
+CREATE SEMANTIC VIEW sd_long
+  TABLES (customers AS customers PRIMARY KEY (customer_id), orders AS orders PRIMARY KEY (order_id),
+    stores AS stores_d PRIMARY KEY (store_id), districts AS districts PRIMARY KEY (district_id),
+    regions AS regions PRIMARY KEY (region))
+  RELATIONSHIPS (b_ord_cust AS orders(customer_id) REFERENCES customers, a_ord_store AS orders(store_id) REFERENCES stores,
+    b_cust_reg AS customers(region) REFERENCES regions, a_store_dist AS stores(district_id) REFERENCES districts,
+    a_dist_reg AS districts(region) REFERENCES regions)
+  FACTS (orders.order_amount AS amount)
+  DIMENSIONS (customers.customer_id AS customer_id, stores.store_id AS store_id, regions.manager AS manager)
+  METRICS (avg_store_rev_excl AS AVG(SUM(orders.order_amount) EXCLUDE DIMENSIONS (stores.store_id)));
+
+query TR
+SELECT * FROM SEMANTIC_VIEW(sd_long DIMENSIONS regions.manager METRICS avg_store_rev_excl) ORDER BY 1 NULLS LAST;
+----
+Nina	1000.0
+Sam	1100.0
+
+# G2: split one hop above the orders. At the split the zones relationship
+# sorts first (a_acct_zone), though into regions the segments' one does: the
+# zones path (Nina: customers 1 and 3, 1600; Sam: 2 and 4, 500).
+statement ok
+CREATE TABLE accts (customer_id INTEGER, seg_id INTEGER, zone_id INTEGER);
+
+statement ok
+CREATE TABLE segs (seg_id INTEGER, region VARCHAR);
+
+statement ok
+CREATE TABLE zones (zone_id INTEGER, region VARCHAR);
+
+statement ok
+INSERT INTO accts VALUES (1, 1, 1), (2, 1, 2), (3, 2, 1), (4, 2, 2);
+
+statement ok
+INSERT INTO segs VALUES (1, 'North'), (2, 'South');
+
+statement ok
+INSERT INTO zones VALUES (1, 'North'), (2, 'South');
+
+statement ok
+CREATE SEMANTIC VIEW sd_split
+  TABLES (accts AS accts PRIMARY KEY (customer_id), orders AS orders PRIMARY KEY (order_id),
+    segs AS segs PRIMARY KEY (seg_id), zones AS zones PRIMARY KEY (zone_id), regions AS regions PRIMARY KEY (region))
+  RELATIONSHIPS (m_ord_acct AS orders(customer_id) REFERENCES accts, z_acct_seg AS accts(seg_id) REFERENCES segs,
+    a_acct_zone AS accts(zone_id) REFERENCES zones, a_seg_reg AS segs(region) REFERENCES regions,
+    z_zone_reg AS zones(region) REFERENCES regions)
+  FACTS (orders.order_amount AS amount)
+  DIMENSIONS (accts.customer_id AS customer_id, regions.manager AS manager)
+  METRICS (avg_excl_customer AS AVG(SUM(orders.order_amount) EXCLUDE DIMENSIONS (accts.customer_id)));
+
+query TR
+SELECT * FROM SEMANTIC_VIEW(sd_split DIMENSIONS regions.manager METRICS avg_excl_customer) ORDER BY 1 NULLS LAST;
+----
+Nina	1600.0
+Sam	500.0
+
+# G3: a filter on the path not taken is refused (010246).
+statement error
+SELECT * FROM SEMANTIC_VIEW(sd_cust_first DIMENSIONS regions.manager METRICS avg_customer_rev WHERE stores.store_id = 1);
+----
+regions
+
+# Fixture 14f (H-labels): beside a plain metric, the values are matched to
+# every child row with their key, joined up, and the query's WHERE applies
+# after. A value no child row has the key of gets NULL dimensions, which the
+# WHERE then keeps or drops; one whose child rows the WHERE all drops is lost.
+# Return 8 is an orphan (no order 999); orders_f adds a category.
+statement ok
+CREATE TABLE orders_f AS SELECT o.*, CASE WHEN order_id IN (101, 102, 105, 107, 108, 110) THEN 'Electronics' ELSE 'Clothing' END AS category FROM orders o;
+
+statement ok
+CREATE TABLE order_returns_f AS SELECT * FROM order_returns;
+
+statement ok
+INSERT INTO order_returns_f VALUES (8, 999, 'lost');
+
+statement ok
+CREATE SEMANTIC VIEW sales_child_f
+  TABLES (customers AS customers PRIMARY KEY (customer_id), orders AS orders_f PRIMARY KEY (order_id),
+    order_returns AS order_returns_f PRIMARY KEY (return_id))
+  RELATIONSHIPS (orders(customer_id) REFERENCES customers, order_returns(order_id) REFERENCES orders)
+  FACTS (
+    orders.order_amount AS amount,
+    region_total_excl_customer AS SUM(orders.order_amount) EXCLUDE DIMENSIONS (customers.customer_id)
+  )
+  DIMENSIONS (customers.customer_id AS customer_id, customers.region AS region,
+    orders.category AS category, orders.order_id AS order_id, order_returns.reason AS reason)
   METRICS (
+    orders.total_revenue AS SUM(amount),
     avg_customer_rev AS AVG(SUM(orders.order_amount) INCLUDE DIMENSIONS (customers.customer_id)),
-    avg_store_rev_excl AS AVG(SUM(orders.order_amount) EXCLUDE DIMENSIONS (stores.store_id))
+    region_rev_via_exclude AS AVG(region_total_excl_customer),
+    avg_orders_fixed AS AVG(COUNT(orders.order_id) FIXED DIMENSIONS (customers.customer_id))
   );
 
-statement error
-SELECT * FROM SEMANTIC_VIEW(sales_diamond DIMENSIONS regions.manager METRICS avg_customer_rev);
+# H1: customer 2's 300 has no return, so its NULL-dimension row fails
+# region = 'North' and is dropped: NULL is customer 1's 100 alone.
+query TRR
+SELECT * FROM SEMANTIC_VIEW(sales_child_f DIMENSIONS order_returns.reason METRICS orders.total_revenue, avg_customer_rev WHERE customers.region = 'North') ORDER BY 1 NULLS LAST;
 ----
-'regions'
+damaged	400.00	400.0
+late	900.00	900.0
+NULL	400.00	100.0
 
-statement error
-SELECT * FROM SEMANTIC_VIEW(sales_diamond DIMENSIONS regions.manager METRICS avg_store_rev_excl);
+# H2: the same by region too: no NULL/NULL row.
+query TTRR
+SELECT * FROM SEMANTIC_VIEW(sales_child_f DIMENSIONS customers.region, order_returns.reason METRICS orders.total_revenue, avg_customer_rev WHERE customers.region = 'North') ORDER BY 1 NULLS LAST, 2 NULLS LAST;
 ----
-'regions'
+North	damaged	400.00	400.0
+North	late	900.00	900.0
+North	NULL	400.00	100.0
+
+# H3: no Electronics order's return has a NULL reason, so the NULL group has
+# no LOD value.
+query TRR
+SELECT * FROM SEMANTIC_VIEW(sales_child_f DIMENSIONS order_returns.reason METRICS orders.total_revenue, avg_customer_rev WHERE orders.category = 'Electronics') ORDER BY 1 NULLS LAST;
+----
+damaged	700.00	350.0
+late	600.00	600.0
+NULL	600.00	NULL
+
+# H4: EXCLUDE, the same filter.
+query TTRR
+SELECT * FROM SEMANTIC_VIEW(sales_child_f DIMENSIONS customers.region, order_returns.reason METRICS orders.total_revenue, region_rev_via_exclude WHERE orders.category = 'Electronics') ORDER BY 1 NULLS LAST, 2 NULLS LAST;
+----
+North	damaged	400.00	400.0
+North	late	600.00	600.0
+North	NULL	200.00	NULL
+South	damaged	300.00	300.0
+South	NULL	400.00	NULL
+
+# H5: reason IS NULL holds on the NULL-dimension rows, so customers 2 and 4
+# (no returns) land in the NULL group; customer 3's 300 is claimed by its
+# 'damaged' return, which the filter drops, so it is lost: avg(300, 200).
+query TRR
+SELECT * FROM SEMANTIC_VIEW(sales_child_f DIMENSIONS customers.region METRICS orders.total_revenue, avg_customer_rev WHERE order_returns.reason IS NULL) ORDER BY 1 NULLS LAST;
+----
+North	400.00	100.0
+South	500.00	NULL
+NULL	NULL	250.0
+
+# H6a: alone, the orphan return makes a 'lost' group with no value.
+query TR
+SELECT * FROM SEMANTIC_VIEW(sales_child_f DIMENSIONS order_returns.reason METRICS avg_customer_rev) ORDER BY 1 NULLS LAST;
+----
+damaged	350.0
+late	1100.0
+lost	NULL
+NULL	100.0
+
+# H6b: beside a plain metric the values come from the orders: no 'lost' row.
+query TRR
+SELECT * FROM SEMANTIC_VIEW(sales_child_f DIMENSIONS order_returns.reason METRICS orders.total_revenue, avg_customer_rev) ORDER BY 1 NULLS LAST;
+----
+damaged	700.00	350.0
+late	900.00	900.0
+NULL	900.00	225.0
+
+# Fixture 14g (J-labels): FIXED read through the child table follows the same
+# rule. Each customer's order count (c1 4, c2 2, c3 3, c4 1) is matched to the
+# returns with its customer; one with no return (c2, c4) gets NULL dimensions,
+# and the WHERE applies after. It used to be read through the orders as well,
+# which put c3 (orders 108, 109 have no return) in South's NULL group.
+query TR
+SELECT * FROM SEMANTIC_VIEW(sales_child_f DIMENSIONS order_returns.reason METRICS avg_orders_fixed) ORDER BY 1 NULLS LAST;
+----
+damaged	3.5
+late	4.0
+NULL	2.3333333333333335
+
+# J2
+query TTR
+SELECT * FROM SEMANTIC_VIEW(sales_child_f DIMENSIONS customers.region, order_returns.reason METRICS avg_orders_fixed) ORDER BY 1 NULLS LAST, 2 NULLS LAST;
+----
+North	damaged	4.0
+North	late	4.0
+North	NULL	4.0
+South	damaged	3.0
+NULL	NULL	1.5
+
+# J3: beside a plain metric, South's NULL group is the orders' alone.
+query TTRR
+SELECT * FROM SEMANTIC_VIEW(sales_child_f DIMENSIONS customers.region, order_returns.reason METRICS orders.total_revenue, avg_orders_fixed) ORDER BY 1 NULLS LAST, 2 NULLS LAST;
+----
+North	damaged	400.00	4.0
+North	late	900.00	4.0
+North	NULL	400.00	4.0
+South	damaged	300.00	3.0
+South	NULL	500.00	NULL
+NULL	NULL	NULL	1.5
+
+# J4
+query TTR
+SELECT * FROM SEMANTIC_VIEW(sales_child_f DIMENSIONS orders.category, order_returns.reason METRICS avg_orders_fixed) ORDER BY 1 NULLS LAST, 2 NULLS LAST;
+----
+Clothing	late	4.0
+Clothing	NULL	4.0
+Electronics	damaged	3.5
+Electronics	late	4.0
+NULL	NULL	1.5
+
+# J5
+query TR
+SELECT * FROM SEMANTIC_VIEW(sales_child_f DIMENSIONS customers.region METRICS avg_orders_fixed WHERE order_returns.reason IS NULL) ORDER BY 1 NULLS LAST;
+----
+North	4.0
+NULL	1.5
+
+# J6
+query TR
+SELECT * FROM SEMANTIC_VIEW(sales_child_f DIMENSIONS customers.region METRICS avg_orders_fixed WHERE order_returns.reason IS NULL OR order_returns.reason = 'damaged') ORDER BY 1 NULLS LAST;
+----
+North	4.0
+South	3.0
+NULL	1.5
+
+# J7
+query TR
+SELECT * FROM SEMANTIC_VIEW(sales_child_f DIMENSIONS customers.region METRICS avg_orders_fixed WHERE order_returns.reason = 'late') ORDER BY 1 NULLS LAST;
+----
+North	4.0

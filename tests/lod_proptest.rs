@@ -1165,10 +1165,10 @@ mod child_table {
                 .iter()
                 .map(|d| format!("{}.{}", DIMS[*d].1, DIMS[*d].0))
                 .collect();
-            let kind = if self.kind == LodKind::Include {
-                "INCLUDE"
-            } else {
-                "EXCLUDE"
+            let kind = match self.kind {
+                LodKind::Fixed => "FIXED",
+                LodKind::Include => "INCLUDE",
+                LodKind::Exclude => "EXCLUDE",
             };
             format!(
                 "{}(o.ov) {kind} DIMENSIONS ({})",
@@ -1198,9 +1198,12 @@ mod child_table {
             dims.iter().map(|d| row[*d]).collect()
         }
 
-        /// `lie`'s grain: the query's dimensions with (`INCLUDE`) or without
-        /// (`EXCLUDE`) the LOD's own.
+        /// `lie`'s grain: its own dimensions (`FIXED`), or the query's with
+        /// (`INCLUDE`) or without (`EXCLUDE`) them.
         fn grain(&self) -> Vec<usize> {
+            if self.kind == LodKind::Fixed {
+                return self.fixed.clone();
+            }
             let mut g: BTreeSet<usize> = self.dims.iter().copied().collect();
             if self.kind == LodKind::Include {
                 g.extend(self.fixed.iter().copied());
@@ -1255,15 +1258,71 @@ mod child_table {
                 .collect()
         }
 
-        /// `lie`'s value per tuple of its grain.
+        /// Whether a plain metric on `lie`'s home table (`o`) is in the query.
+        /// Then Snowflake computes `lie` over the home rows, each counted once
+        /// per tuple of its grain, not over the child rows (fixture 14d/14e).
+        fn co_query(&self) -> bool {
+            self.mets.contains(&0) && self.kind != LodKind::Fixed
+        }
+
+        /// The order of each child row the filter keeps, each order with no
+        /// children one row with a NULL `rcat`: the rows `lie` is computed
+        /// over beside a plain metric, as `(order, dimension row)`.
+        fn home_rows(&self) -> Vec<(usize, Row)> {
+            let inst = &self.inst;
+            let mut out = vec![];
+            for i in 0..inst.o.len() {
+                let kids: Vec<Cell> = inst
+                    .r
+                    .iter()
+                    .filter(|(fk, _)| lookup(*fk, inst.o.len()) == Some(i))
+                    .map(|(_, rcat)| *rcat)
+                    .collect();
+                let kids = if kids.is_empty() { vec![None] } else { kids };
+                for rcat in kids {
+                    let row = self.row(Some(i), rcat);
+                    if self.passes(&row) {
+                        out.push((i, row));
+                    }
+                }
+            }
+            out
+        }
+
+        /// `lie`'s value per tuple of its grain: over the child rows alone,
+        /// over the home rows (each order once per tuple) beside a plain
+        /// metric.
         fn lie_values(&self) -> BTreeMap<Row, Option<i128>> {
             let grain = self.grain();
             let mut members: BTreeMap<Row, Vec<Option<i128>>> = BTreeMap::new();
-            for (row, ov) in self.child_rows() {
-                members
-                    .entry(self.project(&row, &grain))
-                    .or_default()
-                    .push(ov);
+            if self.kind == LodKind::Fixed {
+                // Over every order, before the filter.
+                for (i, (_, _, ov)) in self.inst.o.iter().enumerate() {
+                    let row = self.row(Some(i), None);
+                    members
+                        .entry(self.project(&row, &grain))
+                        .or_default()
+                        .push(ov.map(i128::from));
+                }
+            } else if self.co_query() {
+                let pairs: BTreeSet<(usize, Row)> = self
+                    .home_rows()
+                    .into_iter()
+                    .map(|(i, row)| (i, self.project(&row, &grain)))
+                    .collect();
+                for (i, k) in pairs {
+                    members
+                        .entry(k)
+                        .or_default()
+                        .push(self.inst.o[i].2.map(i128::from));
+                }
+            } else {
+                for (row, ov) in self.child_rows() {
+                    members
+                        .entry(self.project(&row, &grain))
+                        .or_default()
+                        .push(ov);
+                }
             }
             members
                 .into_iter()
@@ -1279,37 +1338,47 @@ mod child_table {
                 .collect()
         }
 
-        /// The outer aggregate of `lie` per group the child rows list.
+        /// The outer aggregate of `lie` per group. Each value is matched to
+        /// every child row with its grain tuple, joined up, and the filter is
+        /// applied after: a value goes to the groups of its child rows the
+        /// filter keeps (none, if it drops them all), and a value no child row
+        /// has the tuple of (only beside a plain metric) gets one row with
+        /// NULL dimensions, which the filter then keeps or drops (Snowflake
+        /// 14d C3/C8, 14f H1-H5).
         fn m_ie(&self) -> Groups {
             let grain = self.grain();
             let values = self.lie_values();
-            let at = |g: &Row, d: usize| g[self.dims.iter().position(|x| *x == d).expect("dim")];
-            if self.kind == LodKind::Include {
-                let mut per: BTreeMap<Row, Vec<Option<i128>>> = BTreeMap::new();
-                for (k, v) in &values {
-                    let g: Row = self
-                        .dims
-                        .iter()
-                        .map(|d| k[grain.iter().position(|x| x == d).expect("in grain")])
-                        .collect();
+            let mut listed: BTreeMap<Row, Vec<Row>> = BTreeMap::new();
+            for row in self.all_child_rows() {
+                listed
+                    .entry(self.project(&row, &grain))
+                    .or_default()
+                    .push(row);
+            }
+            let null_row: Row = vec![None; DIMS.len()];
+            let mut per: BTreeMap<Row, Vec<Option<i128>>> = BTreeMap::new();
+            for (k, v) in &values {
+                let rows: &[Row] = listed.get(k).map_or(std::slice::from_ref(&null_row), |r| r);
+                let groups: BTreeSet<Row> = rows
+                    .iter()
+                    .filter(|row| self.passes(row))
+                    .map(|row| self.project(row, &self.dims))
+                    .collect();
+                for g in groups {
                     per.entry(g).or_default().push(*v);
                 }
-                return per
-                    .into_iter()
-                    .map(|(g, vs)| (g, self.outer.apply(vs.into_iter())))
-                    .collect();
             }
-            // Only the groups the child rows list: a group that only a plain
-            // metric's childless orders make has no child rows to compute
-            // over (Snowflake 14b R3 gives it a NULL too).
-            self.child_groups()
+            per.into_iter()
+                .map(|(g, vs)| (g, self.outer.apply(vs.into_iter())))
+                .collect()
+        }
+
+        /// Every child row joined up, whether the filter keeps it or not.
+        fn all_child_rows(&self) -> Vec<Row> {
+            let inst = &self.inst;
+            inst.r
                 .iter()
-                .filter_map(|g| {
-                    let k: Row = grain.iter().map(|d| at(g, *d)).collect();
-                    values
-                        .get(&k)
-                        .map(|v| (g.clone(), self.outer.apply(std::iter::once(*v))))
-                })
+                .map(|(fk, rcat)| self.row(lookup(*fk, inst.o.len()), *rcat))
                 .collect()
         }
 
@@ -1319,7 +1388,14 @@ mod child_table {
             if let Some(s) = &sum {
                 groups.extend(s.keys().cloned());
             }
-            groups.extend(self.child_groups());
+            // Alone, every group the child rows list has a value. Beside a
+            // plain metric the values come from the home rows, so a group only
+            // orphaned child rows (no order) list has none and is not listed.
+            // A FIXED value is computed over the orders, so a group only
+            // orphaned child rows list has none either (14g J1).
+            if !self.co_query() && self.kind != LodKind::Fixed {
+                groups.extend(self.child_groups());
+            }
             if self.dims.is_empty() {
                 groups.insert(vec![]);
             }
@@ -1497,7 +1573,11 @@ mod child_table {
         (
             arb_instance(),
             arb_agg(),
-            any::<bool>(),
+            prop_oneof![
+                Just(LodKind::Fixed),
+                Just(LodKind::Include),
+                Just(LodKind::Exclude)
+            ],
             prop::sample::subsequence(vec![0usize, 1, 2], 0..=2),
             arb_agg(),
             prop::sample::subsequence((0..DIMS.len()).collect::<Vec<usize>>(), 0..=2),
@@ -1505,7 +1585,7 @@ mod child_table {
             prop::option::of(arb_pred()),
         )
             .prop_map(
-                |(inst, agg, include, fixed, outer, mut dims, mut mets, pred)| {
+                |(inst, agg, kind, fixed, outer, mut dims, mut mets, pred)| {
                     let mut touched = BTreeSet::new();
                     if let Some(p) = &pred {
                         p.dims(&mut touched);
@@ -1520,11 +1600,7 @@ mod child_table {
                     Case {
                         inst,
                         agg,
-                        kind: if include {
-                            LodKind::Include
-                        } else {
-                            LodKind::Exclude
-                        },
+                        kind,
                         fixed,
                         outer,
                         dims,
@@ -1577,6 +1653,8 @@ mod child_table {
                 labels.push("empty");
             } else {
                 labels.push(match (case.kind, by_child) {
+                    (LodKind::Fixed, true) => "fixed by the child",
+                    (LodKind::Fixed, false) => "fixed filtered by the child",
                     (LodKind::Include, true) => "include by the child",
                     (LodKind::Include, false) => "include filtered by the child",
                     (_, true) => "exclude by the child",
@@ -1597,6 +1675,8 @@ mod child_table {
             }
         }
         for label in [
+            "fixed by the child",
+            "fixed filtered by the child",
             "include by the child",
             "include filtered by the child",
             "exclude by the child",
@@ -1604,6 +1684,388 @@ mod child_table {
             "an order repeated in a group",
             "beside a plain metric",
             "a NULL child group",
+        ] {
+            assert!(
+                seen.get(label).copied().unwrap_or(0) >= 10,
+                "{label} reached too rarely: {seen:?}"
+            );
+        }
+    }
+}
+
+/// `INCLUDE` / `EXCLUDE DIMENSIONS` across a **diamond** (Snowflake fixtures
+/// 14d and 14e): `o` reaches `g` through `c` and through `s`, each hop a
+/// named relationship. A plain metric by `g` is refused there; an LOD
+/// expression follows one path, the one whose relationship names, upper-cased
+/// and read from `o`, come first. The four names are drawn in random order
+/// from a pool whose upper-cased order differs from its raw order, so the
+/// case-folding is exercised too.
+///
+/// - `INCLUDE` the key `K` (`c.id` or `s.id`) by `gcat`: each order's `gcat`
+///   is read along the chosen path. When `K` is on the other path, its table
+///   is joined from `o` as well and `g` is joined on both relationships into
+///   it, ANDed (14d D3, D6), so an order whose customer and store sit in
+///   different `g` rows has a `NULL` `gcat`. The value per `(gcat, K)` is the
+///   aggregate over its orders, and a group's the outer aggregate of its
+///   values.
+/// - `EXCLUDE` the key `K` by `gcat` and `K`: the value per `gcat` is read
+///   along the chosen path alone (the excluded key's table is not joined),
+///   and listed for every `K` row whose own `gcat` (through `K`) is that
+///   value's; a value no `K` row lists is read with `NULL` dimensions.
+mod diamond {
+    use super::{lookup, sql_cell, Agg};
+    use proptest::prelude::*;
+    use semantic_views::expand::{expand, DimensionName, MetricName, QueryRequest};
+    use semantic_views::model::{
+        Cardinality, Dimension, Fact, Join, Metric, SemanticViewDefinition, TableRef,
+    };
+    use std::collections::{BTreeMap, BTreeSet};
+
+    type Cell = Option<i64>;
+    type Row = Vec<Option<i128>>;
+
+    /// Upper-cased: `D_A < D_B < D_C < D_D`; raw: `D_c < d_A < d_D < d_b`.
+    const NAMES: [&str; 4] = ["d_A", "d_b", "D_c", "d_D"];
+
+    #[derive(Debug, Clone)]
+    struct Instance {
+        /// `(fk_c, fk_s, ov)`.
+        o: Vec<(Cell, Cell, Cell)>,
+        /// `fk_g` of each customer.
+        c: Vec<Cell>,
+        /// `fk_g` of each store.
+        s: Vec<Cell>,
+        /// `gcat` of each `g` row.
+        g: Vec<Cell>,
+    }
+
+    #[derive(Debug, Clone)]
+    struct Case {
+        inst: Instance,
+        /// Names of `o -> c`, `o -> s`, `c -> g`, `s -> g`.
+        names: [usize; 4],
+        include: bool,
+        /// The key's table: `c` when true, else `s`.
+        key_c: bool,
+        agg: Agg,
+        outer: Agg,
+    }
+
+    impl Case {
+        fn name(&self, hop: usize) -> &'static str {
+            NAMES[self.names[hop]]
+        }
+
+        /// Whether the path through `c` is taken.
+        fn through_c(&self) -> bool {
+            let up = |h: usize| self.name(h).to_uppercase();
+            (up(0), up(2)) < (up(1), up(3))
+        }
+
+        /// `fk_g` of the customer or store `i`.
+        fn fk_g(&self, on_c: bool, i: usize) -> Option<usize> {
+            let inst = &self.inst;
+            if on_c {
+                lookup(inst.c[i], inst.g.len())
+            } else {
+                lookup(inst.s[i], inst.g.len())
+            }
+        }
+
+        fn parent(&self, on_c: bool, o: usize) -> Option<usize> {
+            let inst = &self.inst;
+            if on_c {
+                lookup(inst.o[o].0, inst.c.len())
+            } else {
+                lookup(inst.o[o].1, inst.s.len())
+            }
+        }
+
+        fn gcat(&self, g: Option<usize>) -> Option<i128> {
+            g.and_then(|g| self.inst.g[g]).map(i128::from)
+        }
+
+        /// The `g` row an order reaches along the chosen path, joined on
+        /// the key's relationship too when `with_key` and the key's table is
+        /// on the other path.
+        fn order_g(&self, o: usize, with_key: bool) -> Option<usize> {
+            let x = self.through_c();
+            let xg = self.parent(x, o).and_then(|p| self.fk_g(x, p));
+            if !with_key || self.key_c == x {
+                return xg;
+            }
+            let kg = self
+                .parent(self.key_c, o)
+                .and_then(|p| self.fk_g(self.key_c, p));
+            if xg == kg {
+                xg
+            } else {
+                None
+            }
+        }
+
+        fn oracle(&self) -> Vec<Row> {
+            let inst = &self.inst;
+            let keys_n = if self.key_c {
+                inst.c.len()
+            } else {
+                inst.s.len()
+            };
+            let mut members: BTreeMap<Row, Vec<Option<i128>>> = BTreeMap::new();
+            for (o, (_, _, ov)) in inst.o.iter().enumerate() {
+                let key = if self.include {
+                    let k = self.parent(self.key_c, o).map(|k| k as i128);
+                    vec![self.gcat(self.order_g(o, true)), k]
+                } else {
+                    vec![self.gcat(self.order_g(o, false))]
+                };
+                members.entry(key).or_default().push(ov.map(i128::from));
+            }
+            let values: BTreeMap<Row, Option<i128>> = members
+                .into_iter()
+                .map(|(k, vs)| (k, self.agg.apply(vs.into_iter())))
+                .collect();
+            let mut per: BTreeMap<Row, Vec<Option<i128>>> = BTreeMap::new();
+            for (k, v) in &values {
+                if self.include {
+                    per.entry(vec![k[0]]).or_default().push(*v);
+                    continue;
+                }
+                let listed: BTreeSet<Row> = (0..keys_n)
+                    .filter(|r| self.gcat(self.fk_g(self.key_c, *r)) == k[0])
+                    .map(|r| vec![k[0], Some(r as i128)])
+                    .collect();
+                if listed.is_empty() {
+                    per.entry(vec![None, None]).or_default().push(*v);
+                }
+                for g in listed {
+                    per.entry(g).or_default().push(*v);
+                }
+            }
+            let mut out: Vec<Row> = per
+                .into_iter()
+                .map(|(mut g, vs)| {
+                    g.push(self.outer.apply(vs.into_iter()));
+                    g
+                })
+                .collect();
+            out.sort();
+            out
+        }
+
+        fn key_dim(&self) -> &'static str {
+            if self.key_c {
+                "cid"
+            } else {
+                "sid"
+            }
+        }
+
+        fn def(&self) -> SemanticViewDefinition {
+            let table = |alias: &str| TableRef {
+                alias: alias.to_string(),
+                table: format!("{alias}_tbl"),
+                pk_columns: vec!["id".to_string()],
+                ..Default::default()
+            };
+            let join = |from: &str, to: &str, fk: &str, name: &str| Join {
+                table: to.to_string(),
+                from_alias: from.to_string(),
+                fk_columns: vec![fk.to_string()],
+                ref_columns: vec!["id".to_string()],
+                name: Some(name.to_string()),
+                cardinality: Cardinality::ManyToOne,
+                ..Default::default()
+            };
+            let dim = |name: &str, t: &str, col: &str| Dimension {
+                name: name.to_string(),
+                expr: format!("{t}.{col}"),
+                source_table: Some(t.to_string()),
+                ..Default::default()
+            };
+            let kind = if self.include { "INCLUDE" } else { "EXCLUDE" };
+            let k = if self.key_c { "c" } else { "s" };
+            SemanticViewDefinition {
+                tables: vec![table("o"), table("c"), table("s"), table("g")],
+                joins: vec![
+                    join("o", "c", "fk_c", self.name(0)),
+                    join("o", "s", "fk_s", self.name(1)),
+                    join("c", "g", "fk_g", self.name(2)),
+                    join("s", "g", "fk_g", self.name(3)),
+                ],
+                dimensions: vec![
+                    dim("gcat", "g", "gcat"),
+                    dim("cid", "c", "id"),
+                    dim("sid", "s", "id"),
+                ],
+                facts: vec![Fact {
+                    name: "ov".to_string(),
+                    expr: "o.ov".to_string(),
+                    source_table: Some("o".to_string()),
+                    ..Default::default()
+                }],
+                metrics: vec![Metric {
+                    name: "m".to_string(),
+                    expr: format!(
+                        "{}({}(o.ov) {kind} DIMENSIONS ({k}.{}))",
+                        self.outer.sql(),
+                        self.agg.sql(),
+                        self.key_dim()
+                    ),
+                    ..Default::default()
+                }],
+                ..Default::default()
+            }
+        }
+
+        fn db(&self) -> duckdb::Connection {
+            let con = duckdb::Connection::open_in_memory().expect("in-memory DuckDB");
+            let mut sql = "CREATE TABLE o_tbl (id BIGINT, fk_c BIGINT, fk_s BIGINT, ov BIGINT);
+                 CREATE TABLE c_tbl (id BIGINT, fk_g BIGINT);
+                 CREATE TABLE s_tbl (id BIGINT, fk_g BIGINT);
+                 CREATE TABLE g_tbl (id BIGINT, gcat BIGINT);"
+                .to_string();
+            for (i, (c, s, v)) in self.inst.o.iter().enumerate() {
+                let cells = [*c, *s, *v].map(sql_cell).join(", ");
+                sql += &format!("INSERT INTO o_tbl VALUES ({i}, {cells});");
+            }
+            for (t, rows) in [
+                ("c", &self.inst.c),
+                ("s", &self.inst.s),
+                ("g", &self.inst.g),
+            ] {
+                for (i, v) in rows.iter().enumerate() {
+                    sql += &format!("INSERT INTO {t}_tbl VALUES ({i}, {});", sql_cell(*v));
+                }
+            }
+            con.execute_batch(&sql).expect("data");
+            con
+        }
+
+        fn request(&self) -> QueryRequest {
+            let mut dimensions = vec![DimensionName::new("gcat")];
+            if !self.include {
+                dimensions.push(DimensionName::new(self.key_dim()));
+            }
+            QueryRequest {
+                dimensions,
+                metrics: vec![MetricName::new("m")],
+                ..QueryRequest::default()
+            }
+        }
+    }
+
+    fn cell(n: i64) -> impl Strategy<Value = Cell> {
+        prop_oneof![1 => Just(None), 4 => (0..n).prop_map(Some)]
+    }
+
+    fn fk(n: usize) -> impl Strategy<Value = Cell> {
+        let n = n as i64;
+        prop_oneof![1 => Just(None), 1 => Just(Some(n + 7)), 6 => (0..n).prop_map(Some)]
+    }
+
+    fn arb_agg() -> impl Strategy<Value = Agg> {
+        prop_oneof![
+            Just(Agg::Sum),
+            Just(Agg::Count),
+            Just(Agg::Min),
+            Just(Agg::Max)
+        ]
+    }
+
+    fn arb_case() -> impl Strategy<Value = Case> {
+        (1usize..4, 1usize..4, 1usize..4, 1usize..7)
+            .prop_flat_map(|(nc, ns, ng, no)| {
+                (
+                    prop::collection::vec((fk(nc), fk(ns), cell(20)), no),
+                    prop::collection::vec(fk(ng), nc),
+                    prop::collection::vec(fk(ng), ns),
+                    prop::collection::vec(cell(2), ng),
+                    Just([0usize, 1, 2, 3]).prop_shuffle(),
+                    any::<bool>(),
+                    any::<bool>(),
+                    arb_agg(),
+                    arb_agg(),
+                )
+            })
+            .prop_map(|(o, c, s, g, names, include, key_c, agg, outer)| Case {
+                inst: Instance { o, c, s, g },
+                names: names.try_into().expect("four names"),
+                include,
+                key_c,
+                agg,
+                outer,
+            })
+    }
+
+    fn check(case: &Case) -> Result<usize, TestCaseError> {
+        let sql = expand("v", &case.def(), &case.request())
+            .map_err(|e| TestCaseError::fail(format!("refused: {e}")))?;
+        let got = super::run(&case.db(), &sql);
+        let want = case.oracle();
+        prop_assert_eq!(&got, &want, "SQL:\n{}", sql);
+        Ok(got.len())
+    }
+
+    proptest! {
+        #![proptest_config(ProptestConfig::with_cases(512))]
+
+        #[test]
+        fn lod_across_a_diamond_matches_snowflakes_rules(case in arb_case()) {
+            check(&case)?;
+        }
+    }
+
+    /// The generator reaches every shape with rows, so the property above is
+    /// not vacuous.
+    #[test]
+    fn every_diamond_shape_is_reached() {
+        use proptest::strategy::ValueTree;
+        use proptest::test_runner::{Config, TestRunner};
+        let mut runner = TestRunner::new_with_rng(
+            Config::default(),
+            proptest::test_runner::TestRng::deterministic_rng(
+                proptest::test_runner::RngAlgorithm::ChaCha,
+            ),
+        );
+        let strategy = arb_case();
+        let mut seen: BTreeMap<&str, usize> = BTreeMap::new();
+        for _ in 0..1500 {
+            let case = strategy.new_tree(&mut runner).expect("case").current();
+            let n = check(&case).expect("the property holds");
+            if n == 0 {
+                continue;
+            }
+            let on_path = case.key_c == case.through_c();
+            let raw_first = (case.name(0), case.name(2)) < (case.name(1), case.name(3));
+            let mut labels = vec![match (case.include, on_path) {
+                (true, true) => "include, key on the path",
+                (true, false) => "include, key on the other path",
+                (false, true) => "exclude, key on the path",
+                (false, false) => "exclude, key on the other path",
+            }];
+            if raw_first != case.through_c() {
+                labels.push("case-folding decides the path");
+            }
+            // An order whose customer and store reach different `g` rows.
+            if (0..case.inst.o.len()).any(|o| {
+                let cg = case.parent(true, o).and_then(|p| case.fk_g(true, p));
+                let sg = case.parent(false, o).and_then(|p| case.fk_g(false, p));
+                cg.is_some() && sg.is_some() && cg != sg
+            }) {
+                labels.push("the paths disagree");
+            }
+            for l in labels {
+                *seen.entry(l).or_default() += 1;
+            }
+        }
+        for label in [
+            "include, key on the path",
+            "include, key on the other path",
+            "exclude, key on the path",
+            "exclude, key on the other path",
+            "case-folding decides the path",
+            "the paths disagree",
         ] {
             assert!(
                 seen.get(label).copied().unwrap_or(0) >= 10,
