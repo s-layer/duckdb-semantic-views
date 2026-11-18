@@ -996,6 +996,19 @@ SELECT * FROM SEMANTIC_VIEW(sales_child_2p DIMENSIONS order_returns.reason METRI
 ----
 more than one path
 
+# SHOW ... FOR METRIC lists only what a query of it answers: not reason,
+# refused above, nor customer_id, which the expression's table reaches
+# through orders and through the returns.
+query T
+SELECT name FROM (SHOW SEMANTIC DIMENSIONS IN sales_child_2p FOR METRIC avg_orders_fixed) ORDER BY 1;
+----
+order_id
+
+statement error
+SELECT * FROM SEMANTIC_VIEW(sales_child_2p DIMENSIONS customers.customer_id METRICS avg_orders_fixed);
+----
+more than one path
+
 # An EXCLUDE expression across the diamond filtered on the path not taken
 # (the stores, when the customers' path is taken) is refused, as G3 is.
 statement error
