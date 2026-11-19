@@ -112,7 +112,7 @@ Returns one row per fact with 9 columns:
      - The semantic view this fact belongs to.
    * - ``table_name``
      - VARCHAR
-     - The physical table name the fact is scoped to.
+     - The logical table the fact is scoped to, by its alias in ``TABLES``.
    * - ``name``
      - VARCHAR
      - The fact name as declared in the ``FACTS`` clause.
@@ -140,6 +140,10 @@ Returns one row per fact with 9 columns:
 
    Added the ``labels`` column, after ``comment``, as in Snowflake's output.
 
+.. versionchanged:: 0.21.0
+
+   ``table_name`` is the table's alias from ``TABLES``, as in Snowflake. It was the physical table.
+
 
 .. _ref-show-facts-examples:
 
@@ -159,7 +163,7 @@ Given a semantic view ``orders_sv`` with one fact:
    ┌───────────────┬─────────────┬────────────────────┬────────────┬────────────┬───────────────┬──────────┬─────────┬────────┐
    │ database_name │ schema_name │ semantic_view_name │ table_name │ name       │ data_type     │ synonyms │ comment │ labels │
    ├───────────────┼─────────────┼────────────────────┼────────────┼────────────┼───────────────┼──────────┼─────────┼────────┤
-   │ memory        │ main        │ orders_sv          │ orders     │ raw_amount │ DECIMAL(10,2) │ []       │         │ []     │
+   │ memory        │ main        │ orders_sv          │ o          │ raw_amount │ DECIMAL(10,2) │ []       │         │ []     │
    └───────────────┴─────────────┴────────────────────┴────────────┴────────────┴───────────────┴──────────┴─────────┴────────┘
 
 The example tables use ``VARCHAR`` text columns, ``DATE`` dates, ``INTEGER`` quantities and ``DECIMAL(10,2)`` amounts and prices. ``data_type`` is each member's type as a query returns it -- an aggregate's own type, not its input's: ``COUNT`` is ``BIGINT``, ``SUM`` of a ``DECIMAL(10,2)`` is ``DECIMAL(38,2)``, and a ratio of two metrics is ``DOUBLE``. See :ref:`Reported Data Types <explanation-sf-data-types>`.
@@ -216,8 +220,8 @@ Facts can reference other facts. Consider a view with two chained facts:
    ┌───────────────┬─────────────┬────────────────────┬────────────┬────────────┬───────────────┬──────────┬─────────┬────────┐
    │ database_name │ schema_name │ semantic_view_name │ table_name │ name       │ data_type     │ synonyms │ comment │ labels │
    ├───────────────┼─────────────┼────────────────────┼────────────┼────────────┼───────────────┼──────────┼─────────┼────────┤
-   │ memory        │ main        │ tpch_analysis      │ line_items │ net_price  │ DECIMAL(18,4) │ []       │         │ []     │
-   │ memory        │ main        │ tpch_analysis      │ line_items │ tax_amount │ DECIMAL(18,6) │ []       │         │ []     │
+   │ memory        │ main        │ tpch_analysis      │ li         │ net_price  │ DECIMAL(18,4) │ []       │         │ []     │
+   │ memory        │ main        │ tpch_analysis      │ li         │ tax_amount │ DECIMAL(18,6) │ []       │         │ []     │
    └───────────────┴─────────────┴────────────────────┴────────────┴────────────┴───────────────┴──────────┴─────────┴────────┘
 
 Assuming ``extended_price DECIMAL(12,2)`` and ``discount`` / ``tax_rate DECIMAL(4,2)``, each fact reports the type of its expression with the referenced fact substituted in: ``tax_amount`` is typed through ``li.net_price``. Chained references are resolved the same way at query expansion time.
@@ -243,8 +247,8 @@ A fact declared with ``LABELS = (FILTER)`` reports ``["FILTER"]`` in the ``label
    ┌───────────────┬─────────────┬────────────────────┬────────────┬────────────┬───────────────┬──────────┬─────────┬────────────┐
    │ database_name │ schema_name │ semantic_view_name │ table_name │ name       │ data_type     │ synonyms │ comment │ labels     │
    ├───────────────┼─────────────┼────────────────────┼────────────┼────────────┼───────────────┼──────────┼─────────┼────────────┤
-   │ memory        │ main        │ orders_sv          │ orders     │ is_large   │ BOOLEAN       │ []       │         │ ["FILTER"] │
-   │ memory        │ main        │ orders_sv          │ orders     │ raw_amount │ DECIMAL(10,2) │ []       │         │ []         │
+   │ memory        │ main        │ orders_sv          │ o          │ is_large   │ BOOLEAN       │ []       │         │ ["FILTER"] │
+   │ memory        │ main        │ orders_sv          │ o          │ raw_amount │ DECIMAL(10,2) │ []       │         │ []         │
    └───────────────┴─────────────┴────────────────────┴────────────┴────────────┴───────────────┴──────────┴─────────┴────────────┘
 
 **Error: view does not exist:**

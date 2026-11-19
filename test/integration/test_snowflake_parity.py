@@ -27,8 +27,9 @@ A statement whose run lost its connection before Snowflake answered is recorded 
 reached". It is not run here either, so later statements see the state Snowflake saw.
 
 A SHOW is held to the same column names and to listing the same names (its `name`
-column, case-insensitively); its other cells are each engine's own spelling of types,
-tables and empty lists.
+column, case-insensitively), each under the same logical table (its `table_name` column,
+case-insensitively, an empty one matching Snowflake's NULL); its other cells are each
+engine's own spelling of types and empty lists.
 
 Not compared, and counted in the summary: schema setup (CREATE/USE/DROP SCHEMA, since the
 fixtures ran in a throwaway Snowflake schema), EXPLAIN (plans differ by design) and
@@ -214,12 +215,13 @@ def compare(
         return f"columns: Snowflake {expected_columns}, ours {columns}"
     if SHOW.match(statement.sql) and "name" in columns:
         # SHOW spells cells in each engine's own way (Snowflake's NUMBER(38,0) for our
-        # INTEGER, upper-case names, NULL for an empty list), so compare what it lists.
-        at = columns.index("name")
-        listed = sorted(str(row[at]).lower() for row in rows)
-        expected = sorted(row[at].lower() for row in statement.rows)
+        # INTEGER, upper-case names, NULL for an empty list), so compare what it lists,
+        # and under which logical table.
+        at = [columns.index(c) for c in ("table_name", "name") if c in columns]
+        listed = sorted(tuple(_listed(row[i]) for i in at) for row in rows)
+        expected = sorted(tuple(_listed(row[i]) for i in at) for row in statement.rows)
         if listed != expected:
-            return f"names listed: Snowflake {expected}, ours {listed}"
+            return f"listed: Snowflake {expected}, ours {listed}"
         return None
     scales = _scales(statement.rows, len(columns))
     ours = sorted(_key(_rounded(list(row), scales)) for row in rows)
@@ -227,6 +229,12 @@ def compare(
     if ours != theirs:
         return f"rows: Snowflake {theirs}, ours {ours}"
     return None
+
+
+def _listed(cell: object) -> str:
+    """A SHOW name cell compared case-insensitively, an empty one as Snowflake's NULL."""
+    text = "" if cell is None else str(cell)
+    return "" if text == "None" else text.lower()
 
 
 def main() -> int:

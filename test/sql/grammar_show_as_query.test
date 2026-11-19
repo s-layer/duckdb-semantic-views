@@ -96,8 +96,8 @@ o_c
 query TT
 SELECT name, table_name FROM (SHOW SEMANTIC DIMENSIONS IN gq_m) ORDER BY name;
 ----
-name	gq_c
-region	gq_o
+name	c
+region	o
 
 query TT
 SELECT name, data_type FROM (SHOW SEMANTIC METRICS IN gq_m) WHERE name = 'orders';

@@ -1,0 +1,124 @@
+# SHOW and DESCRIBE name each logical table by its alias, as Snowflake does
+# (fixture 8: SHOW SEMANTIC DIMENSIONS ... FOR METRIC lists `qty` under `LI`, the
+# alias of line_items). Only DESCRIBE's BASE_TABLE_NAME names the physical table.
+# Before this, both named the physical table, so two logical tables over one
+# physical table (`bill` and `ship` here) could not be told apart.
+
+require semantic_views
+
+statement ok
+CREATE TABLE p_addresses (addr_id INTEGER PRIMARY KEY, city VARCHAR);
+
+statement ok
+CREATE TABLE p_orders (order_id INTEGER PRIMARY KEY, bill_addr INTEGER, ship_addr INTEGER, amount INTEGER);
+
+statement ok
+CREATE TABLE p_line_items (item_id INTEGER PRIMARY KEY, order_id INTEGER, qty INTEGER);
+
+statement ok
+INSERT INTO p_addresses VALUES (1, 'Leeds'), (2, 'York');
+
+statement ok
+INSERT INTO p_orders VALUES (10, 1, 2, 100);
+
+statement ok
+INSERT INTO p_line_items VALUES (100, 10, 3), (101, 10, 4);
+
+statement ok
+CREATE SEMANTIC VIEW alias_sv AS
+  TABLES (
+    bill AS p_addresses PRIMARY KEY (addr_id),
+    ship AS p_addresses PRIMARY KEY (addr_id),
+    ord AS p_orders PRIMARY KEY (order_id),
+    li AS p_line_items PRIMARY KEY (item_id)
+  )
+  RELATIONSHIPS (
+    ord_bill AS ord(bill_addr) REFERENCES bill,
+    ord_ship AS ord(ship_addr) REFERENCES ship,
+    li_ord AS li(order_id) REFERENCES ord
+  )
+  FACTS (
+    li.units AS li.qty
+  )
+  DIMENSIONS (
+    bill.bill_city AS bill.city,
+    ship.ship_city AS ship.city,
+    li.qty_band AS CASE WHEN li.qty > 3 THEN 'big' ELSE 'small' END
+  )
+  METRICS (
+    ord.revenue AS SUM(ord.amount),
+    li.total_units AS SUM(li.units),
+    per_unit AS revenue / total_units
+  )
+
+# Case 1: SHOW SEMANTIC DIMENSIONS
+query TT rowsort
+SELECT table_name, name FROM (SHOW SEMANTIC DIMENSIONS IN alias_sv)
+----
+bill	bill_city
+li	qty_band
+ship	ship_city
+
+# Case 2: SHOW SEMANTIC METRICS (a derived metric is on no table)
+query TT rowsort
+SELECT table_name, name FROM (SHOW SEMANTIC METRICS IN alias_sv)
+----
+(empty)	per_unit
+li	total_units
+ord	revenue
+
+# Case 3: SHOW SEMANTIC FACTS
+query TT rowsort
+SELECT table_name, name FROM (SHOW SEMANTIC FACTS IN alias_sv)
+----
+li	units
+
+# Case 4: SHOW SEMANTIC DIMENSIONS ... FOR METRIC
+query TT rowsort
+SELECT table_name, name FROM (SHOW SEMANTIC DIMENSIONS IN alias_sv FOR METRIC revenue)
+----
+bill	bill_city
+li	qty_band
+ship	ship_city
+
+# Case 5: DESCRIBE lists each logical table by its alias, with its physical table
+# under BASE_TABLE_NAME.
+query TT rowsort
+SELECT object_name, property_value FROM (DESCRIBE SEMANTIC VIEW alias_sv)
+WHERE object_kind = 'TABLE' AND property = 'BASE_TABLE_NAME'
+----
+bill	p_addresses
+li	p_line_items
+ord	p_orders
+ship	p_addresses
+
+# Case 6: DESCRIBE's members name their logical table, in parent_entity and in
+# their TABLE property.
+query TTTT rowsort
+SELECT object_kind, object_name, parent_entity, property_value FROM (DESCRIBE SEMANTIC VIEW alias_sv)
+WHERE object_kind IN ('DIMENSION', 'FACT', 'METRIC') AND property = 'TABLE'
+----
+DIMENSION	bill_city	bill	bill
+DIMENSION	qty_band	li	li
+DIMENSION	ship_city	ship	ship
+FACT	units	li	li
+METRIC	revenue	ord	ord
+METRIC	total_units	li	li
+
+# Case 7: DESCRIBE's relationships name their logical tables.
+query TTTT rowsort
+SELECT object_name, parent_entity, property, property_value FROM (DESCRIBE SEMANTIC VIEW alias_sv)
+WHERE object_kind = 'RELATIONSHIP' AND property IN ('TABLE', 'REF_TABLE')
+----
+li_ord	li	REF_TABLE	ord
+li_ord	li	TABLE	li
+ord_bill	ord	REF_TABLE	bill
+ord_bill	ord	TABLE	ord
+ord_ship	ord	REF_TABLE	ship
+ord_ship	ord	TABLE	ord
+
+# The view answers queries as before.
+query TTI rowsort
+SELECT * FROM semantic_view('alias_sv', dimensions := ['bill_city', 'ship_city'], metrics := ['revenue'])
+----
+Leeds	York	100

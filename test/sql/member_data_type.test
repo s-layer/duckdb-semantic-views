@@ -84,13 +84,13 @@ tier	SMALLINT
 query TTTTTTTTT
 SHOW SEMANTIC DIMENSIONS LIKE 'tags' IN dt_sv
 ----
-memory	main	dt_sv	dt_orders	tags	VARCHAR[]	[]	(empty)	[]
+memory	main	dt_sv	o	tags	VARCHAR[]	[]	(empty)	[]
 
 # CASE metric: COUNT is BIGINT
 query TTTTTTTT
 SHOW SEMANTIC METRICS LIKE 'order_count' IN dt_sv
 ----
-memory	main	dt_sv	dt_orders	order_count	BIGINT	[]	(empty)
+memory	main	dt_sv	o	order_count	BIGINT	[]	(empty)
 
 # CASE metric: AVG over INTEGER is DOUBLE, not the input's INTEGER
 query TT
@@ -139,8 +139,8 @@ score_sum	DOUBLE
 query TTTTTTTTT
 SHOW SEMANTIC FACTS IN dt_sv
 ----
-memory	main	dt_sv	dt_orders	line_total	DECIMAL(18,2)	[]	(empty)	[]
-memory	main	dt_sv	dt_orders	raw_score	DOUBLE	[]	(empty)	[]
+memory	main	dt_sv	o	line_total	DECIMAL(18,2)	[]	(empty)	[]
+memory	main	dt_sv	o	raw_score	DOUBLE	[]	(empty)	[]
 
 # CASE the cross-view SHOW form (no IN) reports the same types
 query TT
@@ -343,8 +343,8 @@ METRICS (i.top_price AS MAX(i.price), i.n AS COUNT(*));
 query TTTT
 SELECT schema_name, name, data_type, table_name FROM show_semantic_metrics('dt_s.items_sv') ORDER BY name
 ----
-dt_s	n	BIGINT	dt_s.items
-dt_s	top_price	FLOAT	dt_s.items
+dt_s	n	BIGINT	i
+dt_s	top_price	FLOAT	i
 
 query TT
 SELECT name, data_type FROM show_semantic_dimensions_all() WHERE schema_name = 'dt_s'

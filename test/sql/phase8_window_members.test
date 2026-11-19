@@ -185,22 +185,22 @@ query TTT
 SELECT table_name, name, data_type FROM (SHOW SEMANTIC DIMENSIONS IN wdim_sv)
 WHERE name IN ('units_rank', 'prev_category') ORDER BY name;
 ----
-w_sales	prev_category	VARCHAR
-w_sales	units_rank	BIGINT
+sales	prev_category	VARCHAR
+sales	units_rank	BIGINT
 
 query TTT
 SELECT table_name, name, data_type FROM (SHOW SEMANTIC FACTS IN wdim_sv)
 WHERE name IN ('total_units', 'revenue_by_category') ORDER BY name;
 ----
-w_sales	revenue_by_category	HUGEINT
-w_sales	total_units	HUGEINT
+sales	revenue_by_category	HUGEINT
+sales	total_units	HUGEINT
 
 query TTT
 SELECT table_name, name, data_type FROM (SHOW SEMANTIC METRICS IN wdim_sv)
 WHERE name IN ('sum_cat_rev', 'max_total_units') ORDER BY name;
 ----
-w_sales	max_total_units	HUGEINT
-w_sales	sum_cat_rev	HUGEINT
+sales	max_total_units	HUGEINT
+sales	sum_cat_rev	HUGEINT
 
 # W9: a window fact partitioned by a parent's dimension.
 statement ok

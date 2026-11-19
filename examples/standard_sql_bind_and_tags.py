@@ -265,7 +265,7 @@ assert tags == {
     ("DIMENSION", "channel"): {"s_layer_kind": "dimension"},
     ("DIMENSION", "region"): {"s_layer_kind": "dimension", "s_layer_label": "Region"},
     ("METRIC", "revenue"): {"s_layer_kind": "metric"},
-    ("TABLE", "orders"): {"governance.pii": "none"},
+    ("TABLE", "o"): {"governance.pii": "none"},
 }, tags
 
 kinds = show(

@@ -38,10 +38,10 @@ SELECT regexp_matches(object_name, '^SYS_RELATIONSHIP_[0-9a-f]{8}-[0-9a-f]{4}-[0
        parent_entity, property, property_value
 FROM describe_semantic_view('ur_u1') WHERE object_kind = 'RELATIONSHIP' ORDER BY property;
 ----
-true	ur_orders	FOREIGN_KEY	["customer_id"]
-true	ur_orders	REF_KEY	["customer_id"]
-true	ur_orders	REF_TABLE	ur_customers
-true	ur_orders	TABLE	ur_orders
+true	orders	FOREIGN_KEY	["customer_id"]
+true	orders	REF_KEY	["customer_id"]
+true	orders	REF_TABLE	customers
+true	orders	TABLE	orders
 
 # GET_DDL leaves it unnamed, and its output re-creates the view.
 query I

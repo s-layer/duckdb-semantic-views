@@ -997,13 +997,7 @@ mod tests {
         };
         let alias_map = def.alias_to_table_map();
         let mut rows = Vec::new();
-        collect_metric_rows(
-            &def,
-            "orders",
-            &alias_map,
-            &MemberTypes::default(),
-            &mut rows,
-        );
+        collect_metric_rows(&def, "o", &alias_map, &MemberTypes::default(), &mut rows);
 
         // Find the WINDOW_SPEC row
         let ws_row = rows
@@ -1078,13 +1072,7 @@ mod tests {
         };
         let alias_map = def.alias_to_table_map();
         let mut rows = Vec::new();
-        collect_metric_rows(
-            &def,
-            "orders",
-            &alias_map,
-            &MemberTypes::default(),
-            &mut rows,
-        );
+        collect_metric_rows(&def, "o", &alias_map, &MemberTypes::default(), &mut rows);
 
         let ws_row = rows
             .iter()
@@ -1151,20 +1139,8 @@ mod tests {
         let def = filter_def(true, true);
         let alias_map = def.alias_to_table_map();
         let mut rows = Vec::new();
-        collect_dimension_rows(
-            &def,
-            "orders",
-            &alias_map,
-            &MemberTypes::default(),
-            &mut rows,
-        );
-        collect_fact_rows(
-            &def,
-            "orders",
-            &alias_map,
-            &MemberTypes::default(),
-            &mut rows,
-        );
+        collect_dimension_rows(&def, "o", &alias_map, &MemberTypes::default(), &mut rows);
+        collect_fact_rows(&def, "o", &alias_map, &MemberTypes::default(), &mut rows);
 
         let dim_row = rows
             .iter()
@@ -1172,7 +1148,7 @@ mod tests {
             .expect("dimension should have a LABELS row");
         assert_eq!(dim_row.object_name, "is_domestic");
         assert_eq!(dim_row.property_value, r#"["FILTER"]"#);
-        assert_eq!(dim_row.parent_entity, "orders");
+        assert_eq!(dim_row.parent_entity, "o");
 
         let fact_row = rows
             .iter()
@@ -1180,7 +1156,7 @@ mod tests {
             .expect("fact should have a LABELS row");
         assert_eq!(fact_row.object_name, "is_large");
         assert_eq!(fact_row.property_value, r#"["FILTER"]"#);
-        assert_eq!(fact_row.parent_entity, "orders");
+        assert_eq!(fact_row.parent_entity, "o");
     }
 
     /// A non-filter member emits no `LABELS` row at all, matching how `COMMENT`
@@ -1190,20 +1166,8 @@ mod tests {
         let def = filter_def(false, false);
         let alias_map = def.alias_to_table_map();
         let mut rows = Vec::new();
-        collect_dimension_rows(
-            &def,
-            "orders",
-            &alias_map,
-            &MemberTypes::default(),
-            &mut rows,
-        );
-        collect_fact_rows(
-            &def,
-            "orders",
-            &alias_map,
-            &MemberTypes::default(),
-            &mut rows,
-        );
+        collect_dimension_rows(&def, "o", &alias_map, &MemberTypes::default(), &mut rows);
+        collect_fact_rows(&def, "o", &alias_map, &MemberTypes::default(), &mut rows);
         assert!(
             !rows.iter().any(|r| r.property == "LABELS"),
             "no spurious LABELS row for a plain member"
@@ -1216,20 +1180,8 @@ mod tests {
         let def = filter_def(true, false);
         let alias_map = def.alias_to_table_map();
         let mut rows = Vec::new();
-        collect_dimension_rows(
-            &def,
-            "orders",
-            &alias_map,
-            &MemberTypes::default(),
-            &mut rows,
-        );
-        collect_fact_rows(
-            &def,
-            "orders",
-            &alias_map,
-            &MemberTypes::default(),
-            &mut rows,
-        );
+        collect_dimension_rows(&def, "o", &alias_map, &MemberTypes::default(), &mut rows);
+        collect_fact_rows(&def, "o", &alias_map, &MemberTypes::default(), &mut rows);
         let labelled: Vec<&str> = rows
             .iter()
             .filter(|r| r.property == "LABELS")
@@ -1245,13 +1197,7 @@ mod tests {
         let def = filter_def(false, true);
         let alias_map = def.alias_to_table_map();
         let mut rows = Vec::new();
-        collect_fact_rows(
-            &def,
-            "orders",
-            &alias_map,
-            &MemberTypes::default(),
-            &mut rows,
-        );
+        collect_fact_rows(&def, "o", &alias_map, &MemberTypes::default(), &mut rows);
         let props: Vec<&str> = rows.iter().map(|r| r.property.as_str()).collect();
         let labels_at = props.iter().position(|p| *p == "LABELS").expect("LABELS");
         let access_at = props
@@ -1261,7 +1207,7 @@ mod tests {
         assert!(labels_at < access_at, "LABELS before ACCESS_MODIFIER");
         assert_eq!(rows[access_at].property_value, "PUBLIC");
         assert!(
-            rows.iter().all(|r| r.parent_entity == "orders"),
+            rows.iter().all(|r| r.parent_entity == "o"),
             "every fact row keeps its parent entity"
         );
     }

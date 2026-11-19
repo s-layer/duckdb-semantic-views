@@ -9,7 +9,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-_No unreleased changes yet._
+### Changed
+
+- `SHOW SEMANTIC DIMENSIONS`, `METRICS` and `FACTS` (with or without `FOR METRIC`) and `DESCRIBE SEMANTIC VIEW` name each table by its alias from `TABLES`, as Snowflake does: `table_name`, `parent_entity`, a `TABLE` block's `object_name`, and the `TABLE` and `REF_TABLE` values of relationships, members and LOD dimension lists. They named the physical table, so two aliases of one table, such as a billing and a shipping address, read the same. `DESCRIBE`'s `BASE_TABLE_NAME` still gives each alias's physical table. A query that filters these listings by physical table name needs the alias instead.
 
 ## [0.20.0] - 2026-11-18
 

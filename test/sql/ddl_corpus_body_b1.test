@@ -99,8 +99,8 @@ SELECT object_kind, object_name, property, property_value FROM describe_semantic
 ----
 RELATIONSHIP	rel	FOREIGN_KEY	["code","c2"]
 RELATIONSHIP	rel	REF_KEY	["code","c2"]
-RELATIONSHIP	rel	REF_TABLE	dcc_customers
-RELATIONSHIP	rel	TABLE	dcc_orders
+RELATIONSHIP	rel	REF_TABLE	c
+RELATIONSHIP	rel	TABLE	o
 
 # C-002: body_parser/mod.rs::references_target_no_space_before_paren — `REFERENCES c(id)` (no space before the paren): target c, ref columns [id]
 # GET_DDL omits a ref column list equal to the target PK; DESCRIBE REF_KEY shows it.
@@ -126,7 +126,7 @@ query TTTT rowsort
 SELECT object_kind, object_name, property, property_value FROM describe_semantic_view('dcc_c002') WHERE object_kind = 'RELATIONSHIP' AND property IN ('REF_TABLE', 'REF_KEY');
 ----
 RELATIONSHIP	rel	REF_KEY	["id"]
-RELATIONSHIP	rel	REF_TABLE	dcc_customers
+RELATIONSHIP	rel	REF_TABLE	c
 
 # C-003: body_parser/mod.rs::references_target_space_before_paren — `REFERENCES c (id)` (space before the paren) parses the same as C-002
 statement ok
@@ -151,7 +151,7 @@ query TTTT rowsort
 SELECT object_kind, object_name, property, property_value FROM describe_semantic_view('dcc_c003') WHERE object_kind = 'RELATIONSHIP' AND property IN ('REF_TABLE', 'REF_KEY');
 ----
 RELATIONSHIP	rel	REF_KEY	["id"]
-RELATIONSHIP	rel	REF_TABLE	dcc_customers
+RELATIONSHIP	rel	REF_TABLE	c
 
 # C-004: body_parser/mod.rs::parse_relationships_quoted_paren_in_from_alias — a `(` inside a QUOTED from-alias is inert; the alias is `"a(b"` and the FK list is (cust_id) [text]
 statement ok
@@ -176,8 +176,8 @@ query TTTT rowsort
 SELECT object_kind, object_name, property, property_value FROM describe_semantic_view('dcc_c004') WHERE object_kind = 'RELATIONSHIP' AND property IN ('TABLE', 'FOREIGN_KEY', 'REF_TABLE');
 ----
 RELATIONSHIP	rel	FOREIGN_KEY	["cust_id"]
-RELATIONSHIP	rel	REF_TABLE	dcc_customers
-RELATIONSHIP	rel	TABLE	dcc_orders
+RELATIONSHIP	rel	REF_TABLE	c
+RELATIONSHIP	rel	TABLE	"a(b"
 
 # C-005: body_parser/mod.rs::parse_relationships_multi_token_from_alias_rejected — near miss of C-002: a two-token from-alias `o c(...)` is rejected, not captured as a bogus alias [syntax]
 statement error
@@ -394,10 +394,10 @@ query TTTT rowsort
 SELECT object_kind, object_name, property, property_value FROM describe_semantic_view('dcc_c017') WHERE object_kind <> 'TABLE' AND property IN ('TABLE', 'EXPRESSION', 'ACCESS_MODIFIER', 'WINDOW_SPEC');
 ----
 DIMENSION	region	EXPRESSION	region
-DIMENSION	region	TABLE	dcc_orders
+DIMENSION	region	TABLE	o
 METRIC	rev	ACCESS_MODIFIER	PUBLIC
 METRIC	rev	EXPRESSION	SUM(amount)
-METRIC	rev	TABLE	dcc_orders
+METRIC	rev	TABLE	o
 
 query I nosort
 SELECT count(*) FROM show_semantic_materializations('dcc_c017');
@@ -873,7 +873,7 @@ query TTTT rowsort
 SELECT object_kind, object_name, property, property_value FROM describe_semantic_view('dcc_c038') WHERE object_kind = 'FACT' AND property IN ('TABLE', 'EXPRESSION');
 ----
 FACT	net_price	EXPRESSION	o.price * (1 - o.discount)
-FACT	net_price	TABLE	dcc_orders
+FACT	net_price	TABLE	o
 
 # C-039: body_parser/mod.rs::parse_keyword_body_with_facts_multiple — two facts, in order
 statement ok
@@ -968,7 +968,7 @@ query TTTT rowsort
 SELECT object_kind, object_name, property, property_value FROM describe_semantic_view('dcc_c044') WHERE property IN ('TABLE', 'EXPRESSION');
 ----
 METRIC	revenue	EXPRESSION	SUM(li.amount)
-METRIC	revenue	TABLE	dcc_line_items
+METRIC	revenue	TABLE	li
 
 # C-045: body_parser/mod.rs::parse_metrics_clause_unqualified_entry — unqualified `profit AS revenue - cost` is a DERIVED metric (no source table)
 statement ok
@@ -1079,9 +1079,9 @@ METRICS (
 query TTTT rowsort
 SELECT object_kind, object_name, property, property_value FROM describe_semantic_view('dcc_c049') WHERE property = 'TABLE';
 ----
-DIMENSION	region	TABLE	dcc_orders
-METRIC	cost	TABLE	dcc_orders
-METRIC	revenue	TABLE	dcc_orders
+DIMENSION	region	TABLE	o
+METRIC	cost	TABLE	o
+METRIC	revenue	TABLE	o
 
 # C-050: body_parser/mod.rs::parse_keyword_body_only_derived_metrics — a METRICS clause of derived metrics only (no qualified metric at all), no DIMENSIONS
 # (The derived expressions are constants / each other so the view resolves; the
@@ -1153,7 +1153,7 @@ SELECT object_kind, object_name, property, property_value FROM describe_semantic
 METRIC	departure_count	ACCESS_MODIFIER	PUBLIC
 METRIC	departure_count	DATA_TYPE	BIGINT
 METRIC	departure_count	EXPRESSION	COUNT(*)
-METRIC	departure_count	TABLE	dcc_flights
+METRIC	departure_count	TABLE	f
 
 # C-053: body_parser/mod.rs::parse_metrics_using_multiple_relationships — `USING (rel1, rel2)`: two relationships, in order
 statement ok
@@ -1428,8 +1428,8 @@ METRICS (
 query TTTT rowsort
 SELECT object_kind, object_name, property, property_value FROM describe_semantic_view('dcc_c065') WHERE object_kind = 'TABLE' AND property IN ('COMMENT', 'SYNONYMS');
 ----
-TABLE	dcc_orders	COMMENT	Orders table
-TABLE	dcc_orders	SYNONYMS	["sales"]
+TABLE	o	COMMENT	Orders table
+TABLE	o	SYNONYMS	["sales"]
 
 # C-066: body_parser/mod.rs::test_metric_with_using_and_comment — USING (dep) then a trailing `COMMENT = 'Departures'` on one metric
 statement ok
@@ -1478,7 +1478,7 @@ query TTTT rowsort
 SELECT object_kind, object_name, property, property_value FROM describe_semantic_view('dcc_c067') WHERE object_kind = 'METRIC' AND property IN ('TABLE', 'ACCESS_MODIFIER');
 ----
 METRIC	metric_name	ACCESS_MODIFIER	PUBLIC
-METRIC	metric_name	TABLE	dcc_priv
+METRIC	metric_name	TABLE	private_schema
 
 # C-068: body_parser/mod.rs::test_full_keyword_body_with_all_metadata — comments, synonyms and PRIVATE on tables, facts, dimensions and metrics together
 statement ok

@@ -51,7 +51,7 @@ SELECT object_name, property, property_value
 FROM (DESCRIBE SEMANTIC VIEW order_metrics)
 WHERE object_kind = 'DIMENSION';
 ----
-region	TABLE	orders
+region	TABLE	o
 region	EXPRESSION	o.region
 region	DATA_TYPE	VARCHAR
 
@@ -87,8 +87,8 @@ SELECT object_name, property, property_value
 FROM (DESCRIBE SEMANTIC VIEW shop)
 WHERE object_kind = 'RELATIONSHIP';
 ----
-order_customer	TABLE	orders
-order_customer	REF_TABLE	customers
+order_customer	TABLE	o
+order_customer	REF_TABLE	c
 order_customer	FOREIGN_KEY	["customer_id"]
 order_customer	REF_KEY	["id"]
 

@@ -31,17 +31,17 @@ CREATE SEMANTIC VIEW p41_simple AS
 query TTTTT
 DESCRIBE SEMANTIC VIEW p41_simple;
 ----
-TABLE	p41_orders	(empty)	BASE_TABLE_DATABASE_NAME	memory
-TABLE	p41_orders	(empty)	BASE_TABLE_SCHEMA_NAME	main
-TABLE	p41_orders	(empty)	BASE_TABLE_NAME	p41_orders
-TABLE	p41_orders	(empty)	PRIMARY_KEY	["id"]
-DIMENSION	region	p41_orders	TABLE	p41_orders
-DIMENSION	region	p41_orders	EXPRESSION	o.region
-DIMENSION	region	p41_orders	DATA_TYPE	VARCHAR
-METRIC	total	p41_orders	TABLE	p41_orders
-METRIC	total	p41_orders	EXPRESSION	SUM(o.amount)
-METRIC	total	p41_orders	DATA_TYPE	DECIMAL(38,2)
-METRIC	total	p41_orders	ACCESS_MODIFIER	PUBLIC
+TABLE	o	(empty)	BASE_TABLE_DATABASE_NAME	memory
+TABLE	o	(empty)	BASE_TABLE_SCHEMA_NAME	main
+TABLE	o	(empty)	BASE_TABLE_NAME	p41_orders
+TABLE	o	(empty)	PRIMARY_KEY	["id"]
+DIMENSION	region	o	TABLE	o
+DIMENSION	region	o	EXPRESSION	o.region
+DIMENSION	region	o	DATA_TYPE	VARCHAR
+METRIC	total	o	TABLE	o
+METRIC	total	o	EXPRESSION	SUM(o.amount)
+METRIC	total	o	DATA_TYPE	DECIMAL(38,2)
+METRIC	total	o	ACCESS_MODIFIER	PUBLIC
 
 # ============================================================
 # Test 2: Multi-table view with relationships (DESC-03)
@@ -68,28 +68,28 @@ CREATE SEMANTIC VIEW p41_multi AS
 query TTTTT
 DESCRIBE SEMANTIC VIEW p41_multi;
 ----
-TABLE	p41_orders	(empty)	BASE_TABLE_DATABASE_NAME	memory
-TABLE	p41_orders	(empty)	BASE_TABLE_SCHEMA_NAME	main
-TABLE	p41_orders	(empty)	BASE_TABLE_NAME	p41_orders
-TABLE	p41_orders	(empty)	PRIMARY_KEY	["id"]
-TABLE	p41_customers	(empty)	BASE_TABLE_DATABASE_NAME	memory
-TABLE	p41_customers	(empty)	BASE_TABLE_SCHEMA_NAME	main
-TABLE	p41_customers	(empty)	BASE_TABLE_NAME	p41_customers
-TABLE	p41_customers	(empty)	PRIMARY_KEY	["id"]
-RELATIONSHIP	order_to_customer	p41_orders	TABLE	p41_orders
-RELATIONSHIP	order_to_customer	p41_orders	REF_TABLE	p41_customers
-RELATIONSHIP	order_to_customer	p41_orders	FOREIGN_KEY	["customer_id"]
-RELATIONSHIP	order_to_customer	p41_orders	REF_KEY	["id"]
-DIMENSION	region	p41_orders	TABLE	p41_orders
-DIMENSION	region	p41_orders	EXPRESSION	o.region
-DIMENSION	region	p41_orders	DATA_TYPE	VARCHAR
-DIMENSION	customer_name	p41_customers	TABLE	p41_customers
-DIMENSION	customer_name	p41_customers	EXPRESSION	c.name
-DIMENSION	customer_name	p41_customers	DATA_TYPE	VARCHAR
-METRIC	total_revenue	p41_orders	TABLE	p41_orders
-METRIC	total_revenue	p41_orders	EXPRESSION	SUM(o.amount)
-METRIC	total_revenue	p41_orders	DATA_TYPE	DECIMAL(38,2)
-METRIC	total_revenue	p41_orders	ACCESS_MODIFIER	PUBLIC
+TABLE	o	(empty)	BASE_TABLE_DATABASE_NAME	memory
+TABLE	o	(empty)	BASE_TABLE_SCHEMA_NAME	main
+TABLE	o	(empty)	BASE_TABLE_NAME	p41_orders
+TABLE	o	(empty)	PRIMARY_KEY	["id"]
+TABLE	c	(empty)	BASE_TABLE_DATABASE_NAME	memory
+TABLE	c	(empty)	BASE_TABLE_SCHEMA_NAME	main
+TABLE	c	(empty)	BASE_TABLE_NAME	p41_customers
+TABLE	c	(empty)	PRIMARY_KEY	["id"]
+RELATIONSHIP	order_to_customer	o	TABLE	o
+RELATIONSHIP	order_to_customer	o	REF_TABLE	c
+RELATIONSHIP	order_to_customer	o	FOREIGN_KEY	["customer_id"]
+RELATIONSHIP	order_to_customer	o	REF_KEY	["id"]
+DIMENSION	region	o	TABLE	o
+DIMENSION	region	o	EXPRESSION	o.region
+DIMENSION	region	o	DATA_TYPE	VARCHAR
+DIMENSION	customer_name	c	TABLE	c
+DIMENSION	customer_name	c	EXPRESSION	c.name
+DIMENSION	customer_name	c	DATA_TYPE	VARCHAR
+METRIC	total_revenue	o	TABLE	o
+METRIC	total_revenue	o	EXPRESSION	SUM(o.amount)
+METRIC	total_revenue	o	DATA_TYPE	DECIMAL(38,2)
+METRIC	total_revenue	o	ACCESS_MODIFIER	PUBLIC
 
 # ============================================================
 # Test 3: Facts (DESC-05)
@@ -120,29 +120,29 @@ CREATE SEMANTIC VIEW p41_facts AS
 query TTTTT
 DESCRIBE SEMANTIC VIEW p41_facts;
 ----
-TABLE	p41_orders	(empty)	BASE_TABLE_DATABASE_NAME	memory
-TABLE	p41_orders	(empty)	BASE_TABLE_SCHEMA_NAME	main
-TABLE	p41_orders	(empty)	BASE_TABLE_NAME	p41_orders
-TABLE	p41_orders	(empty)	PRIMARY_KEY	["id"]
-TABLE	p41_line_items	(empty)	BASE_TABLE_DATABASE_NAME	memory
-TABLE	p41_line_items	(empty)	BASE_TABLE_SCHEMA_NAME	main
-TABLE	p41_line_items	(empty)	BASE_TABLE_NAME	p41_line_items
-TABLE	p41_line_items	(empty)	PRIMARY_KEY	["id"]
-RELATIONSHIP	li_to_order	p41_line_items	TABLE	p41_line_items
-RELATIONSHIP	li_to_order	p41_line_items	REF_TABLE	p41_orders
-RELATIONSHIP	li_to_order	p41_line_items	FOREIGN_KEY	["order_id"]
-RELATIONSHIP	li_to_order	p41_line_items	REF_KEY	["id"]
-FACT	net_price	p41_line_items	TABLE	p41_line_items
-FACT	net_price	p41_line_items	EXPRESSION	li.price * li.quantity
-FACT	net_price	p41_line_items	DATA_TYPE	DECIMAL(18,2)
-FACT	net_price	p41_line_items	ACCESS_MODIFIER	PUBLIC
-DIMENSION	region	p41_orders	TABLE	p41_orders
-DIMENSION	region	p41_orders	EXPRESSION	o.region
-DIMENSION	region	p41_orders	DATA_TYPE	VARCHAR
-METRIC	total_net	p41_orders	TABLE	p41_orders
-METRIC	total_net	p41_orders	EXPRESSION	SUM(li.net_price)
-METRIC	total_net	p41_orders	DATA_TYPE	(empty)
-METRIC	total_net	p41_orders	ACCESS_MODIFIER	PUBLIC
+TABLE	o	(empty)	BASE_TABLE_DATABASE_NAME	memory
+TABLE	o	(empty)	BASE_TABLE_SCHEMA_NAME	main
+TABLE	o	(empty)	BASE_TABLE_NAME	p41_orders
+TABLE	o	(empty)	PRIMARY_KEY	["id"]
+TABLE	li	(empty)	BASE_TABLE_DATABASE_NAME	memory
+TABLE	li	(empty)	BASE_TABLE_SCHEMA_NAME	main
+TABLE	li	(empty)	BASE_TABLE_NAME	p41_line_items
+TABLE	li	(empty)	PRIMARY_KEY	["id"]
+RELATIONSHIP	li_to_order	li	TABLE	li
+RELATIONSHIP	li_to_order	li	REF_TABLE	o
+RELATIONSHIP	li_to_order	li	FOREIGN_KEY	["order_id"]
+RELATIONSHIP	li_to_order	li	REF_KEY	["id"]
+FACT	net_price	li	TABLE	li
+FACT	net_price	li	EXPRESSION	li.price * li.quantity
+FACT	net_price	li	DATA_TYPE	DECIMAL(18,2)
+FACT	net_price	li	ACCESS_MODIFIER	PUBLIC
+DIMENSION	region	o	TABLE	o
+DIMENSION	region	o	EXPRESSION	o.region
+DIMENSION	region	o	DATA_TYPE	VARCHAR
+METRIC	total_net	o	TABLE	o
+METRIC	total_net	o	EXPRESSION	SUM(li.net_price)
+METRIC	total_net	o	DATA_TYPE	(empty)
+METRIC	total_net	o	ACCESS_MODIFIER	PUBLIC
 
 # ============================================================
 # Test 4: Derived metrics (DESC-07)
@@ -162,17 +162,17 @@ CREATE SEMANTIC VIEW p41_derived AS
 query TTTTT
 DESCRIBE SEMANTIC VIEW p41_derived;
 ----
-TABLE	p41_orders	(empty)	BASE_TABLE_DATABASE_NAME	memory
-TABLE	p41_orders	(empty)	BASE_TABLE_SCHEMA_NAME	main
-TABLE	p41_orders	(empty)	BASE_TABLE_NAME	p41_orders
-TABLE	p41_orders	(empty)	PRIMARY_KEY	["id"]
-DIMENSION	region	p41_orders	TABLE	p41_orders
-DIMENSION	region	p41_orders	EXPRESSION	o.region
-DIMENSION	region	p41_orders	DATA_TYPE	VARCHAR
-METRIC	revenue	p41_orders	TABLE	p41_orders
-METRIC	revenue	p41_orders	EXPRESSION	SUM(o.amount)
-METRIC	revenue	p41_orders	DATA_TYPE	DECIMAL(38,2)
-METRIC	revenue	p41_orders	ACCESS_MODIFIER	PUBLIC
+TABLE	o	(empty)	BASE_TABLE_DATABASE_NAME	memory
+TABLE	o	(empty)	BASE_TABLE_SCHEMA_NAME	main
+TABLE	o	(empty)	BASE_TABLE_NAME	p41_orders
+TABLE	o	(empty)	PRIMARY_KEY	["id"]
+DIMENSION	region	o	TABLE	o
+DIMENSION	region	o	EXPRESSION	o.region
+DIMENSION	region	o	DATA_TYPE	VARCHAR
+METRIC	revenue	o	TABLE	o
+METRIC	revenue	o	EXPRESSION	SUM(o.amount)
+METRIC	revenue	o	DATA_TYPE	DECIMAL(38,2)
+METRIC	revenue	o	ACCESS_MODIFIER	PUBLIC
 DERIVED_METRIC	profit	(empty)	EXPRESSION	revenue * 0.3
 DERIVED_METRIC	profit	(empty)	DATA_TYPE	DECIMAL(38,3)
 DERIVED_METRIC	profit	(empty)	ACCESS_MODIFIER	PUBLIC
@@ -191,16 +191,16 @@ CREATE SEMANTIC VIEW p41_nopk AS
 query TTTTT
 DESCRIBE SEMANTIC VIEW p41_nopk;
 ----
-TABLE	p41_orders	(empty)	BASE_TABLE_DATABASE_NAME	memory
-TABLE	p41_orders	(empty)	BASE_TABLE_SCHEMA_NAME	main
-TABLE	p41_orders	(empty)	BASE_TABLE_NAME	p41_orders
-DIMENSION	region	p41_orders	TABLE	p41_orders
-DIMENSION	region	p41_orders	EXPRESSION	o.region
-DIMENSION	region	p41_orders	DATA_TYPE	VARCHAR
-METRIC	total	p41_orders	TABLE	p41_orders
-METRIC	total	p41_orders	EXPRESSION	SUM(o.amount)
-METRIC	total	p41_orders	DATA_TYPE	DECIMAL(38,2)
-METRIC	total	p41_orders	ACCESS_MODIFIER	PUBLIC
+TABLE	o	(empty)	BASE_TABLE_DATABASE_NAME	memory
+TABLE	o	(empty)	BASE_TABLE_SCHEMA_NAME	main
+TABLE	o	(empty)	BASE_TABLE_NAME	p41_orders
+DIMENSION	region	o	TABLE	o
+DIMENSION	region	o	EXPRESSION	o.region
+DIMENSION	region	o	DATA_TYPE	VARCHAR
+METRIC	total	o	TABLE	o
+METRIC	total	o	EXPRESSION	SUM(o.amount)
+METRIC	total	o	DATA_TYPE	DECIMAL(38,2)
+METRIC	total	o	ACCESS_MODIFIER	PUBLIC
 
 # ============================================================
 # Test 6: Error case -- nonexistent view
@@ -218,17 +218,17 @@ does not exist
 query TTTTT
 describe semantic view p41_simple;
 ----
-TABLE	p41_orders	(empty)	BASE_TABLE_DATABASE_NAME	memory
-TABLE	p41_orders	(empty)	BASE_TABLE_SCHEMA_NAME	main
-TABLE	p41_orders	(empty)	BASE_TABLE_NAME	p41_orders
-TABLE	p41_orders	(empty)	PRIMARY_KEY	["id"]
-DIMENSION	region	p41_orders	TABLE	p41_orders
-DIMENSION	region	p41_orders	EXPRESSION	o.region
-DIMENSION	region	p41_orders	DATA_TYPE	VARCHAR
-METRIC	total	p41_orders	TABLE	p41_orders
-METRIC	total	p41_orders	EXPRESSION	SUM(o.amount)
-METRIC	total	p41_orders	DATA_TYPE	DECIMAL(38,2)
-METRIC	total	p41_orders	ACCESS_MODIFIER	PUBLIC
+TABLE	o	(empty)	BASE_TABLE_DATABASE_NAME	memory
+TABLE	o	(empty)	BASE_TABLE_SCHEMA_NAME	main
+TABLE	o	(empty)	BASE_TABLE_NAME	p41_orders
+TABLE	o	(empty)	PRIMARY_KEY	["id"]
+DIMENSION	region	o	TABLE	o
+DIMENSION	region	o	EXPRESSION	o.region
+DIMENSION	region	o	DATA_TYPE	VARCHAR
+METRIC	total	o	TABLE	o
+METRIC	total	o	EXPRESSION	SUM(o.amount)
+METRIC	total	o	DATA_TYPE	DECIMAL(38,2)
+METRIC	total	o	ACCESS_MODIFIER	PUBLIC
 
 # ============================================================
 # Test 8: COUNT(*) verification

@@ -62,8 +62,8 @@ SELECT * FROM describe_semantic_view('p44d_annotated') WHERE property = 'COMMENT
 query TTTTT rowsort
 SELECT * FROM describe_semantic_view('p44d_annotated') WHERE object_kind = 'TABLE' AND property IN ('COMMENT', 'SYNONYMS');
 ----
-TABLE	p44d_orders	(empty)	COMMENT	Orders fact table
-TABLE	p44d_orders	(empty)	SYNONYMS	["purchases","transactions"]
+TABLE	o	(empty)	COMMENT	Orders fact table
+TABLE	o	(empty)	SYNONYMS	["purchases","transactions"]
 
 # ============================================================
 # Test 3: DIMENSION COMMENT and SYNONYMS rows
@@ -72,8 +72,8 @@ TABLE	p44d_orders	(empty)	SYNONYMS	["purchases","transactions"]
 query TTTTT rowsort
 SELECT * FROM describe_semantic_view('p44d_annotated') WHERE object_kind = 'DIMENSION' AND property IN ('COMMENT', 'SYNONYMS');
 ----
-DIMENSION	customer_name	p44d_customers	COMMENT	Customer full name
-DIMENSION	customer_name	p44d_customers	SYNONYMS	["client_name"]
+DIMENSION	customer_name	c	COMMENT	Customer full name
+DIMENSION	customer_name	c	SYNONYMS	["client_name"]
 
 # ============================================================
 # Test 4: FACT COMMENT, SYNONYMS, ACCESS_MODIFIER=PRIVATE
@@ -82,9 +82,9 @@ DIMENSION	customer_name	p44d_customers	SYNONYMS	["client_name"]
 query TTTTT rowsort
 SELECT * FROM describe_semantic_view('p44d_annotated') WHERE object_kind = 'FACT' AND property IN ('COMMENT', 'SYNONYMS', 'ACCESS_MODIFIER');
 ----
-FACT	raw_amount	p44d_orders	ACCESS_MODIFIER	PRIVATE
-FACT	raw_amount	p44d_orders	COMMENT	Raw order amount
-FACT	raw_amount	p44d_orders	SYNONYMS	["order_value"]
+FACT	raw_amount	o	ACCESS_MODIFIER	PRIVATE
+FACT	raw_amount	o	COMMENT	Raw order amount
+FACT	raw_amount	o	SYNONYMS	["order_value"]
 
 # ============================================================
 # Test 5: METRIC COMMENT, SYNONYMS, ACCESS_MODIFIER=PUBLIC
@@ -93,9 +93,9 @@ FACT	raw_amount	p44d_orders	SYNONYMS	["order_value"]
 query TTTTT rowsort
 SELECT * FROM describe_semantic_view('p44d_annotated') WHERE object_kind = 'METRIC' AND property IN ('COMMENT', 'SYNONYMS', 'ACCESS_MODIFIER');
 ----
-METRIC	total_amount	p44d_orders	ACCESS_MODIFIER	PUBLIC
-METRIC	total_amount	p44d_orders	COMMENT	Total sales
-METRIC	total_amount	p44d_orders	SYNONYMS	["total_sales","revenue"]
+METRIC	total_amount	o	ACCESS_MODIFIER	PUBLIC
+METRIC	total_amount	o	COMMENT	Total sales
+METRIC	total_amount	o	SYNONYMS	["total_sales","revenue"]
 
 # ============================================================
 # Test 6: DERIVED_METRIC ACCESS_MODIFIER=PUBLIC and COMMENT
@@ -135,8 +135,8 @@ SELECT COUNT(*) FROM describe_semantic_view('p44d_plain') WHERE property = 'SYNO
 query TTTTT rowsort
 SELECT * FROM describe_semantic_view('p44d_plain') WHERE property = 'ACCESS_MODIFIER';
 ----
-FACT	raw_amount	p44d_orders	ACCESS_MODIFIER	PUBLIC
-METRIC	total	p44d_orders	ACCESS_MODIFIER	PUBLIC
+FACT	raw_amount	o	ACCESS_MODIFIER	PUBLIC
+METRIC	total	o	ACCESS_MODIFIER	PUBLIC
 
 # ============================================================
 # Cleanup

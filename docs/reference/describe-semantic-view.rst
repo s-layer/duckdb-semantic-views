@@ -57,7 +57,7 @@ The result contains multiple rows with 5 VARCHAR columns:
      - The name of the object (table name, relationship name, variable name, fact/dimension/metric name, materialization name, verified query name). Empty string on the view-level rows and the ``CUSTOM_INSTRUCTIONS`` rows.
    * - ``parent_entity``
      - VARCHAR
-     - The parent table for this object. Empty string for the view-level rows and for ``TABLE``, ``VARIABLE``, ``DERIVED_METRIC``, ``MATERIALIZATION``, ``CUSTOM_INSTRUCTIONS``, and ``AI_VERIFIED_QUERY`` objects.
+     - The alias of the parent table for this object. Empty string for the view-level rows and for ``TABLE``, ``VARIABLE``, ``DERIVED_METRIC``, ``MATERIALIZATION``, ``CUSTOM_INSTRUCTIONS``, and ``AI_VERIFIED_QUERY`` objects.
    * - ``property``
      - VARCHAR
      - The property name being described.
@@ -99,7 +99,7 @@ Rows appear in definition order: the view-level comment, ``MAX_STALENESS`` and t
         - The view's tags as a JSON object. See ``TAGS`` below.
 
 **TABLE**
-   One block per table declared in the ``TABLES`` clause, named by its physical table, or by its alias for a table defined by a query. Each table produces 1-7 property rows:
+   One block per table declared in the ``TABLES`` clause, named by its alias in ``TABLES``, as in Snowflake. Each table produces 1-7 property rows:
 
    .. list-table::
       :header-rows: 1
@@ -138,9 +138,9 @@ Rows appear in definition order: the view-level comment, ``MAX_STALENESS`` and t
       * - Property
         - Description
       * - ``TABLE``
-        - The physical table name on the foreign key side.
+        - The alias of the table on the foreign key side.
       * - ``REF_TABLE``
-        - The physical table name on the referenced (primary key) side.
+        - The alias of the table on the referenced (primary key) side.
       * - ``FOREIGN_KEY``
         - JSON array of foreign key column names (e.g., ``["customer_id"]``).
       * - ``REF_KEY``
@@ -194,7 +194,7 @@ Rows appear in definition order: the view-level comment, ``MAX_STALENESS`` and t
       * - Property
         - Description
       * - ``TABLE``
-        - The physical table name the fact is scoped to.
+        - The alias of the table the fact is scoped to.
       * - ``EXPRESSION``
         - The row-level SQL expression defining the fact.
       * - ``DATA_TYPE``
@@ -226,7 +226,7 @@ Rows appear in definition order: the view-level comment, ``MAX_STALENESS`` and t
       * - Property
         - Description
       * - ``TABLE``
-        - The physical table name the dimension is scoped to.
+        - The alias of the table the dimension is scoped to.
       * - ``EXPRESSION``
         - The SQL expression defining the dimension.
       * - ``DATA_TYPE``
@@ -264,7 +264,7 @@ Rows appear in definition order: the view-level comment, ``MAX_STALENESS`` and t
       * - Property
         - Description
       * - ``TABLE``
-        - The physical table name the metric is scoped to.
+        - The alias of the table the metric is scoped to.
       * - ``EXPRESSION``
         - The aggregate SQL expression defining the metric.
       * - ``DATA_TYPE``
@@ -371,6 +371,10 @@ Rows appear in definition order: the view-level comment, ``MAX_STALENESS`` and t
       * - ``SQL``
         - The SQL text.
 
+.. versionchanged:: 0.21.0
+
+   Tables are named by their alias from ``TABLES``, as in Snowflake: a ``TABLE`` block's ``object_name``, every ``parent_entity``, and the ``TABLE`` and ``REF_TABLE`` values of relationships and members. They were named by the physical table, which ``BASE_TABLE_NAME`` still gives.
+
 
 .. _ref-describe-examples:
 
@@ -399,17 +403,17 @@ Examples
    ┌─────────────┬─────────────┬───────────────┬──────────────────────────┬────────────────┐
    │ object_kind │ object_name │ parent_entity │ property                 │ property_value │
    ├─────────────┼─────────────┼───────────────┼──────────────────────────┼────────────────┤
-   │ TABLE       │ orders      │               │ BASE_TABLE_DATABASE_NAME │ memory         │
-   │ TABLE       │ orders      │               │ BASE_TABLE_SCHEMA_NAME   │ main           │
-   │ TABLE       │ orders      │               │ BASE_TABLE_NAME          │ orders         │
-   │ TABLE       │ orders      │               │ PRIMARY_KEY              │ ["id"]         │
-   │ DIMENSION   │ region      │ orders        │ TABLE                    │ orders         │
-   │ DIMENSION   │ region      │ orders        │ EXPRESSION               │ o.region       │
-   │ DIMENSION   │ region      │ orders        │ DATA_TYPE                │ VARCHAR        │
-   │ METRIC      │ total       │ orders        │ TABLE                    │ orders         │
-   │ METRIC      │ total       │ orders        │ EXPRESSION               │ SUM(o.amount)  │
-   │ METRIC      │ total       │ orders        │ DATA_TYPE                │ DECIMAL(38,2)  │
-   │ METRIC      │ total       │ orders        │ ACCESS_MODIFIER          │ PUBLIC         │
+   │ TABLE       │ o           │               │ BASE_TABLE_DATABASE_NAME │ memory         │
+   │ TABLE       │ o           │               │ BASE_TABLE_SCHEMA_NAME   │ main           │
+   │ TABLE       │ o           │               │ BASE_TABLE_NAME          │ orders         │
+   │ TABLE       │ o           │               │ PRIMARY_KEY              │ ["id"]         │
+   │ DIMENSION   │ region      │ o             │ TABLE                    │ o              │
+   │ DIMENSION   │ region      │ o             │ EXPRESSION               │ o.region       │
+   │ DIMENSION   │ region      │ o             │ DATA_TYPE                │ VARCHAR        │
+   │ METRIC      │ total       │ o             │ TABLE                    │ o              │
+   │ METRIC      │ total       │ o             │ EXPRESSION               │ SUM(o.amount)  │
+   │ METRIC      │ total       │ o             │ DATA_TYPE                │ DECIMAL(38,2)  │
+   │ METRIC      │ total       │ o             │ ACCESS_MODIFIER          │ PUBLIC         │
    └─────────────┴─────────────┴───────────────┴──────────────────────────┴────────────────┘
 
 **View with metadata annotations:**
@@ -437,21 +441,21 @@ Examples
    │ object_kind │ object_name │ parent_entity │ property                 │ property_value    │
    ├─────────────┼─────────────┼───────────────┼──────────────────────────┼───────────────────┤
    │             │             │               │ COMMENT                  │ Revenue analytics │
-   │ TABLE       │ orders      │               │ BASE_TABLE_DATABASE_NAME │ memory            │
-   │ TABLE       │ orders      │               │ BASE_TABLE_SCHEMA_NAME   │ main              │
-   │ TABLE       │ orders      │               │ BASE_TABLE_NAME          │ orders            │
-   │ TABLE       │ orders      │               │ PRIMARY_KEY              │ ["id"]            │
-   │ TABLE       │ orders      │               │ COMMENT                  │ Order data        │
-   │ DIMENSION   │ region      │ orders        │ TABLE                    │ orders            │
-   │ DIMENSION   │ region      │ orders        │ EXPRESSION               │ o.region          │
-   │ DIMENSION   │ region      │ orders        │ DATA_TYPE                │ VARCHAR           │
-   │ DIMENSION   │ region      │ orders        │ COMMENT                  │ Sales region      │
-   │ DIMENSION   │ region      │ orders        │ SYNONYMS                 │ ["territory"]     │
-   │ METRIC      │ revenue     │ orders        │ TABLE                    │ orders            │
-   │ METRIC      │ revenue     │ orders        │ EXPRESSION               │ SUM(o.amount)     │
-   │ METRIC      │ revenue     │ orders        │ DATA_TYPE                │ DECIMAL(38,2)     │
-   │ METRIC      │ revenue     │ orders        │ COMMENT                  │ Total revenue     │
-   │ METRIC      │ revenue     │ orders        │ ACCESS_MODIFIER          │ PUBLIC            │
+   │ TABLE       │ o           │               │ BASE_TABLE_DATABASE_NAME │ memory            │
+   │ TABLE       │ o           │               │ BASE_TABLE_SCHEMA_NAME   │ main              │
+   │ TABLE       │ o           │               │ BASE_TABLE_NAME          │ orders            │
+   │ TABLE       │ o           │               │ PRIMARY_KEY              │ ["id"]            │
+   │ TABLE       │ o           │               │ COMMENT                  │ Order data        │
+   │ DIMENSION   │ region      │ o             │ TABLE                    │ o                 │
+   │ DIMENSION   │ region      │ o             │ EXPRESSION               │ o.region          │
+   │ DIMENSION   │ region      │ o             │ DATA_TYPE                │ VARCHAR           │
+   │ DIMENSION   │ region      │ o             │ COMMENT                  │ Sales region      │
+   │ DIMENSION   │ region      │ o             │ SYNONYMS                 │ ["territory"]     │
+   │ METRIC      │ revenue     │ o             │ TABLE                    │ o                 │
+   │ METRIC      │ revenue     │ o             │ EXPRESSION               │ SUM(o.amount)     │
+   │ METRIC      │ revenue     │ o             │ DATA_TYPE                │ DECIMAL(38,2)     │
+   │ METRIC      │ revenue     │ o             │ COMMENT                  │ Total revenue     │
+   │ METRIC      │ revenue     │ o             │ ACCESS_MODIFIER          │ PUBLIC            │
    └─────────────┴─────────────┴───────────────┴──────────────────────────┴───────────────────┘
 
 The first row is the view-level comment, so its ``object_kind`` and ``object_name`` are empty.
@@ -486,21 +490,21 @@ The first row is the view-level comment, so its ``object_kind`` and ``object_nam
    ┌─────────────────┬─────────────┬───────────────┬──────────────────────────┬───────────────────────────┐
    │ object_kind     │ object_name │ parent_entity │ property                 │ property_value            │
    ├─────────────────┼─────────────┼───────────────┼──────────────────────────┼───────────────────────────┤
-   │ TABLE           │ orders      │               │ BASE_TABLE_DATABASE_NAME │ memory                    │
-   │ TABLE           │ orders      │               │ BASE_TABLE_SCHEMA_NAME   │ main                      │
-   │ TABLE           │ orders      │               │ BASE_TABLE_NAME          │ orders                    │
-   │ TABLE           │ orders      │               │ PRIMARY_KEY              │ ["id"]                    │
-   │ DIMENSION       │ region      │ orders        │ TABLE                    │ orders                    │
-   │ DIMENSION       │ region      │ orders        │ EXPRESSION               │ o.region                  │
-   │ DIMENSION       │ region      │ orders        │ DATA_TYPE                │ VARCHAR                   │
-   │ METRIC          │ revenue     │ orders        │ TABLE                    │ orders                    │
-   │ METRIC          │ revenue     │ orders        │ EXPRESSION               │ SUM(o.amount)             │
-   │ METRIC          │ revenue     │ orders        │ DATA_TYPE                │ DECIMAL(38,2)             │
-   │ METRIC          │ revenue     │ orders        │ ACCESS_MODIFIER          │ PUBLIC                    │
-   │ METRIC          │ order_count │ orders        │ TABLE                    │ orders                    │
-   │ METRIC          │ order_count │ orders        │ EXPRESSION               │ COUNT(*)                  │
-   │ METRIC          │ order_count │ orders        │ DATA_TYPE                │ BIGINT                    │
-   │ METRIC          │ order_count │ orders        │ ACCESS_MODIFIER          │ PUBLIC                    │
+   │ TABLE           │ o           │               │ BASE_TABLE_DATABASE_NAME │ memory                    │
+   │ TABLE           │ o           │               │ BASE_TABLE_SCHEMA_NAME   │ main                      │
+   │ TABLE           │ o           │               │ BASE_TABLE_NAME          │ orders                    │
+   │ TABLE           │ o           │               │ PRIMARY_KEY              │ ["id"]                    │
+   │ DIMENSION       │ region      │ o             │ TABLE                    │ o                         │
+   │ DIMENSION       │ region      │ o             │ EXPRESSION               │ o.region                  │
+   │ DIMENSION       │ region      │ o             │ DATA_TYPE                │ VARCHAR                   │
+   │ METRIC          │ revenue     │ o             │ TABLE                    │ o                         │
+   │ METRIC          │ revenue     │ o             │ EXPRESSION               │ SUM(o.amount)             │
+   │ METRIC          │ revenue     │ o             │ DATA_TYPE                │ DECIMAL(38,2)             │
+   │ METRIC          │ revenue     │ o             │ ACCESS_MODIFIER          │ PUBLIC                    │
+   │ METRIC          │ order_count │ o             │ TABLE                    │ o                         │
+   │ METRIC          │ order_count │ o             │ EXPRESSION               │ COUNT(*)                  │
+   │ METRIC          │ order_count │ o             │ DATA_TYPE                │ BIGINT                    │
+   │ METRIC          │ order_count │ o             │ ACCESS_MODIFIER          │ PUBLIC                    │
    │ MATERIALIZATION │ region_agg  │               │ TABLE                    │ revenue_by_region         │
    │ MATERIALIZATION │ region_agg  │               │ DIMENSIONS               │ ["region"]                │
    │ MATERIALIZATION │ region_agg  │               │ METRICS                  │ ["revenue","order_count"] │

@@ -88,9 +88,9 @@ CREATE SEMANTIC VIEW fi_sv AS
 query TTTTTTT rowsort
 SHOW SEMANTIC DIMENSIONS IN fi_sv FOR METRIC total_ship_cost
 ----
-fi_customers	customer_country	VARCHAR	false	[]	(empty)	[]
-fi_line_items	item_qty	INTEGER	false	[]	(empty)	[]
-fi_shipments	carrier	VARCHAR	false	[]	(empty)	[]
+c	customer_country	VARCHAR	false	[]	(empty)	[]
+li	item_qty	INTEGER	false	[]	(empty)	[]
+s	carrier	VARCHAR	false	[]	(empty)	[]
 
 # The listed fanned dimension is answered: shipment 1000 (order 10, 4.50) is
 # counted once under each of order 10's quantities, 1 and 2.
@@ -109,9 +109,9 @@ SELECT * FROM SEMANTIC_VIEW(fi_sv DIMENSIONS item_qty METRICS total_ship_cost);
 query TTTTTTT rowsort
 SHOW SEMANTIC DIMENSIONS IN fi_sv FOR METRIC line_total
 ----
-fi_customers	customer_country	VARCHAR	false	[]	(empty)	[]
-fi_line_items	item_qty	INTEGER	false	[]	(empty)	[]
-fi_shipments	carrier	VARCHAR	false	[]	(empty)	[]
+c	customer_country	VARCHAR	false	[]	(empty)	[]
+li	item_qty	INTEGER	false	[]	(empty)	[]
+s	carrier	VARCHAR	false	[]	(empty)	[]
 
 # ============================================================
 # Test 3: a fact on the base table with a dimension across the fan-in

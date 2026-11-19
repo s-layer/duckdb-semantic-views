@@ -112,7 +112,7 @@ Returns one row per dimension with 9 columns:
      - The semantic view this dimension belongs to.
    * - ``table_name``
      - VARCHAR
-     - The physical table name the dimension is scoped to. Empty string if no source table is associated.
+     - The logical table the dimension is scoped to, by its alias in ``TABLES``. Empty string if no source table is associated.
    * - ``name``
      - VARCHAR
      - The dimension name as declared in the ``DIMENSIONS`` clause.
@@ -140,6 +140,10 @@ Returns one row per dimension with 9 columns:
 
    Added the ``labels`` column, after ``comment``, as in Snowflake's output.
 
+.. versionchanged:: 0.21.0
+
+   ``table_name`` is the table's alias from ``TABLES``, as in Snowflake. It was the physical table.
+
 
 .. _ref-show-dims-examples:
 
@@ -159,12 +163,12 @@ Given a semantic view ``orders_sv`` with three dimensions:
    ┌───────────────┬─────────────┬────────────────────┬────────────┬───────────────┬───────────┬──────────┬─────────┬────────┐
    │ database_name │ schema_name │ semantic_view_name │ table_name │ name          │ data_type │ synonyms │ comment │ labels │
    ├───────────────┼─────────────┼────────────────────┼────────────┼───────────────┼───────────┼──────────┼─────────┼────────┤
-   │ memory        │ main        │ orders_sv          │ customers  │ customer_name │ VARCHAR   │ []       │         │ []     │
-   │ memory        │ main        │ orders_sv          │ orders     │ order_date    │ DATE      │ []       │         │ []     │
-   │ memory        │ main        │ orders_sv          │ customers  │ region        │ VARCHAR   │ []       │         │ []     │
+   │ memory        │ main        │ orders_sv          │ c          │ customer_name │ VARCHAR   │ []       │         │ []     │
+   │ memory        │ main        │ orders_sv          │ o          │ order_date    │ DATE      │ []       │         │ []     │
+   │ memory        │ main        │ orders_sv          │ c          │ region        │ VARCHAR   │ []       │         │ []     │
    └───────────────┴─────────────┴────────────────────┴────────────┴───────────────┴───────────┴──────────┴─────────┴────────┘
 
-The ``table_name`` column shows the actual physical table name, not the alias used in the DDL.
+The ``table_name`` column shows each table's alias from the ``TABLES`` clause (``c``, ``o``), as Snowflake does, not the physical table. ``DESCRIBE SEMANTIC VIEW`` gives the physical table of each alias in its ``BASE_TABLE_NAME`` row.
 
 The example tables use ``VARCHAR`` text columns, ``DATE`` dates, ``INTEGER`` quantities and ``DECIMAL(10,2)`` amounts and prices. ``data_type`` is each member's type as a query returns it -- an aggregate's own type, not its input's: ``COUNT`` is ``BIGINT``, ``SUM`` of a ``DECIMAL(10,2)`` is ``DECIMAL(38,2)``, and a ratio of two metrics is ``DOUBLE``. See :ref:`Reported Data Types <explanation-sf-data-types>`.
 

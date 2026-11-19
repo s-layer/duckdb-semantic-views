@@ -171,7 +171,7 @@ CREATE SEMANTIC VIEW annotated AS
 query TTTTTTTTT
 SHOW SEMANTIC DIMENSIONS IN annotated
 ----
-memory	main	annotated	notes	lbl	VARCHAR	[]	the label column	[]
+memory	main	annotated	n	lbl	VARCHAR	[]	the label column	[]
 
 statement ok
 DROP SEMANTIC VIEW annotated

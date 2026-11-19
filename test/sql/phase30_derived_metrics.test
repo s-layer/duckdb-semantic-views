@@ -198,33 +198,33 @@ West	150.00	90.00
 query TTTTT
 DESCRIBE SEMANTIC VIEW p30_sales_facts;
 ----
-TABLE	p30_orders	(empty)	BASE_TABLE_DATABASE_NAME	memory
-TABLE	p30_orders	(empty)	BASE_TABLE_SCHEMA_NAME	main
-TABLE	p30_orders	(empty)	BASE_TABLE_NAME	p30_orders
-TABLE	p30_orders	(empty)	PRIMARY_KEY	["id"]
-TABLE	p30_line_items	(empty)	BASE_TABLE_DATABASE_NAME	memory
-TABLE	p30_line_items	(empty)	BASE_TABLE_SCHEMA_NAME	main
-TABLE	p30_line_items	(empty)	BASE_TABLE_NAME	p30_line_items
-TABLE	p30_line_items	(empty)	PRIMARY_KEY	["id"]
-RELATIONSHIP	li_to_order	p30_line_items	TABLE	p30_line_items
-RELATIONSHIP	li_to_order	p30_line_items	REF_TABLE	p30_orders
-RELATIONSHIP	li_to_order	p30_line_items	FOREIGN_KEY	["order_id"]
-RELATIONSHIP	li_to_order	p30_line_items	REF_KEY	["id"]
-FACT	net_price	p30_line_items	TABLE	p30_line_items
-FACT	net_price	p30_line_items	EXPRESSION	li.extended_price * (1 - li.discount)
-FACT	net_price	p30_line_items	DATA_TYPE	DECIMAL(18,4)
-FACT	net_price	p30_line_items	ACCESS_MODIFIER	PUBLIC
-DIMENSION	region	p30_orders	TABLE	p30_orders
-DIMENSION	region	p30_orders	EXPRESSION	o.region
-DIMENSION	region	p30_orders	DATA_TYPE	VARCHAR
-METRIC	revenue	p30_line_items	TABLE	p30_line_items
-METRIC	revenue	p30_line_items	EXPRESSION	SUM(li.net_price)
-METRIC	revenue	p30_line_items	DATA_TYPE	DECIMAL(38,4)
-METRIC	revenue	p30_line_items	ACCESS_MODIFIER	PUBLIC
-METRIC	cost	p30_line_items	TABLE	p30_line_items
-METRIC	cost	p30_line_items	EXPRESSION	SUM(li.unit_cost)
-METRIC	cost	p30_line_items	DATA_TYPE	DECIMAL(38,2)
-METRIC	cost	p30_line_items	ACCESS_MODIFIER	PUBLIC
+TABLE	o	(empty)	BASE_TABLE_DATABASE_NAME	memory
+TABLE	o	(empty)	BASE_TABLE_SCHEMA_NAME	main
+TABLE	o	(empty)	BASE_TABLE_NAME	p30_orders
+TABLE	o	(empty)	PRIMARY_KEY	["id"]
+TABLE	li	(empty)	BASE_TABLE_DATABASE_NAME	memory
+TABLE	li	(empty)	BASE_TABLE_SCHEMA_NAME	main
+TABLE	li	(empty)	BASE_TABLE_NAME	p30_line_items
+TABLE	li	(empty)	PRIMARY_KEY	["id"]
+RELATIONSHIP	li_to_order	li	TABLE	li
+RELATIONSHIP	li_to_order	li	REF_TABLE	o
+RELATIONSHIP	li_to_order	li	FOREIGN_KEY	["order_id"]
+RELATIONSHIP	li_to_order	li	REF_KEY	["id"]
+FACT	net_price	li	TABLE	li
+FACT	net_price	li	EXPRESSION	li.extended_price * (1 - li.discount)
+FACT	net_price	li	DATA_TYPE	DECIMAL(18,4)
+FACT	net_price	li	ACCESS_MODIFIER	PUBLIC
+DIMENSION	region	o	TABLE	o
+DIMENSION	region	o	EXPRESSION	o.region
+DIMENSION	region	o	DATA_TYPE	VARCHAR
+METRIC	revenue	li	TABLE	li
+METRIC	revenue	li	EXPRESSION	SUM(li.net_price)
+METRIC	revenue	li	DATA_TYPE	DECIMAL(38,4)
+METRIC	revenue	li	ACCESS_MODIFIER	PUBLIC
+METRIC	cost	li	TABLE	li
+METRIC	cost	li	EXPRESSION	SUM(li.unit_cost)
+METRIC	cost	li	DATA_TYPE	DECIMAL(38,2)
+METRIC	cost	li	ACCESS_MODIFIER	PUBLIC
 DERIVED_METRIC	profit	(empty)	EXPRESSION	revenue - cost
 DERIVED_METRIC	profit	(empty)	DATA_TYPE	DECIMAL(38,4)
 DERIVED_METRIC	profit	(empty)	ACCESS_MODIFIER	PUBLIC

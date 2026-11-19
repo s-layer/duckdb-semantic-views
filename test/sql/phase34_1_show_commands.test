@@ -56,9 +56,9 @@ CREATE SEMANTIC VIEW products_sv AS
 query TTTTTTTTT rowsort
 SHOW SEMANTIC DIMENSIONS IN orders_sv
 ----
-memory	main	orders_sv	p34s_customers	customer_name	VARCHAR	[]	(empty)	[]
-memory	main	orders_sv	p34s_customers	region	VARCHAR	[]	(empty)	[]
-memory	main	orders_sv	p34s_orders	order_date	DATE	[]	(empty)	[]
+memory	main	orders_sv	c	customer_name	VARCHAR	[]	(empty)	[]
+memory	main	orders_sv	c	region	VARCHAR	[]	(empty)	[]
+memory	main	orders_sv	o	order_date	DATE	[]	(empty)	[]
 
 # ============================================================
 # Test 2: SHOW SEMANTIC DIMENSIONS (cross-view)
@@ -67,10 +67,10 @@ memory	main	orders_sv	p34s_orders	order_date	DATE	[]	(empty)	[]
 query TTTTTTTTT rowsort
 SHOW SEMANTIC DIMENSIONS
 ----
-memory	main	orders_sv	p34s_customers	customer_name	VARCHAR	[]	(empty)	[]
-memory	main	orders_sv	p34s_customers	region	VARCHAR	[]	(empty)	[]
-memory	main	orders_sv	p34s_orders	order_date	DATE	[]	(empty)	[]
-memory	main	products_sv	p34s_products	product_name	VARCHAR	[]	(empty)	[]
+memory	main	orders_sv	c	customer_name	VARCHAR	[]	(empty)	[]
+memory	main	orders_sv	c	region	VARCHAR	[]	(empty)	[]
+memory	main	orders_sv	o	order_date	DATE	[]	(empty)	[]
+memory	main	products_sv	p	product_name	VARCHAR	[]	(empty)	[]
 
 # ============================================================
 # Test 3: SHOW SEMANTIC METRICS IN (single view)
@@ -79,8 +79,8 @@ memory	main	products_sv	p34s_products	product_name	VARCHAR	[]	(empty)	[]
 query TTTTTTTT rowsort
 SHOW SEMANTIC METRICS IN orders_sv
 ----
-memory	main	orders_sv	p34s_orders	order_count	BIGINT	[]	(empty)
-memory	main	orders_sv	p34s_orders	total_amount	DECIMAL(38,2)	[]	(empty)
+memory	main	orders_sv	o	order_count	BIGINT	[]	(empty)
+memory	main	orders_sv	o	total_amount	DECIMAL(38,2)	[]	(empty)
 
 # ============================================================
 # Test 4: SHOW SEMANTIC METRICS (cross-view)
@@ -89,9 +89,9 @@ memory	main	orders_sv	p34s_orders	total_amount	DECIMAL(38,2)	[]	(empty)
 query TTTTTTTT rowsort
 SHOW SEMANTIC METRICS
 ----
-memory	main	orders_sv	p34s_orders	order_count	BIGINT	[]	(empty)
-memory	main	orders_sv	p34s_orders	total_amount	DECIMAL(38,2)	[]	(empty)
-memory	main	products_sv	p34s_products	avg_price	DOUBLE	[]	(empty)
+memory	main	orders_sv	o	order_count	BIGINT	[]	(empty)
+memory	main	orders_sv	o	total_amount	DECIMAL(38,2)	[]	(empty)
+memory	main	products_sv	p	avg_price	DOUBLE	[]	(empty)
 
 # ============================================================
 # Test 5: SHOW SEMANTIC FACTS IN (single view)
@@ -100,7 +100,7 @@ memory	main	products_sv	p34s_products	avg_price	DOUBLE	[]	(empty)
 query TTTTTTTTT rowsort
 SHOW SEMANTIC FACTS IN orders_sv
 ----
-memory	main	orders_sv	p34s_orders	raw_amount	DECIMAL(10,2)	[]	(empty)	[]
+memory	main	orders_sv	o	raw_amount	DECIMAL(10,2)	[]	(empty)	[]
 
 # ============================================================
 # Test 6: SHOW SEMANTIC FACTS (cross-view, includes view with no facts)
@@ -109,7 +109,7 @@ memory	main	orders_sv	p34s_orders	raw_amount	DECIMAL(10,2)	[]	(empty)	[]
 query TTTTTTTTT rowsort
 SHOW SEMANTIC FACTS
 ----
-memory	main	orders_sv	p34s_orders	raw_amount	DECIMAL(10,2)	[]	(empty)	[]
+memory	main	orders_sv	o	raw_amount	DECIMAL(10,2)	[]	(empty)	[]
 
 # ============================================================
 # Test 7: Non-existent view
@@ -127,9 +127,9 @@ does not exist
 query TTTTTTTTT rowsort
 show semantic dimensions in orders_sv
 ----
-memory	main	orders_sv	p34s_customers	customer_name	VARCHAR	[]	(empty)	[]
-memory	main	orders_sv	p34s_customers	region	VARCHAR	[]	(empty)	[]
-memory	main	orders_sv	p34s_orders	order_date	DATE	[]	(empty)	[]
+memory	main	orders_sv	c	customer_name	VARCHAR	[]	(empty)	[]
+memory	main	orders_sv	c	region	VARCHAR	[]	(empty)	[]
+memory	main	orders_sv	o	order_date	DATE	[]	(empty)	[]
 
 # ============================================================
 # Cleanup

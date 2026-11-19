@@ -199,33 +199,33 @@ METRICS (
 query TTTTT
 DESCRIBE SEMANTIC VIEW desc_test;
 ----
-TABLE	sv_test	(empty)	BASE_TABLE_DATABASE_NAME	memory
-TABLE	sv_test	(empty)	BASE_TABLE_SCHEMA_NAME	main
-TABLE	sv_test	(empty)	BASE_TABLE_NAME	sv_test
-TABLE	sv_test	(empty)	PRIMARY_KEY	["region"]
-DIMENSION	region	sv_test	TABLE	sv_test
-DIMENSION	region	sv_test	EXPRESSION	region
-DIMENSION	region	sv_test	DATA_TYPE	VARCHAR
-METRIC	total_amount	sv_test	TABLE	sv_test
-METRIC	total_amount	sv_test	EXPRESSION	SUM(amount)
-METRIC	total_amount	sv_test	DATA_TYPE	DOUBLE
-METRIC	total_amount	sv_test	ACCESS_MODIFIER	PUBLIC
+TABLE	s	(empty)	BASE_TABLE_DATABASE_NAME	memory
+TABLE	s	(empty)	BASE_TABLE_SCHEMA_NAME	main
+TABLE	s	(empty)	BASE_TABLE_NAME	sv_test
+TABLE	s	(empty)	PRIMARY_KEY	["region"]
+DIMENSION	region	s	TABLE	s
+DIMENSION	region	s	EXPRESSION	region
+DIMENSION	region	s	DATA_TYPE	VARCHAR
+METRIC	total_amount	s	TABLE	s
+METRIC	total_amount	s	EXPRESSION	SUM(amount)
+METRIC	total_amount	s	DATA_TYPE	DOUBLE
+METRIC	total_amount	s	ACCESS_MODIFIER	PUBLIC
 
 # Case insensitive: lowercase describe
 query TTTTT
 describe semantic view desc_test;
 ----
-TABLE	sv_test	(empty)	BASE_TABLE_DATABASE_NAME	memory
-TABLE	sv_test	(empty)	BASE_TABLE_SCHEMA_NAME	main
-TABLE	sv_test	(empty)	BASE_TABLE_NAME	sv_test
-TABLE	sv_test	(empty)	PRIMARY_KEY	["region"]
-DIMENSION	region	sv_test	TABLE	sv_test
-DIMENSION	region	sv_test	EXPRESSION	region
-DIMENSION	region	sv_test	DATA_TYPE	VARCHAR
-METRIC	total_amount	sv_test	TABLE	sv_test
-METRIC	total_amount	sv_test	EXPRESSION	SUM(amount)
-METRIC	total_amount	sv_test	DATA_TYPE	DOUBLE
-METRIC	total_amount	sv_test	ACCESS_MODIFIER	PUBLIC
+TABLE	s	(empty)	BASE_TABLE_DATABASE_NAME	memory
+TABLE	s	(empty)	BASE_TABLE_SCHEMA_NAME	main
+TABLE	s	(empty)	BASE_TABLE_NAME	sv_test
+TABLE	s	(empty)	PRIMARY_KEY	["region"]
+DIMENSION	region	s	TABLE	s
+DIMENSION	region	s	EXPRESSION	region
+DIMENSION	region	s	DATA_TYPE	VARCHAR
+METRIC	total_amount	s	TABLE	s
+METRIC	total_amount	s	EXPRESSION	SUM(amount)
+METRIC	total_amount	s	DATA_TYPE	DOUBLE
+METRIC	total_amount	s	ACCESS_MODIFIER	PUBLIC
 
 # Error: describe nonexistent view
 statement error
@@ -317,17 +317,17 @@ METRICS (
 query TTTTT
 DESCRIBE SEMANTIC VIEW lifecycle_test;
 ----
-TABLE	sv_test	(empty)	BASE_TABLE_DATABASE_NAME	memory
-TABLE	sv_test	(empty)	BASE_TABLE_SCHEMA_NAME	main
-TABLE	sv_test	(empty)	BASE_TABLE_NAME	sv_test
-TABLE	sv_test	(empty)	PRIMARY_KEY	["region"]
-DIMENSION	region	sv_test	TABLE	sv_test
-DIMENSION	region	sv_test	EXPRESSION	region
-DIMENSION	region	sv_test	DATA_TYPE	VARCHAR
-METRIC	total_amount	sv_test	TABLE	sv_test
-METRIC	total_amount	sv_test	EXPRESSION	SUM(amount)
-METRIC	total_amount	sv_test	DATA_TYPE	DOUBLE
-METRIC	total_amount	sv_test	ACCESS_MODIFIER	PUBLIC
+TABLE	s	(empty)	BASE_TABLE_DATABASE_NAME	memory
+TABLE	s	(empty)	BASE_TABLE_SCHEMA_NAME	main
+TABLE	s	(empty)	BASE_TABLE_NAME	sv_test
+TABLE	s	(empty)	PRIMARY_KEY	["region"]
+DIMENSION	region	s	TABLE	s
+DIMENSION	region	s	EXPRESSION	region
+DIMENSION	region	s	DATA_TYPE	VARCHAR
+METRIC	total_amount	s	TABLE	s
+METRIC	total_amount	s	EXPRESSION	SUM(amount)
+METRIC	total_amount	s	DATA_TYPE	DOUBLE
+METRIC	total_amount	s	ACCESS_MODIFIER	PUBLIC
 
 # Step 3: SHOW -- verify it appears in the list
 query T
@@ -352,17 +352,17 @@ METRICS (
 query TTTTT
 DESCRIBE SEMANTIC VIEW lifecycle_test;
 ----
-TABLE	sv_test	(empty)	BASE_TABLE_DATABASE_NAME	memory
-TABLE	sv_test	(empty)	BASE_TABLE_SCHEMA_NAME	main
-TABLE	sv_test	(empty)	BASE_TABLE_NAME	sv_test
-TABLE	sv_test	(empty)	PRIMARY_KEY	["region"]
-DIMENSION	region	sv_test	TABLE	sv_test
-DIMENSION	region	sv_test	EXPRESSION	region
-DIMENSION	region	sv_test	DATA_TYPE	VARCHAR
-METRIC	avg_amount	sv_test	TABLE	sv_test
-METRIC	avg_amount	sv_test	EXPRESSION	AVG(amount)
-METRIC	avg_amount	sv_test	DATA_TYPE	DOUBLE
-METRIC	avg_amount	sv_test	ACCESS_MODIFIER	PUBLIC
+TABLE	s	(empty)	BASE_TABLE_DATABASE_NAME	memory
+TABLE	s	(empty)	BASE_TABLE_SCHEMA_NAME	main
+TABLE	s	(empty)	BASE_TABLE_NAME	sv_test
+TABLE	s	(empty)	PRIMARY_KEY	["region"]
+DIMENSION	region	s	TABLE	s
+DIMENSION	region	s	EXPRESSION	region
+DIMENSION	region	s	DATA_TYPE	VARCHAR
+METRIC	avg_amount	s	TABLE	s
+METRIC	avg_amount	s	EXPRESSION	AVG(amount)
+METRIC	avg_amount	s	DATA_TYPE	DOUBLE
+METRIC	avg_amount	s	ACCESS_MODIFIER	PUBLIC
 
 # Step 6: DROP
 statement ok

@@ -305,17 +305,17 @@ memory	dcf_b	dcf_sp	total	HUGEINT	METRIC	SUM(o.amount) * 100	(empty)
 query TTTTTTTTT nosort
 SELECT * FROM show_semantic_dimensions('dcf_sp');
 ----
-memory	dcf_b	dcf_sp	dcf_orders	region	VARCHAR	[]	(empty)	[]
+memory	dcf_b	dcf_sp	o	region	VARCHAR	[]	(empty)	[]
 
 query TTTTTTTT nosort
 SHOW SEMANTIC METRICS IN dcf_sp;
 ----
-memory	dcf_b	dcf_sp	dcf_orders	total	HUGEINT	[]	(empty)
+memory	dcf_b	dcf_sp	o	total	HUGEINT	[]	(empty)
 
 query TTTTTTTTT nosort
 SHOW SEMANTIC FACTS IN dcf_sp;
 ----
-memory	dcf_b	dcf_sp	dcf_orders	amt_b	INTEGER	[]	(empty)	[]
+memory	dcf_b	dcf_sp	o	amt_b	INTEGER	[]	(empty)	[]
 
 query TTTTTTT nosort
 SHOW SEMANTIC MATERIALIZATIONS IN dcf_sp;
@@ -325,7 +325,7 @@ memory	dcf_b	dcf_sp	dcf_mat_b	dcf_orders	["region"]	[]
 query TTTTTTT nosort
 SHOW SEMANTIC DIMENSIONS IN dcf_sp FOR METRIC total;
 ----
-dcf_orders	region	VARCHAR	false	[]	(empty)	[]
+o	region	VARCHAR	false	[]	(empty)	[]
 
 # F-090: search_path.rs::RESOLVING_READ_FUNCTIONS (base-table schema) — PRE-EXISTING (TECH-DEBT #96): DESCRIBE reports BASE_TABLE_SCHEMA_NAME = the VIEW's schema (dcf_b), but the base table resolved at CREATE to memory.main.dcf_orders (as EXPLAIN shows); there is no dcf_b.dcf_orders
 query T
@@ -437,8 +437,8 @@ CREATE SEMANTIC VIEW "dcf_sch'ema".dcf_q AS TABLES (o AS main.dcf_orders PRIMARY
 query TTTTTTTT nosort
 SHOW SEMANTIC METRICS IN dcf_sw;
 ----
-memory	main	dcf_sw	dcf_orders	cnt	BIGINT	[]	(empty)
-memory	main	dcf_sw	dcf_orders	total	HUGEINT	[]	(empty)
+memory	main	dcf_sw	o	cnt	BIGINT	[]	(empty)
+memory	main	dcf_sw	o	total	HUGEINT	[]	(empty)
 
 query TTTTTTTT nosort
 SHOW SEMANTIC METRICS IN dcf_sw LIMIT 0;
@@ -471,9 +471,9 @@ SHOW SEMANTIC VIEWS LIKE 'dcf_cust%' LIMIT 1;
 query TTTTTTTTT nosort
 SHOW SEMANTIC DIMENSIONS IN dcf_sw;
 ----
-memory	main	dcf_sw	dcf_orders	a_b	VARCHAR	[]	(empty)	[]
-memory	main	dcf_sw	dcf_orders	a_bc	VARCHAR	[]	(empty)	[]
-memory	main	dcf_sw	dcf_orders	axb	VARCHAR	[]	(empty)	[]
+memory	main	dcf_sw	o	a_b	VARCHAR	[]	(empty)	[]
+memory	main	dcf_sw	o	a_bc	VARCHAR	[]	(empty)	[]
+memory	main	dcf_sw	o	axb	VARCHAR	[]	(empty)	[]
 
 # F-100: show_clauses.rs::filter_suffix_escapes_single_quotes (LIKE, STARTS WITH) — a doubled quote in a LIKE pattern or a STARTS WITH prefix is one literal quote that matches, not a break-out of the literal
 query TTTTTT nosort
@@ -487,7 +487,6 @@ SHOW SEMANTIC VIEWS STARTS WITH 'dcf_o''br';
 <REGEX>:.+	dcf_o'brien	SEMANTIC_VIEW	memory	main	(empty)
 <REGEX>:.+	dcf_o'bryan	SEMANTIC_VIEW	memory	main	(empty)
 
-# PRE-EXISTING (TECH-DEBT #96): `table_name` in SHOW SEMANTIC DIMENSIONS keeps the qualifier as written (`main.dcf_orders`)
 # F-101: show_clauses.rs::filter_suffix_escapes_single_quotes (IN SCHEMA, IN DATABASE) — a quote inside a quoted scope name reaches the predicate as data: the schema matches by its real name, a database of that shape matches nothing (no error), and the qualified <db>.<schema> form applies both halves
 query TTTTTT nosort
 SHOW SEMANTIC VIEWS IN SCHEMA "dcf_sch'ema";
@@ -497,7 +496,7 @@ SHOW SEMANTIC VIEWS IN SCHEMA "dcf_sch'ema";
 query TTTTTTTTT nosort
 SHOW SEMANTIC DIMENSIONS IN SCHEMA memory."dcf_sch'ema";
 ----
-memory	dcf_sch'ema	dcf_q	main.dcf_orders	region	VARCHAR	[]	(empty)	[]
+memory	dcf_sch'ema	dcf_q	o	region	VARCHAR	[]	(empty)	[]
 
 query TTTTTTTTT nosort
 SHOW SEMANTIC DIMENSIONS IN DATABASE "dcf_d'b";
@@ -511,14 +510,14 @@ SHOW SEMANTIC DIMENSIONS IN SCHEMA "dcf_d'b"."dcf_sch'ema";
 query TTTTTTTTT nosort
 SHOW SEMANTIC DIMENSIONS IN dcf_sw STARTS WITH 'a_b';
 ----
-memory	main	dcf_sw	dcf_orders	a_b	VARCHAR	[]	(empty)	[]
-memory	main	dcf_sw	dcf_orders	a_bc	VARCHAR	[]	(empty)	[]
+memory	main	dcf_sw	o	a_b	VARCHAR	[]	(empty)	[]
+memory	main	dcf_sw	o	a_bc	VARCHAR	[]	(empty)	[]
 
 query TTTTTTTTT nosort
 SHOW SEMANTIC DIMENSIONS LIKE 'a_b' IN dcf_sw;
 ----
-memory	main	dcf_sw	dcf_orders	a_b	VARCHAR	[]	(empty)	[]
-memory	main	dcf_sw	dcf_orders	axb	VARCHAR	[]	(empty)	[]
+memory	main	dcf_sw	o	a_b	VARCHAR	[]	(empty)	[]
+memory	main	dcf_sw	o	axb	VARCHAR	[]	(empty)	[]
 
 # F-103: show_clauses.rs::starts_with_prefix_is_literal_not_a_like_pattern, ::starts_with_discriminates_underscore_from_wildcard_in_duckdb (percent) — STARTS WITH 'dcf_pct_100%' matches only the name with a literal `%`; LIKE 'dcf_pct_100%' matches both
 query TTTTTT nosort

@@ -112,7 +112,7 @@ Returns one row per metric with 8 columns:
      - The semantic view this metric belongs to.
    * - ``table_name``
      - VARCHAR
-     - The physical table name the metric is scoped to. Empty string for derived metrics (which reference other metrics rather than a specific table).
+     - The logical table the metric is scoped to, by its alias in ``TABLES``. Empty string for derived metrics (which reference other metrics rather than a specific table).
    * - ``name``
      - VARCHAR
      - The metric name as declared in the ``METRICS`` clause.
@@ -133,6 +133,10 @@ Returns one row per metric with 8 columns:
    since v0.10.0. The type is now worked out when the command runs, so views
    created in that window report it too, with no need to re-create them.
 
+.. versionchanged:: 0.21.0
+
+   ``table_name`` is the table's alias from ``TABLES``, as in Snowflake. It was the physical table.
+
 
 .. _ref-show-metrics-examples:
 
@@ -152,8 +156,8 @@ Given a semantic view ``orders_sv`` with two base metrics:
    ┌───────────────┬─────────────┬────────────────────┬────────────┬──────────────┬───────────────┬──────────┬─────────┐
    │ database_name │ schema_name │ semantic_view_name │ table_name │ name         │ data_type     │ synonyms │ comment │
    ├───────────────┼─────────────┼────────────────────┼────────────┼──────────────┼───────────────┼──────────┼─────────┤
-   │ memory        │ main        │ orders_sv          │ orders     │ order_count  │ BIGINT        │ []       │         │
-   │ memory        │ main        │ orders_sv          │ orders     │ total_amount │ DECIMAL(38,2) │ []       │         │
+   │ memory        │ main        │ orders_sv          │ o          │ order_count  │ BIGINT        │ []       │         │
+   │ memory        │ main        │ orders_sv          │ o          │ total_amount │ DECIMAL(38,2) │ []       │         │
    └───────────────┴─────────────┴────────────────────┴────────────┴──────────────┴───────────────┴──────────┴─────────┘
 
 The example tables use ``VARCHAR`` text columns, ``DATE`` dates, ``INTEGER`` quantities and ``DECIMAL(10,2)`` amounts and prices. ``data_type`` is each member's type as a query returns it -- an aggregate's own type, not its input's: ``COUNT`` is ``BIGINT``, ``SUM`` of a ``DECIMAL(10,2)`` is ``DECIMAL(38,2)``, and a ratio of two metrics is ``DOUBLE``. See :ref:`Reported Data Types <explanation-sf-data-types>`.
@@ -184,7 +188,7 @@ Because ``LIKE`` is case-insensitive, ``LIKE '%AMOUNT%'`` produces the same resu
 
 **Derived metrics appear with an empty table_name:**
 
-Derived metrics reference other metrics rather than a specific physical table. They are distinguished from base metrics by their empty ``table_name``:
+Derived metrics reference other metrics rather than a specific table. They are distinguished from base metrics by their empty ``table_name``:
 
 .. code-block:: sql
 
@@ -195,13 +199,13 @@ Derived metrics reference other metrics rather than a specific physical table. T
    ┌───────────────┬─────────────┬────────────────────┬────────────┬─────────┬───────────────┬──────────┬─────────┐
    │ database_name │ schema_name │ semantic_view_name │ table_name │ name    │ data_type     │ synonyms │ comment │
    ├───────────────┼─────────────┼────────────────────┼────────────┼─────────┼───────────────┼──────────┼─────────┤
-   │ memory        │ main        │ profit_analysis    │ line_items │ cost    │ DECIMAL(38,2) │ []       │         │
+   │ memory        │ main        │ profit_analysis    │ li         │ cost    │ DECIMAL(38,2) │ []       │         │
    │ memory        │ main        │ profit_analysis    │            │ margin  │ DOUBLE        │ []       │         │
    │ memory        │ main        │ profit_analysis    │            │ profit  │ DECIMAL(38,2) │ []       │         │
-   │ memory        │ main        │ profit_analysis    │ line_items │ revenue │ DECIMAL(38,2) │ []       │         │
+   │ memory        │ main        │ profit_analysis    │ li         │ revenue │ DECIMAL(38,2) │ []       │         │
    └───────────────┴─────────────┴────────────────────┴────────────┴─────────┴───────────────┴──────────┴─────────┘
 
-Base metrics (``revenue``, ``cost``) show their physical table name. Derived metrics (``profit``, ``margin``) show an empty ``table_name`` because they reference other metrics rather than a specific table. ``profit`` keeps the ``DECIMAL`` type of the two sums it subtracts; ``margin`` divides them and is ``DOUBLE``.
+Base metrics (``revenue``, ``cost``) show their table's alias. Derived metrics (``profit``, ``margin``) show an empty ``table_name`` because they reference other metrics rather than a specific table. ``profit`` keeps the ``DECIMAL`` type of the two sums it subtracts; ``margin`` divides them and is ``DOUBLE``.
 
 **Error: view does not exist:**
 

@@ -38,17 +38,17 @@ CREATE SEMANTIC VIEW ssa_view AS
 query TTTTTTTTT rowsort
 SHOW SEMANTIC DIMENSIONS IN SCHEMA main
 ----
-memory	main	ssa_view	ssa_sales	region	VARCHAR	[]	(empty)	[]
+memory	main	ssa_view	t	region	VARCHAR	[]	(empty)	[]
 
 query TTTTTTTT rowsort
 SHOW SEMANTIC METRICS IN SCHEMA main
 ----
-memory	main	ssa_view	ssa_sales	total	HUGEINT	[]	(empty)
+memory	main	ssa_view	t	total	HUGEINT	[]	(empty)
 
 query TTTTTTTTT rowsort
 SHOW SEMANTIC FACTS IN SCHEMA main
 ----
-memory	main	ssa_view	ssa_sales	amt	INTEGER	[]	(empty)	[]
+memory	main	ssa_view	t	amt	INTEGER	[]	(empty)	[]
 
 # ============================================================
 # Test 2: IN DATABASE, and the qualified schema form from #184, must reach
@@ -58,12 +58,12 @@ memory	main	ssa_view	ssa_sales	amt	INTEGER	[]	(empty)	[]
 query TTTTTTTTT rowsort
 SHOW SEMANTIC DIMENSIONS IN DATABASE memory
 ----
-memory	main	ssa_view	ssa_sales	region	VARCHAR	[]	(empty)	[]
+memory	main	ssa_view	t	region	VARCHAR	[]	(empty)	[]
 
 query TTTTTTTTT rowsort
 SHOW SEMANTIC DIMENSIONS IN SCHEMA memory.main
 ----
-memory	main	ssa_view	ssa_sales	region	VARCHAR	[]	(empty)	[]
+memory	main	ssa_view	t	region	VARCHAR	[]	(empty)	[]
 
 # ...and the database half of the qualified form is really applied.
 query TTTTTTTTT
@@ -78,19 +78,19 @@ SHOW SEMANTIC DIMENSIONS IN SCHEMA nosuchdb.main
 query TTTTTTTTT rowsort
 SHOW SEMANTIC DIMENSIONS IN SCHEMA
 ----
-memory	main	ssa_view	ssa_sales	region	VARCHAR	[]	(empty)	[]
+memory	main	ssa_view	t	region	VARCHAR	[]	(empty)	[]
 
 query TTTTTTTTT rowsort
 SHOW SEMANTIC DIMENSIONS IN DATABASE
 ----
-memory	main	ssa_view	ssa_sales	region	VARCHAR	[]	(empty)	[]
+memory	main	ssa_view	t	region	VARCHAR	[]	(empty)	[]
 
 # The bare form still composes with a following clause — the parser has to
 # tell "no name given" from "the next clause starts here".
 query TTTTTTTTT rowsort
 SHOW SEMANTIC DIMENSIONS IN SCHEMA LIMIT 5
 ----
-memory	main	ssa_view	ssa_sales	region	VARCHAR	[]	(empty)	[]
+memory	main	ssa_view	t	region	VARCHAR	[]	(empty)	[]
 
 # ============================================================
 # Test 4: IN ACCOUNT is accepted and filters nothing (DuckDB has no account).
@@ -99,7 +99,7 @@ memory	main	ssa_view	ssa_sales	region	VARCHAR	[]	(empty)	[]
 query TTTTTTTTT rowsort
 SHOW SEMANTIC DIMENSIONS IN ACCOUNT
 ----
-memory	main	ssa_view	ssa_sales	region	VARCHAR	[]	(empty)	[]
+memory	main	ssa_view	t	region	VARCHAR	[]	(empty)	[]
 
 statement ok
 SHOW SEMANTIC VIEWS IN ACCOUNT
@@ -114,7 +114,7 @@ SHOW SEMANTIC VIEWS IN ACCOUNT
 query TTTTTTTTT rowsort
 SHOW SEMANTIC DIMENSIONS IN ssa_view
 ----
-memory	main	ssa_view	ssa_sales	region	VARCHAR	[]	(empty)	[]
+memory	main	ssa_view	t	region	VARCHAR	[]	(empty)	[]
 
 statement ok
 CREATE SEMANTIC VIEW "schema" AS
@@ -127,7 +127,7 @@ CREATE SEMANTIC VIEW "schema" AS
 query TTTTTTTTT rowsort
 SHOW SEMANTIC DIMENSIONS IN "schema"
 ----
-memory	main	schema	ssa_sales	id	INTEGER	[]	(empty)	[]
+memory	main	schema	t	id	INTEGER	[]	(empty)	[]
 
 # ============================================================
 # Test 6: a name that merely STARTS with a scope keyword is still a view
@@ -143,7 +143,7 @@ CREATE SEMANTIC VIEW schemas AS
 query TTTTTTTTT rowsort
 SHOW SEMANTIC DIMENSIONS IN schemas
 ----
-memory	main	schemas	ssa_sales	id	INTEGER	[]	(empty)	[]
+memory	main	schemas	t	id	INTEGER	[]	(empty)	[]
 
 # ============================================================
 # Test 7: a nonexistent schema is an empty result, not an error — and not a

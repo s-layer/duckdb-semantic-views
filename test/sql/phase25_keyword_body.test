@@ -84,17 +84,17 @@ METRICS (
 query TTTTT
 DESCRIBE SEMANTIC VIEW p25_orders_view
 ----
-TABLE	p25_orders	(empty)	BASE_TABLE_DATABASE_NAME	memory
-TABLE	p25_orders	(empty)	BASE_TABLE_SCHEMA_NAME	main
-TABLE	p25_orders	(empty)	BASE_TABLE_NAME	p25_orders
-TABLE	p25_orders	(empty)	PRIMARY_KEY	["o_orderkey"]
-DIMENSION	region	p25_orders	TABLE	p25_orders
-DIMENSION	region	p25_orders	EXPRESSION	region
-DIMENSION	region	p25_orders	DATA_TYPE	VARCHAR
-METRIC	total_revenue	p25_orders	TABLE	p25_orders
-METRIC	total_revenue	p25_orders	EXPRESSION	SUM(revenue)
-METRIC	total_revenue	p25_orders	DATA_TYPE	DOUBLE
-METRIC	total_revenue	p25_orders	ACCESS_MODIFIER	PUBLIC
+TABLE	o	(empty)	BASE_TABLE_DATABASE_NAME	memory
+TABLE	o	(empty)	BASE_TABLE_SCHEMA_NAME	main
+TABLE	o	(empty)	BASE_TABLE_NAME	p25_orders
+TABLE	o	(empty)	PRIMARY_KEY	["o_orderkey"]
+DIMENSION	region	o	TABLE	o
+DIMENSION	region	o	EXPRESSION	region
+DIMENSION	region	o	DATA_TYPE	VARCHAR
+METRIC	total_revenue	o	TABLE	o
+METRIC	total_revenue	o	EXPRESSION	SUM(revenue)
+METRIC	total_revenue	o	DATA_TYPE	DOUBLE
+METRIC	total_revenue	o	ACCESS_MODIFIER	PUBLIC
 
 # DDL-07: SHOW works -- returns view name and kind for all current views
 query TT rowsort

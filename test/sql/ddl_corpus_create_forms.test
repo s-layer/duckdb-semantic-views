@@ -834,13 +834,13 @@ $$
 query TTTTT nosort
 DESCRIBE SEMANTIC VIEW y_base;
 ----
-TABLE	dcs_orders	(empty)	BASE_TABLE_DATABASE_NAME	memory
-TABLE	dcs_orders	(empty)	BASE_TABLE_SCHEMA_NAME	main
-TABLE	dcs_orders	(empty)	BASE_TABLE_NAME	dcs_orders
-METRIC	total	dcs_orders	TABLE	dcs_orders
-METRIC	total	dcs_orders	EXPRESSION	sum(o.amount)
-METRIC	total	dcs_orders	DATA_TYPE	HUGEINT
-METRIC	total	dcs_orders	ACCESS_MODIFIER	PUBLIC
+TABLE	o	(empty)	BASE_TABLE_DATABASE_NAME	memory
+TABLE	o	(empty)	BASE_TABLE_SCHEMA_NAME	main
+TABLE	o	(empty)	BASE_TABLE_NAME	dcs_orders
+METRIC	total	o	TABLE	o
+METRIC	total	o	EXPRESSION	sum(o.amount)
+METRIC	total	o	DATA_TYPE	HUGEINT
+METRIC	total	o	ACCESS_MODIFIER	PUBLIC
 
 query I
 SELECT * FROM semantic_view('y_base', metrics := ['total']);
@@ -1207,25 +1207,25 @@ CREATE SEMANTIC VIEW rel AS TABLES (o AS dcs_orders PRIMARY KEY (id), c AS dcs_c
 query TTTTT nosort
 DESCRIBE SEMANTIC VIEW rel;
 ----
-TABLE	dcs_orders	(empty)	BASE_TABLE_DATABASE_NAME	memory
-TABLE	dcs_orders	(empty)	BASE_TABLE_SCHEMA_NAME	main
-TABLE	dcs_orders	(empty)	BASE_TABLE_NAME	dcs_orders
-TABLE	dcs_orders	(empty)	PRIMARY_KEY	["id"]
-TABLE	dcs_customers	(empty)	BASE_TABLE_DATABASE_NAME	memory
-TABLE	dcs_customers	(empty)	BASE_TABLE_SCHEMA_NAME	main
-TABLE	dcs_customers	(empty)	BASE_TABLE_NAME	dcs_customers
-TABLE	dcs_customers	(empty)	PRIMARY_KEY	["cust_id"]
-RELATIONSHIP	r	dcs_orders	TABLE	dcs_orders
-RELATIONSHIP	r	dcs_orders	REF_TABLE	dcs_customers
-RELATIONSHIP	r	dcs_orders	FOREIGN_KEY	["customer_id"]
-RELATIONSHIP	r	dcs_orders	REF_KEY	["cust_id"]
-DIMENSION	region	dcs_orders	TABLE	dcs_orders
-DIMENSION	region	dcs_orders	EXPRESSION	region
-DIMENSION	region	dcs_orders	DATA_TYPE	VARCHAR
-METRIC	revenue	dcs_orders	TABLE	dcs_orders
-METRIC	revenue	dcs_orders	EXPRESSION	SUM(amount)
-METRIC	revenue	dcs_orders	DATA_TYPE	HUGEINT
-METRIC	revenue	dcs_orders	ACCESS_MODIFIER	PUBLIC
+TABLE	o	(empty)	BASE_TABLE_DATABASE_NAME	memory
+TABLE	o	(empty)	BASE_TABLE_SCHEMA_NAME	main
+TABLE	o	(empty)	BASE_TABLE_NAME	dcs_orders
+TABLE	o	(empty)	PRIMARY_KEY	["id"]
+TABLE	c	(empty)	BASE_TABLE_DATABASE_NAME	memory
+TABLE	c	(empty)	BASE_TABLE_SCHEMA_NAME	main
+TABLE	c	(empty)	BASE_TABLE_NAME	dcs_customers
+TABLE	c	(empty)	PRIMARY_KEY	["cust_id"]
+RELATIONSHIP	r	o	TABLE	o
+RELATIONSHIP	r	o	REF_TABLE	c
+RELATIONSHIP	r	o	FOREIGN_KEY	["customer_id"]
+RELATIONSHIP	r	o	REF_KEY	["cust_id"]
+DIMENSION	region	o	TABLE	o
+DIMENSION	region	o	EXPRESSION	region
+DIMENSION	region	o	DATA_TYPE	VARCHAR
+METRIC	revenue	o	TABLE	o
+METRIC	revenue	o	EXPRESSION	SUM(amount)
+METRIC	revenue	o	DATA_TYPE	HUGEINT
+METRIC	revenue	o	ACCESS_MODIFIER	PUBLIC
 
 # S-381: rewrite.rs::phase33_inference_tests::keeps_explicit_ref_columns — an explicit `REFERENCES c(email)` column list is kept
 statement ok

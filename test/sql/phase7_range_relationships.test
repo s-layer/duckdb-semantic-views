@@ -359,9 +359,9 @@ query TTTT
 SELECT object_name, parent_entity, property, property_value FROM describe_semantic_view('p7_range')
 WHERE object_kind = 'CONSTRAINT';
 ----
-period_range	periods	CONSTRAINT_TYPE	DISTINCT_RANGE
-period_range	periods	START_COLUMN	start_ts
-period_range	periods	END_COLUMN	end_ts
+period_range	p	CONSTRAINT_TYPE	DISTINCT_RANGE
+period_range	p	START_COLUMN	start_ts
+period_range	p	END_COLUMN	end_ts
 
 query I
 SELECT contains(GET_DDL('SEMANTIC_VIEW', 'p7_range'), 'CONSTRAINT period_range DISTINCT RANGE BETWEEN start_ts AND end_ts EXCLUSIVE');
