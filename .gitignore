@@ -101,4 +101,7 @@ docs/.venv/
 
 .opencode/
 .agents/
-.claude/
+.claude/*
+!.claude/skills/
+.claude/skills/*
+!.claude/skills/verify/
