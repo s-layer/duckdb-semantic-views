@@ -118,4 +118,4 @@ already happened, named under "Source".
   at a branch on purpose; none of these is a finding.
   Source: the GitHub Actions lockfile section in CLAUDE.md; a branch ref
   (`dtolnay/rust-toolchain@stable`) broke every job's setup in arrowmodel when the branch
-  was force-pushed, and Dependabot only bumps tags.
+  was force-pushed, and Dependabot never moves a branch ref.
