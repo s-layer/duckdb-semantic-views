@@ -8,6 +8,7 @@ description: Prove a change to duckdb-semantic-views works end to end. Use befor
 Run from the repository root:
 
 ```bash
+mkdir -p /tmp/claude
 just build > /tmp/claude/build.log 2>&1; echo "build rc=$?"
 just test-all > /tmp/claude/test-all.log 2>&1; echo "test-all rc=$?"
 tail -100 /tmp/claude/test-all.log
@@ -19,6 +20,8 @@ integration suites, including the Snowflake parity replay. Before pushing to mai
 `just ci` the same way, which adds clippy (pedantic), fmt, cargo-deny, the TEST_LIST and
 fuzz-list checks and the docs check. The first engine build takes about 20 minutes, so
 run it in the background.
+
+A run that skipped what you changed is not a pass.
 
 Take each command's exit status from the command itself. In a pipeline `$?` is the last
 command's status, so `cmd | tail` hides a failure. Redirect long output to a file, then
