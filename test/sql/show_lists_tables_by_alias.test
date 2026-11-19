@@ -122,3 +122,62 @@ query TTI rowsort
 SELECT * FROM semantic_view('alias_sv', dimensions := ['bill_city', 'ship_city'], metrics := ['revenue'])
 ----
 Leeds	York	100
+
+# A member may name its table in another case than TABLES declares it (DuckDB
+# matches identifiers case-insensitively), and an alias may be quoted. Each
+# listing names the table by its alias as declared, without the quotes.
+statement ok
+CREATE SEMANTIC VIEW alias_case_sv AS
+  TABLES (
+    ord AS p_orders PRIMARY KEY (order_id),
+    li AS p_line_items PRIMARY KEY (item_id),
+    "Ship To" AS p_addresses PRIMARY KEY (addr_id)
+  )
+  RELATIONSHIPS (
+    li_ord AS LI(order_id) REFERENCES ORD,
+    ord_ship AS ord(ship_addr) REFERENCES "Ship To"
+  )
+  DIMENSIONS (
+    LI.qty AS LI.qty,
+    "Ship To".ship_city AS "Ship To".city
+  )
+  METRICS (
+    ORD.revenue AS SUM(ORD.amount)
+  )
+
+# Case 8: SHOW lists a member written `LI.` under `li`, and the quoted alias bare.
+query TT rowsort
+SELECT table_name, name FROM (SHOW SEMANTIC DIMENSIONS IN alias_case_sv)
+----
+Ship To	ship_city
+li	qty
+
+# Case 9: the same for a metric.
+query TT rowsort
+SELECT table_name, name FROM (SHOW SEMANTIC METRICS IN alias_case_sv)
+----
+ord	revenue
+
+# Case 10: DESCRIBE names each member's own table (not the first table), in
+# parent_entity and TABLE.
+query TTTT rowsort
+SELECT object_kind, object_name, parent_entity, property_value FROM (DESCRIBE SEMANTIC VIEW alias_case_sv)
+WHERE object_kind IN ('DIMENSION', 'METRIC') AND property = 'TABLE'
+----
+DIMENSION	qty	li	li
+DIMENSION	ship_city	Ship To	Ship To
+METRIC	revenue	ord	ord
+
+# Case 11: DESCRIBE's relationships and table blocks use the declared aliases.
+query TTTT rowsort
+SELECT object_kind, object_name, property, property_value FROM (DESCRIBE SEMANTIC VIEW alias_case_sv)
+WHERE property IN ('TABLE', 'REF_TABLE', 'BASE_TABLE_NAME')
+  AND object_kind IN ('TABLE', 'RELATIONSHIP')
+----
+RELATIONSHIP	li_ord	REF_TABLE	ord
+RELATIONSHIP	li_ord	TABLE	li
+RELATIONSHIP	ord_ship	REF_TABLE	Ship To
+RELATIONSHIP	ord_ship	TABLE	ord
+TABLE	Ship To	BASE_TABLE_NAME	p_addresses
+TABLE	li	BASE_TABLE_NAME	p_line_items
+TABLE	ord	BASE_TABLE_NAME	p_orders

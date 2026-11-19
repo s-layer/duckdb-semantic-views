@@ -177,7 +177,7 @@ SELECT object_kind, object_name, property, property_value FROM describe_semantic
 ----
 RELATIONSHIP	rel	FOREIGN_KEY	["cust_id"]
 RELATIONSHIP	rel	REF_TABLE	c
-RELATIONSHIP	rel	TABLE	"a(b"
+RELATIONSHIP	rel	TABLE	a(b
 
 # C-005: body_parser/mod.rs::parse_relationships_multi_token_from_alias_rejected — near miss of C-002: a two-token from-alias `o c(...)` is rejected, not captured as a bogus alias [syntax]
 statement error
