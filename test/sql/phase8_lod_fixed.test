@@ -393,8 +393,8 @@ query TTT
 SELECT object_name, property, property_value FROM (DESCRIBE SEMANTIC VIEW sales_two)
 WHERE object_name IN ('obr', 'region') AND property IN ('TABLE', 'FIXED_DIMENSIONS') ORDER BY 1, 2;
 ----
-obr	FIXED_DIMENSIONS	[["customers","region"]]
-region	TABLE	customers
+obr	FIXED_DIMENSIONS	[["c","region"]]
+region	TABLE	c
 
 # L31c: an ad-hoc LOD metric reads only the view's members.
 statement error

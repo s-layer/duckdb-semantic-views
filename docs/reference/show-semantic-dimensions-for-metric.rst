@@ -84,7 +84,7 @@ Returns one row per reachable dimension with 7 columns:
      - Description
    * - ``table_name``
      - VARCHAR
-     - The physical table name the dimension is scoped to.
+     - The logical table the dimension is scoped to, by its alias in ``TABLES``.
    * - ``name``
      - VARCHAR
      - The dimension name.
@@ -144,6 +144,10 @@ A dimension is listed when the metric's source table reaches the dimension's tab
 
    For a derived metric whose components sit on **different** tables, one of which refuses a fan-out (a semi-additive metric, or one on a table with no ``PRIMARY KEY``), this command is more permissive than the query. The "at least one source table" rule lists a dimension one component reaches even when it is below the grain of the other, and :ref:`semantic_view() <ref-semantic-view-function>` then refuses that combination. For example, with ``items_per_order AS item_count / latest_orders`` (``item_count`` on ``line_items``, the semi-additive ``latest_orders`` on ``orders``), a ``line_items`` dimension is listed for ``items_per_order``, but the query refuses it. For those metrics, check each component metric separately. With plain components, as in ``item_count / order_count``, the query answers every listed dimension. See :ref:`explanation-grain-refused` for the shapes the query refuses.
 
+.. versionchanged:: 0.21.0
+
+   ``table_name`` is the table's alias from ``TABLES``, as in Snowflake. It was the physical table.
+
 
 .. _ref-show-dims-for-metric-examples:
 
@@ -173,8 +177,8 @@ Examples
    ┌────────────┬─────────┬───────────┬──────────┬──────────┬─────────┐
    │ table_name │ name    │ data_type │ required │ synonyms │ comment │
    ├────────────┼─────────┼───────────┼──────────┼──────────┼─────────┤
-   │ sales      │ product │ VARCHAR   │ false    │ []       │         │
-   │ sales      │ region  │ VARCHAR   │ false    │ []       │         │
+   │ s          │ product │ VARCHAR   │ false    │ []       │         │
+   │ s          │ region  │ VARCHAR   │ false    │ []       │         │
    └────────────┴─────────┴───────────┴──────────┴──────────┴─────────┘
 
 With a single table, there are no joins, so every dimension is listed for every metric.
@@ -218,9 +222,9 @@ For ``order_total`` (source table: ``orders``), the path to ``customers`` is man
    ┌────────────┬──────────────────┬───────────┬──────────┬──────────┬─────────┐
    │ table_name │ name             │ data_type │ required │ synonyms │ comment │
    ├────────────┼──────────────────┼───────────┼──────────┼──────────┼─────────┤
-   │ customers  │ customer_country │ VARCHAR   │ false    │ []       │         │
-   │ customers  │ customer_name    │ VARCHAR   │ false    │ []       │         │
-   │ line_items │ item_qty         │ INTEGER   │ false    │ []       │         │
+   │ c          │ customer_country │ VARCHAR   │ false    │ []       │         │
+   │ c          │ customer_name    │ VARCHAR   │ false    │ []       │         │
+   │ li         │ item_qty         │ INTEGER   │ false    │ []       │         │
    └────────────┴──────────────────┴───────────┴──────────┴──────────┴─────────┘
 
 A window metric on ``orders``, a semi-additive one whose ``NON ADDITIVE BY`` dimension is not ``item_qty``, or a metric on an ``orders`` table declared with no ``PRIMARY KEY`` would not list ``item_qty``.
@@ -236,9 +240,9 @@ For ``line_item_sum`` (source table: ``line_items``), the path from ``line_items
    ┌────────────┬──────────────────┬───────────┬──────────┬──────────┬─────────┐
    │ table_name │ name             │ data_type │ required │ synonyms │ comment │
    ├────────────┼──────────────────┼───────────┼──────────┼──────────┼─────────┤
-   │ customers  │ customer_country │ VARCHAR   │ false    │ []       │         │
-   │ customers  │ customer_name    │ VARCHAR   │ false    │ []       │         │
-   │ line_items │ item_qty         │ INTEGER   │ false    │ []       │         │
+   │ c          │ customer_country │ VARCHAR   │ false    │ []       │         │
+   │ c          │ customer_name    │ VARCHAR   │ false    │ []       │         │
+   │ li         │ item_qty         │ INTEGER   │ false    │ []       │         │
    └────────────┴──────────────────┴───────────┴──────────┴──────────┴─────────┘
 
 **Window metric with required dimensions:**
@@ -274,9 +278,9 @@ When querying dimensions for a window function metric, the ``required`` column i
    ┌────────────┬────────┬───────────┬──────────┬──────────┬─────────┐
    │ table_name │ name   │ data_type │ required │ synonyms │ comment │
    ├────────────┼────────┼───────────┼──────────┼──────────┼─────────┤
-   │ orders     │ month  │ DATE      │ true     │ []       │         │
-   │ orders     │ region │ VARCHAR   │ true     │ []       │         │
-   │ orders     │ status │ VARCHAR   │ false    │ []       │         │
+   │ o          │ month  │ DATE      │ true     │ []       │         │
+   │ o          │ region │ VARCHAR   │ true     │ []       │         │
+   │ o          │ status │ VARCHAR   │ false    │ []       │         │
    └────────────┴────────┴───────────┴──────────┴──────────┴─────────┘
 
 In this example, ``region`` is required because it appears in ``EXCLUDING`` (it defines the partition boundary), and ``month`` is required because it appears in ``ORDER BY`` (it defines the window ordering). The ``status`` dimension is optional -- it can be included in the query but is not referenced by the window specification.
@@ -320,7 +324,7 @@ Narrow the results further by name pattern. ``LIKE`` is case-insensitive:
    ┌────────────┬────────┬───────────┬──────────┬──────────┬─────────┐
    │ table_name │ name   │ data_type │ required │ synonyms │ comment │
    ├────────────┼────────┼───────────┼──────────┼──────────┼─────────┤
-   │ customers  │ region │ VARCHAR   │ false    │ []       │         │
+   │ c          │ region │ VARCHAR   │ false    │ []       │         │
    └────────────┴────────┴───────────┴──────────┴──────────┴─────────┘
 
 ``STARTS WITH`` is case-sensitive:
@@ -334,7 +338,7 @@ Narrow the results further by name pattern. ``LIKE`` is case-insensitive:
    ┌────────────┬───────────────┬───────────┬──────────┬──────────┬─────────┐
    │ table_name │ name          │ data_type │ required │ synonyms │ comment │
    ├────────────┼───────────────┼───────────┼──────────┼──────────┼─────────┤
-   │ customers  │ customer_name │ VARCHAR   │ false    │ []       │         │
+   │ c          │ customer_name │ VARCHAR   │ false    │ []       │         │
    └────────────┴───────────────┴───────────┴──────────┴──────────┴─────────┘
 
 ``LIMIT`` applies after the rows are sorted by dimension name:
@@ -348,9 +352,9 @@ Narrow the results further by name pattern. ``LIKE`` is case-insensitive:
    ┌────────────┬───────────────┬───────────┬──────────┬──────────┬─────────┐
    │ table_name │ name          │ data_type │ required │ synonyms │ comment │
    ├────────────┼───────────────┼───────────┼──────────┼──────────┼─────────┤
-   │ customers  │ customer_name │ VARCHAR   │ false    │ []       │         │
-   │ orders     │ order_date    │ DATE      │ false    │ []       │         │
-   │ customers  │ region        │ VARCHAR   │ false    │ []       │         │
+   │ c          │ customer_name │ VARCHAR   │ false    │ []       │         │
+   │ o          │ order_date    │ DATE      │ false    │ []       │         │
+   │ c          │ region        │ VARCHAR   │ false    │ []       │         │
    └────────────┴───────────────┴───────────┴──────────┴──────────┴─────────┘
 
 **Derived metrics inherit source tables:**
@@ -380,7 +384,7 @@ Narrow the results further by name pattern. ``LIKE`` is case-insensitive:
    ┌────────────┬───────────────┬───────────┬──────────┬──────────┬─────────┐
    │ table_name │ name          │ data_type │ required │ synonyms │ comment │
    ├────────────┼───────────────┼───────────┼──────────┼──────────┼─────────┤
-   │ customers  │ customer_name │ VARCHAR   │ false    │ []       │         │
+   │ c          │ customer_name │ VARCHAR   │ false    │ []       │         │
    └────────────┴───────────────┴───────────┴──────────┴──────────┴─────────┘
 
 The derived metric ``double_total`` depends on ``order_total`` (source: ``orders``). The extension traces this dependency and applies the same reachability rules as if querying ``order_total`` directly.

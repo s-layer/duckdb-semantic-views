@@ -1,7 +1,5 @@
-use std::collections::HashMap;
-
 use crate::catalog::CatalogReader;
-use crate::model::{AccessModifier, SemanticViewDefinition};
+use crate::model::{AccessModifier, ListedTables, SemanticViewDefinition};
 use crate::query::member_types::MemberTypes;
 
 // ---------------------------------------------------------------------------
@@ -64,7 +62,7 @@ unsafe fn describe_view_rows(
         .ok_or_else(|| crate::catalog::view_not_found_msg(&view.to_string()))?;
     let def = SemanticViewDefinition::from_json(&name, &json)?;
     let alias_map = def.alias_to_table_map();
-    let base_table = def.base_table().to_string();
+    let base_table = def.base_table();
     // TECH-DEBT #51: DATA_TYPE rows report each member's type as probed now,
     // in the caller's context (see `query::member_types`).
     let types = crate::ddl::read_ffi::member_types_for_bind(
@@ -332,7 +330,7 @@ fn collect_table_rows(def: &SemanticViewDefinition, rows: &mut Vec<DescribeRow>)
     let sch_name = def.schema_name.clone().unwrap_or_default();
 
     for table in &def.tables {
-        let obj_name = table.listed_name().to_string();
+        let obj_name = table.listed_name();
         // An inline-query table shows its query in place of the BASE_TABLE_*
         // rows, as Snowflake's DESCRIBE does (Phase 6.4).
         if let Some(ref query) = table.definition {
@@ -419,7 +417,7 @@ fn collect_table_rows(def: &SemanticViewDefinition, rows: &mut Vec<DescribeRow>)
 /// Unnamed/legacy joins are skipped.
 fn collect_relationship_rows(
     def: &SemanticViewDefinition,
-    alias_map: &HashMap<String, String>,
+    alias_map: &ListedTables,
     rows: &mut Vec<DescribeRow>,
 ) {
     for join in &def.joins {
@@ -479,7 +477,7 @@ fn collect_relationship_rows(
 fn collect_fact_rows(
     def: &SemanticViewDefinition,
     base_table: &str,
-    alias_map: &HashMap<String, String>,
+    alias_map: &ListedTables,
     types: &MemberTypes,
     rows: &mut Vec<DescribeRow>,
 ) {
@@ -605,10 +603,10 @@ fn lod_parts(def: &SemanticViewDefinition, expr: &str) -> Option<(String, String
                 def.tables
                     .iter()
                     .find(|r| crate::ident::ident_matches(&r.alias, t))
-                    .map_or(t, crate::model::TableRef::listed_name)
+                    .map_or_else(|| t.to_string(), crate::model::TableRef::listed_name)
             });
             match (table, name) {
-                (Some(t), Some(n)) => format_json_array(&[t.to_string(), n.clone()]),
+                (Some(t), Some(n)) => format_json_array(&[t, n.clone()]),
                 _ => format_json_array(std::slice::from_ref(entry)),
             }
         })
@@ -627,7 +625,7 @@ fn lod_parts(def: &SemanticViewDefinition, expr: &str) -> Option<(String, String
 fn collect_dimension_rows(
     def: &SemanticViewDefinition,
     base_table: &str,
-    alias_map: &HashMap<String, String>,
+    alias_map: &ListedTables,
     types: &MemberTypes,
     rows: &mut Vec<DescribeRow>,
 ) {
@@ -729,7 +727,7 @@ fn collect_dimension_rows(
 fn collect_metric_rows(
     def: &SemanticViewDefinition,
     base_table: &str,
-    alias_map: &HashMap<String, String>,
+    alias_map: &ListedTables,
     types: &MemberTypes,
     rows: &mut Vec<DescribeRow>,
 ) {
@@ -997,13 +995,7 @@ mod tests {
         };
         let alias_map = def.alias_to_table_map();
         let mut rows = Vec::new();
-        collect_metric_rows(
-            &def,
-            "orders",
-            &alias_map,
-            &MemberTypes::default(),
-            &mut rows,
-        );
+        collect_metric_rows(&def, "o", &alias_map, &MemberTypes::default(), &mut rows);
 
         // Find the WINDOW_SPEC row
         let ws_row = rows
@@ -1078,13 +1070,7 @@ mod tests {
         };
         let alias_map = def.alias_to_table_map();
         let mut rows = Vec::new();
-        collect_metric_rows(
-            &def,
-            "orders",
-            &alias_map,
-            &MemberTypes::default(),
-            &mut rows,
-        );
+        collect_metric_rows(&def, "o", &alias_map, &MemberTypes::default(), &mut rows);
 
         let ws_row = rows
             .iter()
@@ -1151,20 +1137,8 @@ mod tests {
         let def = filter_def(true, true);
         let alias_map = def.alias_to_table_map();
         let mut rows = Vec::new();
-        collect_dimension_rows(
-            &def,
-            "orders",
-            &alias_map,
-            &MemberTypes::default(),
-            &mut rows,
-        );
-        collect_fact_rows(
-            &def,
-            "orders",
-            &alias_map,
-            &MemberTypes::default(),
-            &mut rows,
-        );
+        collect_dimension_rows(&def, "o", &alias_map, &MemberTypes::default(), &mut rows);
+        collect_fact_rows(&def, "o", &alias_map, &MemberTypes::default(), &mut rows);
 
         let dim_row = rows
             .iter()
@@ -1172,7 +1146,7 @@ mod tests {
             .expect("dimension should have a LABELS row");
         assert_eq!(dim_row.object_name, "is_domestic");
         assert_eq!(dim_row.property_value, r#"["FILTER"]"#);
-        assert_eq!(dim_row.parent_entity, "orders");
+        assert_eq!(dim_row.parent_entity, "o");
 
         let fact_row = rows
             .iter()
@@ -1180,7 +1154,7 @@ mod tests {
             .expect("fact should have a LABELS row");
         assert_eq!(fact_row.object_name, "is_large");
         assert_eq!(fact_row.property_value, r#"["FILTER"]"#);
-        assert_eq!(fact_row.parent_entity, "orders");
+        assert_eq!(fact_row.parent_entity, "o");
     }
 
     /// A non-filter member emits no `LABELS` row at all, matching how `COMMENT`
@@ -1190,20 +1164,8 @@ mod tests {
         let def = filter_def(false, false);
         let alias_map = def.alias_to_table_map();
         let mut rows = Vec::new();
-        collect_dimension_rows(
-            &def,
-            "orders",
-            &alias_map,
-            &MemberTypes::default(),
-            &mut rows,
-        );
-        collect_fact_rows(
-            &def,
-            "orders",
-            &alias_map,
-            &MemberTypes::default(),
-            &mut rows,
-        );
+        collect_dimension_rows(&def, "o", &alias_map, &MemberTypes::default(), &mut rows);
+        collect_fact_rows(&def, "o", &alias_map, &MemberTypes::default(), &mut rows);
         assert!(
             !rows.iter().any(|r| r.property == "LABELS"),
             "no spurious LABELS row for a plain member"
@@ -1216,20 +1178,8 @@ mod tests {
         let def = filter_def(true, false);
         let alias_map = def.alias_to_table_map();
         let mut rows = Vec::new();
-        collect_dimension_rows(
-            &def,
-            "orders",
-            &alias_map,
-            &MemberTypes::default(),
-            &mut rows,
-        );
-        collect_fact_rows(
-            &def,
-            "orders",
-            &alias_map,
-            &MemberTypes::default(),
-            &mut rows,
-        );
+        collect_dimension_rows(&def, "o", &alias_map, &MemberTypes::default(), &mut rows);
+        collect_fact_rows(&def, "o", &alias_map, &MemberTypes::default(), &mut rows);
         let labelled: Vec<&str> = rows
             .iter()
             .filter(|r| r.property == "LABELS")
@@ -1245,13 +1195,7 @@ mod tests {
         let def = filter_def(false, true);
         let alias_map = def.alias_to_table_map();
         let mut rows = Vec::new();
-        collect_fact_rows(
-            &def,
-            "orders",
-            &alias_map,
-            &MemberTypes::default(),
-            &mut rows,
-        );
+        collect_fact_rows(&def, "o", &alias_map, &MemberTypes::default(), &mut rows);
         let props: Vec<&str> = rows.iter().map(|r| r.property.as_str()).collect();
         let labels_at = props.iter().position(|p| *p == "LABELS").expect("LABELS");
         let access_at = props
@@ -1261,7 +1205,7 @@ mod tests {
         assert!(labels_at < access_at, "LABELS before ACCESS_MODIFIER");
         assert_eq!(rows[access_at].property_value, "PUBLIC");
         assert!(
-            rows.iter().all(|r| r.parent_entity == "orders"),
+            rows.iter().all(|r| r.parent_entity == "o"),
             "every fact row keeps its parent entity"
         );
     }

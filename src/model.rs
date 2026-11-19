@@ -84,16 +84,38 @@ pub struct DistinctRange {
 }
 
 impl TableRef {
-    /// The name `DESCRIBE` and the `SHOW` listings give the table: its
-    /// physical table, or for an inline-query table, which has none, its alias
-    /// (Snowflake lists every logical table by its alias).
+    /// The name `DESCRIBE` and the `SHOW` listings give the table: its alias,
+    /// as Snowflake lists every logical table (fixture 8 lists `qty` under
+    /// `LI`, the alias of `line_items`). Only `DESCRIBE`'s `BASE_TABLE_NAME`
+    /// names the physical table, so two logical tables over one physical table
+    /// stay apart.
+    ///
+    /// The alias is given as its identifier, without the quotes it may be
+    /// declared with (`"Ship To"` lists as `Ship To`), as Snowflake lists a
+    /// quoted name.
     #[must_use]
-    pub fn listed_name(&self) -> &str {
-        if self.definition.is_some() {
-            &self.alias
-        } else {
-            &self.table
+    pub fn listed_name(&self) -> String {
+        match crate::ident::parse_qualified_identifier_with_quoting(self.alias.trim()) {
+            Ok(mut parts) if parts.len() == 1 => parts.remove(0).0,
+            _ => self.alias.clone(),
         }
+    }
+}
+
+/// A view's tables by the name SHOW and DESCRIBE list them by
+/// ([`TableRef::listed_name`]), from [`SemanticViewDefinition::alias_to_table_map`].
+#[derive(Debug, Clone, Default)]
+pub struct ListedTables(std::collections::HashMap<String, String>);
+
+impl ListedTables {
+    /// The listed name of the table a member or relationship names by `alias`.
+    /// A member's alias is stored as written, so it is matched as `DuckDB`
+    /// matches identifiers, case-insensitively and with or without quotes
+    /// (`LI.qty` is on the table declared `li`). `None` for an alias the view
+    /// does not declare.
+    #[must_use]
+    pub fn get(&self, alias: &str) -> Option<&String> {
+        self.0.get(&crate::ident::normalize_ident_part(alias))
     }
 }
 
@@ -1068,21 +1090,27 @@ impl SemanticViewDefinition {
     /// Listed name ([`TableRef::listed_name`]) of the primary (first) table
     /// in the view: the one whose members are written unqualified.
     #[must_use]
-    pub fn base_table(&self) -> &str {
-        self.tables.first().map_or("", TableRef::listed_name)
+    pub fn base_table(&self) -> String {
+        self.tables
+            .first()
+            .map_or_else(String::new, TableRef::listed_name)
     }
 
-    /// Build a mapping from table alias to listed table name.
-    ///
-    /// Used by SHOW/DESCRIBE `VTabs` to resolve the stored alias (e.g. `"o"`)
-    /// to the real table name (e.g. `"orders"`), or to the alias itself for an
-    /// inline-query table ([`TableRef::listed_name`]).
+    /// The names SHOW/DESCRIBE `VTabs` list the view's tables by, looked up
+    /// by a member's or relationship's stored alias ([`ListedTables::get`]).
     #[must_use]
-    pub fn alias_to_table_map(&self) -> std::collections::HashMap<String, String> {
-        self.tables
-            .iter()
-            .map(|t| (t.alias.clone(), t.listed_name().to_string()))
-            .collect()
+    pub fn alias_to_table_map(&self) -> ListedTables {
+        ListedTables(
+            self.tables
+                .iter()
+                .map(|t| {
+                    (
+                        crate::ident::normalize_ident_part(&t.alias),
+                        t.listed_name(),
+                    )
+                })
+                .collect(),
+        )
     }
 }
 
@@ -3756,7 +3784,7 @@ metrics:
             "metrics": [{"name": "revenue", "expr": "sum(amount)"}]
         }"#;
         let def = SemanticViewDefinition::from_json("orders", json).unwrap();
-        assert_eq!(def.base_table(), "orders");
+        assert_eq!(def.base_table(), "o");
         assert_eq!(def.dimensions.len(), 1);
         assert_eq!(def.metrics.len(), 1);
         assert!(def.joins.is_empty());
@@ -4843,7 +4871,7 @@ metrics:
         fn minimal_yaml_deserializes() {
             let yaml = "tables:\n  - alias: o\n    table: orders\ndimensions:\n  - name: region\n    expr: region\nmetrics:\n  - name: revenue\n    expr: SUM(amount)\n";
             let def = SemanticViewDefinition::from_yaml("orders", yaml).unwrap();
-            assert_eq!(def.base_table(), "orders");
+            assert_eq!(def.base_table(), "o");
             assert_eq!(def.dimensions.len(), 1);
             assert_eq!(def.dimensions[0].name, "region");
             assert_eq!(def.dimensions[0].expr, "region");

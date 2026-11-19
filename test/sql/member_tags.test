@@ -47,10 +47,10 @@ SELECT * FROM describe_semantic_view('mt_v') WHERE property = 'TAGS'
 ----
 (empty)	(empty)	(empty)	TAGS	{"S_LAYER_KIND":"view"}
 DERIVED_METRIC	double_revenue	(empty)	TAGS	{"S_LAYER_SPEC":"{\"format\": \"currency\"}"}
-DIMENSION	region	mt_orders	TAGS	{"S_LAYER_KIND":"dimension","S_LAYER_LABEL":"Sales region","db.gov.\"Owner Tag\"":"it's"}
-FACT	amt	mt_orders	TAGS	{"S_LAYER_KIND":"fact"}
-METRIC	revenue	mt_orders	TAGS	{"S_LAYER_KIND":"metric"}
-TABLE	mt_orders	(empty)	TAGS	{"gov.pii":"none"}
+DIMENSION	region	o	TAGS	{"S_LAYER_KIND":"dimension","S_LAYER_LABEL":"Sales region","db.gov.\"Owner Tag\"":"it's"}
+FACT	amt	o	TAGS	{"S_LAYER_KIND":"fact"}
+METRIC	revenue	o	TAGS	{"S_LAYER_KIND":"metric"}
+TABLE	o	(empty)	TAGS	{"gov.pii":"none"}
 
 # The other annotations written around the tags are intact.
 query TTTTT rowsort
@@ -58,10 +58,10 @@ SELECT * FROM describe_semantic_view('mt_v')
 WHERE property IN ('COMMENT', 'SYNONYMS') AND object_kind IN ('', 'TABLE', 'DIMENSION')
 ----
 (empty)	(empty)	(empty)	COMMENT	tagged view
-DIMENSION	region	mt_orders	COMMENT	where
-DIMENSION	region	mt_orders	SYNONYMS	["area"]
-TABLE	mt_orders	(empty)	COMMENT	orders
-TABLE	mt_orders	(empty)	SYNONYMS	["sales"]
+DIMENSION	region	o	COMMENT	where
+DIMENSION	region	o	SYNONYMS	["area"]
+TABLE	o	(empty)	COMMENT	orders
+TABLE	o	(empty)	SYNONYMS	["sales"]
 
 # The reader's view of it: one JSON object per tagged object.
 query TT rowsort
@@ -164,8 +164,8 @@ query TTTTT rowsort
 SELECT * FROM describe_semantic_view('mt_yaml') WHERE property = 'TAGS'
 ----
 (empty)	(empty)	(empty)	TAGS	{"db.gov.owner":"analytics"}
-DIMENSION	region	mt_orders	TAGS	{"S_LAYER_KIND":"dimension"}
-TABLE	mt_orders	(empty)	TAGS	{"gov.pii":"none"}
+DIMENSION	region	o	TAGS	{"S_LAYER_KIND":"dimension"}
+TABLE	o	(empty)	TAGS	{"gov.pii":"none"}
 
 query I
 SELECT GET_DDL('SEMANTIC_VIEW', 'mt_yaml') LIKE '%' || chr(10) || 'WITH TAG (db.gov.owner = ''analytics'')' || chr(10)

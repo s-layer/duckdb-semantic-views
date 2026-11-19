@@ -58,8 +58,8 @@ CREATE SEMANTIC VIEW products_sv AS
 query TTTTTTTTT rowsort
 SHOW SEMANTIC DIMENSIONS LIKE '%name%'
 ----
-memory	main	filter_sv	p3411_customers	customer_name	VARCHAR	[]	(empty)	[]
-memory	main	products_sv	p3411_products	product_name	VARCHAR	[]	(empty)	[]
+memory	main	filter_sv	c	customer_name	VARCHAR	[]	(empty)	[]
+memory	main	products_sv	p	product_name	VARCHAR	[]	(empty)	[]
 
 # ============================================================
 # Test 2: SHOW SEMANTIC DIMENSIONS LIKE '%order%' (cross-view)
@@ -69,7 +69,7 @@ memory	main	products_sv	p3411_products	product_name	VARCHAR	[]	(empty)	[]
 query TTTTTTTTT rowsort
 SHOW SEMANTIC DIMENSIONS LIKE '%order%'
 ----
-memory	main	filter_sv	p3411_orders	order_date	DATE	[]	(empty)	[]
+memory	main	filter_sv	o	order_date	DATE	[]	(empty)	[]
 
 # ============================================================
 # Test 3: SHOW SEMANTIC DIMENSIONS LIKE '%NAME%' IN filter_sv
@@ -79,7 +79,7 @@ memory	main	filter_sv	p3411_orders	order_date	DATE	[]	(empty)	[]
 query TTTTTTTTT rowsort
 SHOW SEMANTIC DIMENSIONS LIKE '%NAME%' IN filter_sv
 ----
-memory	main	filter_sv	p3411_customers	customer_name	VARCHAR	[]	(empty)	[]
+memory	main	filter_sv	c	customer_name	VARCHAR	[]	(empty)	[]
 
 # ============================================================
 # Test 4: SHOW SEMANTIC DIMENSIONS STARTS WITH 'customer' (cross-view)
@@ -89,7 +89,7 @@ memory	main	filter_sv	p3411_customers	customer_name	VARCHAR	[]	(empty)	[]
 query TTTTTTTTT rowsort
 SHOW SEMANTIC DIMENSIONS STARTS WITH 'customer'
 ----
-memory	main	filter_sv	p3411_customers	customer_name	VARCHAR	[]	(empty)	[]
+memory	main	filter_sv	c	customer_name	VARCHAR	[]	(empty)	[]
 
 # ============================================================
 # Test 5: SHOW SEMANTIC DIMENSIONS STARTS WITH 'Customer' (cross-view)
@@ -108,7 +108,7 @@ SHOW SEMANTIC DIMENSIONS STARTS WITH 'Customer'
 query TTTTTTTTT rowsort
 SHOW SEMANTIC DIMENSIONS LIKE '%name%' IN filter_sv LIMIT 1
 ----
-memory	main	filter_sv	p3411_customers	customer_name	VARCHAR	[]	(empty)	[]
+memory	main	filter_sv	c	customer_name	VARCHAR	[]	(empty)	[]
 
 # ============================================================
 # Test 7: SHOW SEMANTIC METRICS LIKE '%amount%' (cross-view)
@@ -118,7 +118,7 @@ memory	main	filter_sv	p3411_customers	customer_name	VARCHAR	[]	(empty)	[]
 query TTTTTTTT rowsort
 SHOW SEMANTIC METRICS LIKE '%amount%'
 ----
-memory	main	filter_sv	p3411_orders	total_amount	DECIMAL(38,2)	[]	(empty)
+memory	main	filter_sv	o	total_amount	DECIMAL(38,2)	[]	(empty)
 
 # ============================================================
 # Test 8: SHOW SEMANTIC METRICS STARTS WITH 'order' (cross-view)
@@ -128,7 +128,7 @@ memory	main	filter_sv	p3411_orders	total_amount	DECIMAL(38,2)	[]	(empty)
 query TTTTTTTT rowsort
 SHOW SEMANTIC METRICS STARTS WITH 'order'
 ----
-memory	main	filter_sv	p3411_orders	order_count	BIGINT	[]	(empty)
+memory	main	filter_sv	o	order_count	BIGINT	[]	(empty)
 
 # ============================================================
 # Test 9: SHOW SEMANTIC FACTS LIKE '%amount%' (cross-view)
@@ -138,7 +138,7 @@ memory	main	filter_sv	p3411_orders	order_count	BIGINT	[]	(empty)
 query TTTTTTTTT rowsort
 SHOW SEMANTIC FACTS LIKE '%amount%'
 ----
-memory	main	filter_sv	p3411_orders	raw_amount	DECIMAL(10,2)	[]	(empty)	[]
+memory	main	filter_sv	o	raw_amount	DECIMAL(10,2)	[]	(empty)	[]
 
 # ============================================================
 # Test 10: SHOW SEMANTIC FACTS STARTS WITH 'raw' (cross-view)
@@ -148,7 +148,7 @@ memory	main	filter_sv	p3411_orders	raw_amount	DECIMAL(10,2)	[]	(empty)	[]
 query TTTTTTTTT rowsort
 SHOW SEMANTIC FACTS STARTS WITH 'raw'
 ----
-memory	main	filter_sv	p3411_orders	raw_amount	DECIMAL(10,2)	[]	(empty)	[]
+memory	main	filter_sv	o	raw_amount	DECIMAL(10,2)	[]	(empty)	[]
 
 # ============================================================
 # Test 11: SHOW SEMANTIC FACTS IN filter_sv LIMIT 1
@@ -158,7 +158,7 @@ memory	main	filter_sv	p3411_orders	raw_amount	DECIMAL(10,2)	[]	(empty)	[]
 query TTTTTTTTT
 SHOW SEMANTIC FACTS IN filter_sv LIMIT 1
 ----
-memory	main	filter_sv	p3411_orders	raw_amount	DECIMAL(10,2)	[]	(empty)	[]
+memory	main	filter_sv	o	raw_amount	DECIMAL(10,2)	[]	(empty)	[]
 
 # ============================================================
 # Test 12: Composition: LIKE + IN + STARTS WITH + LIMIT
@@ -168,7 +168,7 @@ memory	main	filter_sv	p3411_orders	raw_amount	DECIMAL(10,2)	[]	(empty)	[]
 query TTTTTTTTT rowsort
 SHOW SEMANTIC DIMENSIONS LIKE '%name%' IN filter_sv STARTS WITH 'cust' LIMIT 10
 ----
-memory	main	filter_sv	p3411_customers	customer_name	VARCHAR	[]	(empty)	[]
+memory	main	filter_sv	c	customer_name	VARCHAR	[]	(empty)	[]
 
 # ============================================================
 # Test 13: FOR METRIC with LIKE
@@ -179,7 +179,7 @@ memory	main	filter_sv	p3411_customers	customer_name	VARCHAR	[]	(empty)	[]
 query TTTTTTT rowsort
 SHOW SEMANTIC DIMENSIONS LIKE '%gio%' IN filter_sv FOR METRIC total_amount
 ----
-p3411_customers	region	VARCHAR	false	[]	(empty)	[]
+c	region	VARCHAR	false	[]	(empty)	[]
 
 # ============================================================
 # Test 14: FOR METRIC with STARTS WITH
@@ -190,7 +190,7 @@ p3411_customers	region	VARCHAR	false	[]	(empty)	[]
 query TTTTTTT rowsort
 SHOW SEMANTIC DIMENSIONS IN filter_sv FOR METRIC total_amount STARTS WITH 'customer'
 ----
-p3411_customers	customer_name	VARCHAR	false	[]	(empty)	[]
+c	customer_name	VARCHAR	false	[]	(empty)	[]
 
 # ============================================================
 # Test 15: FOR METRIC with LIMIT
@@ -201,9 +201,9 @@ p3411_customers	customer_name	VARCHAR	false	[]	(empty)	[]
 query TTTTTTT rowsort
 SHOW SEMANTIC DIMENSIONS IN filter_sv FOR METRIC total_amount LIMIT 3
 ----
-p3411_customers	customer_name	VARCHAR	false	[]	(empty)	[]
-p3411_customers	region	VARCHAR	false	[]	(empty)	[]
-p3411_orders	order_date	DATE	false	[]	(empty)	[]
+c	customer_name	VARCHAR	false	[]	(empty)	[]
+c	region	VARCHAR	false	[]	(empty)	[]
+o	order_date	DATE	false	[]	(empty)	[]
 
 # ============================================================
 # Test 16: Error: wrong clause order (LIKE after IN)
@@ -221,7 +221,7 @@ syntax error at or near "LIKE"
 query TTTTTTTTT rowsort
 show semantic dimensions like '%name%' in filter_sv
 ----
-memory	main	filter_sv	p3411_customers	customer_name	VARCHAR	[]	(empty)	[]
+memory	main	filter_sv	c	customer_name	VARCHAR	[]	(empty)	[]
 
 # ============================================================
 # Test 18: Empty LIKE pattern (matches nothing)

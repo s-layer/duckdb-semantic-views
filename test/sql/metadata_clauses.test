@@ -84,14 +84,14 @@ AI_VERIFIED_QUERY	total	(empty)	QUESTION	What is the total?
 AI_VERIFIED_QUERY	total	(empty)	SQL	SELECT 'all' AS scope, SUM(amount) FROM mc_orders
 CUSTOM_INSTRUCTIONS	(empty)	(empty)	AI_QUESTION_CATEGORIZATION	Reject questions about employees.
 CUSTOM_INSTRUCTIONS	(empty)	(empty)	AI_SQL_GENERATION	Ensure that all numeric columns are rounded to 2 decimal points.
-DIMENSION	region	mc_orders	IS_ENUM	true
-DIMENSION	region	mc_orders	SAMPLE_VALUES	["East","West","North","South"]
-DIMENSION	warehouse	mc_orders	CORTEX_SEARCH_SERVICE_COLUMN_NAME	warehouse_name
-DIMENSION	warehouse	mc_orders	CORTEX_SEARCH_SERVICE_DATABASE_NAME	sales_db
-DIMENSION	warehouse	mc_orders	CORTEX_SEARCH_SERVICE_NAME	Warehouse Search
-DIMENSION	warehouse	mc_orders	CORTEX_SEARCH_SERVICE_SCHEMA_NAME	search
-DIMENSION	warehouse	mc_orders	SAMPLE_VALUES	["SMALL","it's"]
-FACT	amt	mc_orders	SAMPLE_VALUES	["100","250","500","1000"]
+DIMENSION	region	o	IS_ENUM	true
+DIMENSION	region	o	SAMPLE_VALUES	["East","West","North","South"]
+DIMENSION	warehouse	o	CORTEX_SEARCH_SERVICE_COLUMN_NAME	warehouse_name
+DIMENSION	warehouse	o	CORTEX_SEARCH_SERVICE_DATABASE_NAME	sales_db
+DIMENSION	warehouse	o	CORTEX_SEARCH_SERVICE_NAME	Warehouse Search
+DIMENSION	warehouse	o	CORTEX_SEARCH_SERVICE_SCHEMA_NAME	search
+DIMENSION	warehouse	o	SAMPLE_VALUES	["SMALL","it's"]
+FACT	amt	o	SAMPLE_VALUES	["100","250","500","1000"]
 
 # A dimension that is not an enum and names no service has no such rows.
 query I
@@ -220,9 +220,9 @@ AI_VERIFIED_QUERY	q	(empty)	ONBOARDING_QUESTION	false
 AI_VERIFIED_QUERY	q	(empty)	QUESTION	How much?
 AI_VERIFIED_QUERY	q	(empty)	SQL	SELECT 1
 CUSTOM_INSTRUCTIONS	(empty)	(empty)	AI_SQL_GENERATION	Be brief.
-DIMENSION	region	mc_orders	CORTEX_SEARCH_SERVICE_NAME	regions
-DIMENSION	region	mc_orders	IS_ENUM	true
-DIMENSION	region	mc_orders	SAMPLE_VALUES	["East","West"]
+DIMENSION	region	o	CORTEX_SEARCH_SERVICE_NAME	regions
+DIMENSION	region	o	IS_ENUM	true
+DIMENSION	region	o	SAMPLE_VALUES	["East","West"]
 
 query I
 SELECT GET_DDL('SEMANTIC_VIEW', 'mc_yaml') LIKE '%SAMPLE_VALUES (''East'', ''West'') IS_ENUM WITH CORTEX SEARCH SERVICE regions%MAX_STALENESS = ''1 day''%'

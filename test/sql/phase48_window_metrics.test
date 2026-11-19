@@ -184,9 +184,9 @@ requires dimension 'd.date'
 query TTTTTTT rowsort
 SHOW SEMANTIC DIMENSIONS IN p48_sales_view FOR METRIC avg_qty
 ----
-p48_dates	date	DATE	true	[]	(empty)	[]
-p48_dates	year	INTEGER	false	[]	(empty)	[]
-p48_sales	store	VARCHAR	false	[]	(empty)	[]
+d	date	DATE	true	[]	(empty)	[]
+d	year	INTEGER	false	[]	(empty)	[]
+s	store	VARCHAR	false	[]	(empty)	[]
 
 # ========================================
 # Test 7: GET_DDL round-trip
@@ -217,8 +217,8 @@ true
 query TTTTT
 SELECT * FROM describe_semantic_view('p48_sales_view') WHERE property = 'WINDOW_SPEC' ORDER BY object_name;
 ----
-METRIC	avg_qty	p48_sales	WINDOW_SPEC	AVG(total_qty) OVER (PARTITION BY EXCLUDING d.date ORDER BY d.date NULLS LAST)
-METRIC	qty_lag	p48_sales	WINDOW_SPEC	LAG(total_qty, 1) OVER (PARTITION BY EXCLUDING d.date ORDER BY d.date NULLS LAST)
+METRIC	avg_qty	s	WINDOW_SPEC	AVG(total_qty) OVER (PARTITION BY EXCLUDING d.date ORDER BY d.date NULLS LAST)
+METRIC	qty_lag	s	WINDOW_SPEC	LAG(total_qty, 1) OVER (PARTITION BY EXCLUDING d.date ORDER BY d.date NULLS LAST)
 
 # ========================================
 # Test 9: Window metric over a safe many-to-one join direction

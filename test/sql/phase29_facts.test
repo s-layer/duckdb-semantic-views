@@ -108,54 +108,54 @@ SELECT * FROM SEMANTIC_VIEW(p29_analytics METRICS total_net, total_tax);
 query TTTTT
 DESCRIBE SEMANTIC VIEW p29_analytics;
 ----
-TABLE	p29_orders	(empty)	BASE_TABLE_DATABASE_NAME	memory
-TABLE	p29_orders	(empty)	BASE_TABLE_SCHEMA_NAME	main
-TABLE	p29_orders	(empty)	BASE_TABLE_NAME	p29_orders
-TABLE	p29_orders	(empty)	PRIMARY_KEY	["id"]
-TABLE	p29_line_items	(empty)	BASE_TABLE_DATABASE_NAME	memory
-TABLE	p29_line_items	(empty)	BASE_TABLE_SCHEMA_NAME	main
-TABLE	p29_line_items	(empty)	BASE_TABLE_NAME	p29_line_items
-TABLE	p29_line_items	(empty)	PRIMARY_KEY	["id"]
-TABLE	p29_customers	(empty)	BASE_TABLE_DATABASE_NAME	memory
-TABLE	p29_customers	(empty)	BASE_TABLE_SCHEMA_NAME	main
-TABLE	p29_customers	(empty)	BASE_TABLE_NAME	p29_customers
-TABLE	p29_customers	(empty)	PRIMARY_KEY	["id"]
-RELATIONSHIP	li_to_order	p29_line_items	TABLE	p29_line_items
-RELATIONSHIP	li_to_order	p29_line_items	REF_TABLE	p29_orders
-RELATIONSHIP	li_to_order	p29_line_items	FOREIGN_KEY	["order_id"]
-RELATIONSHIP	li_to_order	p29_line_items	REF_KEY	["id"]
-RELATIONSHIP	order_to_customer	p29_orders	TABLE	p29_orders
-RELATIONSHIP	order_to_customer	p29_orders	REF_TABLE	p29_customers
-RELATIONSHIP	order_to_customer	p29_orders	FOREIGN_KEY	["customer_id"]
-RELATIONSHIP	order_to_customer	p29_orders	REF_KEY	["id"]
-FACT	net_price	p29_line_items	TABLE	p29_line_items
-FACT	net_price	p29_line_items	EXPRESSION	li.extended_price * (1 - li.discount)
-FACT	net_price	p29_line_items	DATA_TYPE	DECIMAL(18,4)
-FACT	net_price	p29_line_items	ACCESS_MODIFIER	PUBLIC
-FACT	tax_amount	p29_line_items	TABLE	p29_line_items
-FACT	tax_amount	p29_line_items	EXPRESSION	li.net_price * li.tax_rate
-FACT	tax_amount	p29_line_items	DATA_TYPE	DECIMAL(18,6)
-FACT	tax_amount	p29_line_items	ACCESS_MODIFIER	PUBLIC
-DIMENSION	region	p29_orders	TABLE	p29_orders
-DIMENSION	region	p29_orders	EXPRESSION	o.region
-DIMENSION	region	p29_orders	DATA_TYPE	VARCHAR
-DIMENSION	country	p29_customers	TABLE	p29_customers
-DIMENSION	country	p29_customers	EXPRESSION	c.country
-DIMENSION	country	p29_customers	DATA_TYPE	VARCHAR
-DIMENSION	state	p29_customers	TABLE	p29_customers
-DIMENSION	state	p29_customers	EXPRESSION	c.state
-DIMENSION	state	p29_customers	DATA_TYPE	VARCHAR
-DIMENSION	city	p29_customers	TABLE	p29_customers
-DIMENSION	city	p29_customers	EXPRESSION	c.city
-DIMENSION	city	p29_customers	DATA_TYPE	VARCHAR
-METRIC	total_net	p29_line_items	TABLE	p29_line_items
-METRIC	total_net	p29_line_items	EXPRESSION	SUM(li.net_price)
-METRIC	total_net	p29_line_items	DATA_TYPE	DECIMAL(38,4)
-METRIC	total_net	p29_line_items	ACCESS_MODIFIER	PUBLIC
-METRIC	total_tax	p29_line_items	TABLE	p29_line_items
-METRIC	total_tax	p29_line_items	EXPRESSION	SUM(li.tax_amount)
-METRIC	total_tax	p29_line_items	DATA_TYPE	DECIMAL(38,6)
-METRIC	total_tax	p29_line_items	ACCESS_MODIFIER	PUBLIC
+TABLE	o	(empty)	BASE_TABLE_DATABASE_NAME	memory
+TABLE	o	(empty)	BASE_TABLE_SCHEMA_NAME	main
+TABLE	o	(empty)	BASE_TABLE_NAME	p29_orders
+TABLE	o	(empty)	PRIMARY_KEY	["id"]
+TABLE	li	(empty)	BASE_TABLE_DATABASE_NAME	memory
+TABLE	li	(empty)	BASE_TABLE_SCHEMA_NAME	main
+TABLE	li	(empty)	BASE_TABLE_NAME	p29_line_items
+TABLE	li	(empty)	PRIMARY_KEY	["id"]
+TABLE	c	(empty)	BASE_TABLE_DATABASE_NAME	memory
+TABLE	c	(empty)	BASE_TABLE_SCHEMA_NAME	main
+TABLE	c	(empty)	BASE_TABLE_NAME	p29_customers
+TABLE	c	(empty)	PRIMARY_KEY	["id"]
+RELATIONSHIP	li_to_order	li	TABLE	li
+RELATIONSHIP	li_to_order	li	REF_TABLE	o
+RELATIONSHIP	li_to_order	li	FOREIGN_KEY	["order_id"]
+RELATIONSHIP	li_to_order	li	REF_KEY	["id"]
+RELATIONSHIP	order_to_customer	o	TABLE	o
+RELATIONSHIP	order_to_customer	o	REF_TABLE	c
+RELATIONSHIP	order_to_customer	o	FOREIGN_KEY	["customer_id"]
+RELATIONSHIP	order_to_customer	o	REF_KEY	["id"]
+FACT	net_price	li	TABLE	li
+FACT	net_price	li	EXPRESSION	li.extended_price * (1 - li.discount)
+FACT	net_price	li	DATA_TYPE	DECIMAL(18,4)
+FACT	net_price	li	ACCESS_MODIFIER	PUBLIC
+FACT	tax_amount	li	TABLE	li
+FACT	tax_amount	li	EXPRESSION	li.net_price * li.tax_rate
+FACT	tax_amount	li	DATA_TYPE	DECIMAL(18,6)
+FACT	tax_amount	li	ACCESS_MODIFIER	PUBLIC
+DIMENSION	region	o	TABLE	o
+DIMENSION	region	o	EXPRESSION	o.region
+DIMENSION	region	o	DATA_TYPE	VARCHAR
+DIMENSION	country	c	TABLE	c
+DIMENSION	country	c	EXPRESSION	c.country
+DIMENSION	country	c	DATA_TYPE	VARCHAR
+DIMENSION	state	c	TABLE	c
+DIMENSION	state	c	EXPRESSION	c.state
+DIMENSION	state	c	DATA_TYPE	VARCHAR
+DIMENSION	city	c	TABLE	c
+DIMENSION	city	c	EXPRESSION	c.city
+DIMENSION	city	c	DATA_TYPE	VARCHAR
+METRIC	total_net	li	TABLE	li
+METRIC	total_net	li	EXPRESSION	SUM(li.net_price)
+METRIC	total_net	li	DATA_TYPE	DECIMAL(38,4)
+METRIC	total_net	li	ACCESS_MODIFIER	PUBLIC
+METRIC	total_tax	li	TABLE	li
+METRIC	total_tax	li	EXPRESSION	SUM(li.tax_amount)
+METRIC	total_tax	li	DATA_TYPE	DECIMAL(38,6)
+METRIC	total_tax	li	ACCESS_MODIFIER	PUBLIC
 
 # ============================================================
 # Test 6: Error -- fact cycle (two facts referencing each other)

@@ -265,7 +265,7 @@ PREPARE gw_p4 AS SHOW SEMANTIC DIMENSIONS IN gw_x;
 query TTTTTTTTT
 EXECUTE gw_p4;
 ----
-memory	main	gw_x	gw_t	region	VARCHAR	[]	(empty)	[]
+memory	main	gw_x	t	region	VARCHAR	[]	(empty)	[]
 
 statement ok
 EXPLAIN DESCRIBE SEMANTIC VIEW gw_x;

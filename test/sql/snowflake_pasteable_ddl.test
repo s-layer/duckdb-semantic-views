@@ -58,11 +58,11 @@ CREATE SEMANTIC VIEW sp_labels
 query TTTTT rowsort
 SELECT * FROM describe_semantic_view('sp_labels') WHERE property IN ('LABELS', 'EXPRESSION') AND object_kind IN ('FACT', 'DIMENSION')
 ----
-DIMENSION	is_east	sp_orders	EXPRESSION	o.region = 'East'
-DIMENSION	is_east	sp_orders	LABELS	["FILTER"]
-DIMENSION	region	sp_orders	EXPRESSION	o.region
-FACT	is_large	sp_orders	EXPRESSION	o.amount > 100
-FACT	is_large	sp_orders	LABELS	["FILTER"]
+DIMENSION	is_east	o	EXPRESSION	o.region = 'East'
+DIMENSION	is_east	o	LABELS	["FILTER"]
+DIMENSION	region	o	EXPRESSION	o.region
+FACT	is_large	o	EXPRESSION	o.amount > 100
+FACT	is_large	o	LABELS	["FILTER"]
 
 # A filter declared that way filters like any other.
 query TI rowsort
@@ -232,13 +232,13 @@ CREATE SEMANTIC VIEW sp_show
 query TTTTTTTTT rowsort
 SHOW SEMANTIC FACTS IN sp_show
 ----
-memory	main	sp_show	sp_orders	amt	INTEGER	[]	(empty)	[]
-memory	main	sp_show	sp_orders	is_large	BOOLEAN	[]	(empty)	["FILTER"]
+memory	main	sp_show	o	amt	INTEGER	[]	(empty)	[]
+memory	main	sp_show	o	is_large	BOOLEAN	[]	(empty)	["FILTER"]
 
 query TTTTTTTTT
 SHOW SEMANTIC DIMENSIONS IN sp_show
 ----
-memory	main	sp_show	sp_orders	region	VARCHAR	["area"]	where	[]
+memory	main	sp_show	o	region	VARCHAR	["area"]	where	[]
 
 # The cross-view listing has the column too.
 query TT rowsort
@@ -250,12 +250,12 @@ is_large	["FILTER"]
 query TTTTTTTT
 SHOW SEMANTIC METRICS IN sp_show
 ----
-memory	main	sp_show	sp_orders	revenue	HUGEINT	[]	(empty)
+memory	main	sp_show	o	revenue	HUGEINT	[]	(empty)
 
 query TTTTTTT
 SHOW SEMANTIC DIMENSIONS IN sp_show FOR METRIC revenue
 ----
-sp_orders	region	VARCHAR	false	["area"]	where	[]
+o	region	VARCHAR	false	["area"]	where	[]
 
 query T
 SELECT column_name FROM (DESCRIBE SELECT * FROM (SHOW SEMANTIC DIMENSIONS IN sp_show FOR METRIC revenue))
@@ -326,7 +326,7 @@ ALTER SEMANTIC VIEW sp_mt UNSET TAG k
 query TTTTT
 SELECT * FROM describe_semantic_view('sp_mt') WHERE property = 'TAGS'
 ----
-DIMENSION	region	sp_orders	TAGS	{"k":"member"}
+DIMENSION	region	o	TAGS	{"k":"member"}
 
 # Names fold ASCII letters only, as everywhere else a tag name is compared, so
 # "Ä" and "ä" are two tags. A quoted name is shown as written.

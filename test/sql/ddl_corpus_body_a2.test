@@ -1099,10 +1099,10 @@ DIMENSIONS (
 query TTTT rowsort
 SELECT object_name, parent_entity, property, property_value FROM describe_semantic_view('dcb_rel_single') WHERE object_kind = 'RELATIONSHIP';
 ----
-order_to_customer	dcb_orders	FOREIGN_KEY	["customer_id"]
-order_to_customer	dcb_orders	REF_KEY	["id"]
-order_to_customer	dcb_orders	REF_TABLE	dcb_customers
-order_to_customer	dcb_orders	TABLE	dcb_orders
+order_to_customer	o	FOREIGN_KEY	["customer_id"]
+order_to_customer	o	REF_KEY	["id"]
+order_to_customer	o	REF_TABLE	c
+order_to_customer	o	TABLE	o
 
 # B-175: body_parser/mod.rs::parse_relationships_composite_fk — a two-column FK list
 statement ok

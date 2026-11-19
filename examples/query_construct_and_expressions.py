@@ -394,7 +394,7 @@ dims = show(
        GROUP BY table_name
        ORDER BY table_name""",
 )
-assert dims == [("customers", "customer, region, tier"), ("orders", "channel, ordered_at")]
+assert dims == [("c", "customer, region, tier"), ("o", "channel, ordered_at")]
 
 # ============================================================
 # 8. What an expression item may not do

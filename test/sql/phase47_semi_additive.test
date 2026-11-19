@@ -202,7 +202,7 @@ true
 query TTTTT
 SELECT * FROM describe_semantic_view('p47_account_view') WHERE property = 'NON_ADDITIVE_BY';
 ----
-METRIC	total_balance	p47_accounts	NON_ADDITIVE_BY	report_date NULLS LAST
+METRIC	total_balance	a	NON_ADDITIVE_BY	report_date NULLS LAST
 
 # ========================================
 # Test 8: Global aggregate (no dims)

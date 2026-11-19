@@ -99,17 +99,17 @@ METRICS (
 query TTTTT
 DESCRIBE SEMANTIC VIEW err_valid;
 ----
-TABLE	err_source	(empty)	BASE_TABLE_DATABASE_NAME	memory
-TABLE	err_source	(empty)	BASE_TABLE_SCHEMA_NAME	main
-TABLE	err_source	(empty)	BASE_TABLE_NAME	err_source
-TABLE	err_source	(empty)	PRIMARY_KEY	["id"]
-DIMENSION	id	err_source	TABLE	err_source
-DIMENSION	id	err_source	EXPRESSION	id
-DIMENSION	id	err_source	DATA_TYPE	INTEGER
-METRIC	total	err_source	TABLE	err_source
-METRIC	total	err_source	EXPRESSION	SUM(val)
-METRIC	total	err_source	DATA_TYPE	DOUBLE
-METRIC	total	err_source	ACCESS_MODIFIER	PUBLIC
+TABLE	s	(empty)	BASE_TABLE_DATABASE_NAME	memory
+TABLE	s	(empty)	BASE_TABLE_SCHEMA_NAME	main
+TABLE	s	(empty)	BASE_TABLE_NAME	err_source
+TABLE	s	(empty)	PRIMARY_KEY	["id"]
+DIMENSION	id	s	TABLE	s
+DIMENSION	id	s	EXPRESSION	id
+DIMENSION	id	s	DATA_TYPE	INTEGER
+METRIC	total	s	TABLE	s
+METRIC	total	s	EXPRESSION	SUM(val)
+METRIC	total	s	DATA_TYPE	DOUBLE
+METRIC	total	s	ACCESS_MODIFIER	PUBLIC
 
 # Normal SQL unaffected
 query I

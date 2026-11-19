@@ -1393,8 +1393,8 @@ unknown relationship 'NON ADDITIVE BY' in USING clause
 #   body_parser/cursor.rs::find_kw_skips_quoted_and_strings,
 #   body_parser/cursor.rs::take_parens_is_quote_and_nest_aware
 #   — keywords and `)` inside quoted identifiers and strings are inert: table "dcc PRIMARY KEY (id)", PK ("x)y"), UNIQUE ("UNIQUE"), COMMENT with UNIQUE and a doubled quote [text]
-# PRE-EXISTING (TECH-DEBT #96): DESCRIBE's BASE_TABLE_NAME (and the TABLE object_name) keep the
-# identifier's double quotes; Snowflake reports the bare name.
+# PRE-EXISTING (TECH-DEBT #96): DESCRIBE's BASE_TABLE_NAME keeps the identifier's double
+# quotes; Snowflake reports the bare name. The TABLE object_name is the alias.
 statement ok
 CREATE SEMANTIC VIEW dcc_c175 AS TABLES (o AS "dcc PRIMARY KEY (id)" PRIMARY KEY ("x)y") UNIQUE ("UNIQUE") COMMENT = 'a UNIQUE ''x'' mention') DIMENSIONS (o.region AS o.region);
 
@@ -1412,9 +1412,9 @@ DIMENSIONS (
 query TTTT rowsort
 SELECT object_kind, object_name, property, property_value FROM describe_semantic_view('dcc_c175') WHERE object_kind = 'TABLE' AND property IN ('BASE_TABLE_NAME', 'PRIMARY_KEY', 'COMMENT');
 ----
-TABLE	"dcc PRIMARY KEY (id)"	BASE_TABLE_NAME	"dcc PRIMARY KEY (id)"
-TABLE	"dcc PRIMARY KEY (id)"	COMMENT	a UNIQUE 'x' mention
-TABLE	"dcc PRIMARY KEY (id)"	PRIMARY_KEY	["\"x)y\""]
+TABLE	o	BASE_TABLE_NAME	"dcc PRIMARY KEY (id)"
+TABLE	o	COMMENT	a UNIQUE 'x' mention
+TABLE	o	PRIMARY_KEY	["\"x)y\""]
 
 # C-176: body_parser/lexer.rs::quoted_ident_doubled_quote_escape,
 #   body_parser/lexer.rs::well_formed_over_hostile_inputs,
@@ -1441,8 +1441,8 @@ query TTTT rowsort
 SELECT object_kind, object_name, property, property_value FROM describe_semantic_view('dcc_c176') WHERE property IN ('BASE_TABLE_SCHEMA_NAME', 'BASE_TABLE_NAME', 'EXPRESSION');
 ----
 DIMENSION	"a""b"	EXPRESSION	q.region
-TABLE	"dcc a""b"."c d"	BASE_TABLE_NAME	"dcc a""b"."c d"
-TABLE	"dcc a""b"."c d"	BASE_TABLE_SCHEMA_NAME	main
+TABLE	q	BASE_TABLE_NAME	"dcc a""b"."c d"
+TABLE	q	BASE_TABLE_SCHEMA_NAME	main
 
 # C-177: body_parser/lexer.rs::dollar_string_is_one_opaque_token,
 #   body_parser/lexer.rs::tagged_dollar_string_closes_on_matching_tag_only,
@@ -1525,7 +1525,7 @@ CREATE SEMANTIC VIEW dcc_c183 AS TABLES (o AS dcc_orders PRIMARY KEY (id)) DIMEN
 #   body_parser/lexer.rs::well_formed_over_hostile_inputs,
 #   body_parser/lexer.rs::tiling_holds_over_arbitrary_unicode
 #   — non-ASCII bare identifiers (alias café, member café東京) are single tokens; quoted "dcc 東京 table" kept whole [text]
-# PRE-EXISTING (TECH-DEBT #96): DESCRIBE reports BASE_TABLE_NAME and the dimension's TABLE with the quotes kept.
+# PRE-EXISTING (TECH-DEBT #96): DESCRIBE reports BASE_TABLE_NAME with the quotes kept; the dimension's TABLE is the alias.
 statement ok
 CREATE SEMANTIC VIEW dcc_c184 AS TABLES (café AS "dcc 東京 table" PRIMARY KEY (id)) DIMENSIONS (café.café東京 AS café.region);
 
@@ -1544,8 +1544,8 @@ query TTTT rowsort
 SELECT object_kind, object_name, property, property_value FROM describe_semantic_view('dcc_c184') WHERE property IN ('BASE_TABLE_NAME', 'TABLE', 'EXPRESSION');
 ----
 DIMENSION	café東京	EXPRESSION	café.region
-DIMENSION	café東京	TABLE	"dcc 東京 table"
-TABLE	"dcc 東京 table"	BASE_TABLE_NAME	"dcc 東京 table"
+DIMENSION	café東京	TABLE	café
+TABLE	café	BASE_TABLE_NAME	"dcc 東京 table"
 
 # C-185: body_parser/lexer.rs::lone_dollar_and_positional_param_are_symbols, body_parser/lexer.rs::well_formed_over_hostile_inputs — `$1` lexes as a positional parameter (not a dollar-quote tag)
 # CREATE refuses a parameter in a member (TECH-DEBT #95); the message quoting

@@ -55,8 +55,8 @@ CREATE SEMANTIC VIEW nf_sv AS
 query TTTTT rowsort
 SELECT * FROM describe_semantic_view('nf_sv') WHERE property = 'LABELS';
 ----
-DIMENSION	is_domestic	nf_orders	LABELS	["FILTER"]
-FACT	is_large	nf_orders	LABELS	["FILTER"]
+DIMENSION	is_domestic	o	LABELS	["FILTER"]
+FACT	is_large	o	LABELS	["FILTER"]
 
 # The plain members emit no LABELS row at all — it is omitted when unset, the
 # same rule COMMENT and SYNONYMS follow, not emitted empty.
@@ -73,14 +73,14 @@ SELECT count(*) FROM describe_semantic_view('nf_sv')
 query TTTTTTTTT rowsort
 SHOW SEMANTIC DIMENSIONS IN nf_sv
 ----
-memory	main	nf_sv	nf_orders	country	VARCHAR	[]	(empty)	[]
-memory	main	nf_sv	nf_orders	is_domestic	BOOLEAN	[]	(empty)	["FILTER"]
+memory	main	nf_sv	o	country	VARCHAR	[]	(empty)	[]
+memory	main	nf_sv	o	is_domestic	BOOLEAN	[]	(empty)	["FILTER"]
 
 query TTTTTTTTT rowsort
 SHOW SEMANTIC FACTS IN nf_sv
 ----
-memory	main	nf_sv	nf_orders	amt	DECIMAL(10,2)	[]	(empty)	[]
-memory	main	nf_sv	nf_orders	is_large	BOOLEAN	[]	(empty)	["FILTER"]
+memory	main	nf_sv	o	amt	DECIMAL(10,2)	[]	(empty)	[]
+memory	main	nf_sv	o	is_large	BOOLEAN	[]	(empty)	["FILTER"]
 
 # SHOW SEMANTIC DIMENSIONS ... FOR METRIC ends with the same `labels` column, as
 # in Snowflake (fixture 8, S1-S3): table_name, name, data_type, required,
@@ -88,8 +88,8 @@ memory	main	nf_sv	nf_orders	is_large	BOOLEAN	[]	(empty)	["FILTER"]
 query TTTTTTT rowsort
 SHOW SEMANTIC DIMENSIONS IN nf_sv FOR METRIC revenue
 ----
-nf_orders	country	VARCHAR	false	[]	(empty)	[]
-nf_orders	is_domestic	BOOLEAN	false	[]	(empty)	["FILTER"]
+o	country	VARCHAR	false	[]	(empty)	[]
+o	is_domestic	BOOLEAN	false	[]	(empty)	["FILTER"]
 
 # ============================================================
 # Test 2: GET_DDL renders the clause back, exactly twice — once per labelled
@@ -272,10 +272,10 @@ query TTTTT rowsort
 SELECT * FROM describe_semantic_view('nf_forms')
   WHERE property IN ('COMMENT', 'SYNONYMS') AND object_kind = 'DIMENSION';
 ----
-DIMENSION	after_synonyms	nf_orders	SYNONYMS	["dom"]
-DIMENSION	before_comment	nf_orders	COMMENT	c
-DIMENSION	comment_last	nf_orders	COMMENT	c2
-DIMENSION	comment_last	nf_orders	SYNONYMS	["d2"]
+DIMENSION	after_synonyms	o	SYNONYMS	["dom"]
+DIMENSION	before_comment	o	COMMENT	c
+DIMENSION	comment_last	o	COMMENT	c2
+DIMENSION	comment_last	o	SYNONYMS	["d2"]
 
 statement ok
 DROP SEMANTIC VIEW nf_forms;

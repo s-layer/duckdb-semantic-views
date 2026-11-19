@@ -30,8 +30,8 @@ CREATE SEMANTIC VIEW simple_sv AS
 query TTTTTTT rowsort
 SHOW SEMANTIC DIMENSIONS IN simple_sv FOR METRIC total
 ----
-p34fm_sales	product	VARCHAR	false	[]	(empty)	[]
-p34fm_sales	region	VARCHAR	false	[]	(empty)	[]
+s	product	VARCHAR	false	[]	(empty)	[]
+s	region	VARCHAR	false	[]	(empty)	[]
 
 # ============================================================
 # Setup: multi-table view with fan trap potential
@@ -91,9 +91,9 @@ CREATE SEMANTIC VIEW star_sv AS
 query TTTTTTT rowsort
 SHOW SEMANTIC DIMENSIONS IN star_sv FOR METRIC order_total
 ----
-p34fm_customers	customer_country	VARCHAR	false	[]	(empty)	[]
-p34fm_customers	customer_name	VARCHAR	false	[]	(empty)	[]
-p34fm_line_items	item_qty	INTEGER	false	[]	(empty)	[]
+c	customer_country	VARCHAR	false	[]	(empty)	[]
+c	customer_name	VARCHAR	false	[]	(empty)	[]
+li	item_qty	INTEGER	false	[]	(empty)	[]
 
 # ============================================================
 # Test 3: line_item_sum metric (source: li)
@@ -105,9 +105,9 @@ p34fm_line_items	item_qty	INTEGER	false	[]	(empty)	[]
 query TTTTTTT rowsort
 SHOW SEMANTIC DIMENSIONS IN star_sv FOR METRIC line_item_sum
 ----
-p34fm_customers	customer_country	VARCHAR	false	[]	(empty)	[]
-p34fm_customers	customer_name	VARCHAR	false	[]	(empty)	[]
-p34fm_line_items	item_qty	INTEGER	false	[]	(empty)	[]
+c	customer_country	VARCHAR	false	[]	(empty)	[]
+c	customer_name	VARCHAR	false	[]	(empty)	[]
+li	item_qty	INTEGER	false	[]	(empty)	[]
 
 # ============================================================
 # Test 4: Non-existent metric
@@ -160,7 +160,7 @@ CREATE SEMANTIC VIEW derived_sv AS
 query TTTTTTT rowsort
 SHOW SEMANTIC DIMENSIONS IN derived_sv FOR METRIC double_total
 ----
-p34fm_customers	customer_name	VARCHAR	false	[]	(empty)	[]
+c	customer_name	VARCHAR	false	[]	(empty)	[]
 
 # ============================================================
 # Test 7: Case insensitivity
@@ -169,7 +169,7 @@ p34fm_customers	customer_name	VARCHAR	false	[]	(empty)	[]
 query TTTTTTT rowsort
 show semantic dimensions in derived_sv for metric order_total
 ----
-p34fm_customers	customer_name	VARCHAR	false	[]	(empty)	[]
+c	customer_name	VARCHAR	false	[]	(empty)	[]
 
 # ============================================================
 # Phase 7 PR 4e, Snowflake fixture 8: a metric lists every dimension it can be
@@ -230,28 +230,28 @@ CREATE SEMANTIC VIEW p34fm8_sv AS
 query TTTTTTT rowsort
 SHOW SEMANTIC DIMENSIONS IN p34fm8_sv FOR METRIC order_count
 ----
-p34fm8_items	qty	INTEGER	false	[]	(empty)	[]
-p34fm8_notes	kind	VARCHAR	false	[]	(empty)	[]
-p34fm8_orders	placed_at	DATE	false	[]	(empty)	[]
-p34fm8_regions	region	VARCHAR	false	[]	(empty)	[]
+li	qty	INTEGER	false	[]	(empty)	[]
+n	kind	VARCHAR	false	[]	(empty)	[]
+o	placed_at	DATE	false	[]	(empty)	[]
+r	region	VARCHAR	false	[]	(empty)	[]
 
 # S2: an item metric lists the notes' kind, reached up to orders and down.
 query TTTTTTT rowsort
 SHOW SEMANTIC DIMENSIONS IN p34fm8_sv FOR METRIC item_count
 ----
-p34fm8_items	qty	INTEGER	false	[]	(empty)	[]
-p34fm8_notes	kind	VARCHAR	false	[]	(empty)	[]
-p34fm8_orders	placed_at	DATE	false	[]	(empty)	[]
-p34fm8_regions	region	VARCHAR	false	[]	(empty)	[]
+li	qty	INTEGER	false	[]	(empty)	[]
+n	kind	VARCHAR	false	[]	(empty)	[]
+o	placed_at	DATE	false	[]	(empty)	[]
+r	region	VARCHAR	false	[]	(empty)	[]
 
 # S3: a region metric lists every dimension below it.
 query TTTTTTT rowsort
 SHOW SEMANTIC DIMENSIONS IN p34fm8_sv FOR METRIC region_count
 ----
-p34fm8_items	qty	INTEGER	false	[]	(empty)	[]
-p34fm8_notes	kind	VARCHAR	false	[]	(empty)	[]
-p34fm8_orders	placed_at	DATE	false	[]	(empty)	[]
-p34fm8_regions	region	VARCHAR	false	[]	(empty)	[]
+li	qty	INTEGER	false	[]	(empty)	[]
+n	kind	VARCHAR	false	[]	(empty)	[]
+o	placed_at	DATE	false	[]	(empty)	[]
+r	region	VARCHAR	false	[]	(empty)	[]
 
 # S4: and the query answers it, each order once per kind (order 3 has none).
 query TI
@@ -266,8 +266,8 @@ NULL	1
 query TTTTTTT rowsort
 SHOW SEMANTIC DIMENSIONS IN p34fm8_sv FOR METRIC latest_orders
 ----
-p34fm8_orders	placed_at	DATE	false	[]	(empty)	[]
-p34fm8_regions	region	VARCHAR	false	[]	(empty)	[]
+o	placed_at	DATE	false	[]	(empty)	[]
+r	region	VARCHAR	false	[]	(empty)	[]
 
 statement error
 SELECT * FROM SEMANTIC_VIEW(p34fm8_sv DIMENSIONS li.qty METRICS o.latest_orders);
@@ -281,7 +281,7 @@ fan trap
 query TTTTTTT rowsort
 SHOW SEMANTIC DIMENSIONS IN p34fm8_sv FOR METRIC orders_at_qty
 ----
-p34fm8_items	qty	INTEGER	false	[]	(empty)	[]
+li	qty	INTEGER	false	[]	(empty)	[]
 
 query II
 SELECT * FROM SEMANTIC_VIEW(p34fm8_sv DIMENSIONS li.qty METRICS o.orders_at_qty) ORDER BY ALL;
@@ -301,10 +301,10 @@ fan trap
 query TTTTTTT rowsort
 SHOW SEMANTIC DIMENSIONS IN p34fm8_sv FOR METRIC running_orders
 ----
-p34fm8_items	qty	INTEGER	false	[]	(empty)	[]
-p34fm8_notes	kind	VARCHAR	false	[]	(empty)	[]
-p34fm8_orders	placed_at	DATE	true	[]	(empty)	[]
-p34fm8_regions	region	VARCHAR	false	[]	(empty)	[]
+li	qty	INTEGER	false	[]	(empty)	[]
+n	kind	VARCHAR	false	[]	(empty)	[]
+o	placed_at	DATE	true	[]	(empty)	[]
+r	region	VARCHAR	false	[]	(empty)	[]
 
 # ... and the query across the fan-out runs over `order_count`'s rows, each
 # order once per qty: the two qty groups of order 1 are peers on 2024-01-10.
@@ -331,7 +331,7 @@ CREATE SEMANTIC VIEW p34fm8_unique AS
 query TTTTTTT rowsort
 SHOW SEMANTIC DIMENSIONS IN p34fm8_unique FOR METRIC order_count
 ----
-p34fm8_orders	placed_at	DATE	false	[]	(empty)	[]
+o	placed_at	DATE	false	[]	(empty)	[]
 
 statement error
 SELECT * FROM SEMANTIC_VIEW(p34fm8_unique DIMENSIONS li.qty METRICS o.order_count);
@@ -377,8 +377,8 @@ CREATE SEMANTIC VIEW p34fm8_range AS
 query TTTTTTT rowsort
 SHOW SEMANTIC DIMENSIONS IN p34fm8_range FOR METRIC period_count
 ----
-p34fm8_period_notes	kind	VARCHAR	false	[]	(empty)	[]
-p34fm8_periods	label	VARCHAR	false	[]	(empty)	[]
+p	label	VARCHAR	false	[]	(empty)	[]
+pn	kind	VARCHAR	false	[]	(empty)	[]
 
 statement error
 SELECT * FROM SEMANTIC_VIEW(p34fm8_range DIMENSIONS ti.qty METRICS p.period_count);
@@ -390,9 +390,9 @@ fan trap
 query TTTTTTT rowsort
 SHOW SEMANTIC DIMENSIONS IN p34fm8_range FOR METRIC item_count
 ----
-p34fm8_period_notes	kind	VARCHAR	false	[]	(empty)	[]
-p34fm8_periods	label	VARCHAR	false	[]	(empty)	[]
-p34fm8_timed_items	qty	INTEGER	false	[]	(empty)	[]
+p	label	VARCHAR	false	[]	(empty)	[]
+pn	kind	VARCHAR	false	[]	(empty)	[]
+ti	qty	INTEGER	false	[]	(empty)	[]
 
 statement ok
 DROP SEMANTIC VIEW p34fm8_range

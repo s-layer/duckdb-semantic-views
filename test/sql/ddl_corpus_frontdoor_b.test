@@ -213,10 +213,10 @@ METRICS (
 query TTTTT nosort
 SELECT * FROM describe_semantic_view('dcf_r1') WHERE object_kind = 'RELATIONSHIP';
 ----
-RELATIONSHIP	rel_x	dcf_orders	TABLE	dcf_orders
-RELATIONSHIP	rel_x	dcf_orders	REF_TABLE	dcf_customers
-RELATIONSHIP	rel_x	dcf_orders	FOREIGN_KEY	["customer_id"]
-RELATIONSHIP	rel_x	dcf_orders	REF_KEY	["id"]
+RELATIONSHIP	rel_x	a1	TABLE	a1
+RELATIONSHIP	rel_x	a1	REF_TABLE	a2
+RELATIONSHIP	rel_x	a1	FOREIGN_KEY	["customer_id"]
+RELATIONSHIP	rel_x	a1	REF_KEY	["id"]
 
 # F-057: parse_proptest.rs::metric_using_clause_roundtrip — USING in lower / mixed / upper case attaches the named relationship to the metric; GET_DDL renders it upper case
 statement ok

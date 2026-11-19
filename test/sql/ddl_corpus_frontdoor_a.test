@@ -150,36 +150,36 @@ DIMENSIONS (
 query TTTTT nosort
 DeScRiBe SeMaNtIc ViEw dcf_c2;
 ----
-TABLE	dcf_orders	(empty)	BASE_TABLE_DATABASE_NAME	memory
-TABLE	dcf_orders	(empty)	BASE_TABLE_SCHEMA_NAME	main
-TABLE	dcf_orders	(empty)	BASE_TABLE_NAME	dcf_orders
-TABLE	dcf_orders	(empty)	PRIMARY_KEY	["id"]
-DIMENSION	region	dcf_orders	TABLE	dcf_orders
-DIMENSION	region	dcf_orders	EXPRESSION	region
-DIMENSION	region	dcf_orders	DATA_TYPE	VARCHAR
+TABLE	t	(empty)	BASE_TABLE_DATABASE_NAME	memory
+TABLE	t	(empty)	BASE_TABLE_SCHEMA_NAME	main
+TABLE	t	(empty)	BASE_TABLE_NAME	dcf_orders
+TABLE	t	(empty)	PRIMARY_KEY	["id"]
+DIMENSION	region	t	TABLE	t
+DIMENSION	region	t	EXPRESSION	region
+DIMENSION	region	t	DATA_TYPE	VARCHAR
 
 # F-006: detect.rs::desc_abbreviation_maps_to_describe — DESC SEMANTIC VIEW is DESCRIBE, case-insensitively and with runs of whitespace between the keywords
 query TTTTT nosort
 DESC SEMANTIC VIEW dcf_c2;
 ----
-TABLE	dcf_orders	(empty)	BASE_TABLE_DATABASE_NAME	memory
-TABLE	dcf_orders	(empty)	BASE_TABLE_SCHEMA_NAME	main
-TABLE	dcf_orders	(empty)	BASE_TABLE_NAME	dcf_orders
-TABLE	dcf_orders	(empty)	PRIMARY_KEY	["id"]
-DIMENSION	region	dcf_orders	TABLE	dcf_orders
-DIMENSION	region	dcf_orders	EXPRESSION	region
-DIMENSION	region	dcf_orders	DATA_TYPE	VARCHAR
+TABLE	t	(empty)	BASE_TABLE_DATABASE_NAME	memory
+TABLE	t	(empty)	BASE_TABLE_SCHEMA_NAME	main
+TABLE	t	(empty)	BASE_TABLE_NAME	dcf_orders
+TABLE	t	(empty)	PRIMARY_KEY	["id"]
+DIMENSION	region	t	TABLE	t
+DIMENSION	region	t	EXPRESSION	region
+DIMENSION	region	t	DATA_TYPE	VARCHAR
 
 query TTTTT nosort
 desc   semantic   view dcf_c2;
 ----
-TABLE	dcf_orders	(empty)	BASE_TABLE_DATABASE_NAME	memory
-TABLE	dcf_orders	(empty)	BASE_TABLE_SCHEMA_NAME	main
-TABLE	dcf_orders	(empty)	BASE_TABLE_NAME	dcf_orders
-TABLE	dcf_orders	(empty)	PRIMARY_KEY	["id"]
-DIMENSION	region	dcf_orders	TABLE	dcf_orders
-DIMENSION	region	dcf_orders	EXPRESSION	region
-DIMENSION	region	dcf_orders	DATA_TYPE	VARCHAR
+TABLE	t	(empty)	BASE_TABLE_DATABASE_NAME	memory
+TABLE	t	(empty)	BASE_TABLE_SCHEMA_NAME	main
+TABLE	t	(empty)	BASE_TABLE_NAME	dcf_orders
+TABLE	t	(empty)	PRIMARY_KEY	["id"]
+DIMENSION	region	t	TABLE	t
+DIMENSION	region	t	EXPRESSION	region
+DIMENSION	region	t	DATA_TYPE	VARCHAR
 
 # F-007: detect.rs::desc_requires_word_boundary — DESCXYZ is neither DESC nor DESCRIBE [syntax]
 statement error
@@ -246,17 +246,17 @@ query TTTTTT nosort
 query TTTTT nosort
 		DESCRIBE SEMANTIC VIEW dcf_ws1;
 ----
-TABLE	dcf_orders	(empty)	BASE_TABLE_DATABASE_NAME	memory
-TABLE	dcf_orders	(empty)	BASE_TABLE_SCHEMA_NAME	main
-TABLE	dcf_orders	(empty)	BASE_TABLE_NAME	dcf_orders
-TABLE	dcf_orders	(empty)	PRIMARY_KEY	["id"]
-DIMENSION	region	dcf_orders	TABLE	dcf_orders
-DIMENSION	region	dcf_orders	EXPRESSION	region
-DIMENSION	region	dcf_orders	DATA_TYPE	VARCHAR
-METRIC	revenue	dcf_orders	TABLE	dcf_orders
-METRIC	revenue	dcf_orders	EXPRESSION	SUM(amount)
-METRIC	revenue	dcf_orders	DATA_TYPE	HUGEINT
-METRIC	revenue	dcf_orders	ACCESS_MODIFIER	PUBLIC
+TABLE	t	(empty)	BASE_TABLE_DATABASE_NAME	memory
+TABLE	t	(empty)	BASE_TABLE_SCHEMA_NAME	main
+TABLE	t	(empty)	BASE_TABLE_NAME	dcf_orders
+TABLE	t	(empty)	PRIMARY_KEY	["id"]
+DIMENSION	region	t	TABLE	t
+DIMENSION	region	t	EXPRESSION	region
+DIMENSION	region	t	DATA_TYPE	VARCHAR
+METRIC	revenue	t	TABLE	t
+METRIC	revenue	t	EXPRESSION	SUM(amount)
+METRIC	revenue	t	DATA_TYPE	HUGEINT
+METRIC	revenue	t	ACCESS_MODIFIER	PUBLIC
 
 statement ok
  	 DROP SEMANTIC VIEW IF EXISTS dcf_ws1;
@@ -284,13 +284,13 @@ DIMENSIONS (
 query TTTTT nosort
 DESCRIBE SEMANTIC VIEW dcf_semi;;
 ----
-TABLE	dcf_orders	(empty)	BASE_TABLE_DATABASE_NAME	memory
-TABLE	dcf_orders	(empty)	BASE_TABLE_SCHEMA_NAME	main
-TABLE	dcf_orders	(empty)	BASE_TABLE_NAME	dcf_orders
-TABLE	dcf_orders	(empty)	PRIMARY_KEY	["id"]
-DIMENSION	region	dcf_orders	TABLE	dcf_orders
-DIMENSION	region	dcf_orders	EXPRESSION	region
-DIMENSION	region	dcf_orders	DATA_TYPE	VARCHAR
+TABLE	t	(empty)	BASE_TABLE_DATABASE_NAME	memory
+TABLE	t	(empty)	BASE_TABLE_SCHEMA_NAME	main
+TABLE	t	(empty)	BASE_TABLE_NAME	dcf_orders
+TABLE	t	(empty)	PRIMARY_KEY	["id"]
+DIMENSION	region	t	TABLE	t
+DIMENSION	region	t	EXPRESSION	region
+DIMENSION	region	t	DATA_TYPE	VARCHAR
 
 query TTTTTT nosort
 SHOW SEMANTIC VIEWS;;;
@@ -401,17 +401,17 @@ query TTTTT nosort
 DESCRIBE	
 SEMANTIC	VIEW dcf_pw2;
 ----
-TABLE	dcf_orders	(empty)	BASE_TABLE_DATABASE_NAME	memory
-TABLE	dcf_orders	(empty)	BASE_TABLE_SCHEMA_NAME	main
-TABLE	dcf_orders	(empty)	BASE_TABLE_NAME	dcf_orders
-TABLE	dcf_orders	(empty)	PRIMARY_KEY	["id"]
-DIMENSION	region	dcf_orders	TABLE	dcf_orders
-DIMENSION	region	dcf_orders	EXPRESSION	region
-DIMENSION	region	dcf_orders	DATA_TYPE	VARCHAR
-METRIC	revenue	dcf_orders	TABLE	dcf_orders
-METRIC	revenue	dcf_orders	EXPRESSION	SUM(amount)
-METRIC	revenue	dcf_orders	DATA_TYPE	HUGEINT
-METRIC	revenue	dcf_orders	ACCESS_MODIFIER	PUBLIC
+TABLE	t	(empty)	BASE_TABLE_DATABASE_NAME	memory
+TABLE	t	(empty)	BASE_TABLE_SCHEMA_NAME	main
+TABLE	t	(empty)	BASE_TABLE_NAME	dcf_orders
+TABLE	t	(empty)	PRIMARY_KEY	["id"]
+DIMENSION	region	t	TABLE	t
+DIMENSION	region	t	EXPRESSION	region
+DIMENSION	region	t	DATA_TYPE	VARCHAR
+METRIC	revenue	t	TABLE	t
+METRIC	revenue	t	EXPRESSION	SUM(amount)
+METRIC	revenue	t	DATA_TYPE	HUGEINT
+METRIC	revenue	t	ACCESS_MODIFIER	PUBLIC
 
 query TTTTTT nosort
 SHOW
@@ -559,13 +559,13 @@ CREATE OR REPLACE SEMANTIC VIEW dcf_abcdefghijklmnopqrstuvwxyz AS
 query TTTTT nosort
 DESCRIBE SEMANTIC VIEW _dcf_u;
 ----
-TABLE	dcf_orders	(empty)	BASE_TABLE_DATABASE_NAME	memory
-TABLE	dcf_orders	(empty)	BASE_TABLE_SCHEMA_NAME	main
-TABLE	dcf_orders	(empty)	BASE_TABLE_NAME	dcf_orders
-TABLE	dcf_orders	(empty)	PRIMARY_KEY	["id"]
-DIMENSION	region	dcf_orders	TABLE	dcf_orders
-DIMENSION	region	dcf_orders	EXPRESSION	region
-DIMENSION	region	dcf_orders	DATA_TYPE	VARCHAR
+TABLE	t	(empty)	BASE_TABLE_DATABASE_NAME	memory
+TABLE	t	(empty)	BASE_TABLE_SCHEMA_NAME	main
+TABLE	t	(empty)	BASE_TABLE_NAME	dcf_orders
+TABLE	t	(empty)	PRIMARY_KEY	["id"]
+DIMENSION	region	t	TABLE	t
+DIMENSION	region	t	EXPRESSION	region
+DIMENSION	region	t	DATA_TYPE	VARCHAR
 
 statement ok
 DROP SEMANTIC VIEW IF EXISTS dcf_abcdefghijklmnopqrstuvwxyz;
@@ -595,13 +595,13 @@ SELECT count(*) FROM describe_semantic_view('DCF_MIXEDCASE');
 query TTTTT nosort
 DESCRIBE SEMANTIC VIEW DCF_MIXEDCASE;
 ----
-TABLE	dcf_orders	(empty)	BASE_TABLE_DATABASE_NAME	memory
-TABLE	dcf_orders	(empty)	BASE_TABLE_SCHEMA_NAME	main
-TABLE	dcf_orders	(empty)	BASE_TABLE_NAME	dcf_orders
-TABLE	dcf_orders	(empty)	PRIMARY_KEY	["id"]
-DIMENSION	region	dcf_orders	TABLE	dcf_orders
-DIMENSION	region	dcf_orders	EXPRESSION	region
-DIMENSION	region	dcf_orders	DATA_TYPE	VARCHAR
+TABLE	t	(empty)	BASE_TABLE_DATABASE_NAME	memory
+TABLE	t	(empty)	BASE_TABLE_SCHEMA_NAME	main
+TABLE	t	(empty)	BASE_TABLE_NAME	dcf_orders
+TABLE	t	(empty)	PRIMARY_KEY	["id"]
+DIMENSION	region	t	TABLE	t
+DIMENSION	region	t	EXPRESSION	region
+DIMENSION	region	t	DATA_TYPE	VARCHAR
 
 statement ok
 DROP SEMANTIC VIEW dCf_mIxEdCaSe;
@@ -634,13 +634,13 @@ DIMENSIONS (
 query TTTTT nosort
 DESCRIBE SEMANTIC VIEW "DCF HOSTILE, (X).Y-Z";
 ----
-TABLE	dcf_orders	(empty)	BASE_TABLE_DATABASE_NAME	memory
-TABLE	dcf_orders	(empty)	BASE_TABLE_SCHEMA_NAME	main
-TABLE	dcf_orders	(empty)	BASE_TABLE_NAME	dcf_orders
-TABLE	dcf_orders	(empty)	PRIMARY_KEY	["id"]
-DIMENSION	region	dcf_orders	TABLE	dcf_orders
-DIMENSION	region	dcf_orders	EXPRESSION	region
-DIMENSION	region	dcf_orders	DATA_TYPE	VARCHAR
+TABLE	t	(empty)	BASE_TABLE_DATABASE_NAME	memory
+TABLE	t	(empty)	BASE_TABLE_SCHEMA_NAME	main
+TABLE	t	(empty)	BASE_TABLE_NAME	dcf_orders
+TABLE	t	(empty)	PRIMARY_KEY	["id"]
+DIMENSION	region	t	TABLE	t
+DIMENSION	region	t	EXPRESSION	region
+DIMENSION	region	t	DATA_TYPE	VARCHAR
 
 statement ok
 DROP SEMANTIC VIEW "dcf hostile, (X).y-z";
@@ -718,13 +718,13 @@ SELECT count(*) FROM describe_semantic_view('"PRIMARY KEY (ID)"');
 query TTTTT nosort
 DESCRIBE SEMANTIC VIEW "PRIMARY KEY (ID)";
 ----
-TABLE	dcf_orders	(empty)	BASE_TABLE_DATABASE_NAME	memory
-TABLE	dcf_orders	(empty)	BASE_TABLE_SCHEMA_NAME	main
-TABLE	dcf_orders	(empty)	BASE_TABLE_NAME	dcf_orders
-TABLE	dcf_orders	(empty)	PRIMARY_KEY	["id"]
-DIMENSION	region	dcf_orders	TABLE	dcf_orders
-DIMENSION	region	dcf_orders	EXPRESSION	region
-DIMENSION	region	dcf_orders	DATA_TYPE	VARCHAR
+TABLE	t	(empty)	BASE_TABLE_DATABASE_NAME	memory
+TABLE	t	(empty)	BASE_TABLE_SCHEMA_NAME	main
+TABLE	t	(empty)	BASE_TABLE_NAME	dcf_orders
+TABLE	t	(empty)	PRIMARY_KEY	["id"]
+DIMENSION	region	t	TABLE	t
+DIMENSION	region	t	EXPRESSION	region
+DIMENSION	region	t	DATA_TYPE	VARCHAR
 
 statement ok
 DROP SEMANTIC VIEW IF EXISTS "Drop Semantic View";
@@ -757,13 +757,13 @@ CREATE OR REPLACE SEMANTIC VIEW "we""ird" AS
 query TTTTT nosort
 DESCRIBE SEMANTIC VIEW "We""IRD";
 ----
-TABLE	dcf_orders	(empty)	BASE_TABLE_DATABASE_NAME	memory
-TABLE	dcf_orders	(empty)	BASE_TABLE_SCHEMA_NAME	main
-TABLE	dcf_orders	(empty)	BASE_TABLE_NAME	dcf_orders
-TABLE	dcf_orders	(empty)	PRIMARY_KEY	["id"]
-DIMENSION	region	dcf_orders	TABLE	dcf_orders
-DIMENSION	region	dcf_orders	EXPRESSION	region
-DIMENSION	region	dcf_orders	DATA_TYPE	VARCHAR
+TABLE	t	(empty)	BASE_TABLE_DATABASE_NAME	memory
+TABLE	t	(empty)	BASE_TABLE_SCHEMA_NAME	main
+TABLE	t	(empty)	BASE_TABLE_NAME	dcf_orders
+TABLE	t	(empty)	PRIMARY_KEY	["id"]
+DIMENSION	region	t	TABLE	t
+DIMENSION	region	t	EXPRESSION	region
+DIMENSION	region	t	DATA_TYPE	VARCHAR
 
 statement ok
 DROP SEMANTIC VIEW "WE""ird";

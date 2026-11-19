@@ -106,7 +106,7 @@ SELECT * FROM SEMANTIC_VIEW(p39_sv DIMENSIONS order_id METRICS total_amount)
 query TTTTTTTTT
 SHOW SEMANTIC FACTS IN p39_sv;
 ----
-memory	main	p39_sv	p39_orders	unit_price	DOUBLE	[]	(empty)	[]
+memory	main	p39_sv	o	unit_price	DOUBLE	[]	(empty)	[]
 
 # ============================================================
 # Test 5: SHOW SEMANTIC DIMENSIONS resolves alias to table name
@@ -115,7 +115,7 @@ memory	main	p39_sv	p39_orders	unit_price	DOUBLE	[]	(empty)	[]
 query TTTTTTTTT
 SHOW SEMANTIC DIMENSIONS IN p39_sv;
 ----
-memory	main	p39_sv	p39_orders	order_id	INTEGER	[]	(empty)	[]
+memory	main	p39_sv	o	order_id	INTEGER	[]	(empty)	[]
 
 # ============================================================
 # Test 6: SHOW SEMANTIC METRICS resolves alias to table name
@@ -124,7 +124,7 @@ memory	main	p39_sv	p39_orders	order_id	INTEGER	[]	(empty)	[]
 query TTTTTTTT
 SHOW SEMANTIC METRICS IN p39_sv;
 ----
-memory	main	p39_sv	p39_orders	total_amount	DECIMAL(38,2)	[]	(empty)
+memory	main	p39_sv	o	total_amount	DECIMAL(38,2)	[]	(empty)
 
 # ============================================================
 # Test 7: DESCRIBE shows actual table names; DATA_TYPE rows carry the
@@ -134,21 +134,21 @@ memory	main	p39_sv	p39_orders	total_amount	DECIMAL(38,2)	[]	(empty)
 query TTTTT
 DESCRIBE SEMANTIC VIEW p39_sv;
 ----
-TABLE	p39_orders	(empty)	BASE_TABLE_DATABASE_NAME	memory
-TABLE	p39_orders	(empty)	BASE_TABLE_SCHEMA_NAME	main
-TABLE	p39_orders	(empty)	BASE_TABLE_NAME	p39_orders
-TABLE	p39_orders	(empty)	PRIMARY_KEY	["id"]
-FACT	unit_price	p39_orders	TABLE	p39_orders
-FACT	unit_price	p39_orders	EXPRESSION	o.amount / o.qty
-FACT	unit_price	p39_orders	DATA_TYPE	DOUBLE
-FACT	unit_price	p39_orders	ACCESS_MODIFIER	PUBLIC
-DIMENSION	order_id	p39_orders	TABLE	p39_orders
-DIMENSION	order_id	p39_orders	EXPRESSION	o.id
-DIMENSION	order_id	p39_orders	DATA_TYPE	INTEGER
-METRIC	total_amount	p39_orders	TABLE	p39_orders
-METRIC	total_amount	p39_orders	EXPRESSION	SUM(o.amount)
-METRIC	total_amount	p39_orders	DATA_TYPE	DECIMAL(38,2)
-METRIC	total_amount	p39_orders	ACCESS_MODIFIER	PUBLIC
+TABLE	o	(empty)	BASE_TABLE_DATABASE_NAME	memory
+TABLE	o	(empty)	BASE_TABLE_SCHEMA_NAME	main
+TABLE	o	(empty)	BASE_TABLE_NAME	p39_orders
+TABLE	o	(empty)	PRIMARY_KEY	["id"]
+FACT	unit_price	o	TABLE	o
+FACT	unit_price	o	EXPRESSION	o.amount / o.qty
+FACT	unit_price	o	DATA_TYPE	DOUBLE
+FACT	unit_price	o	ACCESS_MODIFIER	PUBLIC
+DIMENSION	order_id	o	TABLE	o
+DIMENSION	order_id	o	EXPRESSION	o.id
+DIMENSION	order_id	o	DATA_TYPE	INTEGER
+METRIC	total_amount	o	TABLE	o
+METRIC	total_amount	o	EXPRESSION	SUM(o.amount)
+METRIC	total_amount	o	DATA_TYPE	DECIMAL(38,2)
+METRIC	total_amount	o	ACCESS_MODIFIER	PUBLIC
 
 # ============================================================
 # Cleanup

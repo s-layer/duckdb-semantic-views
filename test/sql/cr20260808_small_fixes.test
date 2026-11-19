@@ -34,7 +34,7 @@ CREATE SEMANTIC VIEW cr0808_starts_with_sv AS
 query TTTTTTTTT rowsort
 SHOW SEMANTIC DIMENSIONS IN cr0808_starts_with_sv STARTS WITH 'a_b'
 ----
-memory	main	cr0808_starts_with_sv	cr0808_t	a_b	VARCHAR	[]	(empty)	[]
+memory	main	cr0808_starts_with_sv	t	a_b	VARCHAR	[]	(empty)	[]
 
 # ============================================================
 # IDENT-6 case 2: `%` in the prefix is a literal percent.
@@ -61,8 +61,8 @@ SHOW SEMANTIC DIMENSIONS IN cr0808_starts_with_sv STARTS WITH 'p%'
 query TTTTTTTTT rowsort
 SHOW SEMANTIC DIMENSIONS IN cr0808_starts_with_sv STARTS WITH 'p'
 ----
-memory	main	cr0808_starts_with_sv	cr0808_t	pq	VARCHAR	[]	(empty)	[]
-memory	main	cr0808_starts_with_sv	cr0808_t	pzq	VARCHAR	[]	(empty)	[]
+memory	main	cr0808_starts_with_sv	t	pq	VARCHAR	[]	(empty)	[]
+memory	main	cr0808_starts_with_sv	t	pzq	VARCHAR	[]	(empty)	[]
 
 # ============================================================
 # IDENT-6 control: an ordinary prefix still matches every name
@@ -72,8 +72,8 @@ memory	main	cr0808_starts_with_sv	cr0808_t	pzq	VARCHAR	[]	(empty)	[]
 query TTTTTTTTT rowsort
 SHOW SEMANTIC DIMENSIONS IN cr0808_starts_with_sv STARTS WITH 'a'
 ----
-memory	main	cr0808_starts_with_sv	cr0808_t	a_b	VARCHAR	[]	(empty)	[]
-memory	main	cr0808_starts_with_sv	cr0808_t	axb	VARCHAR	[]	(empty)	[]
+memory	main	cr0808_starts_with_sv	t	a_b	VARCHAR	[]	(empty)	[]
+memory	main	cr0808_starts_with_sv	t	axb	VARCHAR	[]	(empty)	[]
 
 # ============================================================
 # IDENT-6 control: STARTS WITH stays case-SENSITIVE (Snowflake's

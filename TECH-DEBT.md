@@ -753,7 +753,7 @@ Areas where test coverage is reduced compared to ideal, with justification.
 ### 96. ❌ DESCRIBE reports the wrong base table schema and name — OPEN
 
 - **Origin:** 2026-10-16, the Phase 3 DDL corpus (rows C-175, C-176 and C-184 in `ddl_corpus_body_b2.test`, F-090 and F-101 in `ddl_corpus_frontdoor_c.test`).
-- **What is wrong:** `BASE_TABLE_SCHEMA_NAME` is the view's schema, not the table's (`src/ddl/describe.rs`, `collect_table_rows` uses `def.schema_name`), and `BASE_TABLE_NAME` keeps the qualifier and quotes as written (`main.orders`, `"Orders"`). `SHOW SEMANTIC DIMENSIONS` repeats the qualified spelling in `table_name`.
+- **What is wrong:** `BASE_TABLE_SCHEMA_NAME` is the view's schema, not the table's (`src/ddl/describe.rs`, `collect_table_rows` uses `def.schema_name`), and `BASE_TABLE_NAME` keeps the qualifier and quotes as written (`main.orders`, `"Orders"`). (`SHOW`'s `table_name`, a `TABLE` block's `object_name` and members' `TABLE` rows repeated that spelling until they moved to the table's alias, given unquoted, as in Snowflake; only `BASE_TABLE_NAME` still has it.)
 - **What would finish it:** split the stored table reference into its parts and report each unquoted, test-first from those rows.
 
 ### 95. ✅ CREATE accepts an aggregate or a positional parameter as a dimension expression — RESOLVED 2026-10-25
