@@ -196,31 +196,42 @@ struct InnerRequest {
     window_columns: HashMap<usize, String>,
 }
 
-/// Check that the query a window is computed over reads the stored metric name
-/// `name` as that metric.
+/// Check that the query a window is computed over reads the stored name of
+/// `intended`, a metric of `def`, as that same metric.
 ///
 /// The inner query names its metrics by stored name and resolves each as a
-/// member reference, where an unquoted dot splits a qualified `table.member`.
-/// A stored name holding one (`sales.w`, which CREATE never stores but the
-/// public `expand()` accepts) would name member `w` of table `sales`: another
-/// metric's number, or the window itself, recursing without end (#365).
+/// member reference, where an unquoted dot splits a qualified `table.member`
+/// and the first metric of a name wins. A definition `CREATE` never stores but
+/// the public `expand()` accepts can make a name read as another metric: a
+/// stored `sales.w` as member `w` of table `sales`, or a second metric named
+/// `w` as the first. That gives another metric's number, or the window itself,
+/// recursing without end (#365). So the check compares metrics, not names:
+/// `inner_def` is a copy of `def`, slot for slot.
 ///
 /// # Errors
 ///
-/// [`ExpandError::InnerMetricNameMisread`] when `name` resolves to another
+/// [`ExpandError::InnerMetricNameMisread`] when the name resolves to another
 /// metric or to none.
 fn read_as_itself(
     view_name: &str,
+    def: &SemanticViewDefinition,
     inner_def: &SemanticViewDefinition,
-    name: &str,
+    intended: &Metric,
 ) -> Result<(), ExpandError> {
-    let read = super::resolution::find_metric(inner_def, name);
-    if read.is_some_and(|m| m.name == name) {
-        return Ok(());
+    let read = super::resolution::find_metric(inner_def, &intended.name);
+    let slot = def
+        .metrics
+        .iter()
+        .position(|m| std::ptr::eq(m, intended))
+        .and_then(|i| inner_def.metrics.get(i));
+    if let (Some(read), Some(slot)) = (read, slot) {
+        if std::ptr::eq(read, slot) {
+            return Ok(());
+        }
     }
     Err(ExpandError::InnerMetricNameMisread {
         view_name: view_name.to_string(),
-        name: name.to_string(),
+        name: intended.name.clone(),
         read_as: read.map(|m| m.name.clone()),
     })
 }
@@ -251,7 +262,7 @@ fn inner_request(
         }
     };
     for met in resolved_mets.iter().filter(|m| !m.is_window()) {
-        read_as_itself(view_name, &inner_def, &met.name)?;
+        read_as_itself(view_name, def, &inner_def, met)?;
         add(&met.name, &mut inner_metrics);
     }
     let mut window_columns: HashMap<usize, String> = HashMap::new();
@@ -285,35 +296,36 @@ fn inner_request(
         // metric over one does not bind at CREATE, a window over one is
         // refused), so the copy collides with nothing, and an error the inner
         // query raises about it names the metric the user queried.
-        let column = if !met.using_relationships.is_empty() && inner.using_relationships.is_empty()
-        {
-            let same_table = matches!(
-                (&met.source_table, &inner.source_table),
-                (Some(w), Some(t)) if crate::ident::ident_matches(w, t)
-            );
-            if !same_table {
-                return Err(ExpandError::WindowUsingOffItsTable {
-                    view_name: view_name.to_string(),
-                    metric_name: met.name.clone(),
-                    inner_metric: inner.name.clone(),
-                });
-            }
-            let copy = Metric {
-                name: met.name.clone(),
-                using_relationships: met.using_relationships.clone(),
-                ..inner.clone()
+        let (column, intended) =
+            if !met.using_relationships.is_empty() && inner.using_relationships.is_empty() {
+                let same_table = matches!(
+                    (&met.source_table, &inner.source_table),
+                    (Some(w), Some(t)) if crate::ident::ident_matches(w, t)
+                );
+                if !same_table {
+                    return Err(ExpandError::WindowUsingOffItsTable {
+                        view_name: view_name.to_string(),
+                        metric_name: met.name.clone(),
+                        inner_metric: inner.name.clone(),
+                    });
+                }
+                let copy = Metric {
+                    name: met.name.clone(),
+                    using_relationships: met.using_relationships.clone(),
+                    ..inner.clone()
+                };
+                if let Some(slot) = def
+                    .metrics
+                    .iter()
+                    .position(|m| std::ptr::eq(m, *met))
+                    .and_then(|i| inner_def.metrics.get_mut(i))
+                {
+                    *slot = copy;
+                }
+                (met.name.clone(), *met)
+            } else {
+                (inner.name.clone(), inner)
             };
-            if let Some(slot) = inner_def
-                .metrics
-                .iter_mut()
-                .find(|m| crate::ident::ident_matches(&m.name, &met.name))
-            {
-                *slot = copy;
-            }
-            met.name.clone()
-        } else {
-            inner.name.clone()
-        };
         // The inner query resolves `column` as a member reference, so a stored
         // name with an unquoted dot (`t.w`, which CREATE never stores but the
         // public `expand()` accepts) is read as table `t`, member `w`, and can
@@ -328,7 +340,7 @@ fn inner_request(
                 });
             }
         }
-        read_as_itself(view_name, &inner_def, &column)?;
+        read_as_itself(view_name, def, &inner_def, intended)?;
         add(&column, &mut inner_metrics);
         window_columns.insert(i, column);
     }
