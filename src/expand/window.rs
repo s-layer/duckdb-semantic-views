@@ -196,6 +196,35 @@ struct InnerRequest {
     window_columns: HashMap<usize, String>,
 }
 
+/// Check that the query a window is computed over reads the stored metric name
+/// `name` as that metric.
+///
+/// The inner query names its metrics by stored name and resolves each as a
+/// member reference, where an unquoted dot splits a qualified `table.member`.
+/// A stored name holding one (`sales.w`, which CREATE never stores but the
+/// public `expand()` accepts) would name member `w` of table `sales`: another
+/// metric's number, or the window itself, recursing without end (#365).
+///
+/// # Errors
+///
+/// [`ExpandError::InnerMetricNameMisread`] when `name` resolves to another
+/// metric or to none.
+fn read_as_itself(
+    view_name: &str,
+    inner_def: &SemanticViewDefinition,
+    name: &str,
+) -> Result<(), ExpandError> {
+    let read = super::resolution::find_metric(inner_def, name);
+    if read.is_some_and(|m| m.name == name) {
+        return Ok(());
+    }
+    Err(ExpandError::InnerMetricNameMisread {
+        view_name: view_name.to_string(),
+        name: name.to_string(),
+        read_as: read.map(|m| m.name.clone()),
+    })
+}
+
 /// The query a window is computed over (see [`expand_over_result`]).
 ///
 /// # Errors
@@ -222,6 +251,7 @@ fn inner_request(
         }
     };
     for met in resolved_mets.iter().filter(|m| !m.is_window()) {
+        read_as_itself(view_name, &inner_def, &met.name)?;
         add(&met.name, &mut inner_metrics);
     }
     let mut window_columns: HashMap<usize, String> = HashMap::new();
@@ -298,6 +328,7 @@ fn inner_request(
                 });
             }
         }
+        read_as_itself(view_name, &inner_def, &column)?;
         add(&column, &mut inner_metrics);
         window_columns.insert(i, column);
     }
