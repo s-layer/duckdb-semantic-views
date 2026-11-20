@@ -659,6 +659,18 @@ pub enum ExpandError {
         metric_name: String,
         inner_metric: String,
     },
+    /// A query holding a window metric names a metric whose stored name the
+    /// query the window is computed over reads as a different member (or as
+    /// none): a name holding an unquoted `.`, such as `sales.w`, reads as
+    /// member `w` of table `sales`. `CREATE` never stores such a name, but a
+    /// definition handed to `expand()` can hold one. Computing over the other
+    /// member would give another metric's number, or recurse without end when
+    /// it is the window itself (#365).
+    InnerMetricNameMisread {
+        view_name: String,
+        name: String,
+        read_as: Option<String>,
+    },
     /// A window metric with its own `USING` over an inner metric on another
     /// table, or a derived one. The window's `USING` names relationships from
     /// the window's table, and it applies to the inner metric, so the two must
@@ -1288,6 +1300,21 @@ impl fmt::Display for ExpandError {
                     "semantic view '{view_name}': window function metric '{metric_name}' is \
                      computed over '{inner_metric}', which is itself a window function metric. \
                      A window metric must be computed over an aggregate metric."
+                )
+            }
+            Self::InnerMetricNameMisread {
+                view_name,
+                name,
+                read_as,
+            } => {
+                let read = read_as
+                    .as_deref()
+                    .map_or_else(|| "no metric".to_string(), |r| format!("metric '{r}'"));
+                write!(
+                    f,
+                    "semantic view '{view_name}': metric '{name}' cannot be computed beside a \
+                     window function metric: its name reads as {read} in the query the window \
+                     is computed over. Rename the metric so its name holds no unquoted '.'."
                 )
             }
             Self::WindowUsingOffItsTable {

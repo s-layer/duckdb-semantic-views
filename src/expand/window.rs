@@ -196,6 +196,46 @@ struct InnerRequest {
     window_columns: HashMap<usize, String>,
 }
 
+/// Check that the query a window is computed over reads the stored name of
+/// `intended`, a metric of `def`, as that same metric.
+///
+/// The inner query names its metrics by stored name and resolves each as a
+/// member reference, where an unquoted dot splits a qualified `table.member`
+/// and the first metric of a name wins. A definition `CREATE` never stores but
+/// the public `expand()` accepts can make a name read as another metric: a
+/// stored `sales.w` as member `w` of table `sales`, or a second metric named
+/// `w` as the first. That gives another metric's number, or the window itself,
+/// recursing without end (#365). So the check compares metrics, not names:
+/// `inner_def` is a copy of `def`, slot for slot.
+///
+/// # Errors
+///
+/// [`ExpandError::InnerMetricNameMisread`] when the name resolves to another
+/// metric or to none.
+fn read_as_itself(
+    view_name: &str,
+    def: &SemanticViewDefinition,
+    inner_def: &SemanticViewDefinition,
+    intended: &Metric,
+) -> Result<(), ExpandError> {
+    let read = super::resolution::find_metric(inner_def, &intended.name);
+    let slot = def
+        .metrics
+        .iter()
+        .position(|m| std::ptr::eq(m, intended))
+        .and_then(|i| inner_def.metrics.get(i));
+    if let (Some(read), Some(slot)) = (read, slot) {
+        if std::ptr::eq(read, slot) {
+            return Ok(());
+        }
+    }
+    Err(ExpandError::InnerMetricNameMisread {
+        view_name: view_name.to_string(),
+        name: intended.name.clone(),
+        read_as: read.map(|m| m.name.clone()),
+    })
+}
+
 /// The query a window is computed over (see [`expand_over_result`]).
 ///
 /// # Errors
@@ -222,6 +262,7 @@ fn inner_request(
         }
     };
     for met in resolved_mets.iter().filter(|m| !m.is_window()) {
+        read_as_itself(view_name, def, &inner_def, met)?;
         add(&met.name, &mut inner_metrics);
     }
     let mut window_columns: HashMap<usize, String> = HashMap::new();
@@ -255,35 +296,51 @@ fn inner_request(
         // metric over one does not bind at CREATE, a window over one is
         // refused), so the copy collides with nothing, and an error the inner
         // query raises about it names the metric the user queried.
-        let column = if !met.using_relationships.is_empty() && inner.using_relationships.is_empty()
-        {
-            let same_table = matches!(
-                (&met.source_table, &inner.source_table),
-                (Some(w), Some(t)) if crate::ident::ident_matches(w, t)
-            );
-            if !same_table {
-                return Err(ExpandError::WindowUsingOffItsTable {
+        let (column, intended) =
+            if !met.using_relationships.is_empty() && inner.using_relationships.is_empty() {
+                let same_table = matches!(
+                    (&met.source_table, &inner.source_table),
+                    (Some(w), Some(t)) if crate::ident::ident_matches(w, t)
+                );
+                if !same_table {
+                    return Err(ExpandError::WindowUsingOffItsTable {
+                        view_name: view_name.to_string(),
+                        metric_name: met.name.clone(),
+                        inner_metric: inner.name.clone(),
+                    });
+                }
+                let copy = Metric {
+                    name: met.name.clone(),
+                    using_relationships: met.using_relationships.clone(),
+                    ..inner.clone()
+                };
+                if let Some(slot) = def
+                    .metrics
+                    .iter()
+                    .position(|m| std::ptr::eq(m, *met))
+                    .and_then(|i| inner_def.metrics.get_mut(i))
+                {
+                    *slot = copy;
+                }
+                (met.name.clone(), *met)
+            } else {
+                (inner.name.clone(), inner)
+            };
+        // The inner query resolves `column` as a member reference, so a stored
+        // name with an unquoted dot (`t.w`, which CREATE never stores but the
+        // public `expand()` accepts) is read as table `t`, member `w`, and can
+        // land on a window metric: this one, recursing without end (#365).
+        // The inner query must hold no window metric.
+        if let Some(resolved) = super::resolution::find_metric(&inner_def, &column) {
+            if resolved.is_window() {
+                return Err(ExpandError::WindowOverWindow {
                     view_name: view_name.to_string(),
                     metric_name: met.name.clone(),
-                    inner_metric: inner.name.clone(),
+                    inner_metric: column,
                 });
             }
-            let copy = Metric {
-                name: met.name.clone(),
-                using_relationships: met.using_relationships.clone(),
-                ..inner.clone()
-            };
-            if let Some(slot) = inner_def
-                .metrics
-                .iter_mut()
-                .find(|m| crate::ident::ident_matches(&m.name, &met.name))
-            {
-                *slot = copy;
-            }
-            met.name.clone()
-        } else {
-            inner.name.clone()
-        };
+        }
+        read_as_itself(view_name, def, &inner_def, intended)?;
         add(&column, &mut inner_metrics);
         window_columns.insert(i, column);
     }
@@ -443,6 +500,176 @@ mod tests {
             .expect_err("a window over no declared metric is refused");
         assert!(
             matches!(&err, ExpandError::UnknownMetric { name, .. } if name == "\"a\"\"b\""),
+            "got: {err}"
+        );
+    }
+
+    /// Regression for the `fuzz_sql_expand` crash (issue #365): the inner query
+    /// names the inner metric by its stored name, and the inner expansion
+    /// resolves that name as a member reference. A stored name holding an
+    /// unquoted dot (`sales.w`, never produced by CREATE but reachable through
+    /// the public `expand()`) splits into table `sales` and member `w`, which is
+    /// the window metric itself, so each inner query held the window again and
+    /// the expansion recursed until the stack overflowed. The inner query must
+    /// never hold a window metric, so this is refused as a window over a window.
+    #[test]
+    fn window_whose_inner_name_resolves_to_a_window_is_refused() {
+        let def = minimal_def("sales", "store", "store", "total_qty", "SUM(quantity)")
+            .with_metric("sales.w", "SUM(quantity)", Some("sales"))
+            .with_window_metric(
+                "w",
+                WindowSpec {
+                    window_function: "AVG".to_string(),
+                    inner_metric: "sales.w".to_string(),
+                    extra_args: vec![],
+                    excluding_dims: vec![],
+                    partition_dims: vec![],
+                    order_by: vec![],
+                    frame_clause: None,
+                },
+            );
+
+        let req = QueryRequest {
+            where_clause: None,
+            facts: vec![],
+            dimensions: vec![DimensionName::new("store")],
+            metrics: vec![MetricName::new("w")],
+        };
+
+        let err = expand("test_view", &def, &req)
+            .expect_err("an inner query naming the window itself is refused");
+        assert!(
+            matches!(
+                &err,
+                ExpandError::WindowOverWindow { metric_name, inner_metric, .. }
+                    if metric_name == "w" && inner_metric == "sales.w"
+            ),
+            "got: {err}"
+        );
+    }
+
+    /// Second #365 shape (reviewbot on #381): the inner query also carries every
+    /// queried non-window metric by its stored name. A queried metric stored as
+    /// `sales.w`, requested quoted so the outer query resolves it to itself, was
+    /// read by the inner query as table `sales`, member `w`: the window `w`
+    /// queried beside it, so the expansion recursed until the stack overflowed.
+    #[test]
+    fn queried_metric_whose_name_resolves_elsewhere_beside_a_window_is_refused() {
+        let def = minimal_def("sales", "store", "store", "x", "SUM(quantity)")
+            .with_metric("sales.w", "SUM(price)", Some("sales"))
+            .with_window_metric(
+                "w",
+                WindowSpec {
+                    window_function: "AVG".to_string(),
+                    inner_metric: "x".to_string(),
+                    extra_args: vec![],
+                    excluding_dims: vec![],
+                    partition_dims: vec![],
+                    order_by: vec![],
+                    frame_clause: None,
+                },
+            );
+
+        let req = QueryRequest {
+            where_clause: None,
+            facts: vec![],
+            dimensions: vec![DimensionName::new("store")],
+            metrics: vec![MetricName::new("w"), MetricName::new("\"sales.w\"")],
+        };
+
+        let err = expand("test_view", &def, &req)
+            .expect_err("a name the inner query reads as another metric is refused");
+        assert!(
+            matches!(
+                &err,
+                ExpandError::InnerMetricNameMisread { name, read_as, .. }
+                    if name == "sales.w" && read_as.as_deref() == Some("w")
+            ),
+            "got: {err}"
+        );
+    }
+
+    /// The silent-number twin of the #365 shape: a window over a metric stored
+    /// as `sales.w` whose name the inner query reads as table `sales`, member
+    /// `w`, where `w` is an ordinary aggregate. The window was computed over
+    /// `SUM(quantity)` (metric `w`) instead of `SUM(price)` (metric `sales.w`).
+    #[test]
+    fn window_whose_inner_name_resolves_to_another_aggregate_is_refused() {
+        let def = minimal_def("sales", "store", "store", "w", "SUM(quantity)")
+            .with_metric("sales.w", "SUM(price)", Some("sales"))
+            .with_window_metric(
+                "avg_w",
+                WindowSpec {
+                    window_function: "AVG".to_string(),
+                    inner_metric: "sales.w".to_string(),
+                    extra_args: vec![],
+                    excluding_dims: vec![],
+                    partition_dims: vec![],
+                    order_by: vec![],
+                    frame_clause: None,
+                },
+            );
+
+        let req = QueryRequest {
+            where_clause: None,
+            facts: vec![],
+            dimensions: vec![DimensionName::new("store")],
+            metrics: vec![MetricName::new("avg_w")],
+        };
+
+        let err = expand("test_view", &def, &req)
+            .expect_err("a window over a name the inner query reads as another metric is refused");
+        assert!(
+            matches!(
+                &err,
+                ExpandError::InnerMetricNameMisread { name, read_as, .. }
+                    if name == "sales.w" && read_as.as_deref() == Some("w")
+            ),
+            "got: {err}"
+        );
+    }
+
+    /// Two metrics sharing a stored name (reviewbot on #381): window `w` on
+    /// `t1` and an ordinary `w` on `sales`. `CREATE` refuses the pair, but the
+    /// public `expand()` does not. Queried as `w` and `sales.w`, the outer query
+    /// resolves them to the two different metrics, and the inner query read
+    /// `sales.w`'s stored name `w` as the window, recursing without end. A
+    /// check comparing names, not metrics, let it through.
+    #[test]
+    fn queried_metric_sharing_a_window_name_is_refused() {
+        let def = minimal_def("t1", "store", "store", "x", "SUM(quantity)")
+            .clear_metrics()
+            .with_table("sales", "sales", &["id"])
+            .with_pkfk_join("r", "sales", "t1", &["t1_id"], &["id"])
+            .with_metric("x", "SUM(quantity)", Some("t1"))
+            .with_window_metric(
+                "w",
+                WindowSpec {
+                    window_function: "AVG".to_string(),
+                    inner_metric: "x".to_string(),
+                    extra_args: vec![],
+                    excluding_dims: vec![],
+                    partition_dims: vec![],
+                    order_by: vec![],
+                    frame_clause: None,
+                },
+            )
+            .with_metric("w", "SUM(price)", Some("sales"));
+        let req = QueryRequest {
+            where_clause: None,
+            facts: vec![],
+            dimensions: vec![DimensionName::new("store")],
+            metrics: vec![MetricName::new("w"), MetricName::new("sales.w")],
+        };
+
+        let err = expand("test_view", &def, &req)
+            .expect_err("a name the inner query reads as another metric is refused");
+        assert!(
+            matches!(
+                &err,
+                ExpandError::InnerMetricNameMisread { name, read_as, .. }
+                    if name == "w" && read_as.as_deref() == Some("w")
+            ),
             "got: {err}"
         );
     }
