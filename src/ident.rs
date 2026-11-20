@@ -1207,6 +1207,32 @@ mod tests {
             assert_eq!(normalize_ident_part("  Region  "), "region");
         }
 
+        /// A quoted part holding a dot is one identifier, so it must not key
+        /// the same as the two-part qualified name spelled with the same text.
+        /// `"sales.w"` and `sales.w` used to share the key `sales.w`, and a
+        /// view holding both members expanded the wrong one.
+        #[test]
+        fn quoted_part_with_a_dot_keys_apart_from_a_qualified_name() {
+            assert_ne!(
+                normalize_ident_part("\"sales.w\""),
+                normalize_ident_part("sales.w")
+            );
+            assert_ne!(
+                normalize_ident_part("sales.\"sales.w\""),
+                normalize_ident_part("sales.sales.w")
+            );
+            assert!(!ident_matches("\"sales.w\"", "sales.w"));
+            // Still case-insensitive, quoted or not.
+            assert_eq!(
+                normalize_ident_part("\"Sales.W\""),
+                normalize_ident_part("\"sales.w\"")
+            );
+            assert_eq!(
+                normalize_ident_part("Sales.\"Sales.W\""),
+                normalize_ident_part("sales.\"sales.w\"")
+            );
+        }
+
         #[test]
         fn malformed_falls_back_to_lowercase_fold() {
             // Unterminated quote — total, never panics.

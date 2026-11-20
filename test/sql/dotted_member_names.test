@@ -1,0 +1,88 @@
+# A quoted member name holding a dot (`"sales.w"`) is one identifier, distinct
+# from the qualified reference `sales.w` (member `w` of table `sales`). Name
+# matching used to fold both to the same key `sales.w`, so the expansion picked
+# whichever member was registered last: a wrong number with no error. Each
+# case below returned the other member's value before the fix.
+
+require semantic_views
+
+statement ok
+CREATE TABLE dmn_s (id INTEGER PRIMARY KEY, region VARCHAR, qty INTEGER, price INTEGER);
+
+statement ok
+INSERT INTO dmn_s VALUES (1, 'a', 1, 10), (2, 'a', 2, 20);
+
+# ========================================
+# Metrics: the quoted name and the qualified name are two metrics.
+# ========================================
+
+statement ok
+CREATE SEMANTIC VIEW dmn_metrics AS
+TABLES (sales AS dmn_s PRIMARY KEY (id))
+DIMENSIONS (sales.region AS sales.region)
+METRICS (
+    sales."sales.w" AS SUM(price),
+    sales.w AS SUM(qty) * 2,
+    derived_quoted AS "sales.w" + 0,
+    derived_qualified AS sales.w + 0
+)
+
+# Was 6 (metric `w`).
+query TI
+SELECT * FROM semantic_view('dmn_metrics', dimensions := ['region'], metrics := ['"sales.w"'])
+----
+a	30
+
+query TI
+SELECT * FROM semantic_view('dmn_metrics', dimensions := ['region'], metrics := ['sales.w'])
+----
+a	6
+
+# A derived metric over the quoted name. Was 6.
+query TI
+SELECT * FROM semantic_view('dmn_metrics', dimensions := ['region'], metrics := ['derived_quoted'])
+----
+a	30
+
+query TI
+SELECT * FROM semantic_view('dmn_metrics', dimensions := ['region'], metrics := ['derived_qualified'])
+----
+a	6
+
+# ========================================
+# Facts: a metric and a fact over the quoted fact name.
+# ========================================
+
+statement ok
+CREATE SEMANTIC VIEW dmn_facts AS
+TABLES (sales AS dmn_s PRIMARY KEY (id))
+FACTS (
+    sales."sales.f" AS sales.price,
+    sales.f AS sales.qty,
+    sales.g AS "sales.f" + 0
+)
+DIMENSIONS (sales.region AS sales.region)
+METRICS (
+    sales.m_quoted AS SUM("sales.f"),
+    sales.m_qualified AS SUM(sales.f),
+    sales.m_fact_on_fact AS SUM(g)
+)
+
+# Was 3 (fact `f`).
+query TII
+SELECT * FROM semantic_view('dmn_facts', dimensions := ['region'], metrics := ['m_quoted', 'm_qualified'])
+----
+a	30	3
+
+# A fact over the quoted fact name, aggregated. Was 3.
+query TI
+SELECT * FROM semantic_view('dmn_facts', dimensions := ['region'], metrics := ['m_fact_on_fact'])
+----
+a	30
+
+# The same fact queried as a fact. Was 1 and 2.
+query I rowsort
+SELECT * FROM semantic_view('dmn_facts', facts := ['g'])
+----
+10
+20
