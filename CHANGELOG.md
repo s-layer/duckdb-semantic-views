@@ -15,6 +15,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- A quoted member name that contains a dot, such as `"sales.w"`, is no longer confused with a qualified reference spelled the same way, such as metric `w` of table `sales`. A view holding both could return the other member's number: querying the metric, a derived metric that names it, or a metric over a fact named that way silently computed the other member's expression.
 - A member that names its table in another case than `TABLES` declares it (`LI.qty` on the table declared `li`) is listed under that table. `SHOW` gave it an empty `table_name`, and `DESCRIBE` named the view's first table as its parent. A relationship written that way is listed under the declared alias too, and a quoted alias (`"Ship To"`) is listed without its quotes.
 
 ## [0.20.0] - 2026-11-18
