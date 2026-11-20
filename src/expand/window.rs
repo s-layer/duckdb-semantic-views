@@ -447,6 +447,50 @@ mod tests {
         );
     }
 
+    /// Regression for the `fuzz_sql_expand` crash (issue #365): the inner query
+    /// names the inner metric by its stored name, and the inner expansion
+    /// resolves that name as a member reference. A stored name holding an
+    /// unquoted dot (`sales.w`, never produced by CREATE but reachable through
+    /// the public `expand()`) splits into table `sales` and member `w`, which is
+    /// the window metric itself, so each inner query held the window again and
+    /// the expansion recursed until the stack overflowed. The inner query must
+    /// never hold a window metric, so this is refused as a window over a window.
+    #[test]
+    fn window_whose_inner_name_resolves_to_a_window_is_refused() {
+        let def = minimal_def("sales", "store", "store", "total_qty", "SUM(quantity)")
+            .with_metric("sales.w", "SUM(quantity)", Some("sales"))
+            .with_window_metric(
+                "w",
+                WindowSpec {
+                    window_function: "AVG".to_string(),
+                    inner_metric: "sales.w".to_string(),
+                    extra_args: vec![],
+                    excluding_dims: vec![],
+                    partition_dims: vec![],
+                    order_by: vec![],
+                    frame_clause: None,
+                },
+            );
+
+        let req = QueryRequest {
+            where_clause: None,
+            facts: vec![],
+            dimensions: vec![DimensionName::new("store")],
+            metrics: vec![MetricName::new("w")],
+        };
+
+        let err = expand("test_view", &def, &req)
+            .expect_err("an inner query naming the window itself is refused");
+        assert!(
+            matches!(
+                &err,
+                ExpandError::WindowOverWindow { metric_name, inner_metric, .. }
+                    if metric_name == "w" && inner_metric == "sales.w"
+            ),
+            "got: {err}"
+        );
+    }
+
     /// Single window metric with 3 dims -- CTE with GROUP BY all dims,
     /// outer SELECT with window function and PARTITION BY (all minus excluded).
     #[test]
