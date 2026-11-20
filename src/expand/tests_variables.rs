@@ -297,6 +297,45 @@ fn a_materialization_over_a_variable_is_not_used() {
     assert_eq!(kept, vec!["plain"]);
 }
 
+/// The same drop through a quoted dotted name: metric `"s.m"` uses a
+/// variable, and a derived metric reading `"s.m"` is covered by a
+/// materialization. The derived metric's reference keys as `"s.m"`, the key of
+/// the metric's name; keying it by the unquoted last part (`s.m`) missed it,
+/// so the materialization was kept and served the default's numbers.
+#[test]
+fn a_materialization_over_a_variable_through_a_dotted_name_is_not_used() {
+    let mut def = sales_analysis();
+    def.metrics.push(Metric {
+        name: "\"s.m\"".to_string(),
+        expr: "SUM(amount * multiplier)".to_string(),
+        source_table: Some("sales".to_string()),
+        ..Default::default()
+    });
+    def.metrics.push(Metric {
+        name: "d".to_string(),
+        expr: "\"s.m\" + 1".to_string(),
+        source_table: None,
+        ..Default::default()
+    });
+    def.materializations = vec![crate::model::Materialization {
+        name: "over_d".to_string(),
+        table: "mat_over_d".to_string(),
+        dimensions: vec!["region".to_string()],
+        metrics: vec!["d".to_string()],
+    }];
+    let names = vec!["multiplier".to_string(), "target_region".to_string()];
+    let bound = bind(
+        "v",
+        def,
+        Values::Query {
+            names: &names,
+            first_slot: 1,
+        },
+    )
+    .unwrap();
+    assert!(bound.def.materializations.is_empty());
+}
+
 /// A probe needs no value: each variable is its default, as `create_probe`
 /// binds it, or a NULL of its type when it has none. A default keeps a member
 /// whose function refuses a NULL constant (`quantile_cont`) bindable.

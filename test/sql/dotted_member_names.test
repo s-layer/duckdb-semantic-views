@@ -86,3 +86,48 @@ SELECT * FROM semantic_view('dmn_facts', facts := ['g'])
 ----
 10
 20
+
+# An LOD metric beside a plain metric with a quoted dotted name. Beside a plain
+# metric on its home, an INCLUDE value is computed over that metric's rows
+# (fixture 14d C1, as in phase8_lod_child_grain.test). The grain check has to
+# find the plain metric "o.rev" by its own key: when it missed it, the value
+# fell back to the INCLUDE metric alone (late 1100, NULL 100).
+
+statement ok
+CREATE TABLE dmn_customers (customer_id INTEGER, region VARCHAR);
+
+statement ok
+CREATE TABLE dmn_orders (order_id INTEGER, customer_id INTEGER, amount DECIMAL(10,2));
+
+statement ok
+CREATE TABLE dmn_returns (return_id INTEGER, order_id INTEGER, reason VARCHAR);
+
+statement ok
+INSERT INTO dmn_customers VALUES (1, 'North'), (2, 'North'), (3, 'South'), (4, 'South');
+
+statement ok
+INSERT INTO dmn_orders VALUES (101, 1, 400), (102, 1, 200), (103, 1, 300), (104, 1, 100),
+  (105, 2, 200), (106, 2, 100), (107, 3, 300), (108, 3, 200), (109, 3, 100), (110, 4, 200);
+
+statement ok
+INSERT INTO dmn_returns VALUES (1, 101, 'damaged'), (2, 101, 'late'), (3, 103, 'late'), (4, 107, 'damaged'),
+  (5, 102, 'late'), (6, 102, 'late'), (7, 104, NULL);
+
+statement ok
+CREATE SEMANTIC VIEW dmn_lod
+  TABLES (customers AS dmn_customers PRIMARY KEY (customer_id), orders AS dmn_orders PRIMARY KEY (order_id),
+    order_returns AS dmn_returns PRIMARY KEY (return_id))
+  RELATIONSHIPS (orders(customer_id) REFERENCES customers, order_returns(order_id) REFERENCES orders)
+  FACTS (orders.order_amount AS amount)
+  DIMENSIONS (customers.customer_id AS customer_id, order_returns.reason AS reason)
+  METRICS (
+    orders."o.rev" AS SUM(amount),
+    avg_customer_rev AS AVG(SUM(orders.order_amount) INCLUDE DIMENSIONS (customers.customer_id))
+  );
+
+query TRR
+SELECT * FROM SEMANTIC_VIEW(dmn_lod DIMENSIONS order_returns.reason METRICS "o.rev", avg_customer_rev) ORDER BY 1 NULLS LAST;
+----
+damaged	700.00	350.0
+late	900.00	900.0
+NULL	900.00	225.0

@@ -1385,15 +1385,12 @@ pub(super) fn query_grain(
     // The tables of the metrics that read no LOD expression.
     let mut plain_tables: Vec<String> = Vec::new();
     for m in &req.metrics {
-        let name = crate::ident::parse_qualified_identifier(m.as_str())
-            .ok()
-            .and_then(|p| p.last().cloned())
-            .unwrap_or_else(|| m.as_str().to_string());
+        let key = crate::ident::last_part_key(m.as_str());
         let Some((i, metric)) = def
             .metrics
             .iter()
             .enumerate()
-            .find(|(_, x)| ident_matches(&x.name, &name))
+            .find(|(_, x)| crate::ident::normalize_ident_part(&x.name) == key)
         else {
             continue;
         };

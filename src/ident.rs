@@ -539,17 +539,37 @@ pub fn normalize_ident_part(raw: &str) -> String {
     match parse_qualified_identifier_with_quoting(trimmed) {
         Ok(parts) => parts
             .into_iter()
-            .map(|(part, _quoted)| {
-                let folded = part.to_ascii_lowercase();
-                if folded.contains('.') {
-                    format!("\"{}\"", folded.replace('"', "\"\""))
-                } else {
-                    folded
-                }
-            })
+            .map(|(part, _quoted)| part_key(&part))
             .collect::<Vec<_>>()
             .join("."),
         Err(_) => trimmed.to_ascii_lowercase(),
+    }
+}
+
+/// The match key of ONE already-unquoted identifier part, as
+/// [`normalize_ident_part`] writes it inside a whole name's key: folded to
+/// ASCII lowercase, and re-quoted when it contains a `.`.
+fn part_key(part: &str) -> String {
+    let folded = part.to_ascii_lowercase();
+    if folded.contains('.') {
+        format!("\"{}\"", folded.replace('"', "\"\""))
+    } else {
+        folded
+    }
+}
+
+/// The match key of the LAST part of a (possibly dot-qualified, possibly
+/// quoted) identifier: `sales.w` → `w`, while the one-part `"sales.w"` →
+/// `"sales.w"`. It equals [`normalize_ident_part`] of a bare member name, so a
+/// reference's last part can be compared with a member's key; taking the
+/// unquoted part text instead would key `"sales.w"` as the two-part `sales.w`.
+///
+/// Total: input that does not parse keys as [`normalize_ident_part`] does.
+#[must_use]
+pub fn last_part_key(raw: &str) -> String {
+    match parse_qualified_identifier_with_quoting(raw.trim()) {
+        Ok(parts) => parts.last().map(|(p, _)| part_key(p)).unwrap_or_default(),
+        Err(_) => normalize_ident_part(raw),
     }
 }
 
@@ -1244,6 +1264,21 @@ mod tests {
         #[test]
         fn whitespace_trimmed() {
             assert_eq!(normalize_ident_part("  Region  "), "region");
+        }
+
+        #[test]
+        fn last_part_key_matches_a_member_key() {
+            assert_eq!(last_part_key("sales.w"), "w");
+            assert_eq!(
+                last_part_key("\"sales.w\""),
+                normalize_ident_part("\"sales.w\"")
+            );
+            assert_eq!(
+                last_part_key("t.\"Sales.W\""),
+                normalize_ident_part("\"sales.w\"")
+            );
+            assert_ne!(last_part_key("\"sales.w\""), "sales.w");
+            assert_eq!(last_part_key("Main.Sum"), "sum");
         }
 
         /// A quoted part holding a dot is one identifier, so it must not key

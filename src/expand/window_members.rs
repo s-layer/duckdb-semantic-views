@@ -308,12 +308,7 @@ fn derived_table(
 /// its `NON ADDITIVE BY`'s). A name is taken bare: an over-approximation, so
 /// a member it misses can only be one no query step reads.
 pub(super) fn needed(def: &SemanticViewDefinition, req: &QueryRequest) -> HashSet<String> {
-    let last = |name: &str| match crate::ident::parse_qualified_identifier(name) {
-        Ok(parts) => parts
-            .last()
-            .map_or_else(String::new, |p| normalize_ident_part(p)),
-        Err(_) => normalize_ident_part(name),
-    };
+    let last = crate::ident::last_part_key;
     let mut names: HashSet<String> = req
         .dimensions
         .iter()
@@ -723,5 +718,28 @@ mod tests {
             crate::graph::chain_paths(&d, "SALES", "\"st\"", &|_| true).len(),
             1
         );
+    }
+
+    /// A requested quoted dotted name lands in `needed` under its own key,
+    /// `"sales.w"`, the key `normalize_ident_part` gives the member's name.
+    /// Taking the bare last-part text instead keyed it as the two-part
+    /// `sales.w`, so the member it names was never needed.
+    #[test]
+    fn a_quoted_dotted_request_is_needed_under_its_own_key() {
+        let d = def();
+        let req = QueryRequest {
+            facts: vec!["\"sales.w\"".to_string().into()],
+            dimensions: vec!["st.region".to_string().into()],
+            where_clause: Some("\"o.f\" > 0".to_string()),
+            ..Default::default()
+        };
+        let got = needed(&d, &req);
+        assert!(
+            got.contains(&normalize_ident_part("\"sales.w\"")),
+            "{got:?}"
+        );
+        assert!(got.contains(&normalize_ident_part("\"o.f\"")), "{got:?}");
+        assert!(got.contains("region"), "{got:?}");
+        assert!(!got.contains("sales.w"), "{got:?}");
     }
 }
