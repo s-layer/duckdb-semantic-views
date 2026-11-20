@@ -617,6 +617,51 @@ mod tests {
         );
     }
 
+    /// Two metrics sharing a stored name (reviewbot on #381): window `w` on
+    /// `t1` and an ordinary `w` on `sales`. `CREATE` refuses the pair, but the
+    /// public `expand()` does not. Queried as `w` and `sales.w`, the outer query
+    /// resolves them to the two different metrics, and the inner query read
+    /// `sales.w`'s stored name `w` as the window, recursing without end. A
+    /// check comparing names, not metrics, let it through.
+    #[test]
+    fn queried_metric_sharing_a_window_name_is_refused() {
+        let def = minimal_def("t1", "store", "store", "x", "SUM(quantity)")
+            .clear_metrics()
+            .with_table("sales", "sales", &["id"])
+            .with_pkfk_join("r", "sales", "t1", &["t1_id"], &["id"])
+            .with_metric("x", "SUM(quantity)", Some("t1"))
+            .with_window_metric(
+                "w",
+                WindowSpec {
+                    window_function: "AVG".to_string(),
+                    inner_metric: "x".to_string(),
+                    extra_args: vec![],
+                    excluding_dims: vec![],
+                    partition_dims: vec![],
+                    order_by: vec![],
+                    frame_clause: None,
+                },
+            )
+            .with_metric("w", "SUM(price)", Some("sales"));
+        let req = QueryRequest {
+            where_clause: None,
+            facts: vec![],
+            dimensions: vec![DimensionName::new("store")],
+            metrics: vec![MetricName::new("w"), MetricName::new("sales.w")],
+        };
+
+        let err = expand("test_view", &def, &req)
+            .expect_err("a name the inner query reads as another metric is refused");
+        assert!(
+            matches!(
+                &err,
+                ExpandError::InnerMetricNameMisread { name, read_as, .. }
+                    if name == "w" && read_as.as_deref() == Some("w")
+            ),
+            "got: {err}"
+        );
+    }
+
     /// Single window metric with 3 dims -- CTE with GROUP BY all dims,
     /// outer SELECT with window function and PARTITION BY (all minus excluded).
     #[test]
