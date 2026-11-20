@@ -105,7 +105,7 @@ jobs:
       # the checks green (advisories/bans/licenses/sources all OK) — not merely
       # exiting clean.
       - name: cargo-deny (licenses + advisories)
-        uses: EmbarkStudios/cargo-deny-action@v2.1.1
+        uses: EmbarkStudios/cargo-deny-action@v2.1.2
 
   test:
     name: Doctests & extension unit tests
