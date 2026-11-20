@@ -284,6 +284,20 @@ fn inner_request(
         } else {
             inner.name.clone()
         };
+        // The inner query resolves `column` as a member reference, so a stored
+        // name with an unquoted dot (`t.w`, which CREATE never stores but the
+        // public `expand()` accepts) is read as table `t`, member `w`, and can
+        // land on a window metric: this one, recursing without end (#365).
+        // The inner query must hold no window metric.
+        if let Some(resolved) = super::resolution::find_metric(&inner_def, &column) {
+            if resolved.is_window() {
+                return Err(ExpandError::WindowOverWindow {
+                    view_name: view_name.to_string(),
+                    metric_name: met.name.clone(),
+                    inner_metric: column,
+                });
+            }
+        }
         add(&column, &mut inner_metrics);
         window_columns.insert(i, column);
     }
