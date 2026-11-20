@@ -505,6 +505,87 @@ mod tests {
         );
     }
 
+    /// Second #365 shape (reviewbot on #381): the inner query also carries every
+    /// queried non-window metric by its stored name. A queried metric stored as
+    /// `sales.w`, requested quoted so the outer query resolves it to itself, was
+    /// read by the inner query as table `sales`, member `w`: the window `w`
+    /// queried beside it, so the expansion recursed until the stack overflowed.
+    #[test]
+    fn queried_metric_whose_name_resolves_elsewhere_beside_a_window_is_refused() {
+        let def = minimal_def("sales", "store", "store", "x", "SUM(quantity)")
+            .with_metric("sales.w", "SUM(price)", Some("sales"))
+            .with_window_metric(
+                "w",
+                WindowSpec {
+                    window_function: "AVG".to_string(),
+                    inner_metric: "x".to_string(),
+                    extra_args: vec![],
+                    excluding_dims: vec![],
+                    partition_dims: vec![],
+                    order_by: vec![],
+                    frame_clause: None,
+                },
+            );
+
+        let req = QueryRequest {
+            where_clause: None,
+            facts: vec![],
+            dimensions: vec![DimensionName::new("store")],
+            metrics: vec![MetricName::new("w"), MetricName::new("\"sales.w\"")],
+        };
+
+        let err = expand("test_view", &def, &req)
+            .expect_err("a name the inner query reads as another metric is refused");
+        assert!(
+            matches!(
+                &err,
+                ExpandError::InnerMetricNameMisread { name, read_as, .. }
+                    if name == "sales.w" && read_as.as_deref() == Some("w")
+            ),
+            "got: {err}"
+        );
+    }
+
+    /// The silent-number twin of the #365 shape: a window over a metric stored
+    /// as `sales.w` whose name the inner query reads as table `sales`, member
+    /// `w`, where `w` is an ordinary aggregate. The window was computed over
+    /// `SUM(quantity)` (metric `w`) instead of `SUM(price)` (metric `sales.w`).
+    #[test]
+    fn window_whose_inner_name_resolves_to_another_aggregate_is_refused() {
+        let def = minimal_def("sales", "store", "store", "w", "SUM(quantity)")
+            .with_metric("sales.w", "SUM(price)", Some("sales"))
+            .with_window_metric(
+                "avg_w",
+                WindowSpec {
+                    window_function: "AVG".to_string(),
+                    inner_metric: "sales.w".to_string(),
+                    extra_args: vec![],
+                    excluding_dims: vec![],
+                    partition_dims: vec![],
+                    order_by: vec![],
+                    frame_clause: None,
+                },
+            );
+
+        let req = QueryRequest {
+            where_clause: None,
+            facts: vec![],
+            dimensions: vec![DimensionName::new("store")],
+            metrics: vec![MetricName::new("avg_w")],
+        };
+
+        let err = expand("test_view", &def, &req)
+            .expect_err("a window over a name the inner query reads as another metric is refused");
+        assert!(
+            matches!(
+                &err,
+                ExpandError::InnerMetricNameMisread { name, read_as, .. }
+                    if name == "sales.w" && read_as.as_deref() == Some("w")
+            ),
+            "got: {err}"
+        );
+    }
+
     /// Single window metric with 3 dims -- CTE with GROUP BY all dims,
     /// outer SELECT with window function and PARTITION BY (all minus excluded).
     #[test]
