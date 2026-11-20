@@ -550,9 +550,12 @@ mod tests {
 
     /// Second #365 shape (reviewbot on #381): the inner query also carries every
     /// queried non-window metric by its stored name. A queried metric stored as
-    /// `sales.w`, requested quoted so the outer query resolves it to itself, was
-    /// read by the inner query as table `sales`, member `w`: the window `w`
-    /// queried beside it, so the expansion recursed until the stack overflowed.
+    /// `sales.w` and requested quoted used to resolve to itself in the outer
+    /// query, while the inner query read it as table `sales`, member `w`: the
+    /// window `w` queried beside it, so the expansion recursed until the stack
+    /// overflowed. Name keys now keep the quoted one-part `"sales.w"` apart
+    /// from the two-part `sales.w`, so that request names no metric at all and
+    /// is refused before any expansion.
     #[test]
     fn queried_metric_whose_name_resolves_elsewhere_beside_a_window_is_refused() {
         let def = minimal_def("sales", "store", "store", "x", "SUM(quantity)")
@@ -578,15 +581,47 @@ mod tests {
         };
 
         let err = expand("test_view", &def, &req)
-            .expect_err("a name the inner query reads as another metric is refused");
+            .expect_err("a quoted name matching no stored metric is refused");
         assert!(
             matches!(
                 &err,
-                ExpandError::InnerMetricNameMisread { name, read_as, .. }
-                    if name == "sales.w" && read_as.as_deref() == Some("w")
+                ExpandError::UnknownMetric { name, .. } if name == "\"sales.w\""
             ),
             "got: {err}"
         );
+    }
+
+    /// The same shape with the metric stored quoted, as DDL stores a dotted
+    /// name: the inner query's lookup of `"sales.w"` now finds that metric
+    /// itself, not the window `w`, so the query expands, and the inner query
+    /// aggregates `SUM(price)` rather than recursing into the window.
+    #[test]
+    fn quoted_dotted_metric_beside_a_window_reads_itself() {
+        let def = minimal_def("sales", "store", "store", "x", "SUM(quantity)")
+            .with_metric("\"sales.w\"", "SUM(price)", Some("sales"))
+            .with_window_metric(
+                "w",
+                WindowSpec {
+                    window_function: "AVG".to_string(),
+                    inner_metric: "x".to_string(),
+                    extra_args: vec![],
+                    excluding_dims: vec![],
+                    partition_dims: vec![],
+                    order_by: vec![],
+                    frame_clause: None,
+                },
+            );
+
+        let req = QueryRequest {
+            where_clause: None,
+            facts: vec![],
+            dimensions: vec![DimensionName::new("store")],
+            metrics: vec![MetricName::new("w"), MetricName::new("\"sales.w\"")],
+        };
+
+        let sql = expand("test_view", &def, &req).expect("a dotted quoted name reads itself");
+        assert!(sql.contains("SUM(price)"), "{sql}");
+        assert!(sql.contains("AVG("), "{sql}");
     }
 
     /// The silent-number twin of the #365 shape: a window over a metric stored

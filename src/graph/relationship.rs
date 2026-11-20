@@ -137,13 +137,14 @@ impl RelationshipGraph {
                 let mut seen_names: HashMap<String, &str> = HashMap::new();
                 for j in &joins_from_source {
                     let name = j.name.as_deref().unwrap_or_default();
-                    let key = crate::ident::normalize_ident_part(name);
+                    // The alias's logical value, as `scoped_join_alias` builds it.
+                    let key = crate::ident::fold_ident_value(name);
                     if let Some(first) = seen_names.get(&key) {
                         return Err(format!(
                             "relationships '{first}' and '{name}' to '{node}' would both be \
                              joined as '{}__{key}'; role-playing relationships to one table \
                              need names that differ once quotes are removed and case is folded",
-                            crate::ident::normalize_ident_part(node)
+                            crate::ident::fold_ident_value(node)
                         ));
                     }
                     seen_names.insert(key, name);

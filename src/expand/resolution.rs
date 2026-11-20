@@ -644,10 +644,8 @@ mod tests {
 
         /// `dim_ref_key`: an UNRESOLVED reference's fallback key carries the
         /// sentinel prefix, so it can never collide with a real dimension key —
-        /// even one whose stored name is a *quoted dotted* identifier that
-        /// normalizes to the same text (`"s.date"` → `s.date`, the same
-        /// normalization an unresolved qualified `s.date` would produce). Copilot
-        /// review on #130.
+        /// even one whose stored name is a *quoted dotted* identifier (`"s.date"`)
+        /// spelled like an unresolved qualified `s.date`. Copilot review on #130.
         #[test]
         fn dim_ref_key_unresolved_never_collides_with_quoted_dotted_dim_name() {
             let mut def = def_with_db_schema(None, None);
@@ -657,7 +655,7 @@ mod tests {
                 ..Default::default()
             }];
             // Stored dimension name is a QUOTED DOTTED identifier: `"s.date"`.
-            // Its canonical key is the plain `s.date`.
+            // Its key stays quoted, `"s.date"`, so it is apart from `s.date`.
             def.dimensions = vec![Dimension {
                 name: "\"s.date\"".to_string(),
                 expr: "o.sale_date".to_string(),
@@ -665,8 +663,8 @@ mod tests {
                 ..Default::default()
             }];
 
-            // The declared dimension resolves to the plain key.
-            assert_eq!(dim_ref_key(&def, "\"s.date\""), "s.date");
+            // The declared dimension resolves to its own, quoted key.
+            assert_eq!(dim_ref_key(&def, "\"s.date\""), "\"s.date\"");
 
             // A qualified reference `s.date` (alias `s`, name `date`) matches no
             // declared dimension, so it must NOT key as `s.date` (which would
