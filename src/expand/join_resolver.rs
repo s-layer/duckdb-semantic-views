@@ -16,7 +16,8 @@ use super::types::ExpandError;
 /// Build a role-playing scoped alias in the documented `{table}__{rel}` format.
 ///
 /// The result is the alias's *logical* value — never SQL text. Both parts go
-/// through [`crate::ident::normalize_ident_part`], so a stored, quoted
+/// through [`crate::ident::fold_ident_value`] (not the match key, which
+/// re-quotes a dotted part), so a stored, quoted
 /// relationship name (`"de p"`, embedded `""` and all) contributes its
 /// unquoted, case-folded value (`de p`) rather than its delimiters (TECH-DEBT
 /// #70, MM-2). Every emission site then quotes the alias exactly once: the
@@ -31,8 +32,8 @@ use super::types::ExpandError;
 pub(super) fn scoped_join_alias(table: &str, rel: &str) -> String {
     format!(
         "{}__{}",
-        crate::ident::normalize_ident_part(table),
-        crate::ident::normalize_ident_part(rel)
+        crate::ident::fold_ident_value(table),
+        crate::ident::fold_ident_value(rel)
     )
 }
 

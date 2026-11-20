@@ -523,11 +523,70 @@ pub fn find_identifier_end(input: &str, allow_paren: bool) -> usize {
 /// unaffected — normalization happens only at match time, so `DESCRIBE` /
 /// `GET_DDL` still show the name as originally written).
 ///
+/// The key keeps part boundaries: a part that itself contains a `.` (only
+/// possible when it was quoted) is re-quoted in the key, so the one-part
+/// `"x.y"` keys as `"x.y"` while the two-part `x.y` keys as `x.y`. `DuckDB`
+/// resolves those as different identifiers, and a key that joined them would
+/// let one member's expression stand in for the other's. Parts without a dot
+/// key exactly as before, so ordinary names are unaffected.
+///
 /// Total by construction: input that is not a well-formed identifier (an
 /// unterminated quote, an empty part) falls back to a lowercase fold of the
 /// trimmed raw text, so name matching never panics or errors.
 #[must_use]
 pub fn normalize_ident_part(raw: &str) -> String {
+    let trimmed = raw.trim();
+    match parse_qualified_identifier_with_quoting(trimmed) {
+        Ok(parts) => parts
+            .into_iter()
+            .map(|(part, _quoted)| part_key(&part))
+            .collect::<Vec<_>>()
+            .join("."),
+        Err(_) => trimmed.to_ascii_lowercase(),
+    }
+}
+
+/// The match key of ONE already-unquoted identifier part, as
+/// [`normalize_ident_part`] writes it inside a whole name's key: folded to
+/// ASCII lowercase, and re-quoted when it contains a `.`.
+fn part_key(part: &str) -> String {
+    let folded = part.to_ascii_lowercase();
+    if folded.contains('.') {
+        format!("\"{}\"", folded.replace('"', "\"\""))
+    } else {
+        folded
+    }
+}
+
+/// The match key of the LAST part of a (possibly dot-qualified, possibly
+/// quoted) identifier: `sales.w` → `w`, while the one-part `"sales.w"` →
+/// `"sales.w"`. It equals [`normalize_ident_part`] of a bare member name, so a
+/// reference's last part can be compared with a member's key; taking the
+/// unquoted part text instead would key `"sales.w"` as the two-part `sales.w`.
+///
+/// Total: input that does not parse keys as [`normalize_ident_part`] does.
+#[must_use]
+pub fn last_part_key(raw: &str) -> String {
+    match parse_qualified_identifier_with_quoting(raw.trim()) {
+        Ok(parts) => parts.last().map(|(p, _)| part_key(p)).unwrap_or_default(),
+        Err(_) => normalize_ident_part(raw),
+    }
+}
+
+/// The *logical value* of a (possibly dot-qualified, possibly quoted)
+/// identifier: each part with its quotes stripped and folded to ASCII
+/// lowercase, joined with `.`, with no quoting added back.
+///
+/// This is for building a new identifier from a stored one, such as the
+/// role-playing join alias `{table}__{rel}`, which every emission site then
+/// quotes exactly once. It is NOT a match key: the one-part `"x.y"` and the
+/// two-part `x.y` share the value `x.y`. Compare names with
+/// [`normalize_ident_part`] or [`ident_matches`] instead.
+///
+/// Total, like [`normalize_ident_part`]: input that does not parse as an
+/// identifier yields the lowercased trimmed text.
+#[must_use]
+pub fn fold_ident_value(raw: &str) -> String {
     let trimmed = raw.trim();
     match parse_qualified_identifier_with_quoting(trimmed) {
         Ok(parts) => parts
@@ -544,11 +603,9 @@ pub fn normalize_ident_part(raw: &str) -> String {
 /// folded to ASCII lowercase, as [`normalize_ident_part`] does, but kept as a
 /// list rather than joined with `.`.
 ///
-/// [`normalize_ident_part`] is lossy for an identifier slot that may be
-/// dot-qualified: the two-part `x.y` and the one-part `"x.y"` (a quoted name
-/// containing a dot) both normalize to `x.y`, although `DuckDB` resolves them as
-/// different identifiers. Relationship names are such a slot
-/// (`model::slot_qualified`), so they are keyed with this instead.
+/// Relationship names (`model::slot_qualified`) are keyed with this, where the
+/// parts are compared as a list. [`normalize_ident_part`] gives the same
+/// distinctions as a single string, re-quoting any part that contains a dot.
 ///
 /// Total, like [`normalize_ident_part`]: input that does not parse as an
 /// identifier keys as [`IdentKey::Unparsed`], which never equals a parsed key.
@@ -652,9 +709,11 @@ mod tests {
 
     #[test]
     fn ident_key_keeps_identifier_parts_apart() {
-        // One part containing a dot vs. two parts: `normalize_ident_part`
-        // joins both to `x.y`; `ident_key` does not.
-        assert_eq!(normalize_ident_part("x.y"), normalize_ident_part("\"x.y\""));
+        // One part containing a dot vs. two parts: neither key joins them,
+        // only the logical value does.
+        assert_ne!(normalize_ident_part("x.y"), normalize_ident_part("\"x.y\""));
+        assert_eq!(fold_ident_value("x.y"), fold_ident_value("\"x.y\""));
+        assert_eq!(fold_ident_value("\"De P\".\"x.Y\""), "de p.x.y");
         assert_ne!(ident_key("x.y"), ident_key("\"x.y\""));
         // The same two parts in any quoting and case are one key.
         assert_eq!(ident_key("x.y"), ident_key("\"X\".\"y\""));
@@ -1205,6 +1264,47 @@ mod tests {
         #[test]
         fn whitespace_trimmed() {
             assert_eq!(normalize_ident_part("  Region  "), "region");
+        }
+
+        #[test]
+        fn last_part_key_matches_a_member_key() {
+            assert_eq!(last_part_key("sales.w"), "w");
+            assert_eq!(
+                last_part_key("\"sales.w\""),
+                normalize_ident_part("\"sales.w\"")
+            );
+            assert_eq!(
+                last_part_key("t.\"Sales.W\""),
+                normalize_ident_part("\"sales.w\"")
+            );
+            assert_ne!(last_part_key("\"sales.w\""), "sales.w");
+            assert_eq!(last_part_key("Main.Sum"), "sum");
+        }
+
+        /// A quoted part holding a dot is one identifier, so it must not key
+        /// the same as the two-part qualified name spelled with the same text.
+        /// `"sales.w"` and `sales.w` used to share the key `sales.w`, and a
+        /// view holding both members expanded the wrong one.
+        #[test]
+        fn quoted_part_with_a_dot_keys_apart_from_a_qualified_name() {
+            assert_ne!(
+                normalize_ident_part("\"sales.w\""),
+                normalize_ident_part("sales.w")
+            );
+            assert_ne!(
+                normalize_ident_part("sales.\"sales.w\""),
+                normalize_ident_part("sales.sales.w")
+            );
+            assert!(!ident_matches("\"sales.w\"", "sales.w"));
+            // Still case-insensitive, quoted or not.
+            assert_eq!(
+                normalize_ident_part("\"Sales.W\""),
+                normalize_ident_part("\"sales.w\"")
+            );
+            assert_eq!(
+                normalize_ident_part("Sales.\"Sales.W\""),
+                normalize_ident_part("sales.\"sales.w\"")
+            );
         }
 
         #[test]

@@ -118,23 +118,14 @@ impl IdentRef<'_> {
         crate::ident::normalize_ident_part(&self.raw[..first_part_len(self.raw)])
     }
 
-    /// The normalized (quote-stripped, lowercased) key of the chain's **last**
-    /// part — the called name for a function head: `main.sum` → `sum`, but
-    /// `"main.sum"` → `main.sum` because the dot lives *inside* a quoted part
-    /// and so does not separate qualifiers. Splitting the joined [`key`] on `.`
-    /// cannot make this distinction (a quoted dot and a qualifier dot look
-    /// identical there), so this parses quote-aware via
-    /// [`crate::ident::parse_qualified_identifier_with_quoting`].
-    ///
-    /// [`key`]: IdentRef::key
+    /// The match key of the chain's **last** part
+    /// ([`crate::ident::last_part_key`]) — the called name for a function
+    /// head: `main.sum` → `sum`, but `"main.sum"` → `"main.sum"` because the
+    /// dot lives *inside* a quoted part and so does not separate qualifiers.
+    /// The key is a member name's key, so a reference's last part compares
+    /// with [`crate::ident::normalize_ident_part`] of a member name.
     pub(crate) fn last_part_key(&self) -> String {
-        match crate::ident::parse_qualified_identifier_with_quoting(self.raw.trim()) {
-            Ok(parts) => parts
-                .last()
-                .map(|(p, _)| p.to_ascii_lowercase())
-                .unwrap_or_default(),
-            Err(_) => crate::ident::normalize_ident_part(self.raw),
-        }
+        crate::ident::last_part_key(self.raw)
     }
 }
 

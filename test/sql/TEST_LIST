@@ -181,3 +181,4 @@ test/sql/phase8_lod_fixed.test
 test/sql/phase8_lod_include_exclude.test
 test/sql/phase8_lod_child_grain.test
 test/sql/show_lists_tables_by_alias.test
+test/sql/dotted_member_names.test

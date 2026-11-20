@@ -483,6 +483,11 @@ struct Case {
     order: [Group; 3],
     aliased: Vec<bool>,
     var: Option<VarCase>,
+    /// The metrics are stored and requested as quoted one-part dotted names,
+    /// `"t.m{i}"`, beside decoy metrics `m{i}` on table `t` whose qualified
+    /// spelling `t.m{i}` reads the same once quotes are dropped. See
+    /// [`with_dotted_names`].
+    dotted: bool,
 }
 
 impl Case {
@@ -517,6 +522,15 @@ impl Case {
         match &self.var {
             Some(v) if v.in_metric && i == 0 => format!("sum(t.k + ({}))", v.value()),
             _ => self.schema.metric_aggs[i].to_sql(),
+        }
+    }
+
+    /// The member text that requests metric `i`.
+    fn metric_member(&self, i: usize) -> String {
+        if self.dotted {
+            format!("\"t.m{i}\"")
+        } else {
+            format!("m{i}")
         }
     }
 
@@ -637,17 +651,29 @@ fn arb_case() -> impl Strategy<Value = Case> {
                     Some(VarCase { set, default, typed, in_metric, in_where })
                 }),
         ];
-        (Just(schema), dim_sel, met_sel, where_pred, layout, var)
+        // Dotted quoted metric names one case in four.
+        let dotted = prop::bool::weighted(0.25);
+        (
+            Just(schema),
+            dim_sel,
+            met_sel,
+            where_pred,
+            layout,
+            var,
+            dotted,
+        )
             .prop_filter(
                 "at least one of dimensions/metrics must be selected",
-                |(_, sel_dims, sel_metrics, _, _, _)| {
+                |(_, sel_dims, sel_metrics, _, _, _, _)| {
                     !sel_dims.is_empty() || !sel_metrics.is_empty()
                 },
             )
             .prop_map(
-                |(schema, sel_dims, sel_metrics, where_pred, (order, mask), var)| {
+                |(schema, sel_dims, sel_metrics, where_pred, (order, mask), var, dotted)| {
+                    // A dotted metric is always aliased, so its output column
+                    // keeps the plain `x_m{i}` name the oracle uses.
                     let aliased = (0..sel_dims.len() + sel_metrics.len())
-                        .map(|k| mask & (1 << k) != 0)
+                        .map(|k| mask & (1 << k) != 0 || (dotted && k >= sel_dims.len()))
                         .collect();
                     Case {
                         schema,
@@ -657,6 +683,7 @@ fn arb_case() -> impl Strategy<Value = Case> {
                         order,
                         aliased,
                         var,
+                        dotted,
                     }
                 },
             )
@@ -798,6 +825,34 @@ fn make_db(s: &Schema) -> duckdb::Connection {
     conn
 }
 
+/// `def` with each metric `m{i}` renamed to the quoted one-part `"t.m{i}"` on
+/// table `t`, beside a decoy metric `m{i}` on `t` with a different number.
+///
+/// The decoy's qualified spelling `t.m{i}` and the real name `"t.m{i}"` read
+/// the same once quotes are dropped, but `DuckDB` resolves them as different
+/// identifiers. A name key that joined them let the decoy's expression stand in
+/// for the requested metric's, a silent wrong number. The oracle never sees the
+/// decoys, so it only agrees when the request reads the metric it names.
+fn with_dotted_names(mut def: SemanticViewDefinition) -> SemanticViewDefinition {
+    let decoys: Vec<Metric> = def
+        .metrics
+        .iter_mut()
+        .map(|met| {
+            let plain = std::mem::replace(&mut met.name, String::new());
+            met.name = format!("\"t.{plain}\"");
+            met.source_table = Some("t".to_string());
+            Metric {
+                name: plain,
+                expr: "count(*) * 1000 + 7".to_string(),
+                source_table: Some("t".to_string()),
+                ..met.clone()
+            }
+        })
+        .collect();
+    def.metrics.extend(decoys);
+    def
+}
+
 /// `def` with variable `k` declared, and `m0` using it, as `var` says.
 fn with_variable(mut def: SemanticViewDefinition, var: &VarCase) -> SemanticViewDefinition {
     def.variables = vec![Variable {
@@ -825,6 +880,7 @@ proptest! {
             Some(v) => with_variable(def, v),
             None => def,
         };
+        let def = if case.dotted { with_dotted_names(def) } else { def };
 
         // The request as `semantic_view()` receives it: item text (`d0 AS
         // x_d0`) and `column_order` entries, parsed by the code it uses.
@@ -843,7 +899,7 @@ proptest! {
             .sel_metrics
             .iter()
             .enumerate()
-            .map(|(k, i)| item_text(n_dims + k, format!("m{i}")))
+            .map(|(k, i)| item_text(n_dims + k, case.metric_member(*i)))
             .collect();
         let order_text: Vec<String> = case
             .order
