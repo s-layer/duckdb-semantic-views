@@ -22,7 +22,7 @@ jobs:
   duckdb-stable-build:
     name: Build extension binaries (all platforms)
     if: ${{ github.event_name == 'push' || github.event_name == 'workflow_dispatch' }}
-    # IMPORTANT: the engine below must be the release in .duckdb-version (currently v2.0.0).
+    # IMPORTANT: the engine below must be the release in .duckdb-version (currently v2.0.1).
     # GitHub Actions 'uses:' does not support dynamic values, so update these
     # manually whenever .duckdb-version changes; tests::duckdb_derived_pins_agree
     # checks them. extension-ci-tools is versioned apart from DuckDB since 2.0
@@ -34,7 +34,7 @@ jobs:
       # the commit its wheel was built from and add a `duckdb_tag` input naming
       # the release, which labels the clone (the Makefile's set_duckdb_tag;
       # scripts/ensure_engine.py builds a tagged tree under its tag).
-      duckdb_version: v2.0.0
+      duckdb_version: v2.0.1
       ci_tools_version: v2.0-cyanoptera
       extension_name: semantic_views
       extra_toolchains: 'rust;python3'

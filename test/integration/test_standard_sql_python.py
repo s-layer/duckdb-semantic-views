@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # /// script
-# dependencies = ["duckdb==2.0.0", "pandas"]
+# dependencies = ["duckdb==2.0.1", "pandas"]
 # requires-python = ">=3.10"
 # ///
 """
