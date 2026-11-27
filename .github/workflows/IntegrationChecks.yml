@@ -153,7 +153,7 @@ jobs:
         run: pip install uv
 
       - name: Install just
-        uses: taiki-e/install-action@v2.90.5
+        uses: taiki-e/install-action@v2.90.8
         with:
           tool: just
 
@@ -211,7 +211,7 @@ jobs:
         run: make configure
 
       - name: Install just
-        uses: taiki-e/install-action@v2.90.5
+        uses: taiki-e/install-action@v2.90.8
         with:
           tool: just
 
